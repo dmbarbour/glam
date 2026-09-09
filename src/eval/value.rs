@@ -151,7 +151,9 @@ impl LazyTaskMachine {
     fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
-        match self.lazy().cache(Ok(value)) {
+        let result =
+            context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
+        match result {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
@@ -294,7 +296,9 @@ impl LazyTaskMachine {
             });
         }
         let failure = error.into_permanent_failure();
-        match self.lazy().cache(Err(failure)) {
+        let result =
+            context.with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
+        match result {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }

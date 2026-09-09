@@ -643,6 +643,66 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
     FACTORY.clone()
 }
 
+/// Test-only promise publication through an explicit matching factory and a
+/// temporary registered root. Production publishers retain their durable root
+/// as part of the producer or resolver record instead.
+#[cfg(test)]
+pub(crate) fn publish_test_promise(
+    values: &CoreValueFactory,
+    promise: &PromisedValue,
+    assignment: PromiseAssignment,
+) -> Result<(), PromiseAssignment> {
+    let root = values.with_runtime_value_access(|access| promise.root_in(&access));
+    root.publish(values, assignment)
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_promise(
+    values: &CoreValueFactory,
+    promise: &PromisedValue,
+    value: Value,
+) -> Result<(), Value> {
+    publish_test_promise(values, promise, Ok(value)).map_err(|assignment| {
+        assignment.expect("setting a promised value always supplies a successful value")
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fail_test_promise(
+    values: &CoreValueFactory,
+    promise: &PromisedValue,
+    failure: Arc<EvaluationFailure>,
+) -> Result<(), Arc<EvaluationFailure>> {
+    publish_test_promise(values, promise, Err(failure)).map_err(|assignment| {
+        assignment.expect_err("failing a promised value always supplies an error")
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fail_test_promise_message(
+    values: &CoreValueFactory,
+    promise: &PromisedValue,
+    message: impl Into<Arc<str>>,
+) -> Result<(), Arc<EvaluationFailure>> {
+    fail_test_promise(
+        values,
+        promise,
+        Arc::new(EvaluationFailure::message(message.into())),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn cache_test_lazy(
+    values: &CoreValueFactory,
+    lazy: &LazyValue,
+    result: LazyResult,
+) -> LazyResult {
+    values.with_runtime_value_access(|access| {
+        let root = lazy.root_in(&access);
+        root.cache(&access, result)
+    })
+}
+
 impl LazyValue {
     pub(crate) fn from_root(root: &managed::ManagedLazyRoot) -> Self {
         Self {
@@ -842,6 +902,7 @@ impl LazyValue {
         self.with_access(|lazy| lazy.id())
     }
 
+    #[cfg(test)]
     fn with_runtime_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
@@ -852,17 +913,9 @@ impl LazyValue {
             .with_runtime_value_access(operation)
     }
 
+    #[cfg(test)]
     fn with_access<R>(&self, operation: impl FnOnce(managed::ManagedLazyAccess<'_, '_>) -> R) -> R {
         self.with_runtime_access(|access| operation(self.access(&access)))
-    }
-
-    /// Clones the producer while this lazy remains unresolved.
-    ///
-    /// Terminal results are published before the shared source is removed.
-    /// A worker which wins this snapshot may therefore finish concurrent work,
-    /// while later observers take the lock-free cached-result path.
-    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
-        self.with_access(|lazy| lazy.cache(result))
     }
 
     #[cfg(test)]
@@ -903,9 +956,10 @@ impl PromisedValue {
                 .expect("managed promise representation must fit one collector run")
         });
         let promise = Self::from_root(&root);
-        let producer = context.register_promise(root)?;
-        promise
-            .with_access(|promise| promise.install_producer(&producer))
+        let producer = context.register_promise(root.clone())?;
+        context
+            .values()
+            .with_runtime_value_access(|access| root.install_producer(&access, &producer))
             .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;
         Ok(promise)
     }
@@ -944,6 +998,7 @@ impl PromisedValue {
         self.with_access(|promise| promise.id())
     }
 
+    #[cfg(test)]
     fn with_runtime_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
@@ -954,81 +1009,12 @@ impl PromisedValue {
             .with_runtime_value_access(operation)
     }
 
+    #[cfg(test)]
     fn with_access<R>(
         &self,
         operation: impl FnOnce(managed::ManagedPromiseAccess<'_, '_>) -> R,
     ) -> R {
         self.with_runtime_access(|access| operation(self.access(&access)))
-    }
-
-    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.values.runtime_id()
-    }
-
-    pub(crate) fn set(&self, value: Value) -> Result<(), Value> {
-        self.publish(Ok(value)).map_err(|assignment| {
-            assignment.expect("setting a promised value always supplies a successful value")
-        })
-    }
-
-    pub(crate) fn set_root(&self, value: RuntimeValueRoot) -> Result<(), RuntimeValueRoot> {
-        debug_assert_eq!(value.runtime_id(), self.runtime_id());
-        let value = value
-            .clone_core_in_own_domain()
-            .expect("an assigned promise remains in its live value domain");
-        self.set(value).map_err(|value| {
-            RuntimeValueRoot::new(
-                &self.values.upgrade().expect("promise domain remains live"),
-                value,
-            )
-        })
-    }
-
-    pub(crate) fn fail(
-        &self,
-        failure: Arc<EvaluationFailure>,
-    ) -> Result<(), Arc<EvaluationFailure>> {
-        self.publish(Err(failure)).map_err(|assignment| {
-            assignment.expect_err("failing a promised value always supplies an error")
-        })
-    }
-
-    pub(crate) fn fail_message(
-        &self,
-        message: impl Into<Arc<str>>,
-    ) -> Result<(), Arc<EvaluationFailure>> {
-        self.fail(Arc::new(EvaluationFailure::message(message.into())))
-    }
-
-    fn publish(&self, assignment: PromiseAssignment) -> Result<(), PromiseAssignment> {
-        let producer = self.with_access(|promise| promise.producer());
-        if let Some(producer) = producer
-            && let Some(coordinator) = producer.coordinator()
-        {
-            let mutation = coordinator.mutation_guard();
-            let published = self.with_access(|promise| {
-                promise.publish_guarded(&coordinator, &mutation, assignment, |assignment| {
-                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
-                })
-            });
-            let (producer, completion) = published?;
-            drop(mutation);
-            completion.notify();
-            producer.notify();
-            return Ok(());
-        }
-
-        let producer = self.with_access(|promise| {
-            promise.publish_detached(assignment, |assignment| {
-                promise
-                    .producer()
-                    .map(|producer| producer.publish_assignment_detached(assignment))
-            })
-        })?;
-        if let Some(producer) = producer {
-            producer.notify();
-        }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -2543,19 +2529,21 @@ mod tests {
 
     #[test]
     fn terminal_lazy_cache_releases_its_shared_source_after_active_snapshots() {
+        let values = values();
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
-        let lazy = LazyValue::semantic_thunk(&values(), "source release", move |_| {
+        let thunk_values = values.clone();
+        let lazy = LazyValue::semantic_thunk(&values, "source release", move |_| {
             let _keep_signal_captured = &signal;
-            Ok(values().unit())
+            Ok(thunk_values.unit())
         });
         let observer = lazy.clone();
         let active_snapshot = lazy
             .source_snapshot()
             .expect("an unresolved lazy should expose a source snapshot");
 
-        let result = EvaluatedValue::try_from(values().unit()).expect("unit is already evaluated");
-        assert!(observer.cache(Ok(result)).is_ok());
+        let result = EvaluatedValue::try_from(values.unit()).expect("unit is already evaluated");
+        assert!(cache_test_lazy(&values, &observer, Ok(result)).is_ok());
         assert!(
             lazy.source_snapshot().is_none(),
             "all clones should observe the released shared source"
@@ -2708,15 +2696,15 @@ mod tests {
     fn metadata_and_collections_can_participate_in_a_deferred_value_cycle() {
         // This intentionally latches a graph that Arc ownership cannot reclaim.
         // The GC integration suite will retain this shape and add reclamation.
-        let promise = PromisedValue::new(&values(), "metadata collection cycle");
+        let values = values();
+        let promise = PromisedValue::new(&values, "metadata collection cycle");
         let metadata =
             Value::metadata_carrier(Value::List(List::from_values(vec![Value::Promised(
                 promise.clone(),
             )])));
         let cycle = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("metadata"), metadata));
 
-        promise
-            .set(cycle)
+        set_test_promise(&values, &promise, cycle)
             .expect("an unresolved promise should accept a recursive value graph");
         assert!(matches!(promise.assignment(), Some(Ok(Value::Dict(_)))));
     }
@@ -2774,10 +2762,10 @@ mod tests {
 
     #[test]
     fn promised_assignments_retain_deferred_aliases() {
-        let target = PromisedValue::new(&values(), "target");
-        let forwarding = PromisedValue::new(&values(), "forwarding");
-        forwarding
-            .set(Value::Promised(target))
+        let values = values();
+        let target = PromisedValue::new(&values, "target");
+        let forwarding = PromisedValue::new(&values, "forwarding");
+        set_test_promise(&values, &forwarding, Value::Promised(target))
             .expect("new promise should accept its target");
 
         assert!(matches!(
@@ -2785,9 +2773,8 @@ mod tests {
             Some(Ok(Value::Promised(_)))
         ));
 
-        let ready = PromisedValue::new(&values(), "ready");
-        ready
-            .set(Value::Number(42.into()))
+        let ready = PromisedValue::new(&values, "ready");
+        set_test_promise(&values, &ready, Value::Number(42.into()))
             .expect("new promise should accept its value");
         assert_eq!(ready.assignment(), Some(Ok(Value::Number(42.into()))));
     }

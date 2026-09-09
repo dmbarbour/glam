@@ -113,7 +113,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // same bounded access surface.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(37, 0),
+            GatewayCounts::new(39, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures
@@ -122,10 +122,11 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // I5D routes lazy and promise cell construction and access through the
         // same bounded domain gateway as reflection-value projection.
         // GCI5R-001B adds one synchronous construction entry which publishes
-        // its returned graph before that same bounded access ends. C makes the
-        // failed-lazy shim open one explicit region in place of allocation
-        // followed by a facade-mediated second entry.
-        ("src/core.rs", GatewayCounts::new(20, 5)),
+        // its returned graph before that same bounded access ends. GCI5R-003E
+        // adds the explicit producer-installation gateway plus test-only
+        // promise/lazy publication helpers; semantic facades no longer reopen
+        // managed access to mutate themselves.
+        ("src/core.rs", GatewayCounts::new(23, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         ("src/core_net.rs", GatewayCounts::new(12, 0)),
@@ -139,9 +140,15 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // producer root while the coordinator mutation remains admitted.
         ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
         ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
+        // GCI5R-003E publishes a strict lazy-cycle failure through all of the
+        // already-retained producer roots in one bounded batch.
+        ("src/evaluation/pump.rs", GatewayCounts::new(1, 0)),
         // GCI5R-003D roots lazy and promise producers before coordinator
         // admission instead of letting either semantic façade reopen access.
         ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
+        // Production-shaped task fixtures retain lazy/promise roots and use
+        // explicit matching-domain access rather than facade mutation.
+        ("src/evaluation/tests.rs", GatewayCounts::new(3, 0)),
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(2, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",

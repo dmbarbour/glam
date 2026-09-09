@@ -4890,6 +4890,13 @@ owner. Focused collection tests prove the resolver, task-owner, and local-owner
 roots retire exactly once, including runtime teardown before resolver drop.
 Production collection remains `NoAuto`.
 
+Post-I5 remediation GCI5R-003E completed on 2026-09-09 supersedes the
+external-writer names in the earlier I5D migration table without changing its
+mutation protocol. `ManagedLazyRoot::cache` and
+`ManagedPromiseRoot::{publish,publish_guarded,publish_detached}` now own
+publication; their managed-access operations are private representation
+details. `LazyValue` and `PromisedValue` no longer mutate their cells.
+
 - Keep `PromiseResolver` and every producer/task owner which performs failure,
   cancellation, abandonment, notification, or wakeup as an external owner
   with exactly the root/capability authorized by I5.0. It is not a managed

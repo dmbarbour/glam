@@ -2174,9 +2174,12 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
             IsolatedSearchPoll::Cancelled => panic!("search was cancelled"),
         }
     }
-    promised
-        .set(Value::Binary(Bytes::from_static(b"ready")))
-        .expect("test dependency should resolve once");
+    crate::core::set_test_promise(
+        &assembler.core_values(),
+        &promised,
+        Value::Binary(Bytes::from_static(b"ready")),
+    )
+    .expect("test dependency should resolve once");
 
     let results = poll_isolated_search(&mut search);
     assert_eq!(results.len(), 1);
@@ -3486,8 +3489,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     };
     assert!(blocked.lazy.is_some());
 
-    promised
-        .fail_message("dependency failed")
+    crate::core::fail_test_promise_message(session.values(), &promised, "dependency failed")
         .expect("test promise should fail once");
     let poll = task.poll(256);
     let EffectTaskPoll::Complete(value) = poll else {
@@ -4972,9 +4974,12 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
         .expect("task-owned promise should expose its wait")
         .wait()
         .clone();
-    resolved
-        .set(Value::Number(Number::integer(42)))
-        .expect("one owned promise should resolve before task failure");
+    crate::core::set_test_promise(
+        context.values(),
+        &resolved,
+        Value::Number(Number::integer(42)),
+    )
+    .expect("one owned promise should resolve before task failure");
 
     let detail = Key::atom_from_text("detail");
     let emission = Value::Dict(

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
-    EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId, PromisedValue,
-    RuntimeValueAccess, RuntimeValueObserver, Value,
+    CoreValueFactory, EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
+    PromisedValue, RuntimeValueAccess, RuntimeValueObserver, Value,
 };
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
 use crate::evaluation::{
@@ -295,7 +295,8 @@ impl RuntimeValueAccess<'_> {
         failure: Arc<EvaluationFailure>,
     ) -> Result<LazyValue, UnsupportedLayout> {
         let lazy = self.construct_managed_lazy(label, LazySource::Error)?;
-        let result = lazy.access(self).cache(Err(failure));
+        let root = lazy.root_in(self);
+        let result = root.cache(self, Err(failure));
         debug_assert!(result.is_err(), "new lazy errors must cache a failure");
         Ok(lazy)
     }
@@ -528,6 +529,21 @@ impl ManagedLazyRoot {
             authority,
         )
     }
+
+    /// Publishes one terminal result through this registered owner.
+    ///
+    /// The caller supplies a bounded matching-runtime access region. The root
+    /// is the durable authority which keeps the cell live across publication;
+    /// semantic lazy facades do not carry mutation authority.
+    pub(crate) fn cache(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        result: LazyResult,
+    ) -> LazyResult {
+        self.access(authority)
+            .expect("lazy root and publication access must share one value domain")
+            .cache(result)
+    }
 }
 
 impl ManagedPromiseRoot {
@@ -581,6 +597,90 @@ impl ManagedPromiseRoot {
             authority.get(&self.root),
             authority,
         ))
+    }
+
+    /// Publishes one terminal assignment through this registered owner.
+    ///
+    /// Managed access is bounded to the assignment transition. Completion
+    /// wakes and producer notifications run only after that region, and any
+    /// coordinator mutation admission it used, have been released.
+    pub(crate) fn publish(
+        &self,
+        values: &CoreValueFactory,
+        assignment: ManagedPromiseAssignment,
+    ) -> Result<(), ManagedPromiseAssignment> {
+        assert_eq!(
+            values.runtime_id(),
+            self.observer.runtime_id(),
+            "promise root and publication factory must share one value domain"
+        );
+        let producer = self.producer();
+        if let Some(producer) = producer
+            && let Some(coordinator) = producer.coordinator()
+        {
+            let mutation = coordinator.mutation_guard();
+            let published = values.with_runtime_value_access(|authority| {
+                self.publish_guarded(
+                    &authority,
+                    &coordinator,
+                    &mutation,
+                    assignment,
+                    |assignment| {
+                        producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
+                    },
+                )
+            });
+            let (producer, completion) = published?;
+            drop(mutation);
+            completion.notify();
+            producer.notify();
+            return Ok(());
+        }
+
+        let producer = values.with_runtime_value_access(|authority| {
+            self.publish_detached(&authority, assignment, |assignment| {
+                self.producer()
+                    .map(|producer| producer.publish_assignment_detached(assignment))
+            })
+        })?;
+        if let Some(producer) = producer {
+            producer.notify();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn install_producer(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        producer: &Arc<PromiseProducerObligation>,
+    ) -> Result<(), Arc<PromiseProducerObligation>> {
+        self.access(authority)
+            .expect("promise root and producer access must share one value domain")
+            .install_producer(producer)
+    }
+
+    pub(crate) fn publish_detached<T>(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        assignment: ManagedPromiseAssignment,
+        after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
+    ) -> Result<T, ManagedPromiseAssignment> {
+        self.access(authority)
+            .expect("promise root and publication access must share one value domain")
+            .publish_detached(assignment, after_assignment)
+    }
+
+    pub(crate) fn publish_guarded<T>(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        assignment: ManagedPromiseAssignment,
+        after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
+    ) -> Result<(T, CompletionWake), ManagedPromiseAssignment> {
+        self.access(authority)
+            .expect("promise root and publication access must share one value domain")
+            .publish_guarded(coordinator, mutation, assignment, after_assignment)
     }
 }
 
@@ -658,7 +758,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         self.cell.result.get().cloned()
     }
 
-    pub(crate) fn cache(&self, result: LazyResult) -> LazyResult {
+    fn cache(&self, result: LazyResult) -> LazyResult {
         let proposed = RefCell::new(Some(result));
         // SAFETY: `self.owner` is the exact live lazy cell authorized by this
         // access. The leaving visitor snapshots its pre-transition source
@@ -735,7 +835,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         self.cell.assignment.get().cloned()
     }
 
-    pub(crate) fn install_producer(
+    fn install_producer(
         &self,
         producer: &Arc<PromiseProducerObligation>,
     ) -> Result<(), Arc<PromiseProducerObligation>> {
@@ -747,14 +847,14 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
     }
 
     #[cfg(test)]
-    pub(crate) fn publish(
+    fn publish(
         &self,
         assignment: ManagedPromiseAssignment,
     ) -> Result<(), ManagedPromiseAssignment> {
         self.publish_detached(assignment, |_| ())
     }
 
-    pub(crate) fn publish_detached<T>(
+    fn publish_detached<T>(
         &self,
         assignment: ManagedPromiseAssignment,
         after_assignment: impl FnOnce(&ManagedPromiseAssignment) -> T,
@@ -764,7 +864,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
             .publish(|| self.publish_assignment(assignment, after_assignment))
     }
 
-    pub(crate) fn publish_guarded<T>(
+    fn publish_guarded<T>(
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
@@ -1689,8 +1789,8 @@ mod tests {
             assert_eq!(lazy.id(), root.id());
             assert_eq!(lazy.label().as_ref(), "prepared lazy");
             assert!(lazy.source_snapshot().is_some());
-            assert_eq!(lazy.cache(Ok(winner.clone())), Ok(winner.clone()));
-            assert_eq!(lazy.cache(Ok(loser)), Ok(winner.clone()));
+            assert_eq!(root.cache(&access, Ok(winner.clone())), Ok(winner.clone()));
+            assert_eq!(root.cache(&access, Ok(loser)), Ok(winner.clone()));
             assert_eq!(lazy.cached(), Some(Ok(winner)));
             assert!(lazy.source_snapshot().is_none());
         });
@@ -1721,8 +1821,14 @@ mod tests {
             assert_eq!(promise.runtime_id(), values.runtime_id());
             assert_eq!(promise.label().as_ref(), "prepared promise");
             assert!(promise.producer().is_none());
-            assert_eq!(promise.publish(Ok(winner.clone())), Ok(()));
-            assert_eq!(promise.publish(Ok(loser.clone())), Err(Ok(loser)));
+            assert_eq!(
+                root.publish_detached(&access, Ok(winner.clone()), |_| ()),
+                Ok(())
+            );
+            assert_eq!(
+                root.publish_detached(&access, Ok(loser.clone()), |_| ()),
+                Err(Ok(loser))
+            );
             assert_eq!(promise.assignment(), Some(Ok(winner)));
         });
         assert!(root.is_terminal());
@@ -1756,12 +1862,8 @@ mod tests {
                     sentinel.clone(),
                 )])))
                 .expect("a list is already in weak-head normal form");
-            let lazy = root
-                .access(&access)
-                .expect("the rooted lazy should be live");
-
-            assert_eq!(lazy.cache(Ok(result.clone())), Ok(result));
-            assert!(lazy.source_snapshot().is_none());
+            assert_eq!(root.cache(&access, Ok(result.clone())), Ok(result));
+            assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
         assert!(!forced.load(Ordering::Acquire));
@@ -1792,12 +1894,8 @@ mod tests {
             let failure = Arc::new(EvaluationFailure::emission(Value::List(List::from_values(
                 vec![Value::Promised(emitted)],
             ))));
-            let lazy = root
-                .access(&access)
-                .expect("the rooted lazy should be live");
-
-            assert_eq!(lazy.cache(Err(Arc::clone(&failure))), Err(failure));
-            assert!(lazy.source_snapshot().is_none());
+            assert_eq!(root.cache(&access, Err(Arc::clone(&failure))), Err(failure));
+            assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
         let records = probe.records();
@@ -3146,5 +3244,40 @@ mod tests {
         require("promise", &["fn publish_", "guarded"]);
         require("promise", &["Completion", "Subscriptions"]);
         require("core net", &["RuntimeNet", "Cell<CoreSpecialization>"]);
+    }
+
+    #[test]
+    fn recursive_identity_mutation_is_owned_by_registered_roots() {
+        let recursive = include_str!("recursive_cells.rs");
+        let core = include_str!("../../core.rs");
+        let resolver = include_str!("../../api/value.rs");
+
+        let lazy_root = source_declaration(recursive, "impl ManagedLazyRoot {");
+        let promise_root = source_declaration(recursive, "impl ManagedPromiseRoot {");
+        assert!(lazy_root.contains("pub(crate) fn cache("));
+        for operation in [
+            "pub(crate) fn publish(",
+            "pub(crate) fn publish_detached",
+            "pub(crate) fn publish_guarded",
+        ] {
+            assert!(
+                promise_root.contains(operation),
+                "promise root lost its {operation} mutation gateway"
+            );
+        }
+
+        let lazy_facade = source_declaration(core, "impl LazyValue {");
+        let promise_facade = source_declaration(core, "impl PromisedValue {");
+        assert!(!lazy_facade.contains("fn cache("));
+        for forbidden in ["fn set(", "fn set_root(", "fn fail(", "fn publish("] {
+            assert!(
+                !promise_facade.contains(forbidden),
+                "semantic promise facade regained mutation operation {forbidden}"
+            );
+        }
+
+        let resolver = source_declaration(resolver, "impl PromiseResolver {");
+        assert!(resolver.contains(".publish(&values"));
+        assert!(resolver.contains("take_for_completion"));
     }
 }

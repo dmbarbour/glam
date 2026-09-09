@@ -13,7 +13,7 @@ use super::error::net_build_error;
 use crate::core::Value as CoreValue;
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, LazyValue, List, ManagedPromiseRoot,
-    PromisedValue, RuntimeValueAccess, RuntimeValueObserver,
+    RuntimeValueAccess, RuntimeValueObserver,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::interaction_net::{NetBuilder as CoreNetBuilder, Port as CorePort};
@@ -1023,9 +1023,10 @@ impl PromiseResolver {
             return Err(error);
         }
         let (promise, values) = self.take_for_completion()?;
+        let value = value.clone_core_in_own_domain()?;
         let label = promise.label().clone();
-        let published = PromisedValue::from_root(&promise)
-            .set_root(value.into_runtime_root())
+        let published = promise
+            .publish(&values, Ok(value))
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
         drop(values);
         published
@@ -1052,8 +1053,8 @@ impl PromiseResolver {
     fn fail_with(mut self, failure: Arc<EvaluationFailure>) -> Result<(), Error> {
         let (promise, values) = self.take_for_completion()?;
         let label = promise.label().clone();
-        let published = PromisedValue::from_root(&promise)
-            .fail(failure)
+        let published = promise
+            .publish(&values, Err(failure))
             .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
         drop(values);
         published
@@ -1072,7 +1073,7 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             promise.label()
         );
-        let _ = PromisedValue::from_root(&promise).fail_message(message);
+        let _ = promise.publish(&values, Err(Arc::new(EvaluationFailure::message(message))));
         drop(values);
     }
 }

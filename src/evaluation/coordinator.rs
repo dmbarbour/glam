@@ -152,9 +152,7 @@ impl TaskOwnedPromiseObligation {
             .expect("a registered promise root must retain a live value domain owner");
         let (publication, wake) = values.with_runtime_value_access(|access| {
             self.root
-                .access(&access)
-                .expect("task-owned promise root must belong to its value domain")
-                .publish_guarded(coordinator, mutation, Err(failure), |assignment| {
+                .publish_guarded(&access, coordinator, mutation, Err(failure), |assignment| {
                     self.producer
                         .publish_assignment_guarded(coordinator, mutation, assignment)
                 })

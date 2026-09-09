@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::core::{
-    EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId, PromisedValue,
-};
+use crate::core::{EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority, RuntimeValueRoot,
 };
@@ -603,8 +601,12 @@ impl LocalPromiseOwner {
             .expect("local promise obligations were poisoned")
             .clone();
         for obligation in obligations {
-            let promise = PromisedValue::from_root(&obligation.root);
-            let _ = promise.fail(failure.clone());
+            let values = obligation
+                .root
+                .observer()
+                .upgrade()
+                .expect("a registered local promise must retain its live value domain");
+            let _ = obligation.root.publish(&values, Err(failure.clone()));
         }
     }
 }

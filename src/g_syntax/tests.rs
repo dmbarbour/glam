@@ -34,8 +34,7 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     let Value::Promised(final_defs) = context.final_defs() else {
         panic!("final module binding should be a promised value");
     };
-    final_defs
-        .set(lowered.definitions.clone())
+    crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
         .expect("future should not be set yet");
     crate::eval::eval_value(&test_eval_context(), &lowered.definitions)
         .expect("lowered module should evaluate")
@@ -248,8 +247,7 @@ fn reflection_test_module(
     let Value::Promised(final_defs) = context.final_defs() else {
         panic!("final module binding should be promised");
     };
-    final_defs
-        .set(lowered.definitions.clone())
+    crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
         .expect("final module binding should be unset");
 
     let eval_context = assembler.eval_context();

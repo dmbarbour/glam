@@ -267,18 +267,20 @@ mod tests {
         );
 
         let promise = PromisedValue::new(&values, "compatibility visitor promise");
-        promise
-            .set(first.clone())
+        crate::core::set_test_promise(&values, &promise, first.clone())
             .expect("the fresh promise should accept one assignment");
         assert_eq!(promise.assignment(), Some(Ok(first.clone())));
 
         let failed_promise = PromisedValue::new(&values, "compatibility visitor failure");
-        failed_promise
-            .fail(Arc::new(
+        crate::core::fail_test_promise(
+            &values,
+            &failed_promise,
+            Arc::new(
                 EvaluationFailure::emission(failure_emission.clone())
                     .with_context(failure_context.clone()),
-            ))
-            .expect("the fresh promise should accept one failure");
+            ),
+        )
+        .expect("the fresh promise should accept one failure");
         assert!(matches!(failed_promise.assignment(), Some(Err(_))));
 
         let pending = LazyValue::semantic_computation(
@@ -301,7 +303,7 @@ mod tests {
         let evaluated = EvaluatedValue::try_from(first.clone())
             .expect("a number is already in weak-head normal form");
         assert_eq!(
-            complete.cache(Ok(evaluated)),
+            crate::core::cache_test_lazy(&values, &complete, Ok(evaluated)),
             Ok(EvaluatedValue(first.clone()))
         );
         assert_eq!(

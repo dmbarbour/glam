@@ -177,13 +177,13 @@ fn fix_deferred_list_effect_results(
     };
     let results = lazy_run_list_effect(context, operation.clone());
     let Some((head, tail)) = pop_list_front_in(context, &results)? else {
-        handle
-            .set(Value::List(List::empty()))
+        let root = context.with_value_access(|access| handle.root_in(access.values()));
+        root.publish(context.context().values(), Ok(Value::List(List::empty())))
             .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
         return Ok(Value::List(List::empty()));
     };
-    handle
-        .set(head.clone())
+    let root = context.with_value_access(|access| handle.root_in(access.values()));
+    root.publish(context.context().values(), Ok(head.clone()))
         .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
     Ok(Value::List(List::concat(
         List::from_values(vec![head]),

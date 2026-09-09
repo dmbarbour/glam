@@ -1375,6 +1375,8 @@ same-runtime contract explicit rather than preserving an invalid fixture.
 
 ##### GCI5R-003E — Move mutation authority to durable roots
 
+**Completed:** 2026-09-09
+
 - Publish lazy cache results through the task-held `ManagedLazyRoot`, and
   promise results through the producer- or resolver-held
   `ManagedPromiseRoot`. Remove mutation APIs from `LazyValue` and
@@ -1388,6 +1390,38 @@ same-runtime contract explicit rather than preserving an invalid fixture.
   publisher wins.
 - Force both relevant orderings with barriers or deterministic probes. Do not
   accept a test merely because it passes under repetition.
+
+Lazy and promise mutation is now owned by registered roots. Evaluator tasks,
+the coordinator, direct-runner owners, reflection continuations, list-effect
+fixpoints, and module sealing retain or construct the intended
+`ManagedLazyRoot` or `ManagedPromiseRoot` before publication. The semantic
+`LazyValue` and `PromisedValue` façades no longer expose cache, assignment, or
+failure operations. Their managed access objects retain private transition
+primitives only as the representation-local implementation behind the public
+crate root gateways.
+
+`PromiseResolver` publishes through its affine promise root. It first upgrades
+the resolver's weak value-domain observer so retirement still reports the
+specific host-facing completion diagnostic, then lets the root open one
+bounded mutation-access region. Assignment becomes visible inside that
+region; access and any coordinator mutation admission end before completion
+wakes or producer notifications run. Resolver drop follows the same gateway.
+
+The GCI5R-002 transition protocol remains unchanged below those root
+gateways: lazy publication installs the terminal result before releasing its
+source, promise assignment precedes terminal publication and wake delivery,
+and the one-write cells select exactly one winner. Deterministic completion
+fixtures force publication before, during, and after subscription; the
+competing-publisher fixture forces winner-before-loser order; and the
+assignment-before-callback fixture latches the visibility boundary. No claim
+in this checkpoint relies on repeated scheduling.
+
+Test-only construction helpers now create the matching registered root
+explicitly rather than restoring façade mutation authority. Source and access
+inventories latch that production publishers use root gateways and that the
+façades cannot silently regain mutation methods. The weak façade observers and
+test-only observation/rooting compatibility helpers deliberately remain for
+GCI5R-003F.
 
 ##### GCI5R-003F — Remove semantic-edge observers and audit durable copies
 

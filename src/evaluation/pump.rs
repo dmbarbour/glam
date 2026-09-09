@@ -15,7 +15,7 @@ use super::session::{
     EvaluationUnfinishedTask, client_demand_halt_poll,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
-use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember, LazyValue};
+use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 impl ClientDemandOperation {
@@ -557,28 +557,29 @@ fn poison_lazy_cycle(
     // Make the shared failure authoritative in every lazy before any
     // producer wait wakes. The already-batched `Terminalizing` transition
     // prevents another worker from reclaiming a cycle member meanwhile.
-    let mut terminals = members
-        .iter()
-        .map(|member| {
-            let terminal = match LazyValue::from_root(&member.lazy).cache(Err(failure.clone())) {
-                Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
-                    member.wait.value_observer(),
-                    error,
-                )),
-                Ok(value) => {
-                    debug_assert!(
-                        false,
-                        "a successful concurrent lazy result contradicts a strict dependency cycle"
-                    );
-                    EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-                        &values,
-                        value.into_value(),
-                    ))
-                }
-            };
-            (member, terminal)
-        })
-        .collect::<Vec<_>>();
+    let mut terminals = values.with_runtime_value_access(|access| {
+        members
+            .iter()
+            .map(|member| {
+                let terminal = match member.lazy.cache(&access, Err(failure.clone())) {
+                    Err(error) => EvaluationWaitTerminal::Failed(
+                        RuntimeFailureRoot::from_observer(member.wait.value_observer(), error),
+                    ),
+                    Ok(value) => {
+                        debug_assert!(
+                            false,
+                            "a successful concurrent lazy result contradicts a strict dependency cycle"
+                        );
+                        EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+                            &values,
+                            value.into_value(),
+                        ))
+                    }
+                };
+                (member, terminal)
+            })
+            .collect::<Vec<_>>()
+    });
     for (member, terminal) in &mut terminals {
         *terminal =
             coordinator.settle_terminal_work(member.work, terminal.clone(), failure.clone());

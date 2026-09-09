@@ -15,6 +15,26 @@ use crate::number::Number;
 
 use super::*;
 
+fn set_promise(context: &EvalContext, promise: &PromisedValue, value: Value) -> Result<(), Value> {
+    crate::core::set_test_promise(context.values(), promise, value)
+}
+
+fn fail_promise(
+    context: &EvalContext,
+    promise: &PromisedValue,
+    failure: Arc<EvaluationFailure>,
+) -> Result<(), Arc<EvaluationFailure>> {
+    crate::core::fail_test_promise(context.values(), promise, failure)
+}
+
+fn fail_promise_message(
+    context: &EvalContext,
+    promise: &PromisedValue,
+    message: impl Into<Arc<str>>,
+) -> Result<(), Arc<EvaluationFailure>> {
+    crate::core::fail_test_promise_message(context.values(), promise, message)
+}
+
 fn unit_value() -> Value {
     crate::core::test_value_factory().unit()
 }
@@ -752,16 +772,17 @@ fn same_runtime_contexts() -> (
 
 #[test]
 fn promised_values_fail_fast_without_poisoning_later_assignment() {
+    let context = test_context();
     let promised = PromisedValue::new(&crate::core::test_value_factory(), "test promised value");
     let value = Value::Promised(promised.clone());
 
     assert_eq!(
-        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        eval_value(&context, &value).unwrap_err().to_string(),
         "promised value was observed before initialization"
     );
     assert_eq!(promised.assignment(), None);
-    promised.set(n(42)).unwrap();
-    assert_eq!(eval_value(&test_context(), &value).unwrap(), n(42));
+    set_promise(&context, &promised, n(42)).unwrap();
+    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
 }
 
 #[test]
@@ -796,7 +817,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
         "the scheduler must not record a permanent lazy failure while its input may change"
     );
 
-    promise.set(n(42)).unwrap();
+    set_promise(&session, &promise, n(42)).unwrap();
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert!(
         attempts.load(Ordering::SeqCst) >= 2,
@@ -904,7 +925,7 @@ fn deferred_list_effect_work_blocks_and_resumes() {
             Arc::new(TestExpr::Value(n(42))),
         ),
     ));
-    promise.set(return_effect).unwrap();
+    set_promise(&session, &promise, return_effect).unwrap();
 
     assert_eq!(
         list_to_value_items(&observer, &results)
@@ -1013,7 +1034,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     assert!(lazy.cached().is_none());
     assert_eq!(promise.assignment(), None);
 
-    promise.set(n(42)).unwrap();
+    set_promise(&context, &promise, n(42)).unwrap();
     assert_eq!(promise.exact_subscription_count(), 0);
     assert_eq!(eval_value(&context, &value).unwrap(), n(42));
     assert_eq!(
@@ -1038,8 +1059,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(), 1);
 
-    promise
-        .fail_message("resolver failed deliberately")
+    fail_promise_message(&context, &promise, "resolver failed deliberately")
         .expect("the unresolved resolver promise should fail once");
     assert_eq!(promise.exact_subscription_count(), 0);
     assert_eq!(
@@ -1070,16 +1090,12 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     assert_eq!(promise_a.exact_subscription_count(), 1);
     assert_eq!(promise_b.exact_subscription_count(), 1);
 
-    promise_a
-        .set(n(41))
-        .expect("promise A should accept its assignment");
+    set_promise(&owner, &promise_a, n(41)).expect("promise A should accept its assignment");
     assert_eq!(promise_a.exact_subscription_count(), 0);
     assert_eq!(promise_b.exact_subscription_count(), 1);
     assert_eq!(eval_value(&observer, &lazy_a).unwrap(), n(41));
 
-    promise_b
-        .set(n(42))
-        .expect("promise B should accept its assignment");
+    set_promise(&owner, &promise_b, n(42)).expect("promise B should accept its assignment");
     assert_eq!(promise_b.exact_subscription_count(), 0);
     assert_eq!(eval_value(&observer, &lazy_b).unwrap(), n(42));
 }
@@ -1092,7 +1108,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
             Ok(n(42))
         });
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
-    promise.set(Value::Lazy(target.clone())).unwrap();
+    set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap();
 
     assert_eq!(
         eval_value(&context, &Value::Promised(promise.clone())).unwrap(),
@@ -1133,8 +1149,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     let failure =
         Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
 
-    promise
-        .fail(failure.clone())
+    fail_promise(&session, &promise, failure.clone())
         .expect("new promise should accept one permanent failure");
 
     let observed = eval_value(&observer, &Value::Promised(promise))
@@ -1159,8 +1174,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
 fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "promise cycle");
-    promise
-        .set(Value::Promised(promise.clone()))
+    set_promise(&context, &promise, Value::Promised(promise.clone()))
         .expect("promise should accept its own named assignment");
 
     let error = eval_value(&context, &Value::Promised(promise.clone()))
@@ -1182,7 +1196,7 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
         Arc::from([]),
         Arc::from([Value::Promised(promise.clone())]),
     );
-    promise.set(Value::Lazy(lazy.clone())).unwrap();
+    set_promise(&context, &promise, Value::Lazy(lazy.clone())).unwrap();
 
     let error = eval_value(&context, &Value::Promised(promise.clone()))
         .expect_err("strict mixed recursion should remain blocked");
@@ -1225,7 +1239,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     assert_eq!(counts.promises_terminal, 0);
     assert_eq!(counts.owned_promise_waits, 1);
 
-    fixpoint.set(n(42)).unwrap();
+    set_promise(&session, &fixpoint, n(42)).unwrap();
     assert_eq!(fixpoint.exact_subscription_count(), 0);
     assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
     assert_eq!(
@@ -1292,9 +1306,7 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
         .wait()
         .clone();
 
-    fixpoint
-        .fail_message("fixpoint failed deliberately")
-        .unwrap();
+    fail_promise_message(&session, &fixpoint, "fixpoint failed deliberately").unwrap();
 
     assert!(matches!(
         session.poll_wait(&wait),
@@ -1477,7 +1489,7 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     assert!(second_block.blocked_on().is_some());
     assert!(lazy.cached().is_none());
 
-    promise.set(n(42)).unwrap();
+    set_promise(&first, &promise, n(42)).unwrap();
     assert_eq!(eval_value(&first, &fixpoint).unwrap(), n(42));
     assert_eq!(eval_value(&second, &fixpoint).unwrap(), n(42));
     assert_eq!(cached_value(&lazy), n(42));
@@ -2166,9 +2178,12 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
             .to_string()
             .contains("promised value was observed before initialization")
     );
-    promise
-        .set(Value::Binary(Bytes::from_static(b"assigned")))
-        .expect("early observation must not fill the promise");
+    set_promise(
+        &test_context(),
+        &promise,
+        Value::Binary(Bytes::from_static(b"assigned")),
+    )
+    .expect("early observation must not fill the promise");
     assert_eq!(
         list_output_bytes(&test_context(), &list).expect("assigned list promise should resolve"),
         b"assigned"
@@ -5883,8 +5898,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
             Ok(n(7))
         });
     let promise = PromisedValue::new(context.values(), "resolved spark input");
-    promise
-        .set(Value::Lazy(promised_work.clone()))
+    set_promise(&context, &promise, Value::Lazy(promised_work.clone()))
         .expect("test promise should accept its one assignment");
     context.spark(Value::Promised(promise));
 
@@ -5942,8 +5956,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
             .expect("spark result receiver should remain open");
         Ok(n(7))
     });
-    promise
-        .set(Value::Lazy(assigned.clone()))
+    set_promise(&context, &promise, Value::Lazy(assigned.clone()))
         .expect("promise should accept its one assignment");
 
     forced_receiver
@@ -6002,7 +6015,7 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
     .expect_err("seq should block on unresolved hidden metadata");
     assert!(blocked.blocked_on().is_some());
 
-    promise.set(n(7)).unwrap();
+    set_promise(&observer, &promise, n(7)).unwrap();
     assert_eq!(
         apply_values(
             &observer,

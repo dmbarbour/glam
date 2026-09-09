@@ -1467,11 +1467,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     if active.next_choice != active.choices.len() {
                         return Err(TaskHalt::new("reflection fixpoint choice replay diverged"));
                     }
-                    context.evaluate(&self.eval_context, |evaluator| {
-                        PromisedValue::from_root(&handle)
-                            .set(evaluator.project_root(&value))
-                            .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))
-                    })?;
+                    let assignment = context.evaluate(&self.eval_context, |evaluator| {
+                        evaluator.project_root(&value)
+                    });
+                    handle
+                        .publish(self.eval_context.values(), Ok(assignment))
+                        .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))?;
                     branch.control.sequence.pop();
                     branch.active_fixes.pop();
                     Ok(MachineStep::Continue(MachineWork::deliver_root(

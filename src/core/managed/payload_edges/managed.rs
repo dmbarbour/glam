@@ -274,8 +274,7 @@ mod tests {
             |_context, captures| Ok(captures[0].clone()),
         );
         let promise = PromisedValue::new(&values, "I5B raw promise stop");
-        promise
-            .set(marker())
+        crate::core::set_test_promise(&values, &promise, marker())
             .expect("the fresh raw promise should accept one assignment");
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(marker());
