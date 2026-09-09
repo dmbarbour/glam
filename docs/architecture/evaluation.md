@@ -182,6 +182,15 @@ facades through ordinary values and containers only while the whole
 unpublished graph remains inside one access region. None of those facades is a
 durable owner by itself.
 
+`LazyValue` and `PromisedValue` are one-pointer, edge-only semantic facades;
+their registered roots carry only reviewed scheduler, diagnostic, and
+coordination fields needed without managed access. `PromiseResolver` is the
+public affine exception which retains weak runtime re-entry, a host-facing
+label, and an optional promise root. `CoreRuntimeNet` temporarily retains weak
+value-domain provenance used by stored source identities and self-rooting
+helpers. I8A.0 migrates those surfaces together and leaves both its semantic
+facade and registered root observer-free.
+
 Post-publication changes to those families use the same bounded value-access
 authority. The lazy cache reports its deferred source as leaving and its
 terminal result as adding while preserving result-before-source-release.
@@ -516,10 +525,11 @@ follow lazy or promised payloads through the common deferred dependency graph.
 Promise-only and mixed promise/lazy cycles remain retryable scheduler waits;
 only pure lazy cycles permanently poison computed results.
 
-A `PromisedValue` is a thin shared `PromiseCell`. Successful assignment,
+A `PromisedValue` is one non-owning managed edge. Successful assignment,
 explicit failure, resolver drop, and task-producer termination all publish its
-one authoritative assignment under shared runtime mutation admission. The
-cell then fulfills an attached task producer obligation, detaches completion
+one authoritative assignment through a producer-held registered root under
+shared runtime mutation admission. The cell then fulfills an attached task
+producer obligation, detaches completion
 registrations, and releases notifications only after admission ends. The cell
 retains only an immutable, root-free producer route with a weak link to the
 concrete wait state; task and direct-runner owners retain the registered

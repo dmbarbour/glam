@@ -201,8 +201,9 @@ control-flow overview.
   diagnose them as deadlocks, while retry or producer progress may first
   remove their temporary dependency edges.
 - The public `Assembler::promise` pair gives clients one affine Rust
-  `PromiseResolver`. Its `PromisedValue` is a thin `Arc<PromiseCell>` whose
-  terminal assignment is published once under shared runtime mutation
+  `PromiseResolver`. Its `PromisedValue` is one non-owning managed edge; the
+  resolver and task/local producers retain registered roots which own terminal
+  publication. Assignment is published once under shared runtime mutation
   admission. Resolving, failing, or dropping the resolver wakes every live
   same-runtime session whose task work actually observed the unresolved
   promise; those follower targets are weak and deduplicated, so sharing a

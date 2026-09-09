@@ -87,14 +87,21 @@ pub type CoreInteractionNet = InteractionNet<CoreSpecialization>;
 ///
 /// The generic shared owner remains private. The weak value-domain observer
 /// records which runtime may inspect the semantic values in this net without
-/// retaining that runtime after its explicit owners disappear. I3D.3b moves
-/// every locking operation below a matching scoped `RuntimeValueAccess`; this
-/// checkpoint first closes construction and returned-observation escape paths.
+/// retaining that runtime after its explicit owners disappear. I3D.3b moved
+/// every locking operation below a matching scoped `RuntimeValueAccess`.
+/// GCI5R-003G records this edge-plus-observer representation as the temporary
+/// core-net exception; I8A.0 removes the observer after migrating stored source
+/// identities and the remaining access/root helpers together.
 #[derive(Clone)]
 pub struct CoreRuntimeNet {
     edge: ManagedCoreNetEdge,
     values: RuntimeValueObserver,
 }
+
+// This target-specific latch records the temporary edge-plus-observer cost
+// assigned to I8A.0. It is an implementation diagnostic, not an ABI promise.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = assert!(std::mem::size_of::<CoreRuntimeNet>() == 24);
 
 /// One bounded, thread-local authority to inspect or mutate a core net.
 ///

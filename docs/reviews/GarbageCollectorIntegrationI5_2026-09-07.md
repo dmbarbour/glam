@@ -2,7 +2,8 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; GCI5R-001 and GCI5R-002 are closed. The implemented I5
+Status: review complete; GCI5R-001 through GCI5R-003 and GCI5R-008 are closed.
+The implemented I5
 graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
 closed isolated collection fixtures provide strong evidence for recursive
 cycle reclamation. Regional construction establishes an exact traced or rooted
@@ -63,7 +64,7 @@ ManagedLazyCell
   result: OnceLock<LazyResult>
 
 ManagedPromiseCell
-  id + label + weak value-domain observer
+  id
   assignment: OnceLock<Result<Value, EvaluationFailure>>
   edge-free completion registrations
   root-free immutable producer route
@@ -72,11 +73,15 @@ ManagedCoreNetCell
   synchronized RuntimeNetCell<CoreSpecialization>
 ```
 
-`LazyValue`, `PromisedValue`, and `CoreRuntimeNet` carry private `Gc` edges
-plus weak value-domain observation. Durable parked or external owners carry
-`ManagedLazyRoot`, `ManagedPromiseRoot`, or `ManagedCoreNetRoot`; bounded
-evaluation and net operations derive non-escaping access views from one
-matching `RuntimeValueAccess`.
+`LazyValue` and `PromisedValue` now carry only private `Gc` edges. Their durable
+parked or external owners carry `ManagedLazyRoot` or `ManagedPromiseRoot`, and
+the public `PromiseResolver` is the sole promise-specific weak runtime owner.
+`CoreRuntimeNet` still carries its private edge plus weak value-domain
+observation because stored source identities and facade construction currently
+share that qualification path. Durable core-net owners carry
+`ManagedCoreNetRoot`; bounded evaluation and net operations derive
+non-escaping access views from one matching `RuntimeValueAccess`. GCI5R-003G
+assigns removal of the remaining net observer to I8A.0.
 
 The production trace graph is:
 
@@ -1169,8 +1174,7 @@ Loom coverage.
 **Classification:** undocumented representation drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** remediation through GCI5R-003F completed 2026-09-09;
-GCI5R-003G closure and adjacent-façade audit remain
+**Status:** closed 2026-09-09
 
 The I5.0 disposition said IDs and labels remain cell-resident and are copied
 only into diagnostics or explicit indexes. The implementation stored both
@@ -1487,6 +1491,8 @@ weak-observer route.
 
 ##### GCI5R-003G — Closure and adjacent-façade audit
 
+**Completed:** 2026-09-09
+
 - Reconcile the I5.0 disposition, ownership ledger, evaluator architecture,
   and GC integration plan with the implemented policy.
 - Audit `CoreRuntimeNet`, which currently has the analogous managed edge plus
@@ -1502,6 +1508,37 @@ weak-observer route.
 - Close GCI5R-003 only when the production inventory finds no duplicate
   ID, label, or weak observer in the two semantic façades and every retained
   copy has a named durable role.
+
+The reconciliation confirms that the two semantic facades named by this
+finding are final: `LazyValue` and `PromisedValue` each contain exactly one
+managed edge, and their source-backed shape latches reject IDs, labels,
+observers, roots, `Arc`, and `Weak`. `ManagedLazyRoot` retains its ID and label
+for scheduler indexing and concrete cycle diagnostics. `ManagedPromiseRoot`
+retains its ID and edge-free terminal, completion, and producer companions for
+coordinator-locked work. `PromiseResolver` remains the documented public,
+affine exception with one weak runtime observer, a host-facing label, and its
+optional promise root.
+
+Closed GCI5R-008 is fully consumed: all three `Managed*Root` records project
+their managed edge from `Root<T>` under matching access, and normalization,
+copy-source, frontier, and retryable-halt handoffs retain roots without caching
+a facade or same-target edge.
+
+The adjacent `CoreRuntimeNet` audit did not apply the lazy/promise edit in
+place. Its observer currently qualifies source facades embedded throughout
+generic core topology and supports the remaining self-rooting/test surfaces;
+removing it requires coordinated source, root, and access changes. The GC
+integration plan now contains I8A.0, which makes both `CoreRuntimeNet` and
+`ManagedCoreNetRoot` observer-free before the final net payload/mutation audit.
+The source comment and ownership ledger name this temporary exception, so it
+is no longer undocumented drift.
+
+Closure verification passed 44 managed recursive-cell tests, 17 core-net
+tests, 46 coordinator tests, and 3 public resolver tests. The managed
+edge/root identity fixture also passed targeted Miri with strict provenance.
+Formatting, all-target/all-feature Clippy with warnings denied, and the full
+repository test suite passed. The focused source inventories, rather than
+schedule repetition, latch the final facade and durable-copy shapes.
 
 The order is intentional: first remove passive metadata duplication, then
 move reads and writes behind explicit authority, and only then remove the weak
@@ -1913,10 +1950,10 @@ the managed root/edge identity projection fixture.
    shapes, routed lazy and promise writers through them, and installed the
    synchronized whole-net correctness bridge. Exact net deltas remain I8
    performance work.
-3. **In progress:** GCI5R-003A-E removed façade metadata duplication and moved
-   observation/publication behind explicit authority. GCI5R-008 has now closed
-   the root-projection defect; GCI5R-003F/G may proceed with façade-observer
-   removal and the final durable-copy audit.
+3. **Completed:** GCI5R-003A-G removed lazy/promise façade metadata and weak
+   observers, moved observation/publication behind explicit authority,
+   consumed GCI5R-008's root projection, and assigned the distinct net-wide
+   observer retirement to I8A.0.
 4. Rewrite I6 around the immutable-shell result and partition reflection
    computation into semantic and external-lifecycle checkpoints.
 5. Narrow I7, repartition I8, and update the I9-I12 entry conditions described

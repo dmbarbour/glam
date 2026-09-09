@@ -4478,13 +4478,20 @@ The binding decisions are:
   concrete wait state and coordinator/local owner only weakly; outstanding
   external wait handles retain late terminal observation;
 - `PromiseResolver` owns a promise root plus a weak runtime observer and keeps
-  `Option` only as its affine `Drop`-disarm state;
+  `Option` only as its affine `Drop`-disarm state; it is the deliberate public
+  exception to the edge-only semantic-facade rule;
 - parked promise dependencies retain a clone of the registered promise root;
-- IDs and labels remain cell-resident and are copied only into concrete
-  diagnostics or explicit indexes;
+- lazy/promise semantic facades contain only their exact managed edge.
+  `ManagedLazyRoot` copies the ID and label required by scheduler indexes and
+  cycle diagnostics; `ManagedPromiseRoot` copies the ID and edge-free
+  completion/producer companions required under coordinator locks. The
+  promise cell carries no label, and no semantic facade or registered root
+  carries a weak observer;
 - core-net frontier/copy/claim state remains access-bounded, durable
   construction handoffs are rooted, and contention/normalization bookkeeping
-  is edge-free or access-bounded rather than a weak managed pointer; and
+  is edge-free or access-bounded rather than a weak managed pointer. The
+  `CoreRuntimeNet` semantic facade remains the one temporary edge-plus-observer
+  exception; GCI5R-003G assigns its coordinated retirement to I8A.0; and
 - the current generic weak normalization lease may remain for non-core
   specializations, while I5C.1 selects the precise bounded core guard shape.
 
@@ -4822,8 +4829,11 @@ buildable production state may manage only a subset of lazy, promise, and core
 net identities.
 
 Completed 2026-09-04. `LazyValue`, `PromisedValue`, and `CoreRuntimeNet` now
-carry exact managed edges plus value-domain provenance; their synchronization
-cells live in the Glam-owned heap. Parked lazy producers, promise followers,
+carry exact managed edges and their synchronization cells live in the
+Glam-owned heap. At the original cutover all three facades also carried weak
+value-domain provenance; GCI5R-003F later removed it from the lazy and promise
+facades, while GCI5R-003G assigns the net-wide exception to I8A.0. Parked lazy
+producers, promise followers,
 producer obligations, normalization requests, source-copy handoffs, frontier
 observations, and reflection fix state retain the corresponding registered
 roots. Promise assignments contain ordinary traced `Value` edges rather than
@@ -4890,12 +4900,13 @@ owner. Focused collection tests prove the resolver, task-owner, and local-owner
 roots retire exactly once, including runtime teardown before resolver drop.
 Production collection remains `NoAuto`.
 
-Post-I5 remediation GCI5R-003E completed on 2026-09-09 supersedes the
-external-writer names in the earlier I5D migration table without changing its
-mutation protocol. `ManagedLazyRoot::cache` and
+Post-I5 remediation GCI5R-003E/F completed on 2026-09-09 supersedes the
+external-writer and facade-authority shapes in the earlier I5D migration table
+without changing its mutation protocol. `ManagedLazyRoot::cache` and
 `ManagedPromiseRoot::{publish,publish_guarded,publish_detached}` now own
 publication; their managed-access operations are private representation
-details. `LazyValue` and `PromisedValue` no longer mutate their cells.
+details. `LazyValue` and `PromisedValue` no longer mutate their cells or carry
+weak runtime observers; they are one-pointer, edge-only semantic facades.
 
 - Keep `PromiseResolver` and every producer/task owner which performs failure,
   cancellation, abandonment, notification, or wakeup as an external owner
@@ -5207,6 +5218,42 @@ managed allocation family, move that work to an explicit prior checkpoint and
 apply the
 [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
 before resuming this audit.
+
+### Phase I8A.0 — Core-Net Semantic Observer Retirement
+
+GCI5R-003G found that `CoreRuntimeNet` is the one remaining semantic facade
+which pairs an exact managed edge with weak value-domain provenance. Unlike
+the old lazy/promise observers, this observer qualifies source identities
+stored throughout generic core topology, supports facade self-rooting, and is
+carried by `ManagedCoreNetRoot`. Removing it is therefore a coordinated
+net-wide representation change rather than safe tail work for the
+lazy/promise cleanup.
+
+- Make `CoreRuntimeNet` an edge-only semantic facade and make
+  `ManagedCoreNetRoot` a root-only durable owner. A root projects the facade
+  only through matching `RuntimeValueAccess`; neither representation caches
+  the other or carries a weak value-domain observer.
+- Remove facade self-entry and observer-backed helpers, including access-free
+  rooting, liveness/domain probes, and test access. Production callers use
+  their existing evaluator/runtime access; tests receive an explicit matching
+  factory or access carrier.
+- Rework source payload construction and the generic core specialization so a
+  stored source identity is an edge-only facade. Qualification comes from the
+  enclosing live graph and its explicit access region, not from an observer on
+  every source edge.
+- Preserve the existing public boundary: foreign-runtime values are rejected
+  before entering a runtime graph. Private net edges rely on the same
+  construction, rooted/traced-owner, and debug-provenance proof established
+  for lazy and promise edges in GCI5R-003F.
+- Refresh compile-exhaustive owner/source inventories and measured layouts.
+  Verify matching-domain access, public cross-runtime rejection, cross-net
+  copying, frontier observation, normalization, Cursor WHNF, and recursive net
+  cycles. Run a targeted strict-provenance Miri probe over root projection and
+  net access.
+
+This checkpoint precedes I8A so its representation changes are included in the
+final payload and mutation audit rather than invalidating that audit later.
+Production remains `NoAuto`.
 
 ### Phase I8A — Final Net Payload and Mutation Audit
 
