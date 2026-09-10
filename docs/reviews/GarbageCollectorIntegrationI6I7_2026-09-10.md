@@ -33,7 +33,7 @@ collection policy.
 
 | Checkpoint | Implemented disposition and evidence |
 | --- | --- |
-| I6A.0 | `NetValue`, `FunctionCode`, and `FunctionValue` remain immutable scalar shells over one exact managed net identity. `core_operator_adapter_enumerates_every_value_and_net_payload` proves identical projection without reduction; shared-stage and managed function-stage tests preserve identity/cycle behavior. |
+| I6A.0 | `NetValue`, `FunctionCode`, and `FunctionValue` remain immutable scalar shells over one exact managed net identity. I8C later retired their separate compatibility projections; `core_operator_value_adapter_enumerates_every_value_payload`, the managed net trace fixture, and shared-stage/function-stage cycle tests preserve the payload and identity behavior. |
 | I6A.1 | `BuiltinCall` and `LazyApplication` retain exact ordered compatibility visitors. The existing partial-builtin cycle and new `managed_cycle_through_lazy_application_is_traced_and_reclaimed` fixture close both paths. |
 | I6A.2 | Both `FixpointComputation` variants remain one-value immutable shells. Direct visitor assertions now cover both variants, and function/object backedge fixtures reclaim exactly. |
 | I6B.1-B.2 | `MetadataCarrier` remains one identity-bearing `Arc<Value>` with one exact edge. Existing pure/reflection update, inspection, `seq`/`spark`, identity, and metadata-cycle suites pass. No external semantic owner or independent conversion benefit was found, so I6B.2 is not required. |

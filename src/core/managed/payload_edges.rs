@@ -32,7 +32,10 @@ mod runtime_net;
 pub(super) use managed::{
     visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
 };
-pub(super) use runtime_net::{CompatibilityNetEdges, visit_halt_value_edges};
+pub(super) use runtime_net::{
+    trace_core_operator_managed_net_edges, trace_lazy_source_managed_net_edges,
+    visit_halt_value_edges,
+};
 
 fn visit_values(values: &[Value], visit: &mut dyn FnMut(&Value)) {
     for value in values {

@@ -18,7 +18,7 @@ pub(crate) use runtime::{
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
     PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell,
     RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway, RuntimeNetPayload,
-    RuntimeNetPayloadVisitStats, SourceFrontier, StuckReason,
+    SourceFrontier, StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

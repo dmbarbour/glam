@@ -108,7 +108,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ),
         (
             "src/core/managed/payload_edges/runtime_net.rs",
-            GatewayCounts::new(3, 1),
+            // I8C retired two bounded compatibility-projection fixtures. The
+            // remaining access constructs the closed generic visitor fixture.
+            GatewayCounts::new(1, 1),
         ),
         // I5D's recursive-cell cutover and I5F's closed self- and cross-family
         // cycle fixtures use matching-domain access for construction,

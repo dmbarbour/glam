@@ -435,7 +435,7 @@ fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
     ));
 
     let mut visited = Vec::new();
-    let stats = runtime.visit_logical_payloads(&mut |payload| match payload {
+    runtime.visit_logical_payloads(&mut |payload| match payload {
         RuntimeNetPayload::Source(source) => visited.push(*source),
         RuntimeNetPayload::Data(())
         | RuntimeNetPayload::Operator(())
@@ -447,7 +447,6 @@ fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
         Some(RuntimeNode::RemoteCursor { .. })
     ));
     assert_eq!(visited, [source]);
-    assert_eq!(stats.source_nets, 1);
 }
 
 #[test]

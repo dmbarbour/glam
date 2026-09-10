@@ -10,15 +10,15 @@ use crate::core::{
     ManagedCoreNetEdge, ManagedCoreNetRoot, RuntimeValueAccess, Value,
 };
 use crate::evaluation::EvaluationWaitToken;
+#[cfg(test)]
+use crate::interaction_net::RuntimeNetRevisions;
 use crate::interaction_net::{
     ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
     OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
-    RuntimeNetPayload, RuntimeNetPayloadVisitStats, SourceFrontier,
+    SourceFrontier,
 };
-#[cfg(test)]
-use crate::interaction_net::{RuntimeNetRevisions, SharedRuntimeNet};
 use crate::runtime::RuntimeValueRoot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,21 +111,6 @@ pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
     values: &'access RuntimeValueAccess<'scope>,
 }
 
-/// One direct semantic payload observed through a bounded core-net access.
-///
-/// Source identities remain exact edge-only facades. Reporting one never
-/// inspects or materializes the source net.
-#[allow(
-    dead_code,
-    reason = "I4E installs the compatibility payload boundary before I8 migrates core net ownership"
-)]
-pub(crate) enum CoreRuntimeNetPayload<'payload> {
-    Value(&'payload Value),
-    Operator(&'payload CoreOperator),
-    Source(CoreRuntimeNet),
-    StuckReason(&'payload EvaluationHalt),
-}
-
 #[cfg(test)]
 std::thread_local! {
     static CORE_NORMALIZATION_SCOPE_DEPTH: std::cell::Cell<usize> = const {
@@ -175,13 +160,13 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
-    pub(crate) fn adopt_core_net_for_test(
+    fn construct_core_runtime_net_for_test(
         &self,
-        inner: SharedRuntimeNet<CoreSpecialization>,
+        runtime: RuntimeNet<CoreSpecialization>,
     ) -> CoreRuntimeNet {
         self.with_runtime_value_access(|access| {
             access
-                .construct_managed_core_net(inner.into_runtime_for_managed_test())
+                .construct_managed_core_net(runtime)
                 .expect("managed core-net test representation must fit one collector run")
         })
     }
@@ -313,8 +298,11 @@ impl CoreRuntimeNet {
 
     #[cfg(test)]
     pub(crate) fn test_stable_auxiliary(values: &CoreValueFactory) -> (Self, Port) {
-        let (inner, interface) = SharedRuntimeNet::test_stable_auxiliary();
-        (values.adopt_core_net_for_test(inner), interface)
+        let (runtime, interface) = RuntimeNet::test_stable_auxiliary();
+        (
+            values.construct_core_runtime_net_for_test(runtime),
+            interface,
+        )
     }
 
     #[cfg(test)]
@@ -322,8 +310,11 @@ impl CoreRuntimeNet {
         let (prepared, _source_root) = source
             .test_prepare_copy_source(values)
             .into_inner_for_factory(values);
-        let (inner, interface) = SharedRuntimeNet::test_copy_layer_from(prepared);
-        (values.adopt_core_net_for_test(inner), interface)
+        let (runtime, interface) = RuntimeNet::test_copy_layer_from(prepared);
+        (
+            values.construct_core_runtime_net_for_test(runtime),
+            interface,
+        )
     }
 
     #[cfg(test)]
@@ -334,9 +325,12 @@ impl CoreRuntimeNet {
         let (prepared, _source_root) = source
             .test_prepare_copy_source(values)
             .into_inner_for_factory(values);
-        let (inner, interface, cursor) =
-            SharedRuntimeNet::test_pair_owned_copy_layer_from(prepared);
-        (values.adopt_core_net_for_test(inner), interface, cursor)
+        let (runtime, interface, cursor) = RuntimeNet::test_pair_owned_copy_layer_from(prepared);
+        (
+            values.construct_core_runtime_net_for_test(runtime),
+            interface,
+            cursor,
+        )
     }
 
     #[cfg(test)]
@@ -347,9 +341,11 @@ impl CoreRuntimeNet {
         let (prepared, _source_root) = source
             .test_prepare_copy_source(values)
             .into_inner_for_factory(values);
-        let (inner, interface) =
-            SharedRuntimeNet::test_productive_pair_owned_copy_layer_from(prepared);
-        (values.adopt_core_net_for_test(inner), interface)
+        let (runtime, interface) = RuntimeNet::test_productive_pair_owned_copy_layer_from(prepared);
+        (
+            values.construct_core_runtime_net_for_test(runtime),
+            interface,
+        )
     }
 
     #[cfg(test)]
@@ -360,9 +356,13 @@ impl CoreRuntimeNet {
         let (prepared, _source_root) = source
             .test_prepare_copy_source(values)
             .into_inner_for_factory(values);
-        let (inner, interface, cursor) =
-            SharedRuntimeNet::test_stable_root_with_claimed_cursor_from(prepared);
-        (values.adopt_core_net_for_test(inner), interface, cursor)
+        let (runtime, interface, cursor) =
+            RuntimeNet::test_stable_root_with_claimed_cursor_from(prepared);
+        (
+            values.construct_core_runtime_net_for_test(runtime),
+            interface,
+            cursor,
+        )
     }
 
     #[cfg(test)]
@@ -405,36 +405,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
         self.runtime.with(inspect)
-    }
-
-    /// Enumerates the net's direct semantic payloads under its existing
-    /// read-only synchronization boundary.
-    ///
-    /// The callback is synchronous and must not re-enter this net. It may
-    /// inspect source identity, but must not reduce, wait on, or materialize
-    /// any reported source.
-    #[allow(
-        dead_code,
-        reason = "I4E installs the compatibility payload boundary before I8 migrates core net ownership"
-    )]
-    pub(crate) fn visit_logical_payloads(
-        &self,
-        visit: &mut impl FnMut(CoreRuntimeNetPayload<'_>),
-    ) -> RuntimeNetPayloadVisitStats {
-        self.with(|runtime| {
-            runtime.visit_logical_payloads(&mut |payload| match payload {
-                RuntimeNetPayload::Data(value) => visit(CoreRuntimeNetPayload::Value(value)),
-                RuntimeNetPayload::Operator(operator) => {
-                    visit(CoreRuntimeNetPayload::Operator(operator));
-                }
-                RuntimeNetPayload::Source(source) => {
-                    visit(CoreRuntimeNetPayload::Source(source.clone()));
-                }
-                RuntimeNetPayload::StuckReason(reason) => {
-                    visit(CoreRuntimeNetPayload::StuckReason(reason));
-                }
-            })
-        })
     }
 
     #[cfg(test)]
@@ -1936,7 +1906,7 @@ mod tests {
                     relative.display()
                 );
                 assert!(
-                    !source.contains("SharedRuntimeNet<CoreSpecialization>"),
+                    !source.contains(&["SharedRuntime", "Net<CoreSpecialization>"].concat()),
                     "{} names the raw core shared-net owner outside its facade",
                     relative.display()
                 );
@@ -1955,6 +1925,49 @@ mod tests {
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         visit(&root, root.clone());
+    }
+
+    #[test]
+    fn managed_core_net_has_no_legacy_owner() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let forbidden = [
+            ["SharedRuntime", "Net<CoreSpecialization>"].concat(),
+            ["Arc<RuntimeNetCell<", "CoreSpecialization>>"].concat(),
+            ["Weak<RuntimeNetCell<", "CoreSpecialization>>"].concat(),
+            ["Compatibility", "NetEdges"].concat(),
+            ["CoreRuntimeNet", "Payload"].concat(),
+            ["visit_core_runtime_net", "_edges"].concat(),
+            ["adopt_core_net", "_for_test"].concat(),
+            ["into_runtime_for_managed", "_test"].concat(),
+        ];
+
+        fn visit(source_root: &Path, path: PathBuf, forbidden: &[String]) {
+            for entry in fs::read_dir(&path).expect("source directory must be readable") {
+                let entry = entry.expect("source entry must be readable");
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(source_root, path, forbidden);
+                    continue;
+                }
+                if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                    continue;
+                }
+
+                let source = fs::read_to_string(&path).expect("Rust source must be readable");
+                let relative = path
+                    .strip_prefix(source_root)
+                    .expect("visited source must remain below source root");
+                for legacy in forbidden {
+                    assert!(
+                        !source.contains(legacy),
+                        "{} retains obsolete core-net ownership or compatibility surface {legacy}",
+                        relative.display()
+                    );
+                }
+            }
+        }
+
+        visit(&source_root, source_root.clone(), &forbidden);
     }
 
     #[test]

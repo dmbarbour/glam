@@ -29,8 +29,9 @@ use crate::interaction_net::{
 use crate::runtime::RuntimeMutationAuthority;
 
 use super::payload_edges::{
-    CompatibilityNetEdges, visit_compatibility_managed_edges,
-    visit_compatibility_payload_managed_edges, visit_halt_value_edges,
+    trace_core_operator_managed_net_edges, trace_lazy_source_managed_net_edges,
+    visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
+    visit_halt_value_edges,
 };
 use super::{ManagedDropRecord, ManagedFamily};
 
@@ -925,9 +926,7 @@ fn trace_lazy_result(result: &LazyResult, visitor: &mut Visitor<'_>) {
 
 fn trace_lazy_source(source: &LazySource, visitor: &mut Visitor<'_>) {
     visit_compatibility_payload_managed_edges(source, visitor);
-    source.visit_compatibility_net_edges(&mut |net| {
-        net.trace_managed_edge(visitor);
-    });
+    trace_lazy_source_managed_net_edges(source, visitor);
 }
 
 fn trace_lazy_source_cell(cell: &ManagedLazyCell, visitor: &mut Visitor<'_>) {
@@ -1002,9 +1001,7 @@ fn trace_core_runtime_payload(
         }
         RuntimeNetPayload::Operator(operator) => {
             visit_compatibility_payload_managed_edges(operator, visitor);
-            operator.visit_compatibility_net_edges(&mut |net| {
-                net.trace_managed_edge(visitor);
-            });
+            trace_core_operator_managed_net_edges(operator, visitor);
         }
         RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
         RuntimeNetPayload::StuckReason(reason) => {

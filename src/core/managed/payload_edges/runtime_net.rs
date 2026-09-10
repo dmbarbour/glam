@@ -1,96 +1,9 @@
-//! Non-reducing adapters for compatibility interaction-net payloads.
+//! Non-reducing semantic-edge adapters for interaction-net payloads.
 
 use super::{CompatibilityValueEdges, visit_values};
-use crate::core::{
-    EvaluationHalt, EvaluationHaltPayload, FunctionCode, FunctionValue, LazySource, NetValue, Value,
-};
-use crate::core_net::{CoreOperator, CoreRuntimeNet, CoreRuntimeNetAccess, CoreRuntimeNetPayload};
-use crate::interaction_net::RuntimeNetPayloadVisitStats;
-
-/// Reports every direct runtime-net identity held by one compatibility
-/// payload.
-///
-/// Implementations must not reduce, inspect, or materialize the reported net.
-/// The callback is synchronous and may not retain the borrow. I8 replaces
-/// these external identities with exact managed outer-cell edges.
-#[allow(
-    dead_code,
-    reason = "I4E installs compatibility adapters consumed as net-bearing families migrate in I6-I8"
-)]
-pub(crate) trait CompatibilityNetEdges {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet));
-}
-
-/// Logical work performed while translating one core net's generic payload
-/// walk into direct semantic value and net edges.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "I4E installs counters consumed by focused fixtures and the later I8 audit"
-)]
-pub(crate) struct CoreRuntimeNetEdgeVisitStats {
-    pub(crate) runtime: RuntimeNetPayloadVisitStats,
-    pub(crate) value_edges: usize,
-    pub(crate) net_edges: usize,
-}
-
-impl CompatibilityNetEdges for NetValue {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        visit(self.runtime());
-    }
-}
-
-impl CompatibilityNetEdges for FunctionCode {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        visit(self.runtime());
-    }
-}
-
-impl CompatibilityNetEdges for FunctionValue {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        self.stage().visit_compatibility_net_edges(visit);
-    }
-}
-
-impl CompatibilityNetEdges for Value {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        match self {
-            Self::Function(function) => function.visit_compatibility_net_edges(visit),
-            Self::Net(net) => net.visit_compatibility_net_edges(visit),
-            Self::Atom(_)
-            | Self::Number(_)
-            | Self::Binary(_)
-            | Self::List(_)
-            | Self::Dict(_)
-            | Self::Builtin(_)
-            | Self::PartialBuiltin(_)
-            | Self::Lazy(_)
-            | Self::Promised(_)
-            | Self::Metadata(_)
-            | Self::Opaque(_) => {}
-        }
-    }
-}
-
-impl CompatibilityNetEdges for LazySource {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        match self {
-            Self::NetComputation(net) => net.visit_compatibility_net_edges(visit),
-            Self::FunctionCall { function, .. } => function.visit_compatibility_net_edges(visit),
-            Self::Error
-            | Self::ComputedFixpoint(_)
-            | Self::SemanticComputation(_)
-            | Self::HostCall(_)
-            | Self::ReflectionTask(_)
-            | Self::Access { .. }
-            | Self::Application(_)
-            | Self::Builtin(_)
-            | Self::NetConstruction(_) => {}
-            #[cfg(test)]
-            Self::SemanticThunk(_) => {}
-        }
-    }
-}
+use crate::core::{EvaluationHalt, EvaluationHaltPayload, LazySource, Value};
+use crate::core_net::CoreOperator;
+use glam_gc::Visitor;
 
 impl CompatibilityValueEdges for CoreOperator {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
@@ -108,27 +21,6 @@ impl CompatibilityValueEdges for CoreOperator {
     }
 }
 
-impl CompatibilityNetEdges for CoreOperator {
-    fn visit_compatibility_net_edges(&self, visit: &mut dyn FnMut(&CoreRuntimeNet)) {
-        match self {
-            Self::FunctionCaptures { code, .. } | Self::ComputationCaptures { code, .. } => {
-                code.visit_compatibility_net_edges(visit);
-            }
-            Self::ApplyArity { .. }
-            | Self::Dict { .. }
-            | Self::Builtin(_)
-            | Self::Applicable(_)
-            | Self::List { .. }
-            | Self::Access { .. }
-            | Self::Request { .. } => {}
-        }
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "I4E halt visitation is retained by the production managed core-net trace and I8 audit"
-)]
 pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMut(&Value)) {
     match halt.payload() {
         EvaluationHaltPayload::Failure(failure) => {
@@ -141,49 +33,52 @@ pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMu
     }
 }
 
-/// Enumerates every direct semantic edge in one core runtime net without
-/// reducing the net or following a remote cursor.
+/// Traces the exact managed net edge held by a lazy source, if any.
 ///
-/// The caller supplies matching runtime value access. Callbacks run while the
-/// net's read-only synchronization guard is held and therefore must not
-/// re-enter this net.
-#[allow(
-    dead_code,
-    reason = "I4E core-net visitation is consumed by the I5D production trace and retained for I8 audit"
-)]
-pub(crate) fn visit_core_runtime_net_edges(
-    access: &CoreRuntimeNetAccess<'_, '_>,
-    visit_value: &mut dyn FnMut(&Value),
-    visit_net: &mut dyn FnMut(&CoreRuntimeNet),
-) -> CoreRuntimeNetEdgeVisitStats {
-    let mut stats = CoreRuntimeNetEdgeVisitStats::default();
-    stats.runtime = access.visit_logical_payloads(&mut |payload| match payload {
-        CoreRuntimeNetPayload::Value(value) => {
-            stats.value_edges += 1;
-            visit_value(value);
+/// This is not a compatibility projection: the managed lazy cell invokes it
+/// directly from its collector trace. The exhaustive match must remain free of
+/// reduction, materialization, and semantic callbacks.
+pub(crate) fn trace_lazy_source_managed_net_edges(source: &LazySource, visitor: &mut Visitor<'_>) {
+    match source {
+        LazySource::NetComputation(net) => net.runtime().trace_managed_edge(visitor),
+        LazySource::FunctionCall { function, .. } => {
+            function.stage().runtime().trace_managed_edge(visitor);
         }
-        CoreRuntimeNetPayload::Operator(operator) => {
-            operator.visit_compatibility_value_edges(&mut |value| {
-                stats.value_edges += 1;
-                visit_value(value);
-            });
-            operator.visit_compatibility_net_edges(&mut |net| {
-                stats.net_edges += 1;
-                visit_net(net);
-            });
+        LazySource::Error
+        | LazySource::ComputedFixpoint(_)
+        | LazySource::SemanticComputation(_)
+        | LazySource::HostCall(_)
+        | LazySource::ReflectionTask(_)
+        | LazySource::Access { .. }
+        | LazySource::Application(_)
+        | LazySource::Builtin(_)
+        | LazySource::NetConstruction(_) => {}
+        #[cfg(test)]
+        LazySource::SemanticThunk(_) => {}
+    }
+}
+
+/// Traces the exact managed function-code net edge held by an operator.
+///
+/// Raw semantic values remain handled by `CompatibilityValueEdges` until the
+/// value-representation project replaces their structural interiors.
+pub(crate) fn trace_core_operator_managed_net_edges(
+    operator: &CoreOperator,
+    visitor: &mut Visitor<'_>,
+) {
+    match operator {
+        CoreOperator::FunctionCaptures { code, .. }
+        | CoreOperator::ComputationCaptures { code, .. } => {
+            code.runtime().trace_managed_edge(visitor);
         }
-        CoreRuntimeNetPayload::Source(source) => {
-            stats.net_edges += 1;
-            visit_net(&source);
-        }
-        CoreRuntimeNetPayload::StuckReason(reason) => {
-            visit_halt_value_edges(reason, &mut |value| {
-                stats.value_edges += 1;
-                visit_value(value);
-            });
-        }
-    });
-    stats
+        CoreOperator::ApplyArity { .. }
+        | CoreOperator::Dict { .. }
+        | CoreOperator::Builtin(_)
+        | CoreOperator::Applicable(_)
+        | CoreOperator::List { .. }
+        | CoreOperator::Access { .. }
+        | CoreOperator::Request { .. } => {}
+    }
 }
 
 #[cfg(test)]
@@ -195,10 +90,10 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        Builtin, BuiltinCall, CoreValueFactory, EvaluationHalt, FunctionValue, Key,
-        ManagedDropRecord, ManagedFamily,
+        Builtin, BuiltinCall, CoreValueFactory, EvaluationHalt, FunctionCode, Key,
+        ManagedDropRecord, ManagedFamily, NetValue,
     };
-    use crate::core_net::{CoreDataKey, CoreSpecialization};
+    use crate::core_net::{CoreDataKey, CoreRuntimeNet, CoreSpecialization};
     use crate::interaction_net::{
         NetBuilder, NetSpecialization, OperatorCall, ReductionKind, RuntimeNet, RuntimeNetPayload,
     };
@@ -218,14 +113,8 @@ mod tests {
         values.instantiate_core_net(&builder.finish(exposed))
     }
 
-    fn net_edges(value: &impl CompatibilityNetEdges) -> Vec<CoreRuntimeNet> {
-        let mut edges = Vec::new();
-        value.visit_compatibility_net_edges(&mut |net| edges.push(net.clone()));
-        edges
-    }
-
     #[test]
-    fn core_operator_adapter_enumerates_every_value_and_net_payload() {
+    fn core_operator_value_adapter_enumerates_every_value_payload() {
         let values = values();
         let first = number(1);
         let second = number(2);
@@ -240,7 +129,6 @@ mod tests {
                     supplied: supplied.clone(),
                 },
                 2,
-                0,
             ),
             (
                 CoreOperator::FunctionCaptures {
@@ -248,7 +136,6 @@ mod tests {
                     supplied: supplied.clone(),
                 },
                 2,
-                1,
             ),
             (
                 CoreOperator::ComputationCaptures {
@@ -256,7 +143,6 @@ mod tests {
                     supplied: supplied.clone(),
                 },
                 2,
-                1,
             ),
             (
                 CoreOperator::Dict {
@@ -268,7 +154,6 @@ mod tests {
                     supplied: supplied.clone(),
                 },
                 2,
-                0,
             ),
             (
                 CoreOperator::Builtin(BuiltinCall {
@@ -276,16 +161,14 @@ mod tests {
                     arguments: one_supplied,
                 }),
                 1,
-                0,
             ),
-            (CoreOperator::Applicable(first.clone()), 1, 0),
+            (CoreOperator::Applicable(first.clone()), 1),
             (
                 CoreOperator::List {
                     arity: 3,
                     supplied: supplied.clone(),
                 },
                 2,
-                0,
             ),
             (
                 CoreOperator::Access {
@@ -297,7 +180,6 @@ mod tests {
                     supplied: supplied.clone(),
                 },
                 2,
-                0,
             ),
             (
                 CoreOperator::Request {
@@ -307,44 +189,28 @@ mod tests {
                     wrap_effect: true,
                 },
                 2,
-                0,
             ),
         ];
 
-        for (operator, expected_values, expected_nets) in operators {
+        for (operator, expected_values) in operators {
             let mut value_edges = Vec::new();
             operator.visit_compatibility_value_edges(&mut |value| {
                 value_edges.push(value.clone());
             });
             assert_eq!(value_edges.len(), expected_values);
-
-            let nets = net_edges(&operator);
-            assert_eq!(nets.len(), expected_nets);
-            assert!(
-                nets.iter().all(|net| net.ptr_eq(&function_runtime)),
-                "only function-code operators carry the function runtime"
-            );
         }
-
-        let stage = NetValue::new(function_runtime.clone());
-        let function = FunctionValue::new(stage.clone(), 1);
-        assert!(net_edges(&stage)[0].ptr_eq(&function_runtime));
-        assert!(net_edges(code.as_ref())[0].ptr_eq(&function_runtime));
-        assert!(net_edges(&function)[0].ptr_eq(&function_runtime));
-        assert!(net_edges(&Value::Function(function.clone()))[0].ptr_eq(&function_runtime));
-        assert!(net_edges(&Value::Net(stage.clone()))[0].ptr_eq(&function_runtime));
-
-        // Lazy source graphs are visited by the managed identity's exact trace.
-        // The semantic façade no longer reopens managed access solely for a
-        // compatibility net-edge adapter.
     }
 
     #[test]
-    fn net_value_adapter_traces_without_reduction_or_materialization() {
+    fn managed_core_net_trace_does_not_reduce_materialize_or_force() {
         let values = values();
+        let public_values = crate::api::Values::from_core_factory(values.clone());
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the trace fixture should begin collectible");
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let deferred = Value::semantic_thunk(&values, "net adapter sentinel", move |_| {
+        let deferred = Value::semantic_thunk(&values, "managed net trace sentinel", move |_| {
             forced_by_thunk.store(true, Ordering::Release);
             panic!("net payload tracing must not force semantic data")
         });
@@ -352,7 +218,8 @@ mod tests {
         let failure = number(99);
 
         let function_runtime = closed_data_net(&values, number(0));
-        let code = Arc::new(FunctionCode::new(function_runtime.clone(), 1, 1));
+        let code = Arc::new(FunctionCode::new(function_runtime, 1, 1));
+        let retained_code = Arc::downgrade(&code);
         let operator = CoreOperator::FunctionCaptures {
             code,
             supplied: Arc::from([supplied.clone()]),
@@ -385,18 +252,13 @@ mod tests {
             );
         });
 
+        let owner = public_values.wrap(Value::Net(NetValue::new(runtime.clone())));
         let before = runtime.test_with_revisions(&values, |net| {
             assert!(net.stuck_reason(pair).is_some());
         });
-        let mut value_edges = Vec::new();
-        let mut runtime_edges = Vec::new();
-        let stats = values.with_runtime_value_access(|value_access| {
-            visit_core_runtime_net_edges(
-                &runtime.access(&value_access),
-                &mut |value| value_edges.push(value.clone()),
-                &mut |net| runtime_edges.push(net.clone()),
-            )
-        });
+        let live = values
+            .collect_managed_for_test()
+            .expect("the rooted managed net should trace every payload edge");
         let after = runtime.test_with_revisions(&values, |net| {
             assert!(net.stuck_reason(pair).is_some());
         });
@@ -405,34 +267,16 @@ mod tests {
             before.1, after.1,
             "payload visitation must not mutate the net"
         );
-        assert_eq!(stats.runtime.data_nodes, 1);
-        assert_eq!(stats.runtime.operator_nodes, 1);
-        assert_eq!(stats.runtime.stuck_reasons, 1);
-        assert_eq!(stats.value_edges, 3);
-        assert_eq!(stats.net_edges, 1);
-        assert_eq!(value_edges.len(), 3);
-        assert!(value_edges.contains(&deferred));
-        assert!(value_edges.contains(&supplied));
-        assert!(value_edges.contains(&failure));
-        assert_eq!(runtime_edges.len(), 1);
-        assert!(runtime_edges[0].ptr_eq(&function_runtime));
+        assert_eq!(live.finalized_slots(), 0);
+        assert!(live.marked_slots() >= baseline.marked_slots() + 3);
+        assert!(retained_code.upgrade().is_some());
         assert!(!forced.load(Ordering::Acquire));
 
-        let (copy, _) = CoreRuntimeNet::test_copy_layer(&values, function_runtime.clone());
-        let before_copy = copy.test_with_revisions(&values, |_| ());
-        let mut copied_sources = Vec::new();
-        let copy_stats = values.with_runtime_value_access(|value_access| {
-            visit_core_runtime_net_edges(
-                &copy.access(&value_access),
-                &mut |_| panic!("an untouched copy layer has no local semantic value"),
-                &mut |net| copied_sources.push(net.clone()),
-            )
-        });
-        let after_copy = copy.test_with_revisions(&values, |_| ());
-        assert_eq!(before_copy.1, after_copy.1);
-        assert_eq!(copy_stats.runtime.source_nets, 1);
-        assert_eq!(copy_stats.net_edges, 1);
-        assert!(copied_sources[0].ptr_eq(&function_runtime));
+        drop(owner);
+        values
+            .collect_managed_for_test()
+            .expect("retiring the owner should leave the trace fixture collectible");
+        assert!(retained_code.upgrade().is_none());
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,7 +329,7 @@ mod tests {
     // Glam service or observation of a dying edge.
     unsafe impl ManagedFamily for ManagedNetFixtureNode {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "I4E closed runtime-net adapter fixture",
+            "closed generic runtime-net payload fixture",
             "src/core/managed/payload_edges/runtime_net.rs",
             "direct Drop updates only an external atomic counter",
             "the runtime graph, mutex, and Gc data edges drop passively",
@@ -493,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn net_value_adapter_cycle_marks_exactly() {
+    fn generic_runtime_net_payload_cycle_marks_exactly() {
         let values = values();
         let baseline = values
             .collect_managed_for_test()

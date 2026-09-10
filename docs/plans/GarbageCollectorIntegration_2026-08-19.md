@@ -244,7 +244,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8B.2 | complete | ready and claimed operator-work cycle deltas |
 | I8B.3 | complete | cursor and copy-source cycle reconciliation |
 | I8B | complete | final post-cutover net cycle matrix |
-| I8C | pending | net-specific compatibility retirement |
+| I8C | complete | net-specific compatibility retirement |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -2615,8 +2615,9 @@ these adapters after its final representation and topology delta audit.
 - Do not yet migrate synchronized runtime-net ownership or value-replacing net
   mutations; I8 owns that choice and its gateway inventory.
 
-Verification: `net_value_adapter_traces_without_reduction_or_materialization`
-and `net_value_adapter_cycle_marks_exactly`. Production remains `NoAuto`.
+Verification after I8C: `managed_core_net_trace_does_not_reduce_materialize_or_force`
+and `generic_runtime_net_payload_cycle_marks_exactly`. Production remains
+`NoAuto`.
 
 Implement this phase in two bounded checkpoints:
 
@@ -2662,6 +2663,12 @@ production collection; I8 still owns the managed outer cell, lock protocol,
 and value-installing mutation gateways. I5's lazy-cell migration must combine
 value and net categories from one stable source/result snapshot rather than
 calling the two compatibility adapters across a publication race.
+
+I8C subsequently retired the bounded core payload projection and all six
+net-identity compatibility adapters. The managed outer cells now trace exact
+lazy-source, operator-code, and copy-source edges directly through the generic
+logical payload walk. The central compatibility-value walk remains the exact
+trace for raw structural `Value` interiors.
 
 ### Phase I4F.1 — Durable Root-Surface Conversion Gate
 
@@ -5743,6 +5750,23 @@ Verification: `managed_core_net_has_no_legacy_owner` plus the final payload,
 writer, durable-handle, and compatibility-adapter source inventories. The
 complete production runtime remains `NoAuto` until I11 repeats the net cases
 after Gate G2 closes the entire graph.
+
+Completed 2026-09-10. The six `CompatibilityNetEdges` projections, the
+bounded `CoreRuntimeNetPayload` translation, and their audit-only edge/count
+facades are gone. `ManagedLazyCell` and `ManagedCoreNetCell` now dispatch
+their exact nested net edges directly through compile-exhaustive helpers,
+while `RuntimeNet::visit_logical_payloads` remains the single non-reducing
+topology walk. Its obsolete visit counters were also removed from the
+production trace path.
+
+Core test topology now constructs an unshared `RuntimeNet` before installing
+it in the managed outer cell; the temporary `SharedRuntimeNet` unwrap/adoption
+bridge no longer exists. `managed_core_net_has_no_legacy_owner` rejects the
+retired core-specific shared owners, adapter names, and conversion gateways
+across the source tree. The final topology, exact-writer, durable-owner, and
+remaining 13-value-adapter inventories pass unchanged in purpose. The central
+transitive compatibility-value walk is deliberately retained until Value
+Representation Refinement. Production remains `NoAuto`.
 
 ## Phase I9 — Runtime-Root Lifecycle and Retirement Audits
 

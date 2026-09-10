@@ -44,17 +44,9 @@ struct IdentityOwnerEntry {
     reason: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CompatibilityRecursionRole {
-    ImmutablePath,
-    ManagedIdentityProjection,
-    ExternalRootBoundary,
-}
-
 struct CompatibilityAdapterEntry {
     path: &'static str,
     declaration: &'static str,
-    role: CompatibilityRecursionRole,
     reason: &'static str,
 }
 
@@ -504,13 +496,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "access view is branded by one matching runtime value-access scope"
     ),
     owner!(
-        "src/core_net.rs::CoreRuntimeNetPayload",
-        [0, 0, 1],
-        BoundedAccess,
-        None,
-        "synchronous payload visitor projection"
-    ),
-    owner!(
         "src/eval/net.rs::CoreCallClaim",
         [0, 0, 1],
         BoundedAccess,
@@ -631,127 +616,77 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
 ];
 
-// This is the post-I5 closure inventory for every compatibility edge adapter.
-// New adapter implementations fail closed below. `ImmutablePath` means the
-// represented Rust ownership was reviewed as construction-acyclic: it may
-// connect managed identities but cannot independently manufacture a recursive
-// identity. Exact identity projections terminate at one of I5's managed cells.
-// GCI5R-005B moved reflection effect/target containment into its exact direct
-// compatibility trace; only active reservation authority remains external.
+// This is the post-I8 closure inventory for every remaining compatibility
+// value-edge adapter. New implementations fail closed below. Each represented
+// Rust owner is immutable and construction-acyclic: it may connect managed
+// identities but cannot independently manufacture one. Exact lazy, promise,
+// and core-net identities terminate directly at their managed cells rather
+// than passing through compatibility identity projections.
 const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for Value {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "wildcard-free value-shell dispatch stops at managed identities",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for EvaluatedValue {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "transparent immutable value wrapper",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for EvaluationFailure {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable emission and context value paths",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for BuiltinCall {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable argument slice",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for LazyApplication {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable function and argument paths owned by a managed lazy",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for FixpointComputation {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable fixpoint input owned by a managed lazy",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for SemanticComputation {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "function pointer plus immutable explicit captures",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for ReflectionComputation {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable effect and optional gate-target paths owned by a managed lazy; its external handle reaches only edge-free lifecycle authority",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for LazySource {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "stable source snapshot whose mutable identity is ManagedLazyCell",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for MetadataCarrier {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable sealed metadata path",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges/persistent.rs",
         declaration: "impl CompatibilityValueEdges for Dict {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "persistent immutable dictionary values",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges/persistent.rs",
         declaration: "impl CompatibilityValueEdges for List {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "persistent immutable list values and managed thunk stops",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges/runtime_net.rs",
         declaration: "impl CompatibilityValueEdges for CoreOperator {",
-        role: CompatibilityRecursionRole::ImmutablePath,
         reason: "immutable operator payload owned by ManagedCoreNetCell",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for NetValue {",
-        role: CompatibilityRecursionRole::ManagedIdentityProjection,
-        reason: "projects the exact managed core-net identity",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for FunctionCode {",
-        role: CompatibilityRecursionRole::ManagedIdentityProjection,
-        reason: "projects the exact managed function-code net",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for FunctionValue {",
-        role: CompatibilityRecursionRole::ManagedIdentityProjection,
-        reason: "projects the exact managed function-stage net",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for Value {",
-        role: CompatibilityRecursionRole::ImmutablePath,
-        reason: "wildcard-free function/net wrapper dispatch",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for LazySource {",
-        role: CompatibilityRecursionRole::ImmutablePath,
-        reason: "source payload dispatch owned by ManagedLazyCell",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges/runtime_net.rs",
-        declaration: "impl CompatibilityNetEdges for CoreOperator {",
-        role: CompatibilityRecursionRole::ImmutablePath,
-        reason: "operator-held function-code net dispatch",
     },
 ];
 
@@ -823,7 +758,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 19, 10],
+        [13, 19, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
@@ -832,8 +767,6 @@ fn compatibility_graph_cycle_sources_are_classified() {
 fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut expected_by_path = BTreeMap::<&str, usize>::new();
-    let mut roles = [0usize; 3];
-
     for entry in COMPATIBILITY_ADAPTER_INVENTORY {
         assert!(
             !entry.reason.is_empty(),
@@ -841,12 +774,6 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
             entry.declaration
         );
         *expected_by_path.entry(entry.path).or_default() += 1;
-        roles[match entry.role {
-            CompatibilityRecursionRole::ImmutablePath => 0,
-            CompatibilityRecursionRole::ManagedIdentityProjection => 1,
-            CompatibilityRecursionRole::ExternalRootBoundary => 2,
-        }] += 1;
-
         let source = fs::read_to_string(manifest.join(entry.path))
             .unwrap_or_else(|error| panic!("{} should be readable: {error}", entry.path));
         assert_eq!(
@@ -860,23 +787,14 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
     for (path, expected) in expected_by_path {
         let source = fs::read_to_string(manifest.join(path))
             .unwrap_or_else(|error| panic!("{path} should be readable: {error}"));
-        let actual = source.matches("impl CompatibilityValueEdges for ").count()
-            + source.matches("impl CompatibilityNetEdges for ").count();
+        let actual = source.matches("impl CompatibilityValueEdges for ").count();
         assert_eq!(
             actual, expected,
-            "a compatibility adapter in {path} lacks a post-I5 recursion classification"
+            "a compatibility adapter in {path} lacks a post-I8 recursion classification"
         );
     }
 
-    assert_eq!(roles, [16, 3, 0]);
-    let external = COMPATIBILITY_ADAPTER_INVENTORY
-        .iter()
-        .filter(|entry| entry.role == CompatibilityRecursionRole::ExternalRootBoundary)
-        .collect::<Vec<_>>();
-    assert!(
-        external.is_empty(),
-        "no compatibility semantic edge may cross an external-root boundary"
-    );
+    assert_eq!(COMPATIBILITY_ADAPTER_INVENTORY.len(), 13);
 }
 
 #[test]

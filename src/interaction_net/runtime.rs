@@ -973,12 +973,12 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     pub(crate) fn try_visit_logical_payloads(
         &self,
         visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
-    ) -> RuntimeNetPayloadVisitStats {
+    ) {
         let state = self
             .runtime
             .try_lock()
             .expect("managed runtime net must be quiescent during tracing");
-        state.runtime.visit_logical_payloads(visit)
+        state.runtime.visit_logical_payloads(visit);
     }
 
     #[allow(
@@ -1408,37 +1408,26 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
             inner: Arc::new(RuntimeNetCell::new(runtime)),
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn into_runtime_for_managed_test(self) -> RuntimeNet<S> {
-        let mut cell = Arc::try_unwrap(self.inner)
-            .unwrap_or_else(|_| panic!("fresh test runtime net must have one owner"));
-        let state = cell
-            .runtime
-            .get_mut()
-            .expect("fresh test runtime-net mutex must not be poisoned");
-        std::mem::replace(&mut state.runtime, RuntimeNet::empty())
-    }
-
-    #[cfg(test)]
+#[cfg(test)]
+impl<S: NetSpecialization> RuntimeNet<S> {
     pub(crate) fn test_stable_auxiliary() -> (Self, Port) {
         let mut runtime = RuntimeNet::empty();
         let bind = runtime.add_node(RuntimeNode::Bind);
         let interface = runtime.add_interface(Port::auxiliary(bind, 1));
         runtime.exposed = Some(interface);
-        (Self::new(runtime), interface)
+        (runtime, interface)
     }
 
-    #[cfg(test)]
     pub(crate) fn test_copy_layer_from(source: PreparedCopySource<S>) -> (Self, Port) {
         let mut target = RuntimeNet::empty();
         let cursor = target.begin_copy(source);
         let interface = target.add_interface(Port::principal(cursor));
         target.exposed = Some(interface);
-        (Self::new(target), interface)
+        (target, interface)
     }
 
-    #[cfg(test)]
     pub(crate) fn test_pair_owned_copy_layer_from(
         source: PreparedCopySource<S>,
     ) -> (Self, Port, NodeId) {
@@ -1448,10 +1437,9 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         target.connect(Port::principal(bind), Port::principal(cursor));
         let interface = target.add_interface(Port::auxiliary(bind, 1));
         target.exposed = Some(interface);
-        (Self::new(target), interface, cursor)
+        (target, interface, cursor)
     }
 
-    #[cfg(test)]
     pub(crate) fn test_productive_pair_owned_copy_layer_from(
         source: PreparedCopySource<S>,
     ) -> (Self, Port) {
@@ -1470,10 +1458,9 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         target.connect(Port::auxiliary(fan, 2), Port::principal(discard));
         let interface = target.add_interface(Port::auxiliary(fan, 1));
         target.exposed = Some(interface);
-        (Self::new(target), interface)
+        (target, interface)
     }
 
-    #[cfg(test)]
     pub(crate) fn test_stable_root_with_claimed_cursor_from(
         source: PreparedCopySource<S>,
     ) -> (Self, Port, NodeId) {
@@ -1484,7 +1471,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
         assert!(target.ensure_pairless_cursor_obligation(cursor));
         assert!(target.claim_pairless_cursor_obligation(cursor));
         target.exposed = Some(interface);
-        (Self::new(target), interface, cursor)
+        (target, interface, cursor)
     }
 }
 
@@ -1809,30 +1796,11 @@ struct RuntimeEntry<S: NetSpecialization> {
 /// This is a read-only representation walk, not an evaluator operation. In
 /// particular, visiting a remote source reports its existing shared identity;
 /// it never follows or materializes the cursor.
-#[allow(
-    dead_code,
-    reason = "I4E payload visitation is consumed by the I5D production core-net trace and I8 audit"
-)]
 pub(crate) enum RuntimeNetPayload<'payload, S: NetSpecialization> {
     Data(&'payload S::Data),
     Operator(&'payload S::Operator),
     Source(&'payload S::RuntimeSource),
     StuckReason(&'payload S::StuckReason),
-}
-
-/// Logical work performed while enumerating one runtime net's direct semantic
-/// payloads.
-///
-/// Counts describe owning representation occurrences. The same source net may
-/// therefore be reported more than once when multiple copy/dependency records
-/// retain it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct RuntimeNetPayloadVisitStats {
-    pub(crate) node_entries: usize,
-    pub(crate) data_nodes: usize,
-    pub(crate) operator_nodes: usize,
-    pub(crate) source_nets: usize,
-    pub(crate) stuck_reasons: usize,
 }
 
 impl<S: NetSpecialization> RuntimeEntry<S> {
@@ -1921,27 +1889,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// stable. The callback is synchronous and must not re-enter that owner.
     /// Structural nodes, ports, fan identities, wait tokens, and no-rule stuck
     /// states contain no specialization payload and are intentionally omitted.
-    #[allow(
-        dead_code,
-        reason = "I4E payload visitation is consumed by the I5D production core-net trace and I8 audit"
-    )]
-    pub(crate) fn visit_logical_payloads(
-        &self,
-        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
-    ) -> RuntimeNetPayloadVisitStats {
-        let mut stats = RuntimeNetPayloadVisitStats {
-            node_entries: self.nodes.len(),
-            ..RuntimeNetPayloadVisitStats::default()
-        };
-
+    pub(crate) fn visit_logical_payloads(&self, visit: &mut impl FnMut(RuntimeNetPayload<'_, S>)) {
         for entry in self.nodes.values() {
             match &entry.node {
                 RuntimeNode::Data(data) => {
-                    stats.data_nodes += 1;
                     visit(RuntimeNetPayload::Data(data));
                 }
                 RuntimeNode::Operator(operator) => {
-                    stats.operator_nodes += 1;
                     visit(RuntimeNetPayload::Operator(operator));
                 }
                 RuntimeNode::Bind
@@ -1953,7 +1907,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
 
         for copy in self.copies.values() {
-            stats.source_nets += 1;
             visit(RuntimeNetPayload::Source(&copy.source));
         }
 
@@ -1961,7 +1914,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             if let PairlessCursorState::Blocked(dependency) = &obligation.state
                 && let Some(source) = dependency.source_runtime()
             {
-                stats.source_nets += 1;
                 visit(RuntimeNetPayload::Source(source));
             }
         }
@@ -1973,12 +1925,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     ..
                 } => {
                     if let Some(source) = dependency.source_runtime() {
-                        stats.source_nets += 1;
                         visit(RuntimeNetPayload::Source(source));
                     }
                 }
                 ActivePairState::Stuck(StuckReason::Specialization(reason)) => {
-                    stats.stuck_reasons += 1;
                     visit(RuntimeNetPayload::StuckReason(reason));
                 }
                 ActivePairState::Ready
@@ -1992,8 +1942,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 | ActivePairState::Stuck(StuckReason::NoRule) => {}
             }
         }
-
-        stats
     }
 
     fn next_node(&self, offset: u64) -> NodeId {
