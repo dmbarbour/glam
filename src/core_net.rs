@@ -1462,6 +1462,99 @@ mod tests {
     }
 
     #[test]
+    fn final_cursor_join_reports_the_retired_copy_source_once() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let mut source_builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [source_root, left, right] = source_builder.bind();
+        source_builder.wire(left, right);
+        let source = values.instantiate_core_net(&source_builder.finish(source_root));
+        let prepared = source.test_prepare_copy_source(&values);
+        let mut target_builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [function, argument, result] = target_builder.bind();
+        let [continuation, continuation_argument, exposed] = target_builder.bind();
+        let callable = target_builder.data(values.unit());
+        let supplied = target_builder.data(Value::Number(1.into()));
+        let continued = target_builder.data(Value::Number(2.into()));
+        target_builder.wire(function, callable);
+        target_builder.wire(argument, supplied);
+        target_builder.wire(result, continuation);
+        target_builder.wire(continuation_argument, continued);
+        let target = values.instantiate_core_net(&target_builder.finish(exposed));
+        let call_pair = target.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("call pair should be active")
+        });
+        let call =
+            match target.with_test_access(&values, |runtime| runtime.step_active_pair(call_pair)) {
+                CoreActivePairStep::Reduction(Reduction {
+                    kind: crate::interaction_net::ReductionKind::Call { bind, data },
+                    ..
+                }) => crate::interaction_net::Call {
+                    pair: call_pair,
+                    bind,
+                    data,
+                },
+                step => panic!("target should claim its callable data, got {step:?}"),
+            };
+        target.with_test_access(&values, |runtime| {
+            runtime.resume_claimed_call_with_copy(call, prepared);
+        });
+
+        let first_cursor = target
+            .test_with_optional_mut(&values, RuntimeNet::reduce_next)
+            .and_then(|reduction| match reduction.kind {
+                crate::interaction_net::ReductionKind::RemoteCursor {
+                    cursor,
+                    progress: CursorProgress::Claimed,
+                } => Some(cursor),
+                _ => None,
+            })
+            .expect("initial copy cursor should be claimable");
+        assert!(matches!(
+            target.test_advance_claimed_cursor(&values, first_cursor),
+            Some(CursorProgress::Materialized { .. })
+        ));
+        assert!(matches!(
+            target.test_with_optional_mut(&values, RuntimeNet::reduce_next),
+            Some(Reduction {
+                kind: crate::interaction_net::ReductionKind::BindJoin,
+                ..
+            })
+        ));
+
+        let mut claims = Vec::new();
+        for _ in 0..2 {
+            let reduction = target
+                .test_with_optional_mut(&values, RuntimeNet::reduce_next)
+                .expect("each converging cursor should be claimable");
+            let crate::interaction_net::ReductionKind::RemoteCursor {
+                cursor,
+                progress: CursorProgress::Claimed,
+            } = reduction.kind
+            else {
+                panic!("converging cursor should claim, got {reduction:?}")
+            };
+            claims.push(cursor);
+        }
+        assert_eq!(
+            target.test_advance_claimed_cursor(&values, claims[0]),
+            Some(CursorProgress::Blocked)
+        );
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        assert_eq!(
+            target.test_advance_claimed_cursor(&values, claims[1]),
+            Some(CursorProgress::Joined)
+        );
+
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 0);
+    }
+
+    #[test]
     fn core_net_durable_owner_inventory_is_compile_exhaustive() {
         let _: fn(
             &CoreRuntimeNet,

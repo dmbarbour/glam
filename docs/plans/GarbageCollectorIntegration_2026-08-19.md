@@ -239,6 +239,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8A.0 | complete | core-net facade and durable root observer retirement |
 | I8A.1 | complete | final payload and visitor reconciliation |
 | I8A.2 | complete | exact per-edit runtime-net mutation deltas |
+| I8A.3 | complete | lock, access, and lifecycle revalidation |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5633,6 +5634,21 @@ writer, and rejects restoration of the retired whole-net mutation visitor.
 Verification: existing interaction-net and Cursor-WHNF suites, deterministic
 barriers for each changed publication ordering, and privacy tests rejecting
 unscoped dereference or parked bare net handles. Production remains `NoAuto`.
+
+Completed 2026-09-10. Exact edge visitation remains inside the existing
+runtime-net mutex; topology revision and disturbance publication still occur
+only after the coupled update returns. Cursor claim release and unwind restore
+both owner forms through the edge-free gateway, while materialization,
+dependency removal, and the final converging-frontier join use exact semantic
+deltas. A new final-join fixture proves the logical copy's sole source edge is
+reported once when its last two frontiers retire.
+
+The deterministic cursor publication/wait, claim release/unwind,
+normalization-batch, scoped-access, durable-root, and managed collection tests
+remain the lifecycle baseline. No access carrier or raw managed net edge can
+enter parked work; disturbance and normalization companions remain edge-free.
+Generic non-core specializations still use the collector-independent direct
+gateway. Production remains `NoAuto`.
 
 ### Phase I8B — Final Net Cycle Matrix
 
