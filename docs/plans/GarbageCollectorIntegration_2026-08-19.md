@@ -1,12 +1,12 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I5 and their mandatory reviews are
-complete, and I6D.1's reflection-computation repair is also complete. The
+Status: in progress; Phases I0 through I7 and their mandatory reviews are
+complete. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled while I6-I10 audit or migrate the remaining immutable shells
-and close the remaining graph families. Collector Gate G1 passed on
+remains disabled while I8-I10 close the remaining graph families and host
+boundaries. Collector Gate G1 passed on
 2026-08-25.
 
 This plan integrates the collector defined by
@@ -231,11 +231,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I6C.3 | not required | failure compatibility representation retained |
 | I6D.1 | complete | reflection semantic-edge restoration, edge-free observation, one-use activation ownership, and forced-order closure |
 | I6D.2 | complete | audit-only net-construction effect path |
-| I6 | complete | immutable compatibility paths and reflection ownership; grouped post-I6/I7 review pending |
+| I6 | complete | immutable compatibility paths and reflection ownership; grouped post-I6/I7 review passed |
 | I7A | complete | persistent representation-to-visitor delta audit |
 | I7B | complete | production list-thunk backedge closure |
 | I7C | complete | persistent logical-work accounting reconciliation |
-| I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review pending |
+| I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review passed |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5479,6 +5479,11 @@ Phase I7 completed as a delta audit over I4D/I5F.3a. RPDS and FingerTree/`Arc`
 spines remain ordinary immutable Rust storage, while their central non-forcing
 logical walk continues to terminate at exact managed identity edges.
 
+The mandatory grouped post-I6/I7 review passed on 2026-09-10 with no open
+finding. Its implementation accounting and future-phase drift audit are
+recorded in
+[`GarbageCollectorIntegrationI6I7_2026-09-10.md`](../reviews/GarbageCollectorIntegrationI6I7_2026-09-10.md).
+
 ## Phase I8 — Post-Cutover Core Runtime Net Closure Audit
 
 I5 already introduces the production managed core-net identity together with
@@ -5490,6 +5495,12 @@ managed allocation family, move that work to an explicit prior checkpoint and
 apply the
 [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
 before resuming this audit.
+
+I6 and I7 introduced no managed allocation family, payload representation, or
+mutation gateway. I8 therefore consumes their retained exact visitors as an
+unchanged baseline. Its cycle matrix adds no generic I6/I7 family repetition;
+only a topology state introduced or materially changed by I8 earns a new
+closed fixture.
 
 ### Phase I8A.0 — Core-Net Semantic Observer Retirement
 
@@ -5639,6 +5650,11 @@ repair the checkpoint which first allowed that owner to contain a managed
 edge, including its
 [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
 evidence.
+
+At the I6/I7 closeout, no unrecorded durable-owner delta exists. I6D.1's
+reflection ownership change is already source-latched and reviewed; I6A-C,
+I6D.2, and I7 retained immutable shells without introducing owners. I9's next
+possible subsystem delta therefore begins with I8.
 
 ### Phase I9A-E — Phase-Entry Delta and Conditional Subsystem Audits
 

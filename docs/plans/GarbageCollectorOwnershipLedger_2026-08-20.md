@@ -1,7 +1,7 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I7 are complete; the grouped post-I6/I7 review is
-pending. The production inline-or-registered-root facade, managed outer value
+Status: Phases I0 through I7 and their mandatory reviews are complete. The
+production inline-or-registered-root facade, managed outer value
 node, passive active-owner split, exact durable-owner inventory, and closed
 owner-level collection matrix are current. Lazy, promise, core-net, and
 reflection-computation recursion reaches exact managed edges. I6 and I7
