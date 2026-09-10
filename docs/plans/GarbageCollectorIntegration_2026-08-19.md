@@ -1,11 +1,11 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I7 and their mandatory reviews are
+Status: in progress; Phases I0 through I8 and their mandatory reviews are
 complete. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled while I8-I10 close the remaining graph families and host
+remains disabled while I9-I10 close the remaining root and host
 boundaries. Collector Gate G1 passed on
 2026-08-25.
 
@@ -245,7 +245,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8B.3 | complete | cursor and copy-source cycle reconciliation |
 | I8B | complete | final post-cutover net cycle matrix |
 | I8C | complete | net-specific compatibility retirement |
-| I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
+| I8 | complete | post-cutover core-net trace, mutation, cursor, and lifecycle audit; post-I8 review passed |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
 | I10B.0 | pending | opaque representation decision review gate |
@@ -5768,6 +5768,11 @@ remaining 13-value-adapter inventories pass unchanged in purpose. The central
 transitive compatibility-value walk is deliberately retained until Value
 Representation Refinement. Production remains `NoAuto`.
 
+The mandatory post-I8 review passed on 2026-09-10 with no open finding. Its
+implementation accounting, documentation reconciliation, and I9-I13 drift
+audit are recorded in
+[`GarbageCollectorIntegrationI8_2026-09-10.md`](../reviews/GarbageCollectorIntegrationI8_2026-09-10.md).
+
 ## Phase I9 — Runtime-Root Lifecycle and Retirement Audits
 
 I4F performs the structural conversion and registration of durable owner
@@ -5783,6 +5788,15 @@ At the I6/I7 closeout, no unrecorded durable-owner delta exists. I6D.1's
 reflection ownership change is already source-latched and reviewed; I6A-C,
 I6D.2, and I7 retained immutable shells without introducing owners. I9's next
 possible subsystem delta therefore begins with I8.
+
+The completed I8 review identifies one bounded net-owner delta for I9 rather
+than a first-time root conversion: `ManagedCoreNetRoot` became root-only, and
+the existing `CorePreparedCopySource`, `CoreFrontierObservation`, and
+`NormalizationRequest` holders now reconstruct an edge-only `CoreRuntimeNet`
+only inside matching value access. I9 must reconcile those existing owners and
+their retirement paths against I4F's baseline. I8 introduced no new durable
+root family or active RAII owner, and the generic non-core shared-net adapter
+remains outside the production core graph.
 
 ### Phase I9A-E — Phase-Entry Delta and Conditional Subsystem Audits
 

@@ -200,10 +200,11 @@ transition and retain their existing wake/retirement chronology. Managed core
 nets implement the generic `RuntimeNetMutationGateway`: direct and conditional
 edits, active-pair reductions, cursor claims, completion, and unwind restoration
 all enter one collector transition while the semantic net mutex remains held.
-The current bridge lets a selected collector policy visit the borrowed whole
-net immediately before and after the edit without reacquiring the mutex. STW
-`NoAuto` visits neither side; I8 replaces this correctness bridge with exact
-per-edit deltas before a concurrent policy may activate it at high volume.
+Each semantic edit supplies an allocation-free exact set of leaving and adding
+payload-owner addresses, resolved against the borrowed pre- or post-write net
+without reacquiring the mutex. STW `NoAuto` visits neither side; a future
+concurrent policy can activate those exact deltas without traversing the whole
+net per edit.
 
 Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluationWaitPoll::Complete` observation receives that owned root; only
