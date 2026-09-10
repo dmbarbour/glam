@@ -39,7 +39,7 @@ pub(super) fn extract_net_data(
     interface: Port,
     operation: &str,
 ) -> Result<Value, EvaluationHalt> {
-    let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+    let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface, context);
     match request.drive_in(context)? {
         NetInterfaceOutcome::Data => {
             let data = with_core_net_access(context, &runtime, |runtime| {
@@ -110,6 +110,9 @@ struct NormalizationRequest {
     root_interface: Port,
     mode: NormalizationMode,
 }
+
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = assert!(std::mem::size_of::<NormalizationRequest>() == 16);
 
 /// One evaluator-owned unit of cursor-WHNF work. These descriptors carry no
 /// claim or lifecycle ownership; authoritative progress remains in the shared
@@ -606,9 +609,13 @@ fn assert_semantic_step_is_unbatched(runtime: &CoreRuntimeNet) {
 fn assert_semantic_step_is_unbatched(_runtime: &CoreRuntimeNet) {}
 
 impl NormalizationRequest {
-    fn cursor_whnf(runtime: CoreRuntimeNet, root_interface: Port) -> Self {
+    fn cursor_whnf(
+        runtime: CoreRuntimeNet,
+        root_interface: Port,
+        context: &EvaluatorStepContext<'_>,
+    ) -> Self {
         Self {
-            root: runtime.root(),
+            root: context.with_value_access(|access| runtime.root_in(access.values())),
             root_interface,
             mode: NormalizationMode::CursorWhnf,
         }
@@ -1268,6 +1275,13 @@ mod driver_tests {
         crate::core::test_value_factory().instantiate_core_net(&template)
     }
 
+    fn normalization_request(runtime: CoreRuntimeNet, interface: Port) -> NormalizationRequest {
+        let context = test_context();
+        super::with_direct_evaluator(&context, |evaluator| {
+            NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
+        })
+    }
+
     fn claimed_core_call(callable: Value) -> (CoreRuntimeNet, Call) {
         let mut net = NetBuilder::<CoreSpecialization>::new();
         let bind = net.push(crate::interaction_net::Node::Bind);
@@ -1276,9 +1290,13 @@ mod driver_tests {
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
         let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
-        let pair = runtime.test_with(|net| net.active_pairs().next().unwrap());
+        let pair = runtime.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         let reduction = runtime
-            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
+                net.reduce_pair(pair)
+            })
             .expect("call fixture must be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data fixture must produce a call")
@@ -1295,9 +1313,13 @@ mod driver_tests {
         let data = net.data(data);
         net.wire(input, data);
         let runtime = instantiate(net.finish(result));
-        let pair = runtime.test_with(|net| net.active_pairs().next().unwrap());
+        let pair = runtime.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         let reduction = runtime
-            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
+                net.reduce_pair(pair)
+            })
             .expect("operator fixture must be claimable");
         let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
             panic!("operator-data fixture must produce an operator call")
@@ -1317,14 +1339,14 @@ mod driver_tests {
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(crate::core::test_value_factory().unit());
         let runtime = instantiate(builder.finish(data));
-        let cursor = runtime.test_with(|net| {
+        let cursor = runtime.test_with(&crate::core::test_value_factory(), |net| {
             net.interface_neighbor(net.exposed())
                 .expect("closed data net must expose its data node")
                 .node()
         });
 
         let mut worklist = NetDriverWorklist::default();
-        let root = runtime.root();
+        let root = crate::core::test_value_factory().root_core_net(&runtime);
         let expected_root = root.clone();
         worklist.follow_cursor_dependency(root, cursor, CursorDependency::LocalCursor(cursor));
 
@@ -1363,24 +1385,29 @@ mod driver_tests {
         let (leaf, _) = crate::core_net::CoreRuntimeNet::test_stable_auxiliary(
             &crate::core::test_value_factory(),
         );
-        let (middle, middle_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(leaf);
-        let (root, root_interface) =
-            crate::core_net::CoreRuntimeNet::test_copy_layer(middle.clone());
+        let (middle, middle_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+            &crate::core::test_value_factory(),
+            leaf,
+        );
+        let (root, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+            &crate::core::test_value_factory(),
+            middle.clone(),
+        );
 
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &NormalizationRequest::cursor_whnf(root.clone(), root_interface),
+                &normalization_request(root.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
         ));
         assert!(matches!(
-            root.test_poll_interface_demand(root_interface),
+            root.test_poll_interface_demand(&crate::core::test_value_factory(), root_interface),
             crate::interaction_net::InterfaceDemand::StableCursor(_)
         ));
         assert!(matches!(
-            middle.test_poll_interface_demand(middle_interface),
+            middle.test_poll_interface_demand(&crate::core::test_value_factory(), middle_interface),
             crate::interaction_net::InterfaceDemand::StableCursor(_)
         ));
     }
@@ -1391,24 +1418,29 @@ mod driver_tests {
             &crate::core::test_value_factory(),
         );
         let (middle, middle_interface, middle_cursor) =
-            crate::core_net::CoreRuntimeNet::test_pair_owned_copy_layer(leaf);
-        let (root, root_interface) =
-            crate::core_net::CoreRuntimeNet::test_copy_layer(middle.clone());
+            crate::core_net::CoreRuntimeNet::test_pair_owned_copy_layer(
+                &crate::core::test_value_factory(),
+                leaf,
+            );
+        let (root, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+            &crate::core::test_value_factory(),
+            middle.clone(),
+        );
 
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &NormalizationRequest::cursor_whnf(root.clone(), root_interface),
+                &normalization_request(root.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
         ));
         assert!(matches!(
-            root.test_poll_interface_demand(root_interface),
+            root.test_poll_interface_demand(&crate::core::test_value_factory(), root_interface),
             crate::interaction_net::InterfaceDemand::StableCursor(_)
         ));
         assert_eq!(
-            middle.test_poll_interface_demand(middle_interface),
+            middle.test_poll_interface_demand(&crate::core::test_value_factory(), middle_interface),
             crate::interaction_net::InterfaceDemand::StableCursor(middle_cursor)
         );
     }
@@ -1418,25 +1450,32 @@ mod driver_tests {
         let (mut source, _) = crate::core_net::CoreRuntimeNet::test_stable_auxiliary(
             &crate::core::test_value_factory(),
         );
-        let mut root_interface = source.test_with(|net| net.exposed());
+        let mut root_interface =
+            source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
         for _ in 0..1_100 {
-            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+                &crate::core::test_value_factory(),
+                source,
+            );
         }
 
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &NormalizationRequest::cursor_whnf(source.clone(), root_interface),
+                &normalization_request(source.clone(), root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
         ));
         assert!(matches!(
-            source.test_poll_interface_demand(root_interface),
+            source.test_poll_interface_demand(&crate::core::test_value_factory(), root_interface),
             InterfaceDemand::StableCursor(_)
         ));
-        assert_eq!(source.active_normalization_batch(), None);
+        assert_eq!(
+            source.active_normalization_batch(&crate::core::test_value_factory()),
+            None
+        );
     }
 
     #[test]
@@ -1445,28 +1484,40 @@ mod driver_tests {
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.clone());
         let mut source = instantiate(leaf.finish(data));
-        let mut root_interface = source.test_with(|net| net.exposed());
+        let mut root_interface =
+            source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
         for layer in 0..1_100 {
             if layer % 2 == 0 {
                 (source, root_interface) =
-                    crate::core_net::CoreRuntimeNet::test_productive_pair_owned_copy_layer(source);
+                    crate::core_net::CoreRuntimeNet::test_productive_pair_owned_copy_layer(
+                        &crate::core::test_value_factory(),
+                        source,
+                    );
             } else {
-                (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
+                (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+                    &crate::core::test_value_factory(),
+                    source,
+                );
             }
         }
 
         assert_eq!(
-            NormalizationRequest::cursor_whnf(source.clone(), root_interface)
+            normalization_request(source.clone(), root_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
         );
         assert_eq!(
-            source.test_with(|net| net.interface_data(root_interface).cloned()),
+            source.test_with(&crate::core::test_value_factory(), |net| net
+                .interface_data(root_interface)
+                .cloned()),
             Some(expected)
         );
-        assert_eq!(source.active_normalization_batch(), None);
+        assert_eq!(
+            source.active_normalization_batch(&crate::core::test_value_factory()),
+            None
+        );
     }
 
     #[test]
@@ -1477,16 +1528,21 @@ mod driver_tests {
         let right = disconnected.push(crate::interaction_net::Node::Erase);
         disconnected.wire(Port::principal(left), Port::principal(right));
         let disconnected = instantiate(disconnected.finish(Port::principal(root)));
-        let disconnected_interface = disconnected.test_with(|net| net.exposed());
-        let before = disconnected.test_with(|net| net.active_pairs().collect::<Vec<_>>());
+        let disconnected_interface =
+            disconnected.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let before = disconnected.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().collect::<Vec<_>>()
+        });
         assert_eq!(
-            NormalizationRequest::cursor_whnf(disconnected.clone(), disconnected_interface,)
+            normalization_request(disconnected.clone(), disconnected_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
         );
         assert_eq!(
-            disconnected.test_with(|net| net.active_pairs().collect::<Vec<_>>()),
+            disconnected.test_with(&crate::core::test_value_factory(), |net| net
+                .active_pairs()
+                .collect::<Vec<_>>()),
             before
         );
 
@@ -1498,16 +1554,21 @@ mod driver_tests {
         branched.wire(Port::auxiliary(root, 2), Port::auxiliary(active, 2));
         branched.wire(Port::principal(active), Port::principal(erase));
         let branched = instantiate(branched.finish(Port::principal(root)));
-        let branched_interface = branched.test_with(|net| net.exposed());
-        let before = branched.test_with(|net| net.active_pairs().collect::<Vec<_>>());
+        let branched_interface =
+            branched.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let before = branched.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().collect::<Vec<_>>()
+        });
         assert_eq!(
-            NormalizationRequest::cursor_whnf(branched.clone(), branched_interface)
+            normalization_request(branched.clone(), branched_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
         );
         assert_eq!(
-            branched.test_with(|net| net.active_pairs().collect::<Vec<_>>()),
+            branched.test_with(&crate::core::test_value_factory(), |net| net
+                .active_pairs()
+                .collect::<Vec<_>>()),
             before
         );
     }
@@ -1526,19 +1587,22 @@ mod driver_tests {
         net.wire(Port::auxiliary(right, 1), exposed_result);
         net.wire(Port::auxiliary(right, 2), right_result);
         let runtime = instantiate(net.finish(Port::auxiliary(left, 1)));
-        let interface = runtime.test_with(|net| net.exposed());
-        let demanded = runtime.test_with(|net| {
+        let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let demanded = runtime.test_with(&crate::core::test_value_factory(), |net| {
             let pairs = net.active_pairs().collect::<Vec<_>>();
             assert_eq!(pairs.len(), 1);
             pairs[0]
         });
         assert_eq!(
-            NormalizationRequest::cursor_whnf(runtime.clone(), interface)
+            normalization_request(runtime.clone(), interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
         );
-        assert!(!runtime.test_with(|net| net.contains_active_pair(demanded)));
+        assert!(
+            !runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .contains_active_pair(demanded))
+        );
     }
 
     #[test]
@@ -1554,37 +1618,49 @@ mod driver_tests {
         claimed.wire(Port::auxiliary(bind, 1), Port::principal(erase_left));
         claimed.wire(Port::auxiliary(bind, 2), Port::principal(erase_right));
         let claimed = instantiate(claimed.finish(Port::principal(root)));
-        let interface = claimed.test_with(|net| net.exposed());
-        let pair = claimed.test_with(|net| net.active_pairs().next().unwrap());
+        let interface = claimed.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let pair = claimed.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         assert!(matches!(
-            claimed.test_with_optional_mut(|net| net.reduce_pair(pair)),
+            claimed.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(pair)),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
             })
         ));
-        assert!(claimed.test_with(|net| net.pair_is_claimed(pair)));
+        assert!(
+            claimed.test_with(&crate::core::test_value_factory(), |net| net
+                .pair_is_claimed(pair))
+        );
         assert_eq!(
-            NormalizationRequest::cursor_whnf(claimed.clone(), interface)
+            normalization_request(claimed.clone(), interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
         );
-        assert!(claimed.test_with(|net| net.pair_is_claimed(pair)));
+        assert!(
+            claimed.test_with(&crate::core::test_value_factory(), |net| net
+                .pair_is_claimed(pair))
+        );
 
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let data = source.data(crate::core::test_value_factory().unit());
         let source = instantiate(source.finish(data));
         let (claimed_cursor, cursor_interface, cursor) =
-            crate::core_net::CoreRuntimeNet::test_stable_root_with_claimed_cursor(source);
+            crate::core_net::CoreRuntimeNet::test_stable_root_with_claimed_cursor(
+                &crate::core::test_value_factory(),
+                source,
+            );
         assert_eq!(
-            NormalizationRequest::cursor_whnf(claimed_cursor.clone(), cursor_interface)
+            normalization_request(claimed_cursor.clone(), cursor_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
         );
         assert!(matches!(
-            claimed_cursor.test_step_cursor(cursor),
+            claimed_cursor.test_step_cursor(&crate::core::test_value_factory(), cursor),
             CursorStep::Contended(_)
         ));
 
@@ -1594,22 +1670,27 @@ mod driver_tests {
         let right = stuck.data(crate::core::test_value_factory().unit());
         stuck.wire(left, right);
         let stuck = instantiate(stuck.finish(Port::principal(root)));
-        let interface = stuck.test_with(|net| net.exposed());
-        let pair = stuck.test_with(|net| net.active_pairs().next().unwrap());
+        let interface = stuck.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let pair = stuck.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         assert!(matches!(
-            stuck.test_with_optional_mut(|net| net.reduce_pair(pair)),
+            stuck.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(pair)),
             Some(Reduction {
                 kind: ReductionKind::Stuck,
                 ..
             })
         ));
         assert_eq!(
-            NormalizationRequest::cursor_whnf(stuck.clone(), interface)
+            normalization_request(stuck.clone(), interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
         );
-        assert!(stuck.test_with(|net| net.stuck_reason(pair).is_some()));
+        assert!(stuck.test_with(&crate::core::test_value_factory(), |net| {
+            net.stuck_reason(pair).is_some()
+        }));
     }
 
     #[test]
@@ -1617,24 +1698,32 @@ mod driver_tests {
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let data = source.data(crate::core::test_value_factory().unit());
         let source = instantiate(source.finish(data));
-        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
-        let cursor = match target.test_poll_interface_demand(interface) {
+        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+            &crate::core::test_value_factory(),
+            source,
+        );
+        let cursor = match target
+            .test_poll_interface_demand(&crate::core::test_value_factory(), interface)
+        {
             InterfaceDemand::Cursor(cursor) => cursor,
             other => panic!("copy root should expose a cursor, received {other:?}"),
         };
-        assert!(target.test_claim_pairless_cursor_obligation(cursor));
-        let request = NormalizationRequest::cursor_whnf(target.clone(), interface);
+        assert!(
+            target
+                .test_claim_pairless_cursor_obligation(&crate::core::test_value_factory(), cursor)
+        );
+        let request = normalization_request(target.clone(), interface);
         let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded cursor must report contention"),
         };
         assert!(matches!(
-            target.test_advance_claimed_cursor(cursor),
+            target.test_advance_claimed_cursor(&crate::core::test_value_factory(), cursor),
             Some(crate::interaction_net::CursorProgress::Materialized { .. })
         ));
         contention.wait_for_disturbance();
         assert_eq!(
-            NormalizationRequest::cursor_whnf(target, interface)
+            normalization_request(target, interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
@@ -1646,13 +1735,14 @@ mod driver_tests {
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(crate::core::test_value_factory().unit());
         let runtime = instantiate(builder.finish(data));
-        let interface = runtime.test_with(|net| net.exposed());
+        let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
         let leader_runtime = runtime.clone();
         let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let leader = std::thread::spawn(move || {
-            leader_runtime.with_test_access(|access| {
+            let values = crate::core::test_value_factory();
+            leader_runtime.with_test_access(&values, |access| {
                 access
                     .with_normalization_batch(|_| {
                         leader_ready_tx.send(()).unwrap();
@@ -1667,7 +1757,7 @@ mod driver_tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the normalization owner must publish acquisition");
 
-        let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+        let request = normalization_request(runtime.clone(), interface);
         let (registered_tx, registered_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let follower = std::thread::spawn(move || {
@@ -1702,7 +1792,10 @@ mod driver_tests {
             NetInterfaceOutcome::Data
         );
         follower.join().expect("contending evaluator must finish");
-        assert_eq!(runtime.active_normalization_batch(), None);
+        assert_eq!(
+            runtime.active_normalization_batch(&crate::core::test_value_factory()),
+            None
+        );
     }
 
     #[test]
@@ -1716,16 +1809,18 @@ mod driver_tests {
         builder.wire(application, function);
         builder.wire(argument, value);
         let runtime = instantiate(builder.finish(result));
-        let interface = runtime.test_with(|net| net.exposed());
+        let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
-        let parked = NormalizationRequest::cursor_whnf(runtime.clone(), interface)
+        let parked = normalization_request(runtime.clone(), interface)
             .drive(&context)
             .expect_err("an unresolved callable promise must park the driver");
         let wait = parked
             .blocked_on()
             .expect("the parked driver must retain its semantic wait");
         let blocked = runtime
-            .test_with(|net| net.blocked_calls().next())
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_calls().next()
+            })
             .expect("the callable claim must publish Blocked before parking");
 
         assert_eq!(blocked.wait.0, wait.0);
@@ -1734,7 +1829,7 @@ mod driver_tests {
             crate::evaluation::EvaluationWaitPoll::Pending(_)
         ));
         assert_eq!(
-            runtime.active_normalization_batch(),
+            runtime.active_normalization_batch(&crate::core::test_value_factory()),
             None,
             "the semantic park must retain neither a claim nor a normalization lease"
         );
@@ -1750,21 +1845,25 @@ mod driver_tests {
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
         let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
-        let interface = runtime.test_with(|net| net.exposed());
-        let pair = runtime.test_with(|net| net.active_pairs().next().unwrap());
+        let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
+        let pair = runtime.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         let reduction = runtime
-            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
+                net.reduce_pair(pair)
+            })
             .expect("demanded call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data demand should be a call")
         };
         let call = Call { pair, bind, data };
-        let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface);
+        let request = normalization_request(runtime.clone(), interface);
         let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded pair must report contention"),
         };
-        runtime.test_with_mut(|net| {
+        runtime.test_with_mut(&crate::core::test_value_factory(), |net| {
             net.fail_claimed_call(call, EvaluationHalt::new("demanded call failed"))
         });
         contention.wait_for_disturbance();
@@ -1784,19 +1883,29 @@ mod driver_tests {
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
         let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
-        let pair = runtime.test_with(|net| net.active_pairs().next().unwrap());
+        let pair = runtime.test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next().unwrap()
+        });
         let reduction = runtime
-            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
+                net.reduce_pair(pair)
+            })
             .expect("builtin call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data demand should be a call")
         };
         let call = Call { pair, bind, data };
-        let before = runtime.test_with_revisions(|_| ()).1.topology_revision();
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1
+            .topology_revision();
 
         assert!(progress_exact_core_call(&test_context(), &runtime, call).unwrap());
 
-        let after = runtime.test_with_revisions(|_| ()).1.topology_revision();
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1
+            .topology_revision();
         assert_eq!(
             after,
             before.checked_add(1).expect("revision must not overflow"),
@@ -1808,7 +1917,9 @@ mod driver_tests {
     fn fresh_call_claim_release_restores_ready_work() {
         let context = test_context();
         let (runtime, call) = claimed_core_call(Value::Builtin(Builtin::Add));
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let claim = CoreCallClaim::fresh(evaluator, &runtime, call)
@@ -1816,11 +1927,14 @@ mod driver_tests {
             assert!(!claim.finish(CallDisposition::Release).unwrap());
         });
 
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            runtime.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(call.pair)),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
@@ -1832,7 +1946,9 @@ mod driver_tests {
     fn fresh_call_claim_unwind_restores_ready_work() {
         let context = test_context();
         let (runtime, call) = claimed_core_call(Value::Builtin(Builtin::Add));
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::eval::with_direct_evaluator(&context, |evaluator| {
@@ -1843,11 +1959,14 @@ mod driver_tests {
         }));
 
         assert!(unwind.is_err());
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            runtime.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(call.pair)),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
@@ -1859,14 +1978,23 @@ mod driver_tests {
     fn stale_fresh_call_claim_fails_quietly_before_guard_issuance() {
         let context = test_context();
         let (runtime, call) = claimed_core_call(Value::Builtin(Builtin::Add));
-        runtime.test_with_mut(|net| assert!(net.release_claimed_call(call)));
-        let before = runtime.test_with_revisions(|_| ()).1;
+        runtime.test_with_mut(&crate::core::test_value_factory(), |net| {
+            assert!(net.release_claimed_call(call))
+        });
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             assert!(CoreCallClaim::fresh(evaluator, &runtime, call).is_none());
         });
 
-        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
+        assert_eq!(
+            runtime
+                .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+                .1,
+            before
+        );
     }
 
     #[test]
@@ -1876,9 +2004,13 @@ mod driver_tests {
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_call(call.pair)
+            })
             .expect("unassigned callable promise must block the call");
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let claim = CoreCallClaim::retry(evaluator, &runtime, blocked.clone())
@@ -1887,10 +2019,14 @@ mod driver_tests {
         });
 
         let restored = runtime
-            .test_with(|net| net.blocked_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_call(call.pair)
+            })
             .expect("release must restore the prior blocked call");
         assert_eq!(restored.wait, blocked.wait);
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 2);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 2);
     }
@@ -1902,7 +2038,9 @@ mod driver_tests {
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_call(call.pair)
+            })
             .expect("unassigned callable promise must block the call");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1915,7 +2053,9 @@ mod driver_tests {
 
         assert!(unwind.is_err());
         let restored = runtime
-            .test_with(|net| net.blocked_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_call(call.pair)
+            })
             .expect("unwind must restore the prior blocked call");
         assert_eq!(restored.wait, blocked.wait);
     }
@@ -1927,14 +2067,18 @@ mod driver_tests {
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_call(call.pair)
+            })
             .expect("unassigned callable promise must block the call");
         let other = PromisedValue::new(context.values(), "unrelated call wait");
         let wrong_wait = crate::core_net::CoreWaitToken(
             promise_wait(&context, &other).expect("unrelated wait must allocate"),
         );
         assert_ne!(wrong_wait, blocked.wait);
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let mismatch = BlockedCall {
@@ -1944,10 +2088,16 @@ mod driver_tests {
             assert!(CoreCallClaim::retry(evaluator, &runtime, mismatch).is_none());
         });
 
-        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
         assert_eq!(
             runtime
-                .test_with(|net| net.blocked_call(call.pair))
+                .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+                .1,
+            before
+        );
+        assert_eq!(
+            runtime
+                .test_with(&crate::core::test_value_factory(), |net| net
+                    .blocked_call(call.pair))
                 .expect("mismatched retry must preserve the current wait")
                 .wait,
             blocked.wait
@@ -1964,28 +2114,45 @@ mod driver_tests {
         let (copy_runtime, copy_call) =
             claimed_core_call(Value::Net(NetValue::new(source.clone())));
         assert!(progress_exact_core_call(&context, &copy_runtime, copy_call).unwrap());
-        assert!(copy_runtime.test_with(|net| net.call(copy_call.pair).is_none()));
+        assert!(
+            copy_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .call(copy_call.pair)
+                .is_none())
+        );
 
         let (operator_runtime, operator_call) = claimed_core_call(Value::Builtin(Builtin::Add));
         assert!(progress_exact_core_call(&context, &operator_runtime, operator_call).unwrap());
-        assert!(operator_runtime.test_with(|net| net.call(operator_call.pair).is_none()));
+        assert!(
+            operator_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .call(operator_call.pair)
+                .is_none())
+        );
 
         let function = closed_function_value(2, TestExpr::Local(0));
         let (function_runtime, function_call) = claimed_core_call(function);
         assert!(progress_exact_core_call(&context, &function_runtime, function_call).unwrap());
-        assert!(function_runtime.test_with(|net| net.call(function_call.pair).is_none()));
+        assert!(
+            function_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .call(function_call.pair)
+                .is_none())
+        );
 
         let (dict_runtime, dict_call) =
             claimed_core_call(Value::Dict(crate::core::Dict::new_sync()));
         assert!(progress_exact_core_call(&context, &dict_runtime, dict_call).unwrap());
-        assert!(dict_runtime.test_with(|net| net.call(dict_call.pair).is_none()));
+        assert!(
+            dict_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .call(dict_call.pair)
+                .is_none())
+        );
 
         let promise = PromisedValue::new(context.values(), "blocked disposition");
         let (blocked_runtime, blocked_call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &blocked_runtime, blocked_call).unwrap());
         assert!(
             blocked_runtime
-                .test_with(|net| net.blocked_call(blocked_call.pair))
+                .test_with(&crate::core::test_value_factory(), |net| net
+                    .blocked_call(blocked_call.pair))
                 .is_some()
         );
 
@@ -1998,7 +2165,7 @@ mod driver_tests {
                 .contains("application requires a function value")
         );
         assert!(matches!(
-            failed_runtime.test_with(|net| net.stuck_reason(failed_call.pair).cloned()),
+            failed_runtime.test_with(&crate::core::test_value_factory(), |net| net.stuck_reason(failed_call.pair).cloned()),
             Some(StuckReason::Specialization(error)) if error == failure
         ));
     }
@@ -2008,7 +2175,9 @@ mod driver_tests {
         let context = test_context();
         let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let claim = CoreOperatorClaim::fresh(evaluator, &runtime, call)
@@ -2016,11 +2185,14 @@ mod driver_tests {
             assert!(!claim.finish(OperatorDisposition::Release).unwrap());
         });
 
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            runtime.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(call.pair)),
             Some(Reduction {
                 kind: ReductionKind::OperatorCall { .. },
                 ..
@@ -2033,7 +2205,9 @@ mod driver_tests {
         let context = test_context();
         let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::eval::with_direct_evaluator(&context, |evaluator| {
@@ -2044,11 +2218,14 @@ mod driver_tests {
         }));
 
         assert!(unwind.is_err());
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(|net| net.reduce_pair(call.pair)),
+            runtime.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(call.pair)),
             Some(Reduction {
                 kind: ReductionKind::OperatorCall { .. },
                 ..
@@ -2061,14 +2238,23 @@ mod driver_tests {
         let context = test_context();
         let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        runtime.test_with_mut(|net| assert!(net.release_claimed_operator_call(call)));
-        let before = runtime.test_with_revisions(|_| ()).1;
+        runtime.test_with_mut(&crate::core::test_value_factory(), |net| {
+            assert!(net.release_claimed_operator_call(call))
+        });
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             assert!(CoreOperatorClaim::fresh(evaluator, &runtime, call).is_none());
         });
 
-        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
+        assert_eq!(
+            runtime
+                .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+                .1,
+            before
+        );
     }
 
     #[test]
@@ -2079,9 +2265,13 @@ mod driver_tests {
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_operator_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_operator_call(call.pair)
+            })
             .expect("unassigned operator promise must block the call");
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let claim = CoreOperatorClaim::retry(evaluator, &runtime, blocked.clone())
@@ -2090,10 +2280,14 @@ mod driver_tests {
         });
 
         let restored = runtime
-            .test_with(|net| net.blocked_operator_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_operator_call(call.pair)
+            })
             .expect("release must restore the prior blocked operator call");
         assert_eq!(restored.wait, blocked.wait);
-        let after = runtime.test_with_revisions(|_| ()).1;
+        let after = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
         assert_eq!(after.topology_revision(), before.topology_revision() + 2);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 2);
     }
@@ -2106,7 +2300,9 @@ mod driver_tests {
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_operator_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_operator_call(call.pair)
+            })
             .expect("unassigned operator promise must block the call");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2119,7 +2315,9 @@ mod driver_tests {
 
         assert!(unwind.is_err());
         let restored = runtime
-            .test_with(|net| net.blocked_operator_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_operator_call(call.pair)
+            })
             .expect("unwind must restore the prior blocked operator call");
         assert_eq!(restored.wait, blocked.wait);
     }
@@ -2132,14 +2330,18 @@ mod driver_tests {
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
-            .test_with(|net| net.blocked_operator_call(call.pair))
+            .test_with(&crate::core::test_value_factory(), |net| {
+                net.blocked_operator_call(call.pair)
+            })
             .expect("unassigned operator promise must block the call");
         let other = PromisedValue::new(context.values(), "unrelated operator wait");
         let wrong_wait = crate::core_net::CoreWaitToken(
             promise_wait(&context, &other).expect("unrelated wait must allocate"),
         );
         assert_ne!(wrong_wait, blocked.wait);
-        let before = runtime.test_with_revisions(|_| ()).1;
+        let before = runtime
+            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+            .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let mismatch = BlockedOperatorCall {
@@ -2149,10 +2351,16 @@ mod driver_tests {
             assert!(CoreOperatorClaim::retry(evaluator, &runtime, mismatch).is_none());
         });
 
-        assert_eq!(runtime.test_with_revisions(|_| ()).1, before);
         assert_eq!(
             runtime
-                .test_with(|net| net.blocked_operator_call(call.pair))
+                .test_with_revisions(&crate::core::test_value_factory(), |_| ())
+                .1,
+            before
+        );
+        assert_eq!(
+            runtime
+                .test_with(&crate::core::test_value_factory(), |net| net
+                    .blocked_operator_call(call.pair))
                 .expect("mismatched retry must preserve the current operator wait")
                 .wait,
             blocked.wait
@@ -2168,7 +2376,11 @@ mod driver_tests {
         let (data_runtime, data_call) =
             claimed_core_operator_call(applicable_operator(function), data);
         assert!(progress_exact_core_operator_call(&context, &data_runtime, data_call).unwrap());
-        assert!(data_runtime.test_with(|net| net.operator_call(data_call.pair).is_none()));
+        assert!(
+            data_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .operator_call(data_call.pair)
+                .is_none())
+        );
 
         let (operator_runtime, operator_call) = claimed_core_operator_call(
             builtin_operator(BuiltinCall::new(Builtin::Add)),
@@ -2177,7 +2389,11 @@ mod driver_tests {
         assert!(
             progress_exact_core_operator_call(&context, &operator_runtime, operator_call).unwrap()
         );
-        assert!(operator_runtime.test_with(|net| net.operator_call(operator_call.pair).is_none()));
+        assert!(
+            operator_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .operator_call(operator_call.pair)
+                .is_none())
+        );
 
         let promise = PromisedValue::new(context.values(), "blocked operator disposition");
         let (blocked_runtime, blocked_call) = claimed_core_operator_call(
@@ -2188,7 +2404,9 @@ mod driver_tests {
             progress_exact_core_operator_call(&context, &blocked_runtime, blocked_call).unwrap()
         );
         assert!(
-            blocked_runtime.test_with(|net| net.blocked_operator_call(blocked_call.pair).is_some())
+            blocked_runtime.test_with(&crate::core::test_value_factory(), |net| net
+                .blocked_operator_call(blocked_call.pair)
+                .is_some())
         );
 
         let (failed_runtime, failed_call) = claimed_core_operator_call(
@@ -2203,7 +2421,7 @@ mod driver_tests {
                 .contains("application requires a function value")
         );
         assert!(matches!(
-            failed_runtime.test_with(|net| net.stuck_reason(failed_call.pair).cloned()),
+            failed_runtime.test_with(&crate::core::test_value_factory(), |net| net.stuck_reason(failed_call.pair).cloned()),
             Some(StuckReason::Specialization(error)) if error == failure
         ));
     }
@@ -2231,27 +2449,30 @@ mod driver_tests {
             source.wire(Port::auxiliary(unrelated_right, auxiliary), right_data);
         }
         let source = instantiate(source.finish(Port::auxiliary(failed_bind, 1)));
-        let (failed_pair, unrelated_pair) = source.test_with(|net| {
-            let pairs = net.active_pairs().collect::<Vec<_>>();
-            let failed_pair = pairs
-                .iter()
-                .copied()
-                .find(|pair| net.call(*pair).is_some())
-                .expect("source should contain one callable pair");
-            let unrelated_pair = pairs
-                .into_iter()
-                .find(|pair| *pair != failed_pair)
-                .expect("source should contain one unrelated pure pair");
-            (failed_pair, unrelated_pair)
-        });
+        let (failed_pair, unrelated_pair) =
+            source.test_with(&crate::core::test_value_factory(), |net| {
+                let pairs = net.active_pairs().collect::<Vec<_>>();
+                let failed_pair = pairs
+                    .iter()
+                    .copied()
+                    .find(|pair| net.call(*pair).is_some())
+                    .expect("source should contain one callable pair");
+                let unrelated_pair = pairs
+                    .into_iter()
+                    .find(|pair| *pair != failed_pair)
+                    .expect("source should contain one unrelated pure pair");
+                (failed_pair, unrelated_pair)
+            });
 
         let reduction = source
-            .test_with_optional_mut(|net| net.reduce_pair(failed_pair))
+            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
+                net.reduce_pair(failed_pair)
+            })
             .expect("nested source call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("nested source failure should originate in a call");
         };
-        source.test_with_mut(|net| {
+        source.test_with_mut(&crate::core::test_value_factory(), |net| {
             net.fail_claimed_call(
                 Call {
                     pair: failed_pair,
@@ -2262,13 +2483,18 @@ mod driver_tests {
             );
         });
 
-        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source.clone());
-        let cursor = match target.test_poll_interface_demand(interface) {
+        let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+            &crate::core::test_value_factory(),
+            source.clone(),
+        );
+        let cursor = match target
+            .test_poll_interface_demand(&crate::core::test_value_factory(), interface)
+        {
             InterfaceDemand::Cursor(cursor) => cursor,
             demand => panic!("copy root should expose a cursor, got {demand:?}"),
         };
         let CursorStep::Dependency(CursorDependency::SourceFrontier(observation)) =
-            target.test_step_cursor(cursor)
+            target.test_step_cursor(&crate::core::test_value_factory(), cursor)
         else {
             panic!("nested source failure should become an exact frontier dependency");
         };
@@ -2278,13 +2504,14 @@ mod driver_tests {
         );
 
         assert!(matches!(
-            source.test_with_optional_mut(|net| net.reduce_pair(unrelated_pair)),
+            source.test_with_optional_mut(&crate::core::test_value_factory(), |net| net
+                .reduce_pair(unrelated_pair)),
             Some(Reduction {
                 kind: ReductionKind::BindJoin,
                 ..
             })
         ));
-        let failure = NormalizationRequest::cursor_whnf(target, interface)
+        let failure = normalization_request(target, interface)
             .drive(&test_context())
             .expect_err("nested terminal failure must propagate through the driver");
         assert!(failure.to_string().contains("nested driver failure"));
@@ -2297,22 +2524,31 @@ mod driver_tests {
         let data = leaf.data(expected.clone());
         let leaf = instantiate(leaf.finish(data));
         let mut source = leaf;
-        let mut root_interface = source.test_with(|net| net.exposed());
+        let mut root_interface =
+            source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
         for _ in 0..1_100 {
-            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+                &crate::core::test_value_factory(),
+                source,
+            );
         }
 
-        let request = NormalizationRequest::cursor_whnf(source.clone(), root_interface);
+        let request = normalization_request(source.clone(), root_interface);
         assert_eq!(
             request.drive(&test_context()).unwrap(),
             NetInterfaceOutcome::Data
         );
         assert_eq!(
-            source.test_with(|net| net.interface_data(root_interface).cloned()),
+            source.test_with(&crate::core::test_value_factory(), |net| net
+                .interface_data(root_interface)
+                .cloned()),
             Some(expected)
         );
-        assert_eq!(source.active_normalization_batch(), None);
+        assert_eq!(
+            source.active_normalization_batch(&crate::core::test_value_factory()),
+            None
+        );
     }
 
     #[test]
@@ -2320,20 +2556,24 @@ mod driver_tests {
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(crate::core::test_value_factory().unit());
         let mut source = instantiate(leaf.finish(data));
-        let mut root_interface = source.test_with(|net| net.exposed());
+        let mut root_interface =
+            source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
         let mut runtimes = vec![source.clone()];
         for _ in 0..4 {
-            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(source);
+            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
+                &crate::core::test_value_factory(),
+                source,
+            );
             runtimes.push(source.clone());
         }
 
-        NormalizationRequest::cursor_whnf(source, root_interface)
+        normalization_request(source, root_interface)
             .drive(&test_context())
             .unwrap();
-        assert!(
-            runtimes
-                .iter()
-                .all(|runtime| runtime.active_normalization_batch().is_none())
-        );
+        assert!(runtimes.iter().all(|runtime| {
+            runtime
+                .active_normalization_batch(&crate::core::test_value_factory())
+                .is_none()
+        }));
     }
 }

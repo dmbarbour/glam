@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::core::{
     BuiltinCall, CoreValueFactory, EvaluationHalt, FunctionCode, Key, ManagedCoreNetAccess,
-    ManagedCoreNetEdge, ManagedCoreNetRoot, RuntimeValueAccess, RuntimeValueObserver, Value,
+    ManagedCoreNetEdge, ManagedCoreNetRoot, RuntimeValueAccess, Value,
 };
 use crate::evaluation::EvaluationWaitToken;
 use crate::interaction_net::{
@@ -85,23 +85,20 @@ pub type CoreInteractionNet = InteractionNet<CoreSpecialization>;
 
 /// Runtime-local identity of one shared core interaction net.
 ///
-/// The generic shared owner remains private. The weak value-domain observer
-/// records which runtime may inspect the semantic values in this net without
-/// retaining that runtime after its explicit owners disappear. I3D.3b moved
-/// every locking operation below a matching scoped `RuntimeValueAccess`.
-/// GCI5R-003G records this edge-plus-observer representation as the temporary
-/// core-net exception; I8A.0 removes the observer after migrating stored source
-/// identities and the remaining access/root helpers together.
+/// The generic shared owner remains private. This facade is exactly one
+/// non-rooting managed edge; every inspection, mutation, or root projection
+/// requires explicit matching `RuntimeValueAccess`. Runtime provenance is
+/// established at public construction boundaries and rechecked by registered
+/// roots or collector debug validation rather than cached on every net edge.
 #[derive(Clone)]
 pub struct CoreRuntimeNet {
     edge: ManagedCoreNetEdge,
-    values: RuntimeValueObserver,
 }
 
-// This target-specific latch records the temporary edge-plus-observer cost
-// assigned to I8A.0. It is an implementation diagnostic, not an ABI promise.
+// This target-specific latch records the final one-edge facade cost. It is an
+// implementation diagnostic, not an ABI promise.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-const _: () = assert!(std::mem::size_of::<CoreRuntimeNet>() == 24);
+const _: () = assert!(std::mem::size_of::<CoreRuntimeNet>() == 8);
 
 /// One bounded, thread-local authority to inspect or mutate a core net.
 ///
@@ -116,8 +113,8 @@ pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
 
 /// One direct semantic payload observed through a bounded core-net access.
 ///
-/// Source identities are re-qualified with the same value-domain observer as
-/// their owner. Reporting one never inspects or materializes the source net.
+/// Source identities remain exact edge-only facades. Reporting one never
+/// inspects or materializes the source net.
 #[allow(
     dead_code,
     reason = "I4E installs the compatibility payload boundary before I8 migrates core net ownership"
@@ -192,23 +189,15 @@ impl CoreValueFactory {
 
 impl CoreRuntimeNet {
     pub(crate) fn from_root(root: &ManagedCoreNetRoot, access: &RuntimeValueAccess<'_>) -> Self {
-        Self::from_managed_parts(root.edge(access), root.observer().clone())
+        Self::from_managed_edge(root.edge(access))
     }
 
-    pub(crate) fn from_managed_parts(
-        edge: ManagedCoreNetEdge,
-        values: RuntimeValueObserver,
-    ) -> Self {
-        Self { edge, values }
+    pub(crate) fn from_managed_edge(edge: ManagedCoreNetEdge) -> Self {
+        Self { edge }
     }
 
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
-        let same_net = self.edge == other.edge;
-        debug_assert!(
-            !same_net || self.values.same_domain(&other.values),
-            "one core runtime net cannot carry multiple value domains"
-        );
-        same_net
+        self.edge == other.edge
     }
 
     /// Derives bounded net access from matching value-domain authority.
@@ -216,16 +205,7 @@ impl CoreRuntimeNet {
         &'access self,
         values: &'access RuntimeValueAccess<'scope>,
     ) -> CoreRuntimeNetAccess<'access, 'scope> {
-        assert!(
-            values.admits(&self.values),
-            "core net belongs to evaluation runtime {}, but access came from evaluation runtime {}",
-            self.values.runtime_id().get(),
-            values.runtime_id().get()
-        );
-        let runtime = self
-            .edge
-            .access(&self.values, values)
-            .expect("core net and access must share one value domain");
+        let runtime = self.edge.access(values);
         CoreRuntimeNetAccess {
             owner: self,
             runtime,
@@ -233,16 +213,8 @@ impl CoreRuntimeNet {
         }
     }
 
-    pub(crate) fn root(&self) -> ManagedCoreNetRoot {
-        let observer = self.values.clone();
-        self.values
-            .upgrade()
-            .expect("a managed core net can only be rooted in its live value domain")
-            .with_runtime_value_access(|access| access.root_managed_core_net(observer, self.edge))
-    }
-
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> ManagedCoreNetRoot {
-        access.root_managed_core_net(self.values.clone(), self.edge)
+        access.root_managed_core_net(self.edge)
     }
 
     pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
@@ -250,82 +222,93 @@ impl CoreRuntimeNet {
     }
 
     #[cfg(test)]
-    pub(crate) fn belongs_to(&self, values: &CoreValueFactory) -> bool {
-        self.values.belongs_to(values)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn domain_is_live(&self) -> bool {
-        self.values.is_live()
-    }
-
-    #[cfg(test)]
     pub(crate) fn with_test_access<R>(
         &self,
+        values: &CoreValueFactory,
         operation: impl FnOnce(CoreRuntimeNetAccess<'_, '_>) -> R,
     ) -> R {
-        let values = self
-            .values
-            .upgrade()
-            .expect("a test cannot inspect a core net after its value domain is dropped");
         values.with_runtime_value_access(|access| operation(self.access(&access)))
     }
 
     #[cfg(test)]
     pub(crate) fn test_with<R>(
         &self,
+        values: &CoreValueFactory,
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
-        self.with_test_access(|access| access.with(inspect))
+        self.with_test_access(values, |access| access.with(inspect))
     }
 
     #[cfg(test)]
     pub(crate) fn test_with_revisions<R>(
         &self,
+        values: &CoreValueFactory,
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> (R, RuntimeNetRevisions) {
-        self.with_test_access(|access| access.with_revisions(inspect))
+        self.with_test_access(values, |access| access.with_revisions(inspect))
     }
 
     #[cfg(test)]
     pub(crate) fn test_with_mut<R>(
         &self,
+        values: &CoreValueFactory,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
-        self.with_test_access(|access| access.with_mut(update))
+        self.with_test_access(values, |access| access.with_mut(update))
     }
 
     #[cfg(test)]
     pub(crate) fn test_with_optional_mut<R>(
         &self,
+        values: &CoreValueFactory,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
     ) -> Option<R> {
-        self.with_test_access(|access| access.with_optional_mut(update))
+        self.with_test_access(values, |access| access.with_optional_mut(update))
     }
 
     #[cfg(test)]
-    pub(crate) fn test_poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
-        self.with_test_access(|access| access.poll_interface_demand(interface))
+    pub(crate) fn test_poll_interface_demand(
+        &self,
+        values: &CoreValueFactory,
+        interface: Port,
+    ) -> InterfaceDemand {
+        self.with_test_access(values, |access| access.poll_interface_demand(interface))
     }
 
     #[cfg(test)]
-    pub(crate) fn test_step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
-        self.with_test_access(|access| access.step_cursor(cursor))
+    pub(crate) fn test_step_cursor(
+        &self,
+        values: &CoreValueFactory,
+        cursor: NodeId,
+    ) -> CoreCursorStep {
+        self.with_test_access(values, |access| access.step_cursor(cursor))
     }
 
     #[cfg(test)]
-    pub(crate) fn test_advance_claimed_cursor(&self, cursor: NodeId) -> Option<CursorProgress> {
-        self.with_test_access(|access| access.test_advance_claimed_cursor(cursor))
+    pub(crate) fn test_advance_claimed_cursor(
+        &self,
+        values: &CoreValueFactory,
+        cursor: NodeId,
+    ) -> Option<CursorProgress> {
+        self.with_test_access(values, |access| access.test_advance_claimed_cursor(cursor))
     }
 
     #[cfg(test)]
-    pub(crate) fn test_prepare_copy_source(&self) -> CorePreparedCopySource {
-        self.with_test_access(|access| access.prepare_copy_source())
+    pub(crate) fn test_prepare_copy_source(
+        &self,
+        values: &CoreValueFactory,
+    ) -> CorePreparedCopySource {
+        self.with_test_access(values, |access| access.prepare_copy_source())
     }
 
     #[cfg(test)]
-    pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
-        self.with_test_access(|access| access.runtime.cell().active_normalization_batch())
+    pub(crate) fn active_normalization_batch(
+        &self,
+        values: &CoreValueFactory,
+    ) -> Option<(u64, bool)> {
+        self.with_test_access(values, |access| {
+            access.runtime.cell().active_normalization_batch()
+        })
     }
 
     #[cfg(test)]
@@ -335,77 +318,60 @@ impl CoreRuntimeNet {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_copy_layer(source: Self) -> (Self, Port) {
-        let values = source.values.clone();
+    pub(crate) fn test_copy_layer(values: &CoreValueFactory, source: Self) -> (Self, Port) {
         let (prepared, _source_root) = source
-            .test_prepare_copy_source()
-            .into_inner_for_observer(&values);
+            .test_prepare_copy_source(values)
+            .into_inner_for_factory(values);
         let (inner, interface) = SharedRuntimeNet::test_copy_layer_from(prepared);
-        (
-            values
-                .upgrade()
-                .expect("test net domain remains live")
-                .adopt_core_net_for_test(inner),
-            interface,
-        )
+        (values.adopt_core_net_for_test(inner), interface)
     }
 
     #[cfg(test)]
-    pub(crate) fn test_pair_owned_copy_layer(source: Self) -> (Self, Port, NodeId) {
-        let values = source.values.clone();
+    pub(crate) fn test_pair_owned_copy_layer(
+        values: &CoreValueFactory,
+        source: Self,
+    ) -> (Self, Port, NodeId) {
         let (prepared, _source_root) = source
-            .test_prepare_copy_source()
-            .into_inner_for_observer(&values);
+            .test_prepare_copy_source(values)
+            .into_inner_for_factory(values);
         let (inner, interface, cursor) =
             SharedRuntimeNet::test_pair_owned_copy_layer_from(prepared);
-        (
-            values
-                .upgrade()
-                .expect("test net domain remains live")
-                .adopt_core_net_for_test(inner),
-            interface,
-            cursor,
-        )
+        (values.adopt_core_net_for_test(inner), interface, cursor)
     }
 
     #[cfg(test)]
-    pub(crate) fn test_productive_pair_owned_copy_layer(source: Self) -> (Self, Port) {
-        let values = source.values.clone();
+    pub(crate) fn test_productive_pair_owned_copy_layer(
+        values: &CoreValueFactory,
+        source: Self,
+    ) -> (Self, Port) {
         let (prepared, _source_root) = source
-            .test_prepare_copy_source()
-            .into_inner_for_observer(&values);
+            .test_prepare_copy_source(values)
+            .into_inner_for_factory(values);
         let (inner, interface) =
             SharedRuntimeNet::test_productive_pair_owned_copy_layer_from(prepared);
-        (
-            values
-                .upgrade()
-                .expect("test net domain remains live")
-                .adopt_core_net_for_test(inner),
-            interface,
-        )
+        (values.adopt_core_net_for_test(inner), interface)
     }
 
     #[cfg(test)]
-    pub(crate) fn test_stable_root_with_claimed_cursor(source: Self) -> (Self, Port, NodeId) {
-        let values = source.values.clone();
+    pub(crate) fn test_stable_root_with_claimed_cursor(
+        values: &CoreValueFactory,
+        source: Self,
+    ) -> (Self, Port, NodeId) {
         let (prepared, _source_root) = source
-            .test_prepare_copy_source()
-            .into_inner_for_observer(&values);
+            .test_prepare_copy_source(values)
+            .into_inner_for_factory(values);
         let (inner, interface, cursor) =
             SharedRuntimeNet::test_stable_root_with_claimed_cursor_from(prepared);
-        (
-            values
-                .upgrade()
-                .expect("test net domain remains live")
-                .adopt_core_net_for_test(inner),
-            interface,
-            cursor,
-        )
+        (values.adopt_core_net_for_test(inner), interface, cursor)
     }
 
     #[cfg(test)]
-    pub(crate) fn test_claim_pairless_cursor_obligation(&self, cursor: NodeId) -> bool {
-        self.with_test_access(|access| {
+    pub(crate) fn test_claim_pairless_cursor_obligation(
+        &self,
+        values: &CoreValueFactory,
+        cursor: NodeId,
+    ) -> bool {
+        self.with_test_access(values, |access| {
             access.with_mut(|runtime| runtime.claim_pairless_cursor_obligation(cursor))
         })
     }
@@ -462,7 +428,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     visit(CoreRuntimeNetPayload::Operator(operator));
                 }
                 RuntimeNetPayload::Source(source) => {
-                    debug_assert!(source.values.same_domain(&self.owner.values));
                     visit(CoreRuntimeNetPayload::Source(source.clone()));
                 }
                 RuntimeNetPayload::StuckReason(reason) => {
@@ -811,23 +776,16 @@ impl CorePreparedCopySource {
         self,
         target: &RuntimeValueAccess<'_>,
     ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
-        assert!(
-            target.admits(self.root.observer()),
-            "a core net cannot copy topology from another value domain"
-        );
         let source = CoreRuntimeNet::from_root(&self.root, target);
         (PreparedCopySource::new(source, self.remote), self.root)
     }
 
     #[cfg(test)]
-    fn into_inner_for_observer(
+    fn into_inner_for_factory(
         self,
-        target: &RuntimeValueObserver,
+        target: &CoreValueFactory,
     ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
-        target
-            .upgrade()
-            .expect("a prepared source requires its live value domain")
-            .with_runtime_value_access(|access| self.into_inner_for(&access))
+        target.with_runtime_value_access(|access| self.into_inner_for(&access))
     }
 }
 
@@ -1031,6 +989,15 @@ impl CoreActivePairStep {
     }
 }
 
+// These are representation diagnostics for the observer-free I8A.0 handoff,
+// not ABI promises. Durable wrappers retain one registered root plus only
+// their edge-free operation snapshot.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<CorePreparedCopySource>() == 16);
+    assert!(std::mem::size_of::<CoreFrontierObservation>() == 32);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,9 +1020,8 @@ mod tests {
 
         let _: fn(&CoreRuntimeNet) = assert_core_source;
 
-        let CoreRuntimeNet { edge, values } = runtime;
+        let CoreRuntimeNet { edge } = runtime;
         let _: &ManagedCoreNetEdge = edge;
-        let _: &RuntimeValueObserver = values;
 
         let CorePreparedCopySource { root, remote } = prepared;
         let _: &ManagedCoreNetRoot = root;
@@ -1187,9 +1153,9 @@ mod tests {
             .upgrade()
             .expect("the managed net owner must retain its operator payload");
         assert_eq!(
-            retained_code
-                .runtime()
-                .test_with(|runtime| { runtime.interface_data(runtime.exposed()).cloned() }),
+            retained_code.runtime().test_with(&values, |runtime| {
+                runtime.interface_data(runtime.exposed()).cloned()
+            }),
             Some(values.unit()),
             "an operator's nested function net must be traced through the managed owner"
         );
@@ -1211,8 +1177,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the prepared-copy fixture should start collectible");
         let source = values.instantiate_core_net(&closed_unit_template(&values));
-        let prepared = source.test_prepare_copy_source();
-        drop(source);
+        let prepared = source.test_prepare_copy_source(&values);
 
         let retained = values
             .collect_managed_for_test()
@@ -1246,10 +1211,10 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&values);
         let source = values.instantiate_core_net(&template);
-        let (target, _, _) = CoreRuntimeNet::test_pair_owned_copy_layer(source);
-        let pair = target.test_with(|runtime| runtime.active_pairs().next().unwrap());
+        let (target, _, _) = CoreRuntimeNet::test_pair_owned_copy_layer(&values, source);
+        let pair = target.test_with(&values, |runtime| runtime.active_pairs().next().unwrap());
         let reduction = target
-            .test_with_optional_mut(|runtime| runtime.reduce_pair(pair))
+            .test_with_optional_mut(&values, |runtime| runtime.reduce_pair(pair))
             .expect("ready cursor pair must be reducible");
         assert!(matches!(
             reduction.kind,
@@ -1263,18 +1228,22 @@ mod tests {
     }
 
     #[test]
-    fn core_net_provenance_distinguishes_runtimes() {
+    fn core_net_matching_access_reads_its_managed_cell() {
         let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let second = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&first);
         let net = first.instantiate_core_net(&template);
 
-        assert!(net.belongs_to(&first));
-        assert!(!net.belongs_to(&second));
+        first.with_runtime_value_access(|access| {
+            let net = net.access(&access);
+            assert_eq!(
+                net.with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
+                Some(first.unit())
+            );
+        });
     }
 
     #[test]
-    #[should_panic(expected = "but access came from evaluation runtime")]
+    #[should_panic(expected = "does not belong to this heap")]
     fn core_net_access_rejects_a_foreign_runtime() {
         let owner = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let foreign = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -1307,7 +1276,7 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&values);
         let net = values.instantiate_core_net(&template);
-        let initial = net.test_with_revisions(|_| ()).1;
+        let initial = net.test_with_revisions(&values, |_| ()).1;
 
         values.with_runtime_value_access(|values| {
             let access = net.access(&values);
@@ -1331,8 +1300,8 @@ mod tests {
         });
 
         assert!(!thread_has_active_core_normalization_scope());
-        assert_eq!(net.active_normalization_batch(), None);
-        let released = net.test_with_revisions(|_| ()).1;
+        assert_eq!(net.active_normalization_batch(&values), None);
+        let released = net.test_with_revisions(&values, |_| ()).1;
         assert_eq!(
             released.disturbance_epoch(),
             initial.disturbance_epoch() + 1,
@@ -1356,7 +1325,7 @@ mod tests {
         }));
 
         assert!(unwind.is_err());
-        assert_eq!(net.active_normalization_batch(), None);
+        assert_eq!(net.active_normalization_batch(&values), None);
     }
 
     #[test]
@@ -1417,11 +1386,11 @@ mod tests {
         for follower in followers {
             follower.join().expect("forced batch follower must wake");
         }
-        assert_eq!(net.active_normalization_batch(), None);
+        assert_eq!(net.active_normalization_batch(&values), None);
     }
 
     #[test]
-    #[should_panic(expected = "a core net cannot copy topology from another value domain")]
+    #[should_panic(expected = "root does not belong to this heap")]
     fn core_copy_source_rejects_a_foreign_runtime() {
         let first = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let second = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -1429,10 +1398,10 @@ mod tests {
         let second_template = closed_unit_template(&second);
         let source = first
             .instantiate_core_net(&first_template)
-            .test_prepare_copy_source();
-        let target = second.instantiate_core_net(&second_template);
+            .test_prepare_copy_source(&first);
+        let _target = second.instantiate_core_net(&second_template);
 
-        let _ = source.into_inner_for_observer(&target.values);
+        let _ = source.into_inner_for_factory(&second);
     }
 
     #[test]
@@ -1440,13 +1409,13 @@ mod tests {
     fn core_frontier_progress_rejects_access_to_another_net() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let leaf = values.instantiate_core_net(&closed_unit_template(&values));
-        let (source, _) = CoreRuntimeNet::test_copy_layer(leaf);
-        let (target, interface) = CoreRuntimeNet::test_copy_layer(source);
-        let cursor = match target.test_poll_interface_demand(interface) {
+        let (source, _) = CoreRuntimeNet::test_copy_layer(&values, leaf);
+        let (target, interface) = CoreRuntimeNet::test_copy_layer(&values, source);
+        let cursor = match target.test_poll_interface_demand(&values, interface) {
             InterfaceDemand::Cursor(cursor) => cursor,
             demand => panic!("copy root should expose a cursor, got {demand:?}"),
         };
-        let observation = match target.test_step_cursor(cursor) {
+        let observation = match target.test_step_cursor(&values, cursor) {
             CoreCursorStep::Dependency(CoreCursorDependency::SourceCursor(observation))
             | CoreCursorStep::Dependency(CoreCursorDependency::SourceFrontier(observation)) => {
                 observation
@@ -1454,7 +1423,7 @@ mod tests {
             step => panic!("nested copy should expose its source frontier, got {step:?}"),
         };
 
-        target.with_test_access(|wrong_access| match observation.endpoint() {
+        target.with_test_access(&values, |wrong_access| match observation.endpoint() {
             DemandEndpoint::Cursor(cursor) => {
                 let _ = observation.step_cursor(&wrong_access, cursor);
             }
@@ -1465,16 +1434,14 @@ mod tests {
     }
 
     #[test]
-    fn core_net_provenance_does_not_retain_the_value_domain() {
+    fn edge_only_core_net_does_not_retain_the_value_domain() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let domain = Arc::downgrade(values.value_domain());
         let template = closed_unit_template(&values);
-        let net = values.instantiate_core_net(&template);
+        let _net = values.instantiate_core_net(&template);
 
-        assert!(net.domain_is_live());
         drop(values);
         assert!(domain.upgrade().is_none());
-        assert!(!net.domain_is_live());
     }
 
     #[test]
@@ -1493,7 +1460,6 @@ mod tests {
                 .expect("the outer batch must acquire the net")
         });
 
-        drop(net);
         values
             .collect_managed_for_test()
             .expect("the unrooted semantic net should be reclaimed");
@@ -1569,8 +1535,15 @@ mod tests {
             .expect("scoped core-net access implementation must remain present")
             .0;
 
+        assert!(facade.contains("pub(crate) fn with_test_access<R>("));
+        assert!(facade.contains("values: &CoreValueFactory"));
+
         for forbidden in [
+            "RuntimeValueObserver",
             "pub(crate) fn with<",
+            "pub(crate) fn root(",
+            "pub(crate) fn belongs_to(",
+            "pub(crate) fn domain_is_live(",
             "pub(crate) fn with_mut<",
             "pub(crate) fn poll_interface_demand(",
             "pub(crate) fn resolve_cursor_dependency(",

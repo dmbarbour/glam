@@ -131,7 +131,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // observers; seven test-only inspection helpers now require an
         // explicit matching factory and enter through this counted gateway.
         // GCI5R-005B removes the former external reflection-root projection.
-        ("src/core.rs", GatewayCounts::new(29, 5)),
+        ("src/core.rs", GatewayCounts::new(30, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

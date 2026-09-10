@@ -236,6 +236,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I7B | complete | production list-thunk backedge closure |
 | I7C | complete | persistent logical-work accounting reconciliation |
 | I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review passed |
+| I8A.0 | complete | core-net facade and durable root observer retirement |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5538,6 +5539,22 @@ This checkpoint precedes I8A.1 so its representation changes are included in
 the final payload and mutation audits rather than invalidating those audits
 later.
 Production remains `NoAuto`.
+
+Completed 2026-09-10. `CoreRuntimeNet` is now a one-word edge-only facade and
+`ManagedCoreNetRoot` is a one-word registered-root owner. Access-free rooting,
+domain/liveness probes, and observer-backed test entry were removed; test
+operations now receive an explicit matching `CoreValueFactory`. Stored source
+identities remain the same exact facade and are qualified only by the live
+enclosing graph plus bounded `RuntimeValueAccess`.
+
+The observer retirement also reduced `ManagedLazyCell` from 160 to 144 bytes,
+`CorePreparedCopySource` from 32 to 16, `CoreFrontierObservation` from 48 to
+32, and `NormalizationRequest` from 32 to 16 on the recorded x86-64 target.
+The managed core-net cell remains 248 bytes. Compile-time/source inventories
+reject a returned observer or access-free facade operation. Focused root,
+copy, frontier, normalization, Cursor-WHNF, recursive-cycle, and public
+foreign-value tests pass, together with the targeted strict-provenance root
+projection/net-access probe. Production remains `NoAuto`.
 
 ### Phase I8A.1 — Final Payload and Visitor Reconciliation
 

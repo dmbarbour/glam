@@ -52,7 +52,7 @@ not define language semantics or collect subsystem invariants.
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins, and reflection computations whose effect/target remain exact semantic edges |
 | `core/managed.rs` | Factory-qualified collector access and `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
-| `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns a no-auto heap, managed recursive identities are live, and I6/I7 retained exact immutable-shell and persistent-container walks ahead of I8's net audit |
+| `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns a no-auto heap, managed recursive identities are live, I6/I7 retained exact immutable-shell and persistent-container walks, and I8A.0 retired the final recursive-facade observer ahead of the remaining net audit |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation/mutation and non-reducing semantic-payload views for core interaction nets; raw shared-net ownership remains private |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |

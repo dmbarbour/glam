@@ -5733,9 +5733,14 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
     let wait = blocked
         .blocked_on()
         .expect("call should report a task wait");
-    assert_eq!(runtime.test_with(|net| net.blocked_calls().count()), 1);
     assert_eq!(
-        runtime.active_normalization_batch(),
+        runtime.test_with(&crate::core::test_value_factory(), |net| net
+            .blocked_calls()
+            .count()),
+        1
+    );
+    assert_eq!(
+        runtime.active_normalization_batch(&crate::core::test_value_factory()),
         None,
         "specialization waits must not retain a net batch lease"
     );
@@ -5770,9 +5775,14 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
     let wait = blocked
         .blocked_on()
         .expect("function call should report the gate's exact task wait");
-    assert_eq!(runtime.test_with(|net| net.blocked_calls().count()), 1);
     assert_eq!(
-        runtime.active_normalization_batch(),
+        runtime.test_with(&crate::core::test_value_factory(), |net| net
+            .blocked_calls()
+            .count()),
+        1
+    );
+    assert_eq!(
+        runtime.active_normalization_batch(&crate::core::test_value_factory()),
         None,
         "the blocked callable must not retain a net batch lease"
     );
@@ -5801,7 +5811,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     });
     let runtime = applied.runtime().clone();
     let pair = runtime
-        .test_with(|net| net.active_pairs().next())
+        .test_with(&crate::core::test_value_factory(), |net| {
+            net.active_pairs().next()
+        })
         .expect("operator call should start ready");
     let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
 
@@ -5811,10 +5823,12 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
         .blocked_on()
         .expect("operator should report its exact task wait");
     let blocked = runtime
-        .test_with(|net| net.blocked_operator_call(pair))
+        .test_with(&crate::core::test_value_factory(), |net| {
+            net.blocked_operator_call(pair)
+        })
         .expect("operator should retain its exact task wait");
     assert_eq!(
-        runtime.active_normalization_batch(),
+        runtime.active_normalization_batch(&crate::core::test_value_factory()),
         None,
         "operator evaluation must begin after normalization closes"
     );

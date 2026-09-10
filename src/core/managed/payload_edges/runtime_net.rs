@@ -366,10 +366,10 @@ mod tests {
         // Retain a specialization failure so the same read-only walk also
         // exercises semantic payloads parked in active-pair state.
         let pair = runtime
-            .test_with(|net| net.active_pairs().next())
+            .test_with(&values, |net| net.active_pairs().next())
             .expect("the operator/data fixture should begin active");
         let reduction = runtime
-            .test_with_optional_mut(|net| net.reduce_pair(pair))
+            .test_with_optional_mut(&values, |net| net.reduce_pair(pair))
             .expect("the ready operator pair should be claimed");
         let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
             panic!("the fixture should claim an operator call")
@@ -385,7 +385,7 @@ mod tests {
             );
         });
 
-        let before = runtime.test_with_revisions(|net| {
+        let before = runtime.test_with_revisions(&values, |net| {
             assert!(net.stuck_reason(pair).is_some());
         });
         let mut value_edges = Vec::new();
@@ -397,7 +397,7 @@ mod tests {
                 &mut |net| runtime_edges.push(net.clone()),
             )
         });
-        let after = runtime.test_with_revisions(|net| {
+        let after = runtime.test_with_revisions(&values, |net| {
             assert!(net.stuck_reason(pair).is_some());
         });
 
@@ -418,8 +418,8 @@ mod tests {
         assert!(runtime_edges[0].ptr_eq(&function_runtime));
         assert!(!forced.load(Ordering::Acquire));
 
-        let (copy, _) = CoreRuntimeNet::test_copy_layer(function_runtime.clone());
-        let before_copy = copy.test_with_revisions(|_| ());
+        let (copy, _) = CoreRuntimeNet::test_copy_layer(&values, function_runtime.clone());
+        let before_copy = copy.test_with_revisions(&values, |_| ());
         let mut copied_sources = Vec::new();
         let copy_stats = values.with_runtime_value_access(|value_access| {
             visit_core_runtime_net_edges(
@@ -428,7 +428,7 @@ mod tests {
                 &mut |net| copied_sources.push(net.clone()),
             )
         });
-        let after_copy = copy.test_with_revisions(|_| ());
+        let after_copy = copy.test_with_revisions(&values, |_| ());
         assert_eq!(before_copy.1, after_copy.1);
         assert_eq!(copy_stats.runtime.source_nets, 1);
         assert_eq!(copy_stats.net_edges, 1);

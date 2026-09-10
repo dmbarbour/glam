@@ -643,6 +643,13 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
     FACTORY.clone()
 }
 
+#[cfg(test)]
+impl CoreValueFactory {
+    pub(crate) fn root_core_net(&self, net: &CoreRuntimeNet) -> ManagedCoreNetRoot {
+        self.with_runtime_value_access(|access| net.root_in(&access))
+    }
+}
+
 /// Test-only promise publication through an explicit matching factory and a
 /// temporary registered root. Production publishers retain their durable root
 /// as part of the producer or resolver record instead.

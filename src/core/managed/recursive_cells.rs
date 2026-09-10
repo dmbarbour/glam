@@ -15,7 +15,7 @@ use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
     CoreValueFactory, EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
-    PromisedValue, RuntimeValueAccess, RuntimeValueObserver, Value,
+    PromisedValue, RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
 use crate::evaluation::{
@@ -152,7 +152,6 @@ impl fmt::Debug for ManagedPromiseRoot {
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedCoreNetRoot {
     root: Root<ManagedCoreNetCell>,
-    observer: RuntimeValueObserver,
 }
 
 /// A non-escaping lazy-cell observation authorized by one runtime value scope.
@@ -297,9 +296,8 @@ impl RuntimeValueAccess<'_> {
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<CoreRuntimeNet, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
         let edge = self.allocate_managed_core_net(runtime)?;
-        Ok(CoreRuntimeNet::from_managed_parts(edge, observer))
+        Ok(CoreRuntimeNet::from_managed_edge(edge))
     }
 
     pub(in crate::core) fn root_managed_lazy(&self, edge: ManagedLazyEdge) -> ManagedLazyRoot {
@@ -328,18 +326,9 @@ impl RuntimeValueAccess<'_> {
         }
     }
 
-    pub(crate) fn root_managed_core_net(
-        &self,
-        observer: RuntimeValueObserver,
-        edge: ManagedCoreNetEdge,
-    ) -> ManagedCoreNetRoot {
-        assert!(
-            self.admits(&observer),
-            "core-net root requires its value domain"
-        );
+    pub(crate) fn root_managed_core_net(&self, edge: ManagedCoreNetEdge) -> ManagedCoreNetRoot {
         ManagedCoreNetRoot {
             root: self.root(edge.0),
-            observer,
         }
     }
 
@@ -381,9 +370,8 @@ impl RuntimeValueAccess<'_> {
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> Result<ManagedCoreNetRoot, UnsupportedLayout> {
-        let observer = self.values().runtime_value_observer();
         let edge = self.allocate_managed_core_net(runtime)?;
-        Ok(self.root_managed_core_net(observer, edge))
+        Ok(self.root_managed_core_net(edge))
     }
 }
 
@@ -434,16 +422,13 @@ impl ManagedCoreNetEdge {
 
     pub(crate) fn access<'access, 'scope>(
         self,
-        observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<ManagedCoreNetAccess<'access, 'scope>> {
-        if !authority.admits(observer) {
-            return None;
-        }
-        // SAFETY: the private constructor and observer preserve exact heap and
-        // representation provenance; the caller supplies current liveness.
+    ) -> ManagedCoreNetAccess<'access, 'scope> {
+        // SAFETY: private construction and publication preserve exact heap and
+        // representation provenance; the caller reaches this edge through a
+        // live traced owner while supplying current matching-graph access.
         let cell = unsafe { authority.scope.get_traced_edge(self.0) };
-        ManagedCoreNetAccess::from_authorized_cell(self, cell, observer, authority)
+        ManagedCoreNetAccess::from_authorized_cell(self, cell, authority)
     }
 }
 
@@ -635,10 +620,6 @@ impl ManagedCoreNetRoot {
         ManagedCoreNetEdge(authority.project_root(&self.root))
     }
 
-    pub(crate) fn observer(&self) -> &RuntimeValueObserver {
-        &self.observer
-    }
-
     #[cfg(test)]
     pub(crate) fn same_root(&self, other: &Self) -> bool {
         self.root.ptr_eq(&other.root)
@@ -649,7 +630,7 @@ impl ManagedCoreNetRoot {
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
     ) -> Option<ManagedCoreNetAccess<'access, 'scope>> {
-        if !authority.admits(&self.observer) || !authority.admits_root(&self.root) {
+        if !authority.admits_root(&self.root) {
             return None;
         }
         let edge = self.edge(authority);
@@ -873,15 +854,14 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
     fn from_authorized_cell(
         owner: ManagedCoreNetEdge,
         cell: &'access ManagedCoreNetCell,
-        observer: &RuntimeValueObserver,
         authority: &'access RuntimeValueAccess<'scope>,
-    ) -> Option<Self> {
-        authority.admits(observer).then_some(Self {
+    ) -> Self {
+        Self {
             owner,
             cell,
             authority,
             _thread_bound: PhantomData,
-        })
+        }
     }
 
     pub(crate) fn with<R>(&self, inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R) -> R {
@@ -1096,7 +1076,7 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 // field change must update the I5C ledger and these target-specific latches.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<ManagedLazyCell>() == 160);
+    assert!(std::mem::size_of::<ManagedLazyCell>() == 144);
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
     assert!(std::mem::size_of::<ManagedPromiseCell>() == 104);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
@@ -1106,7 +1086,7 @@ const _: () = {
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
     assert!(std::mem::size_of::<ManagedPromiseRoot>() == 40);
     assert!(std::mem::align_of::<ManagedPromiseRoot>() == 8);
-    assert!(std::mem::size_of::<ManagedCoreNetRoot>() == 24);
+    assert!(std::mem::size_of::<ManagedCoreNetRoot>() == 8);
     assert!(std::mem::align_of::<ManagedCoreNetRoot>() == 8);
 };
 
@@ -1725,12 +1705,12 @@ mod tests {
 
     #[test]
     fn recursive_cell_layouts_are_recorded() {
-        assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 160);
+        assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 144);
         assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 104);
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
         assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 32);
         assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 40);
-        assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 24);
+        assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 8);
     }
 
     #[test]
@@ -2240,7 +2220,6 @@ mod tests {
     #[test]
     fn semantic_edges_and_durable_roots_share_one_managed_identity() {
         let values = new_values();
-        let observer = values.runtime_value_observer();
         let (lazy, promise, net, lazy_edge, promise_edge, net_edge) = values
             .with_runtime_value_access(|access| {
                 let lazy_edge = access
@@ -2256,8 +2235,7 @@ mod tests {
                 assert_eq!(lazy_edge.access(&access).label().as_ref(), "split lazy");
                 assert_eq!(
                     net_edge
-                        .access(&observer, &access)
-                        .expect("a fresh net edge should be accessible")
+                        .access(&access)
                         .with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
                     Some(Value::Number(61.into()))
                 );
@@ -2265,7 +2243,7 @@ mod tests {
                 (
                     access.root_managed_lazy(lazy_edge),
                     access.root_managed_promise(promise_edge),
-                    access.root_managed_core_net(observer.clone(), net_edge),
+                    access.root_managed_core_net(net_edge),
                     lazy_edge,
                     promise_edge,
                     net_edge,
@@ -2285,10 +2263,7 @@ mod tests {
                 net.access(&access)
                     .unwrap()
                     .with(|runtime| runtime.exposed()),
-                net_edge
-                    .access(&observer, &access)
-                    .unwrap()
-                    .with(|runtime| runtime.exposed())
+                net_edge.access(&access).with(|runtime| runtime.exposed())
             );
         });
 
@@ -2296,7 +2271,7 @@ mod tests {
         unrelated.with_runtime_value_access(|access| {
             assert!(lazy.access(&access).is_none());
             assert!(promise.access(&access).is_none());
-            assert!(net_edge.access(&observer, &access).is_none());
+            assert!(net.access(&access).is_none());
         });
     }
 
@@ -2494,7 +2469,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-net cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let allocator = access
                 .allocator::<ManagedCoreNetCell>()
@@ -2514,17 +2488,14 @@ mod tests {
                     .with_edge_replacement(edge, None, Some(edge), || {
                         cell.runtime.with_mut(|runtime| {
                             runtime.begin_copy(PreparedCopySource::new(
-                                crate::core_net::CoreRuntimeNet::from_managed_parts(
-                                    managed_edge,
-                                    observer.clone(),
-                                ),
+                                crate::core_net::CoreRuntimeNet::from_managed_edge(managed_edge),
                                 remote,
                             ));
                         });
                     });
             }
 
-            access.root_managed_core_net(observer, managed_edge)
+            access.root_managed_core_net(managed_edge)
         });
 
         let live = values
@@ -2582,7 +2553,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the lazy-net cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy("lazy to net", LazySource::Error)
@@ -2592,9 +2562,8 @@ mod tests {
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Lazy(lazy)))
                 .expect("the managed core-net cell should fit a run");
-            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
-            let net =
-                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+            let net_root = access.root_managed_core_net(net_edge);
+            let net = crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge);
 
             replace_lazy_source_for_cycle(
                 &access,
@@ -2626,7 +2595,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the promise-net cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise("promise to net")
@@ -2636,9 +2604,8 @@ mod tests {
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
-            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
-            let net =
-                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+            let net_root = access.root_managed_core_net(net_edge);
+            let net = crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge);
 
             promise_root
                 .access(&access)
@@ -2669,7 +2636,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the three-family cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy("lazy to net ring", LazySource::Error)
@@ -2684,9 +2650,8 @@ mod tests {
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
-            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
-            let net =
-                crate::core_net::CoreRuntimeNet::from_managed_parts(net_edge, observer.clone());
+            let net_root = access.root_managed_core_net(net_edge);
+            let net = crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge);
 
             replace_lazy_source_for_cycle(
                 &access,
@@ -2778,7 +2743,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the function-stage cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise("function stage compatibility")
@@ -2788,11 +2752,8 @@ mod tests {
             let net_edge = access
                 .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
-            let net_root = access.root_managed_core_net(observer.clone(), net_edge);
-            let stage = NetValue::new(crate::core_net::CoreRuntimeNet::from_managed_parts(
-                net_edge,
-                observer.clone(),
-            ));
+            let net_root = access.root_managed_core_net(net_edge);
+            let stage = NetValue::new(crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge));
 
             promise_root
                 .access(&access)
@@ -2840,7 +2801,6 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the remote-cursor cycle fixture should start collectible");
-        let observer = values.runtime_value_observer();
         let root = values.with_runtime_value_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise("remote cursor compatibility")
@@ -2853,9 +2813,8 @@ mod tests {
             let source_edge = access
                 .allocate_managed_core_net(source_runtime)
                 .expect("the source managed core-net cell should fit a run");
-            let source_root = access.root_managed_core_net(observer.clone(), source_edge);
-            let source =
-                crate::core_net::CoreRuntimeNet::from_managed_parts(source_edge, observer.clone());
+            let source_root = access.root_managed_core_net(source_edge);
+            let source = crate::core_net::CoreRuntimeNet::from_managed_edge(source_edge);
 
             let mut target_runtime = prepared_runtime(0);
             let cursor = target_runtime.begin_copy(PreparedCopySource::new(source, remote));
@@ -2867,9 +2826,8 @@ mod tests {
             let target_edge = access
                 .allocate_managed_core_net(target_runtime)
                 .expect("the target managed core-net cell should fit a run");
-            let target_root = access.root_managed_core_net(observer.clone(), target_edge);
-            let target =
-                crate::core_net::CoreRuntimeNet::from_managed_parts(target_edge, observer.clone());
+            let target_root = access.root_managed_core_net(target_edge);
+            let target = crate::core_net::CoreRuntimeNet::from_managed_edge(target_edge);
 
             promise_root
                 .access(&access)
@@ -3158,6 +3116,16 @@ mod tests {
             assert!(!facade.contains("fn with_runtime_access"));
             assert!(!facade.contains("fn with_access"));
         }
+
+        let core_net = include_str!("../../core_net.rs");
+        let facade = source_declaration(core_net, "struct CoreRuntimeNet");
+        assert!(facade.contains("ManagedCoreNetEdge"));
+        for forbidden in ["RuntimeValueObserver", "Root<", "Arc<", "Weak<", "values:"] {
+            assert!(
+                !facade.contains(forbidden),
+                "CoreRuntimeNet regained access or ownership through {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -3184,6 +3152,22 @@ mod tests {
 
         let cell = source_declaration(recursive, "struct ManagedPromiseCell");
         assert!(!cell.contains("label:"));
+
+        let net = source_declaration(recursive, "struct ManagedCoreNetRoot");
+        assert!(net.contains("Root<ManagedCoreNetCell>"));
+        for forbidden in [
+            "RuntimeValueObserver",
+            "ManagedCoreNetEdge",
+            "CoreRuntimeNet",
+        ] {
+            assert!(
+                !net.contains(forbidden),
+                "core-net root retained duplicate authority through {forbidden}"
+            );
+        }
+
+        let access = source_declaration(recursive, "impl ManagedCoreNetEdge {");
+        assert!(!access.contains("RuntimeValueObserver"));
 
         let resolver_source = include_str!("../../api/value.rs");
         let resolver = source_declaration(resolver_source, "pub struct PromiseResolver");

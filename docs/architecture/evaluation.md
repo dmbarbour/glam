@@ -186,10 +186,11 @@ durable owner by itself.
 their registered roots carry only reviewed scheduler, diagnostic, and
 coordination fields needed without managed access. `PromiseResolver` is the
 public affine exception which retains weak runtime re-entry, a host-facing
-label, and an optional promise root. `CoreRuntimeNet` temporarily retains weak
-value-domain provenance used by stored source identities and self-rooting
-helpers. I8A.0 migrates those surfaces together and leaves both its semantic
-facade and registered root observer-free.
+label, and an optional promise root. `CoreRuntimeNet` is likewise one exact
+edge-only semantic facade, including when stored as a cross-net source;
+`ManagedCoreNetRoot` contains only its registered root. Net access and root
+projection always require an explicit matching `RuntimeValueAccess` rather
+than retaining weak value-domain re-entry on either representation.
 
 Post-publication changes to those families use the same bounded value-access
 authority. The lazy cache reports its deferred source as leaving and its
