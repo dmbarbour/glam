@@ -1119,8 +1119,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, Key, LazySource, LazyValue,
-        List, NetValue, PromisedValue,
+        Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, Key, LazyApplication,
+        LazySource, LazyValue, List, ListThunk, NetValue, PromisedValue,
     };
 
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
@@ -1231,6 +1231,55 @@ mod tests {
         });
         assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    fn assert_lazy_promise_cycle_through_source(
+        label: &str,
+        source_for: impl FnOnce(Value) -> LazySource,
+    ) {
+        let values = new_values();
+        let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the {label} fixture should start collectible: {failure}")
+        });
+        let root = values.with_runtime_value_access(|access| {
+            let lazy_edge = access
+                .allocate_managed_lazy(label, LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let promise_edge = access
+                .allocate_managed_promise(label)
+                .expect("the managed promise cell should fit a run");
+            let lazy_root = access.root_managed_lazy(lazy_edge);
+            let promise_root = access.root_managed_promise(promise_edge);
+            let lazy = LazyValue::from_root(&lazy_root, &access);
+            let promise = PromisedValue::from_root(&promise_root, &access);
+
+            replace_lazy_source_for_cycle(
+                &access,
+                lazy_edge,
+                promise_edge.0,
+                source_for(Value::Promised(promise)),
+            );
+            promise_root
+                .access(&access)
+                .expect("the rooted promise should be accessible")
+                .publish(Ok(Value::Lazy(lazy)))
+                .expect("the fresh promise should accept its lazy assignment");
+            drop(promise_root);
+            lazy_root
+        });
+
+        let live = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("one root should retain the {label} cycle: {failure}")
+        });
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values.collect_managed_for_test().unwrap_or_else(|failure| {
+            panic!("the unrooted {label} cycle should reclaim: {failure}")
+        });
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
     }
 
     fn source_declaration<'source>(source: &'source str, name: &str) -> &'source str {
@@ -2494,51 +2543,37 @@ mod tests {
 
     #[test]
     fn managed_lazy_promise_pair_cycle_is_traced_and_reclaimed() {
-        let values = new_values();
-        let baseline = values
-            .collect_managed_for_test()
-            .expect("the lazy-promise cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
-            let lazy_edge = access
-                .allocate_managed_lazy("lazy to promise", LazySource::Error)
-                .expect("the managed lazy cell should fit a run");
-            let promise_edge = access
-                .allocate_managed_promise("promise to lazy")
-                .expect("the managed promise cell should fit a run");
-            let lazy_root = access.root_managed_lazy(lazy_edge);
-            let promise_root = access.root_managed_promise(promise_edge);
-            let lazy = LazyValue::from_root(&lazy_root, &access);
-            let promise = PromisedValue::from_root(&promise_root, &access);
-
-            replace_lazy_source_for_cycle(
-                &access,
-                lazy_edge,
-                promise_edge.0,
-                LazySource::ComputedFixpoint(Arc::new(crate::core::FixpointComputation::Function(
-                    Value::Promised(promise),
-                ))),
-            );
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Lazy(lazy)))
-                .expect("the fresh promise should accept its lazy assignment");
-            drop(promise_root);
-            lazy_root
+        assert_lazy_promise_cycle_through_source("function fixpoint compatibility", |backedge| {
+            LazySource::ComputedFixpoint(Arc::new(crate::core::FixpointComputation::Function(
+                backedge,
+            )))
         });
+    }
 
-        let live = values
-            .collect_managed_for_test()
-            .expect("one root should retain the lazy-promise cycle");
-        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+    #[test]
+    fn managed_cycle_through_object_fixpoint_is_traced_and_reclaimed() {
+        assert_lazy_promise_cycle_through_source("object fixpoint compatibility", |backedge| {
+            LazySource::ComputedFixpoint(Arc::new(
+                crate::core::FixpointComputation::ObjectInstance(backedge),
+            ))
+        });
+    }
 
-        drop(root);
-        let dead = values
-            .collect_managed_for_test()
-            .expect("the unrooted lazy-promise cycle should be reclaimed");
-        assert_eq!(dead.root_entries(), baseline.root_entries());
-        assert_eq!(dead.finalized_slots(), 2);
+    #[test]
+    fn managed_cycle_through_lazy_application_is_traced_and_reclaimed() {
+        assert_lazy_promise_cycle_through_source("lazy application compatibility", |backedge| {
+            LazySource::Application(Arc::new(LazyApplication {
+                function: backedge,
+                arguments: Arc::from([]),
+            }))
+        });
+    }
+
+    #[test]
+    fn managed_cycle_through_net_construction_is_traced_and_reclaimed() {
+        assert_lazy_promise_cycle_through_source("net construction compatibility", |backedge| {
+            LazySource::NetConstruction(Arc::new(backedge))
+        });
     }
 
     #[test]
@@ -2686,6 +2721,16 @@ mod tests {
     fn managed_promise_cycle_through_list_is_traced_and_reclaimed() {
         assert_single_promise_cycle_through("list compatibility", |backedge| {
             Value::List(List::from_values(vec![backedge]))
+        });
+    }
+
+    #[test]
+    fn managed_promise_cycle_through_list_thunk_is_traced_and_reclaimed() {
+        assert_single_promise_cycle_through("list thunk compatibility", |backedge| {
+            let Value::Promised(promise) = backedge else {
+                unreachable!("the cycle helper always supplies its promise backedge")
+            };
+            Value::List(List::from_thunk(ListThunk::Promised(promise)))
         });
     }
 

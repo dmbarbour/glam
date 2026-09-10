@@ -6,14 +6,14 @@ use super::CompatibilityValueEdges;
 use crate::core::{Dict, Key, List, ListThunk, Value};
 use crate::list::{LogicalListPart, LogicalListVisitStats};
 
-/// Trace-work counters retained for I7's persistent-representation audit.
+/// Trace-work counters retained by I7's persistent-representation audit.
 ///
 /// Counts are logical visits rather than unique physical nodes. Reusing one
 /// persistent spine in two positions intentionally counts both traversals.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(
     dead_code,
-    reason = "I4D installs counters consumed by focused fixtures and the later I7 audit"
+    reason = "I7 retains these logical counters for focused fixtures and later profiling"
 )]
 pub(crate) struct PersistentEdgeVisitStats {
     pub(crate) map_entries: usize,
@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_adapter_traces_empty_singleton_and_shared_spines() {
+    fn persistent_representation_to_visitor_inventory_is_complete() {
         let first = number(1);
         let second = number(2);
 
@@ -163,6 +163,14 @@ mod tests {
         assert_eq!(shared_stats.list.shared_value_slices, 2);
         assert_eq!(shared_stats.list.value_items, 4);
         assert_eq!(shared_stats.semantic_edges, 4);
+
+        let sliced = List::from_values(vec![number(0), first.clone(), number(3)]).slice(1, 2);
+        let mut sliced_edges = Vec::new();
+        let sliced_stats = visit_list_edges(&sliced, &mut |value| sliced_edges.push(value.clone()));
+        assert_eq!(sliced_edges, vec![first.clone()]);
+        assert_eq!(sliced_stats.list.shared_value_slices, 1);
+        assert_eq!(sliced_stats.list.value_items, 1);
+        assert_eq!(sliced_stats.semantic_edges, 1);
 
         let finger = List::concat(
             List::from_bytes(Bytes::from_static(b"bytes")),
@@ -216,7 +224,12 @@ mod tests {
         assert_eq!(base_stats.map_entries, 1);
         assert_eq!(base_stats.key_nodes, 6);
         assert_eq!(base_stats.semantic_edges, 1);
-        assert_eq!(edges(&version).len(), 2);
+        let mut version_edges = Vec::new();
+        let version_stats =
+            visit_dict_edges(&version, &mut |value| version_edges.push(value.clone()));
+        assert_eq!(version_edges.len(), 2);
+        assert_eq!(version_stats.map_entries, 2);
+        assert_eq!(version_stats.semantic_edges, 2);
         assert!(edges(&Dict::new_sync()).is_empty());
     }
 

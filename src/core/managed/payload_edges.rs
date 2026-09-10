@@ -250,11 +250,19 @@ mod tests {
         };
         assert_eq!(edges(&semantic), [first.clone(), second.clone()]);
         assert_eq!(
+            edges(&FixpointComputation::Function(first.clone())),
+            vec![first.clone()]
+        );
+        assert_eq!(
             edges(&FixpointComputation::ObjectInstance(first.clone())),
             vec![first.clone()]
         );
         assert_eq!(
             edges(&MetadataCarrier::new(second.clone())),
+            vec![second.clone()]
+        );
+        assert_eq!(
+            edges(&LazySource::NetConstruction(Arc::new(second.clone()))),
             vec![second.clone()]
         );
 

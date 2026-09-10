@@ -221,9 +221,21 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5F.3c | complete | remote-cursor source-topology cycle closure |
 | I5F.4 | complete | recursive-source and external-owner closure audit |
 | I5 | complete | atomic managed lazy/promise/core-net identity closure and post-I5 review |
+| I6A.0 | complete | audit-only function and net shells over exact managed net identities |
+| I6A.1 | complete | audit-only builtin and lazy-application paths with exact cycle closure |
+| I6A.2 | complete | audit-only function/object fixpoint payload paths |
+| I6B.1 | complete | metadata identity, trace, and lifecycle audit |
+| I6B.2 | not required | metadata compatibility representation retained |
+| I6C.1 | complete | failure emission/context trace and cycle audit |
+| I6C.2 | complete | durable failure-root and diagnostic ownership audit |
+| I6C.3 | not required | failure compatibility representation retained |
 | I6D.1 | complete | reflection semantic-edge restoration, edge-free observation, one-use activation ownership, and forced-order closure |
-| I6 | pending | functions, applications, metadata, failures |
-| I7 | pending | persistent list and dictionary tracing |
+| I6D.2 | complete | audit-only net-construction effect path |
+| I6 | complete | immutable compatibility paths and reflection ownership; grouped post-I6/I7 review pending |
+| I7A | complete | persistent representation-to-visitor delta audit |
+| I7B | complete | production list-thunk backedge closure |
+| I7C | complete | persistent logical-work accounting reconciliation |
+| I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review pending |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -2545,9 +2557,9 @@ family's managed visitor in I5-I8.
   recorded by Gate G0.
 - Duplicate traversal of shared spines is correct but measured; do not fork or
   replace persistent collections.
-- Add trace-count instrumentation for the later I7 performance audit.
+- Add trace-count instrumentation consumed by the later I7 performance audit.
 
-Verification: `persistent_adapter_traces_empty_singleton_and_shared_spines`
+Verification: `persistent_representation_to_visitor_inventory_is_complete`
 and `persistent_adapter_cycle_reclaims_in_isolated_heap`. Production remains
 `NoAuto`; I7 later reconciles these adapters against the final concrete
 persistent representations.
@@ -2584,8 +2596,8 @@ the current value-free key policy explicit. Persistent nodes and immutable
 arrays acquire no mutation gateway. Focused fixtures cover every current list
 shape, nested keys, persistent map versions, duplicated shared list spines,
 non-forcing lazy sentinels, and rooted survival followed by reclamation of a
-closed list-to-dictionary cycle. Production remains `NoAuto`; I7 replaces and
-re-audits these compatibility adapters with the final managed value form.
+closed list-to-dictionary cycle. Production remains `NoAuto`; I7 later retained
+these adapters after its final representation and topology delta audit.
 
 ### Phase I4E — Net Value Adapter
 
@@ -5144,6 +5156,14 @@ identity semantics. Audit-only completion keeps the source-backed
 compatibility adapter and its cycle evidence. Production remains `NoAuto`
 throughout I6.
 
+I6 and I7 form one adjacent audit-only major stage under the review policy.
+Their current representations share the same compile-exhaustive compatibility
+walk, neither phase is authorized to introduce a managed family without first
+stopping for a new partition and design decision, and I7 consumes the I6
+representation result. One dated post-I6/I7 review follows I7C before I8A.0;
+an unexpected conversion or ownership change cancels this grouping and
+requires a review at the phase which introduces it.
+
 ### Phase I6A.0 — Function and Net Shell Audit
 
 - Audit `NetValue`, `FunctionCode`, and `FunctionValue` independently. They
@@ -5162,6 +5182,15 @@ net-edge, and managed function-stage cycle fixtures. If audit-only, prove the
 adapter still reports exactly the nested core-net edge; if migrated, add the
 regional construction/reclamation proof.
 
+Completed 2026-09-10 as an audit-only checkpoint. `NetValue` is one managed
+net facade, `FunctionValue` adds only remaining arity, and `FunctionCode` adds
+only arity/capture counts; none owns a distinct mutable identity or destructor
+lifecycle. The exact net-edge adapter projects the same `CoreRuntimeNet` from
+all three shells and from function-code operators without reducing it. The
+existing shared-stage and two-cell managed function-stage fixtures establish
+identity sharing and cycle closure. No additional managed shell removes an
+owner or representation boundary, so the current wrappers remain.
+
 ### Phase I6A.1 — Partial Builtin and Lazy Application Audit
 
 - Audit `BuiltinCall` and `LazyApplication` separately from function stages.
@@ -5174,6 +5203,14 @@ Verification: existing partial-builtin/application behavior plus the closed
 cycles through partial builtin arguments and lazy applications. Source-backed
 edge inventories must remain compile-exhaustive.
 
+Completed 2026-09-10 as an audit-only checkpoint. `BuiltinCall` retains one
+immutable `Arc<[Value]>`; `LazyApplication` retains one function plus one
+immutable argument slice. Neither has observable identity, mutation, active
+destruction, or an external owner. Exact-order visitor tests and isolated
+cycles through both a partial builtin and a lazy application reach the managed
+promise stop edge and reclaim after the final root is removed. Conversion
+would add allocation and indirection without closing another cycle.
+
 ### Phase I6A.2 — Fixpoint Payload Audit
 
 - Audit both `FixpointComputation` variants and their `Arc` owner. Each holds
@@ -5184,6 +5221,13 @@ edge inventories must remain compile-exhaustive.
 
 Verification: strict and guarded fixpoints, object instantiation, and the
 existing managed cycle through each payload shape.
+
+Completed 2026-09-10 as an audit-only checkpoint. Both
+`FixpointComputation` variants contain exactly one immutable `Value` and share
+their existing `Arc` only as a lazy-source payload. The direct visitor covers
+both variants, while isolated function- and object-fixpoint backedges prove
+rooted survival and exact reclamation. There is no independent fixpoint-payload
+identity or lifecycle to manage.
 
 ### Phase I6B.1 — Metadata Identity and Trace Audit
 
@@ -5198,6 +5242,14 @@ existing managed cycle through each payload shape.
 Verification: metadata reorder/copy, pure and reflection update, `seq`,
 `spark`, inspection, and collection of cycles which pass through metadata.
 
+Completed 2026-09-10 as an audit-only checkpoint. `MetadataCarrier` remains a
+single `Arc<Value>` whose pointer identity is copied with the carrier and is
+unobservable to Glam evaluation. Its visitor reports exactly that value;
+inspection and both update modes project or construct ordinary values without
+installing an external lifecycle owner. Existing metadata behavior tests and
+the isolated metadata backedge fixture pass without forcing the associated
+value.
+
 ### Phase I6B.2 — Optional Metadata Representation Conversion
 
 - Execute only if I6B.1 records an independent reason to manage the carrier
@@ -5205,6 +5257,10 @@ Verification: metadata reorder/copy, pure and reflection update, `seq`,
   apply the regional allocation rule.
 - Otherwise close this checkpoint as not required and retain the audited
   compatibility adapter for Value Representation Refinement.
+
+Closed 2026-09-10 as not required. No correctness, ownership, or measured
+representation benefit justified another managed allocation; the one-edge
+compatibility shell remains the Value Representation Refinement input.
 
 ### Phase I6C.1 — Failure and Context Trace Audit
 
@@ -5219,6 +5275,13 @@ Verification: the structured-failure suite, dependency-cycle diagnostics,
 `failure_trace_invokes_no_semantic_service`, and closed cycles through both an
 emission and a context value.
 
+Completed 2026-09-10 as an audit-only checkpoint. `EvaluationFailure` remains
+an immutable emission-or-cycle payload plus ordered `Arc<[Value]>` contexts.
+Dependency-cycle members are scalar diagnostic leaves; emission and context
+values are reported in stable order without formatting or evaluation.
+Isolated cycles through both value-bearing paths reclaim exactly, while the
+no-semantic-service sentinel remains unforced.
+
 ### Phase I6C.2 — Durable Failure and Diagnostic Ownership Audit
 
 - Audit `RuntimeFailureRoot` separately from the semantic failure shell. Its
@@ -5232,6 +5295,14 @@ emission and a context value.
 Verification: fail-closed owner inventories, failure-ledger/report retirement,
 cross-session failure observation, and structured diagnostic projection.
 
+Completed 2026-09-10 as an external-owner audit. `RuntimeFailureRoot` remains
+one shared Rust pointer to the canonical failure, a weak value-domain observer,
+and one registered `RuntimeValueRoot` per direct value occurrence. It is not
+managed-reachable and introduces no backedge into its own domain. The added
+isolated lifecycle fixture proves that this owner alone retains its direct
+managed graph and releases the exact graph when retired; existing coordinator,
+settlement, cross-session, and diagnostic tests cover its publication owners.
+
 ### Phase I6C.3 — Optional Failure Representation Conversion
 
 - Execute only if I6C.1-C.2 record an independent reason to replace the
@@ -5241,6 +5312,11 @@ cross-session failure observation, and structured diagnostic projection.
   replacement is a proven durable owner.
 - Otherwise close this checkpoint as not required and retain the audited
   compatibility representation.
+
+Closed 2026-09-10 as not required. Managing the immutable failure shell would
+not eliminate `RuntimeFailureRoot`, whose registered roots deliberately extend
+diagnostic/report lifetime outside the semantic graph, and no independent
+footprint or representation requirement justifies that conversion.
 
 ### Phase I6D.1 — Reflection Computation Payloads
 
@@ -5315,6 +5391,18 @@ Verification: the existing closed cycle through a net-construction effect,
 the exact compatibility-edge inventory, and current polling/publication tests.
 Only a selected managed-conversion fixture may add another forced collection.
 
+Completed 2026-09-10 as an audit-only checkpoint. The net-construction source
+is one immutable `Arc<Value>` effect beneath its managed lazy identity and has
+no independent identity, mutation gateway, or destructor behavior. Its exact
+one-edge visitor, blocked polling behavior, source-to-result transition, and a
+new isolated net-construction backedge fixture all pass. Conversion would add
+a redundant allocation and was not selected.
+
+Phase I6 completed without introducing a managed family or changing semantic
+identity. I6A-C and I6D.2 retain their exact compatibility shells; I6D.1
+remains the sole ownership repair because reflection computation had crossed
+an external semantic-root boundary. Production remains `NoAuto`.
+
 ## Phase I7 — Persistent List and Dictionary Trace Audit
 
 I4D installed the compile-exhaustive logical list/dictionary visitors and
@@ -5342,6 +5430,13 @@ the existing no-forcing logical-walk suite. Nested managed identities must
 already be traceable from their introduction in I5/I6; I7 is not permission
 to defer a missing production edge until this audit.
 
+Completed 2026-09-10. No list, dictionary, key, thunk, concatenation, slice,
+or iterator representation changed after I4D. The renamed exhaustive fixture
+constructs every `ListNode`/`ListChunk` shape, a strict shared sub-slice, both
+thunk variants, every recursive key form, empty and versioned RPDS maps, and
+the shared-spine traversal. Its exhaustive matches remain the source-level
+change detector. No persistent managed family was introduced.
+
 ### Phase I7B — Missing Closed Topology Deltas
 
 - Add the one known missing topology: a closed list-thunk backedge through a
@@ -5354,6 +5449,13 @@ to defer a missing production edge until this audit.
 - Use a fresh runtime and the real production value facade for each new closed
   fixture; never collect a shared or otherwise unclassified production graph.
 
+Completed 2026-09-10. No I6 audit introduced a new managed payload shape. The
+one missing production topology now assigns a promise to a list whose deferred
+tail is that same promise. One registered root retains the cycle, and removing
+it reclaims the exact managed promise cell. Existing I5F.3a fixtures remain the
+nonduplicated evidence for strict lists, dictionaries, partial builtins,
+metadata, shared spines, and persistent versions.
+
 ### Phase I7C — Accounting and Closeout
 
 - Reconcile the existing logical duplicate-work counters with the final
@@ -5362,10 +5464,20 @@ to defer a missing production edge until this audit.
 - Defer a threshold or collector-aware physical-node migration until profiling
   shows that the logical walk is material.
 
+Completed 2026-09-10. The exhaustive fixture now records strict sub-slice and
+versioned-map counts in addition to empty, byte, value, finger-tree, thunk,
+concat, nested-key, and duplicated shared-spine work. Counters remain logical
+occurrence counts; no deduplication cache, traversal threshold, or whole-map
+copy was added.
+
 Logical duplicate visits are a performance issue in a mark collector, not an
 edge-counting soundness problem. This phase must not silently turn collection
 updates into whole-map copies. Production remains `NoAuto`; I11 repeats these
 reclamation cases only after Gate G2 closes the whole graph.
+
+Phase I7 completed as a delta audit over I4D/I5F.3a. RPDS and FingerTree/`Arc`
+spines remain ordinary immutable Rust storage, while their central non-forcing
+logical walk continues to terminate at exact managed identity edges.
 
 ## Phase I8 — Post-Cutover Core Runtime Net Closure Audit
 

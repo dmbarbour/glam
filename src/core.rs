@@ -188,7 +188,7 @@ impl EvaluationFailure {
     /// evaluating, formatting, comparing, or recursively visiting it.
     ///
     /// Runtime failure roots use this as their complete compatibility edge
-    /// boundary. I6C audits it and may retain it as the final bootstrap shape.
+    /// boundary. I6C retained it as the final bootstrap failure-shell shape.
     pub(crate) fn visit_direct_values(&self, visit: &mut dyn FnMut(&Value)) {
         match &self.kind {
             EvaluationFailureKind::Emission(emission) => visit(emission),
@@ -2178,8 +2178,8 @@ mod tests {
 
     struct ManagedFamilyLayoutProbe([u8; 1]);
 
-    /// Compile-exhaustive latch for the failure interiors deliberately left to
-    /// the I6C compatibility audit by the I3A.4 poll-boundary migration.
+    /// Compile-exhaustive latch for the failure interiors retained by the I6C
+    /// compatibility audit after the I3A.4 poll-boundary migration.
     fn assert_evaluation_failure_boundary_inventory(failure: &EvaluationFailure) {
         let EvaluationFailure { kind, contexts } = failure;
         match kind {
@@ -2679,8 +2679,8 @@ mod tests {
 
     #[test]
     fn metadata_and_collections_can_participate_in_a_deferred_value_cycle() {
-        // This intentionally latches a graph that Arc ownership cannot reclaim.
-        // The GC integration suite will retain this shape and add reclamation.
+        // This semantic shape is reclaimed by the managed-promise metadata and
+        // persistent-container fixtures in the GC integration suite.
         let values = values();
         let promise = PromisedValue::new(&values, "metadata collection cycle");
         let metadata =

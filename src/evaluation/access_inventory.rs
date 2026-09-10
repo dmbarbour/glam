@@ -166,7 +166,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // GCI5R-003D roots a freshly constructed reflection fixpoint before
         // publishing it into branch/coordinator state.
         ("src/reflection/machine.rs", GatewayCounts::new(1, 0)),
-        ("src/runtime.rs", GatewayCounts::new(1, 0)),
+        // I6C's isolated failure-root lifecycle fixture constructs its managed
+        // promise in one explicit region before publishing the durable root.
+        ("src/runtime.rs", GatewayCounts::new(2, 0)),
     ]
     .into_iter()
     .map(|(path, counts)| (PathBuf::from(path), counts))

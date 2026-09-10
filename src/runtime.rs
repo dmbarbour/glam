@@ -305,9 +305,9 @@ impl fmt::Debug for RuntimeValueRoot {
 ///
 /// The existing `Arc<EvaluationFailure>` remains the canonical shared failure
 /// identity. The parallel roots are deliberately shallow: recursive edges are
-/// owned by the root for each direct emission or context value. I6C audits
-/// this compatibility shell and replaces it only if an independent
-/// representation benefit justifies managing the failure family itself.
+/// owned by the root for each direct emission or context value. I6C retained
+/// this compatibility shell after proving that its external owner is not
+/// managed-reachable and retires with its report/coordinator owner.
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeFailureRoot(Arc<RuntimeFailureRootInner>);
 
@@ -325,7 +325,7 @@ struct RuntimeFailureRootInner {
     failure: Arc<EvaluationFailure>,
     #[allow(
         dead_code,
-        reason = "the compatibility root retains direct failure values until I6C manages the failure graph"
+        reason = "the I6C-audited compatibility root retains direct failure values for its external owner"
     )]
     value_roots: Box<[RuntimeValueRoot]>,
 }
@@ -523,7 +523,7 @@ impl RuntimeIds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{LazyValue, test_value_factory};
+    use crate::core::{CoreValueFactory, LazyValue, PromisedValue, Value, test_value_factory};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
@@ -595,5 +595,38 @@ mod tests {
         assert_eq!(root.direct_value_roots().len(), 1);
         assert_eq!(root.direct_value_roots()[0].clone_core_for_test(), lazy);
         assert!(!forced.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn runtime_failure_root_alone_retains_and_releases_its_managed_values() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the failure-root fixture should start collectible");
+        let (promise_root, failure) = values.with_runtime_value_access(|access| {
+            let promise_root = access
+                .construct_rooted_managed_promise("failure root lifecycle")
+                .expect("the managed promise cell should fit a run");
+            let promise = PromisedValue::from_root(&promise_root, &access);
+            (
+                promise_root,
+                Arc::new(EvaluationFailure::emission(Value::Promised(promise))),
+            )
+        });
+        let failure_root = RuntimeFailureRoot::new(&values, failure);
+        drop(promise_root);
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("the durable failure root should retain its direct value graph");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(failure_root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("retiring the durable failure root should release its graph");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
     }
 }
