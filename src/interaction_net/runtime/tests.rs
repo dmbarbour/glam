@@ -138,6 +138,24 @@ impl NetSpecialization for OwnershipNeutralSpecialization {
     type StuckReason = ();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeCycleEvidence {
+    EdgeFree,
+    Fixture(&'static str),
+}
+
+const I5_DATA_NODE_CYCLE: RuntimeCycleEvidence =
+    RuntimeCycleEvidence::Fixture("managed_promise_core_net_pair_cycle_is_traced_and_reclaimed");
+const I5_REMOTE_CURSOR_SOURCE_CYCLE: RuntimeCycleEvidence = RuntimeCycleEvidence::Fixture(
+    "managed_promise_cycle_through_remote_cursor_source_is_traced_and_reclaimed",
+);
+const I8_OPERATOR_WORK_CYCLE: RuntimeCycleEvidence = RuntimeCycleEvidence::Fixture(
+    "managed_operator_payload_cycle_survives_ready_and_claimed_work_then_reclaims",
+);
+const I8_SPECIALIZATION_STUCK_CYCLE: RuntimeCycleEvidence = RuntimeCycleEvidence::Fixture(
+    "managed_core_net_stuck_reason_self_cycle_is_traced_and_reclaimed",
+);
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecialization>(
     template: &InteractionNet<S>,
@@ -229,6 +247,15 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
             let _: (&CopyId, &Port) = (copy, remote);
         }
     }
+    let _runtime_node_cycle = match runtime_node {
+        RuntimeNode::Data(_) => I5_DATA_NODE_CYCLE,
+        RuntimeNode::Operator(_) => I8_OPERATOR_WORK_CYCLE,
+        RuntimeNode::Bind
+        | RuntimeNode::Fan { .. }
+        | RuntimeNode::Erase
+        | RuntimeNode::Interface
+        | RuntimeNode::RemoteCursor { .. } => RuntimeCycleEvidence::EdgeFree,
+    };
 
     let CopyState {
         source,
@@ -240,6 +267,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         &HashMap<Port, NodeId>,
         &HashMap<FanSite, FanSite>,
     ) = (source, frontiers, fan_sites);
+    let _copy_cycle = I5_REMOTE_CURSOR_SOURCE_CYCLE;
 
     let PairlessCursorObligation { cursor, state } = obligation;
     let _: (&NodeId, &PairlessCursorState<S>) = (cursor, state);
@@ -250,6 +278,17 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
             let _: &CursorDependency<S> = dependency;
         }
     }
+    let _pairless_cycle = match pairless {
+        PairlessCursorState::Blocked(dependency) => match dependency {
+            CursorDependency::LocalCursor(_) => RuntimeCycleEvidence::EdgeFree,
+            CursorDependency::SourceCursor(_) | CursorDependency::SourceFrontier(_) => {
+                I5_REMOTE_CURSOR_SOURCE_CYCLE
+            }
+        },
+        PairlessCursorState::Ready | PairlessCursorState::Claimed | PairlessCursorState::Stable => {
+            RuntimeCycleEvidence::EdgeFree
+        }
+    };
 
     match dependency {
         CursorDependency::LocalCursor(cursor) => {
@@ -260,12 +299,19 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
             let _: &FrontierObservation<S> = observation;
         }
     }
+    let _dependency_cycle = match dependency {
+        CursorDependency::LocalCursor(_) => RuntimeCycleEvidence::EdgeFree,
+        CursorDependency::SourceCursor(_) | CursorDependency::SourceFrontier(_) => {
+            I5_REMOTE_CURSOR_SOURCE_CYCLE
+        }
+    };
     let FrontierObservation {
         source,
         observed_topology,
         endpoint,
     } = observation;
     let _: (&S::RuntimeSource, &u64, &DemandEndpoint) = (source, observed_topology, endpoint);
+    let _observation_cycle = I5_REMOTE_CURSOR_SOURCE_CYCLE;
 
     match active_state {
         ActivePairState::Ready | ActivePairState::Claimed => {}
@@ -279,18 +325,52 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
             let _: &StuckReason<S::StuckReason> = reason;
         }
     }
+    let _active_cycle = match active_state {
+        ActivePairState::BlockedCursor {
+            blockage: CursorBlockage::Dependency(dependency),
+            ..
+        } => match dependency {
+            CursorDependency::LocalCursor(_) => RuntimeCycleEvidence::EdgeFree,
+            CursorDependency::SourceCursor(_) | CursorDependency::SourceFrontier(_) => {
+                I5_REMOTE_CURSOR_SOURCE_CYCLE
+            }
+        },
+        ActivePairState::Stuck(StuckReason::Specialization(_)) => I8_SPECIALIZATION_STUCK_CYCLE,
+        ActivePairState::Ready
+        | ActivePairState::Claimed
+        | ActivePairState::BlockedCall { .. }
+        | ActivePairState::BlockedOperatorCall { .. }
+        | ActivePairState::BlockedCursor {
+            blockage: CursorBlockage::Stable,
+            ..
+        }
+        | ActivePairState::Stuck(StuckReason::NoRule) => RuntimeCycleEvidence::EdgeFree,
+    };
     match blockage {
         CursorBlockage::Dependency(dependency) => {
             let _: &CursorDependency<S> = dependency;
         }
         CursorBlockage::Stable => {}
     }
+    let _blockage_cycle = match blockage {
+        CursorBlockage::Dependency(CursorDependency::SourceCursor(_))
+        | CursorBlockage::Dependency(CursorDependency::SourceFrontier(_)) => {
+            I5_REMOTE_CURSOR_SOURCE_CYCLE
+        }
+        CursorBlockage::Dependency(CursorDependency::LocalCursor(_)) | CursorBlockage::Stable => {
+            RuntimeCycleEvidence::EdgeFree
+        }
+    };
     match stuck {
         StuckReason::NoRule => {}
         StuckReason::Specialization(reason) => {
             let _: &S::StuckReason = reason;
         }
     }
+    let _stuck_cycle = match stuck {
+        StuckReason::NoRule => RuntimeCycleEvidence::EdgeFree,
+        StuckReason::Specialization(_) => I8_SPECIALIZATION_STUCK_CYCLE,
+    };
 
     let SharedRuntimeNetState { runtime, batches } = shared;
     let _: (&RuntimeNet<S>, &NormalizationBatchState) = (runtime, batches);
@@ -302,6 +382,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         dirty,
     } = batch;
     let _: (&u64, &bool, &bool) = (id, contended, dirty);
+    let _normalization_cycle = RuntimeCycleEvidence::EdgeFree;
 
     let RuntimeNetEdgeSet {
         nodes,
@@ -317,11 +398,31 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
     ) = (nodes, copy, active, obligation);
     let RuntimeNetEdgeTransition { leaving, adding } = transition;
     let _: (&RuntimeNetEdgeSet, &RuntimeNetEdgeSet) = (leaving, adding);
+    let _edge_transition_cycle = RuntimeCycleEvidence::EdgeFree;
 }
 
 #[test]
 fn runtime_payload_owner_inventory_is_compile_exhaustive() {
     let _ = assert_runtime_payload_owner_inventory_is_compile_exhaustive::<i32>;
+}
+
+#[test]
+fn runtime_cycle_fixture_mapping_is_source_backed() {
+    let recursive_cells = include_str!("../../core/managed/recursive_cells.rs");
+    for evidence in [
+        I5_DATA_NODE_CYCLE,
+        I5_REMOTE_CURSOR_SOURCE_CYCLE,
+        I8_OPERATOR_WORK_CYCLE,
+        I8_SPECIALIZATION_STUCK_CYCLE,
+    ] {
+        let RuntimeCycleEvidence::Fixture(fixture) = evidence else {
+            unreachable!("the fixture inventory must not contain edge-free rows")
+        };
+        assert!(
+            recursive_cells.contains(&format!("fn {fixture}()")),
+            "runtime topology maps to missing reclamation fixture {fixture}"
+        );
+    }
 }
 
 #[test]

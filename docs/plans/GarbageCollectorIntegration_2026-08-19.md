@@ -240,6 +240,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8A.1 | complete | final payload and visitor reconciliation |
 | I8A.2 | complete | exact per-edit runtime-net mutation deltas |
 | I8A.3 | complete | lock, access, and lifecycle revalidation |
+| I8B.1 | complete | quiescent and specialization-stuck cycle deltas |
+| I8B.2 | complete | ready and claimed operator-work cycle deltas |
+| I8B.3 | complete | cursor and copy-source cycle reconciliation |
+| I8B | complete | final post-cutover net cycle matrix |
+| I8C | pending | net-specific compatibility retirement |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5664,6 +5669,14 @@ I6-I8 delta; they do not reproduce that baseline matrix.
 - Include an I6 or I7 payload only when its audit introduced a new edge shape.
   An unchanged compatibility shell consumes its existing I5 fixture.
 
+Completed 2026-09-10. A specialization failure parked in
+`ActivePairState::Stuck` can retain its owning managed core net; this was the
+one quiescent composition not closed by I5's independent net and structured-
+failure fixtures. `managed_core_net_stuck_reason_self_cycle_is_traced_and_reclaimed`
+constructs that exact production state, proves one root retains precisely the
+one-cell cycle, then proves exact reclamation after the root is removed. No
+I6/I7 payload introduced another topology-owned edge shape.
+
 #### Phase I8B.2 — Scheduled and In-Flight Deltas
 
 - Exercise managed values retained solely by pending active-pair work,
@@ -5671,6 +5684,16 @@ I6-I8 delta; they do not reproduce that baseline matrix.
   was not present in the I5 matrix.
 - Use deterministic barriers where ownership changes across a claim or
   publication boundary; repetition is stress evidence, not ordering proof.
+
+Completed 2026-09-10. Ready, claimed, blocked-call, and normalization records
+contain only node IDs, wait tokens, and coordination state; semantic values
+remain owned by the runtime nodes. The isolated
+`managed_operator_payload_cycle_survives_ready_and_claimed_work_then_reclaims`
+fixture therefore keeps one promise/operator-net cycle first in the ready
+state and independently in the claimed state. Each state retains exactly two
+managed cells through one promise root and reclaims both after that root is
+removed. The state change is synchronous under the net lock, so no disputed
+concurrent ordering or repetition-based evidence is involved.
 
 #### Phase I8B.3 — Cursor and Copy-Source Deltas
 
@@ -5680,9 +5703,29 @@ I6-I8 delta; they do not reproduce that baseline matrix.
   materially changed after I5F.3c. The existing three-cell remote-cursor cycle
   remains the baseline for unchanged source topology.
 
+Completed 2026-09-10. `CopyState`, source-cursor observations, and source-
+frontier observations all retain the same exact runtime-source edge already
+closed by I5F.3c's three-cell remote-cursor fixture. A local-cursor dependency,
+the remote-cursor node itself, frontier IDs, and pairless/active claim state
+are edge-free. Cursor WHNF and I8A changed publication and exact mutation
+deltas, but introduced no new durable source representation, so no duplicate
+reclamation fixture was added.
+
 Each new closed fixture proves rooted survival and exact unrooted reclamation
 in an isolated runtime. Finish with one source-backed mapping from every final
 topology state to either its I5 baseline or its I8 delta fixture.
+
+The compile-exhaustive mapping in `interaction_net/runtime/tests.rs` now binds
+every final owning topology variant to this matrix and verifies that every
+named fixture exists in `core/managed/recursive_cells.rs`:
+
+| Final topology owner | Semantic-edge disposition | Reclamation evidence |
+| --- | --- | --- |
+| `RuntimeNode::Data` | value payload | I5F.2 `managed_promise_core_net_pair_cycle_is_traced_and_reclaimed` |
+| `RuntimeNode::Operator` across ready/claimed work | operator value/net payloads; active state itself is edge-free | I8B.2 `managed_operator_payload_cycle_survives_ready_and_claimed_work_then_reclaims`, plus the exhaustive operator adapter |
+| `CopyState` and source cursor/frontier dependencies | exact source-net edge; repeated owning occurrences are permitted | I5F.3c `managed_promise_cycle_through_remote_cursor_source_is_traced_and_reclaimed` |
+| specialization `StuckReason` | structured failure payload | I8B.1 `managed_core_net_stuck_reason_self_cycle_is_traced_and_reclaimed` |
+| bind/fan/erase/interface/remote-cursor nodes; local dependencies; no-rule failures; wait, normalization, frontier-ID, and edge-transition companions | edge-free | compile-exhaustive topology inventory and I8A.3 lifecycle fixtures |
 
 ### Phase I8C — Net-Specific Compatibility Retirement
 

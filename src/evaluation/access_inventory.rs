@@ -117,9 +117,11 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // for lazy, promise, and synchronized net transitions through that
         // same bounded access surface. I8A.2 retires the two-access arbitrary
         // whole-net replacement fixture with the whole-net mutation bridge.
+        // I8B adds two isolated managed-net cycle fixtures, each with one
+        // construction/publication region.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(37, 0),
+            GatewayCounts::new(39, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures

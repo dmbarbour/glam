@@ -1094,8 +1094,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, Key, LazyApplication,
-        LazySource, LazyValue, List, ListThunk, NetValue, PromisedValue,
+        Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluatedValue, EvaluationHalt, Key,
+        LazyApplication, LazySource, LazyValue, List, ListThunk, NetValue, PromisedValue,
     };
 
     use crate::interaction_net::{NetBuilder, PreparedCopySource};
@@ -2753,6 +2753,127 @@ mod tests {
         assert_single_promise_failure_cycle_through("failure context compatibility", |backedge| {
             EvaluationFailure::message("compatibility failure").with_context(backedge)
         });
+    }
+
+    #[test]
+    fn managed_core_net_stuck_reason_self_cycle_is_traced_and_reclaimed() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the stuck-reason cycle fixture should start collectible");
+        let root = values.with_runtime_value_access(|access| {
+            let mut builder = NetBuilder::<CoreSpecialization>::new();
+            let [function, argument, result] = builder.bind();
+            let callable = builder.data(Value::Number(0.into()));
+            let supplied = builder.data(Value::Number(1.into()));
+            builder.wire(function, callable);
+            builder.wire(argument, supplied);
+            let mut runtime = builder.finish(result).instantiate();
+            let reduction = runtime
+                .reduce_next()
+                .expect("the Bind/Data pair should become a claimed call");
+            let crate::interaction_net::ReductionKind::Call { bind, data } = reduction.kind else {
+                panic!("the stuck-reason fixture should claim a call")
+            };
+            let call = crate::interaction_net::Call {
+                pair: reduction.pair,
+                bind,
+                data,
+            };
+
+            let edge = access
+                .allocate_managed_core_net(runtime)
+                .expect("the managed core-net cell should fit a run");
+            let root = access.root_managed_core_net(edge);
+            let net = crate::core_net::CoreRuntimeNet::from_managed_edge(edge);
+            net.access(&access).fail_claimed_call(
+                call,
+                EvaluationHalt::from_value(Value::Net(NetValue::new(net.clone()))),
+            );
+            root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("a root should retain the net through its own stuck reason");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("the unrooted stuck-reason self-cycle should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
+    fn managed_operator_payload_cycle_survives_ready_and_claimed_work_then_reclaims() {
+        fn assert_state(claim: bool) {
+            let state = if claim { "claimed" } else { "ready" };
+            let values = new_values();
+            let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
+                panic!("the {state} operator-work fixture should start collectible: {failure}")
+            });
+            let root = values.with_runtime_value_access(|access| {
+                let promise_root = access
+                    .construct_rooted_managed_promise(format!("{state} operator work"))
+                    .expect("the managed promise cell should fit a run");
+                let promise = PromisedValue::from_root(&promise_root, &access);
+
+                let mut builder = NetBuilder::<CoreSpecialization>::new();
+                let [input, result] = builder.operator(crate::core_net::CoreOperator::Applicable(
+                    Value::Promised(promise),
+                ));
+                let argument = builder.data(Value::Number(2.into()));
+                builder.wire(input, argument);
+                let runtime = builder.finish(result).instantiate();
+                let pair = runtime
+                    .active_pairs()
+                    .next()
+                    .expect("the Operator/Data pair should begin ready");
+                let net_edge = access
+                    .allocate_managed_core_net(runtime)
+                    .expect("the managed core-net cell should fit a run");
+                let net_root = access.root_managed_core_net(net_edge);
+                let net = crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge);
+
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Net(NetValue::new(net.clone()))))
+                    .expect("the fresh promise should accept its operator-work cycle");
+                if claim {
+                    assert!(matches!(
+                        net.access(&access).step_active_pair(pair),
+                        crate::core_net::CoreActivePairStep::Reduction(
+                            crate::interaction_net::Reduction {
+                                kind: crate::interaction_net::ReductionKind::OperatorCall { .. },
+                                ..
+                            }
+                        )
+                    ));
+                }
+                drop(net_root);
+                promise_root
+            });
+
+            let live = values.collect_managed_for_test().unwrap_or_else(|failure| {
+                panic!("one root should retain the {state} operator-work cycle: {failure}")
+            });
+            assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+            assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+            drop(root);
+            let dead = values.collect_managed_for_test().unwrap_or_else(|failure| {
+                panic!("the unrooted {state} operator-work cycle should reclaim: {failure}")
+            });
+            assert_eq!(dead.root_entries(), baseline.root_entries());
+            assert_eq!(dead.finalized_slots(), 2);
+        }
+
+        assert_state(false);
+        assert_state(true);
     }
 
     #[test]
