@@ -522,11 +522,184 @@ pub(crate) struct NormalizationBatchGuard<'cell, S: NetSpecialization> {
 /// specializations use this seam to keep collector edge accounting inside the
 /// same net mutex which authorizes the topology or payload edit.
 pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization> {
+    /// Performs an edge-free topology or coordination transition.
+    ///
+    /// Callers must use `transition_edges` when the update installs or removes
+    /// any specialization payload reported by `RuntimeNet::visit_logical_payloads`.
     fn transition<Result>(
         &self,
         runtime: &mut RuntimeNet<S>,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
+    ) -> Result {
+        self.transition_edges(runtime, RuntimeNetEdgeTransition::default(), update)
+    }
+
+    /// Performs one topology transition with exact pre- and post-write owner
+    /// addresses for its semantic edge delta.
+    fn transition_edges<Result>(
+        &self,
+        runtime: &mut RuntimeNet<S>,
+        edges: RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
     ) -> Result;
+}
+
+/// Allocation-free addresses of semantic payload owners in one runtime net.
+///
+/// The set deliberately describes representation locations rather than
+/// cloning payloads. A collector policy which needs a side resolves these
+/// addresses while the runtime-net mutex still holds the corresponding
+/// pre- or post-write state. Two node slots cover every current rewrite: an
+/// operator completion removes two payload nodes, while duplication installs
+/// at most two payload nodes.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RuntimeNetEdgeSet {
+    nodes: [Option<NodeId>; 2],
+    copy: Option<CopyId>,
+    active: Option<ActivePairKey>,
+    obligation: Option<NodeId>,
+}
+
+impl RuntimeNetEdgeSet {
+    fn node(node: NodeId) -> Self {
+        Self {
+            nodes: [Some(node), None],
+            ..Self::default()
+        }
+    }
+
+    fn nodes(left: NodeId, right: NodeId) -> Self {
+        Self {
+            nodes: [Some(left), Some(right)],
+            ..Self::default()
+        }
+    }
+
+    fn copy(copy: CopyId) -> Self {
+        Self {
+            copy: Some(copy),
+            ..Self::default()
+        }
+    }
+
+    fn active(pair: ActivePairKey) -> Self {
+        Self {
+            active: Some(pair),
+            ..Self::default()
+        }
+    }
+
+    fn with_active(mut self, pair: ActivePairKey) -> Self {
+        self.active = Some(pair);
+        self
+    }
+
+    fn with_copy(mut self, copy: CopyId) -> Self {
+        self.copy = Some(copy);
+        self
+    }
+
+    fn with_obligation(mut self, cursor: NodeId) -> Self {
+        self.obligation = Some(cursor);
+        self
+    }
+
+    fn visit<S: NetSpecialization>(
+        self,
+        runtime: &RuntimeNet<S>,
+        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
+    ) {
+        for node in self.nodes.into_iter().flatten() {
+            match runtime.node(node) {
+                Some(RuntimeNode::Data(data)) => visit(RuntimeNetPayload::Data(data)),
+                Some(RuntimeNode::Operator(operator)) => {
+                    visit(RuntimeNetPayload::Operator(operator));
+                }
+                Some(
+                    RuntimeNode::Bind
+                    | RuntimeNode::Fan { .. }
+                    | RuntimeNode::Erase
+                    | RuntimeNode::Interface
+                    | RuntimeNode::RemoteCursor { .. },
+                )
+                | None => {}
+            }
+        }
+
+        if let Some(copy) = self.copy
+            && let Some(state) = runtime.copies.get(&copy)
+        {
+            visit(RuntimeNetPayload::Source(&state.source));
+        }
+        if let Some(pair) = self.active
+            && let Some(state) = runtime.active.get(&pair)
+        {
+            visit_active_pair_payload(state, visit);
+        }
+        if let Some(cursor) = self.obligation
+            && let Some(obligation) = runtime.cursor_obligations.get(&cursor)
+            && let PairlessCursorState::Blocked(dependency) = &obligation.state
+            && let Some(source) = dependency.source_runtime()
+        {
+            visit(RuntimeNetPayload::Source(source));
+        }
+    }
+}
+
+fn visit_active_pair_payload<'payload, S: NetSpecialization>(
+    state: &'payload ActivePairState<S>,
+    visit: &mut impl FnMut(RuntimeNetPayload<'payload, S>),
+) {
+    match state {
+        ActivePairState::BlockedCursor {
+            blockage: CursorBlockage::Dependency(dependency),
+            ..
+        } => {
+            if let Some(source) = dependency.source_runtime() {
+                visit(RuntimeNetPayload::Source(source));
+            }
+        }
+        ActivePairState::Stuck(StuckReason::Specialization(reason)) => {
+            visit(RuntimeNetPayload::StuckReason(reason));
+        }
+        ActivePairState::Ready
+        | ActivePairState::Claimed
+        | ActivePairState::BlockedCall { .. }
+        | ActivePairState::BlockedOperatorCall { .. }
+        | ActivePairState::BlockedCursor {
+            blockage: CursorBlockage::Stable,
+            ..
+        }
+        | ActivePairState::Stuck(StuckReason::NoRule) => {}
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RuntimeNetEdgeTransition {
+    leaving: RuntimeNetEdgeSet,
+    adding: RuntimeNetEdgeSet,
+}
+
+impl RuntimeNetEdgeTransition {
+    fn new(leaving: RuntimeNetEdgeSet, adding: RuntimeNetEdgeSet) -> Self {
+        Self { leaving, adding }
+    }
+
+    pub(crate) fn visit_leaving<S: NetSpecialization>(
+        self,
+        runtime: &RuntimeNet<S>,
+        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
+    ) {
+        self.leaving.visit(runtime, visit);
+    }
+
+    pub(crate) fn visit_adding<S: NetSpecialization>(
+        self,
+        runtime: &RuntimeNet<S>,
+        visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
+    ) {
+        self.adding.visit(runtime, visit);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -538,9 +711,10 @@ struct DirectRuntimeNetMutationGateway;
 
 impl<S: NetSpecialization> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway {
     #[inline(always)]
-    fn transition<Result>(
+    fn transition_edges<Result>(
         &self,
         runtime: &mut RuntimeNet<S>,
+        _edges: RuntimeNetEdgeTransition,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
     ) -> Result {
         update(runtime)
@@ -832,6 +1006,46 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         result
     }
 
+    pub(crate) fn with_edge_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        edges: impl FnOnce(&RuntimeNet<S>) -> RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> R,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        let mut state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let edges = edges(&state.runtime);
+        let result = gateway.transition_edges(&mut state.runtime, edges, update);
+        self.publish_mutation(&mut state.batches);
+        result
+    }
+
+    pub(crate) fn with_input_edge_mut_via<Gateway, Input, R>(
+        &self,
+        gateway: &Gateway,
+        input: Input,
+        edges: impl FnOnce(&RuntimeNet<S>, &Input) -> RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>, Input) -> R,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        let mut state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let edges = edges(&state.runtime, &input);
+        let result =
+            gateway.transition_edges(&mut state.runtime, edges, |runtime| update(runtime, input));
+        self.publish_mutation(&mut state.batches);
+        result
+    }
+
     #[allow(
         dead_code,
         reason = "the direct gateway serves the generic non-core test specialization"
@@ -856,6 +1070,29 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .lock()
             .expect("shared runtime net was poisoned");
         match gateway.transition(&mut state.runtime, update) {
+            RuntimeNetMutation::Unchanged(result) => result,
+            RuntimeNetMutation::Changed(result) => {
+                self.publish_mutation(&mut state.batches);
+                result
+            }
+        }
+    }
+
+    pub(crate) fn with_conditional_edge_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        edges: impl FnOnce(&RuntimeNet<S>) -> RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        let mut state = self
+            .runtime
+            .lock()
+            .expect("shared runtime net was poisoned");
+        let edges = edges(&state.runtime);
+        match gateway.transition_edges(&mut state.runtime, edges, update) {
             RuntimeNetMutation::Unchanged(result) => result,
             RuntimeNetMutation::Changed(result) => {
                 self.publish_mutation(&mut state.batches);
@@ -905,14 +1142,18 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         expected: &CursorDependency<S>,
         disposition: CursorDependencyDisposition,
     ) -> CursorDependencyResolution {
-        self.with_conditional_mut(|runtime| {
-            let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
-            if resolution == CursorDependencyResolution::Resolved {
-                RuntimeNetMutation::Changed(resolution)
-            } else {
-                RuntimeNetMutation::Unchanged(resolution)
-            }
-        })
+        self.with_conditional_edge_mut_via(
+            &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+            |runtime| runtime.resolve_cursor_dependency_edge_transition(cursor, expected),
+            |runtime| {
+                let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
+                if resolution == CursorDependencyResolution::Resolved {
+                    RuntimeNetMutation::Changed(resolution)
+                } else {
+                    RuntimeNetMutation::Unchanged(resolution)
+                }
+            },
+        )
     }
 
     fn disturbance(&self) -> RuntimeNetDisturbance {
@@ -981,8 +1222,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             let mut cursor_claim = None;
             let (outcome, changed) = match pair_state {
                 Some(ActivePairState::Ready) => {
+                    let edges = state.runtime.reduce_pair_edge_transition(pair);
                     let reduction = gateway
-                        .transition(&mut state.runtime, |runtime| runtime.reduce_pair(pair))
+                        .transition_edges(&mut state.runtime, edges, |runtime| {
+                            runtime.reduce_pair(pair)
+                        })
                         .expect("ready pair must produce one reduction");
                     if let ReductionKind::RemoteCursor {
                         cursor,
@@ -1487,9 +1731,14 @@ where
                     .as_ref()
                     .expect("an unfinished cursor guard must retain its claim")
                     .clone();
-                Some(self.target.with_mut_via(self.gateway, |target| {
-                    target.finish_cursor_claim(claim, frontier)
-                }))
+                Some(self.target.with_input_edge_mut_via(
+                    self.gateway,
+                    (claim, frontier),
+                    |target, (claim, frontier)| {
+                        target.finish_cursor_claim_edge_transition(claim, frontier)
+                    },
+                    |target, (claim, frontier)| target.finish_cursor_claim(claim, frontier),
+                ))
             }
             CursorDisposition::Release => {
                 let restored = self.restore_fallback();
@@ -1745,6 +1994,152 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
 
         stats
+    }
+
+    fn next_node(&self, offset: u64) -> NodeId {
+        NodeId::from_zero_based(
+            self.next_node_id
+                .checked_add(offset)
+                .expect("interaction-net node ID space exhausted"),
+        )
+    }
+
+    pub(crate) fn reduce_pair_edge_transition(
+        &self,
+        pair: ActivePairKey,
+    ) -> RuntimeNetEdgeTransition {
+        if !self
+            .active
+            .get(&pair)
+            .is_some_and(ActivePairState::is_ready)
+        {
+            return RuntimeNetEdgeTransition::default();
+        }
+        let Some((left, right)) = self.pair_nodes(pair) else {
+            return RuntimeNetEdgeTransition::default();
+        };
+        match (self.node(left), self.node(right)) {
+            (Some(RuntimeNode::Fan { .. }), Some(RuntimeNode::Data(_))) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(right),
+                    RuntimeNetEdgeSet::nodes(self.next_node(0), self.next_node(1)),
+                )
+            }
+            (Some(RuntimeNode::Data(_)), Some(RuntimeNode::Fan { .. })) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(left),
+                    RuntimeNetEdgeSet::nodes(self.next_node(0), self.next_node(1)),
+                )
+            }
+            (Some(RuntimeNode::Fan { .. }), Some(RuntimeNode::Operator(_))) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(right),
+                    RuntimeNetEdgeSet::nodes(self.next_node(0), self.next_node(1)),
+                )
+            }
+            (Some(RuntimeNode::Operator(_)), Some(RuntimeNode::Fan { .. })) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(left),
+                    RuntimeNetEdgeSet::nodes(self.next_node(0), self.next_node(1)),
+                )
+            }
+            (Some(RuntimeNode::Erase), Some(RuntimeNode::Data(_) | RuntimeNode::Operator(_))) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(right),
+                    RuntimeNetEdgeSet::default(),
+                )
+            }
+            (Some(RuntimeNode::Data(_) | RuntimeNode::Operator(_)), Some(RuntimeNode::Erase)) => {
+                RuntimeNetEdgeTransition::new(
+                    RuntimeNetEdgeSet::node(left),
+                    RuntimeNetEdgeSet::default(),
+                )
+            }
+            _ => RuntimeNetEdgeTransition::default(),
+        }
+    }
+
+    pub(crate) fn resume_call_with_copy_edge_transition(
+        &self,
+        call: Call,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::node(call.data),
+            RuntimeNetEdgeSet::copy(CopyId(self.next_copy_id)),
+        )
+    }
+
+    pub(crate) fn resume_call_with_operator_edge_transition(
+        &self,
+        call: Call,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::node(call.data),
+            RuntimeNetEdgeSet::node(self.next_node(0)),
+        )
+    }
+
+    pub(crate) fn fail_call_edge_transition(&self, call: Call) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::default(),
+            RuntimeNetEdgeSet::active(call.pair),
+        )
+    }
+
+    pub(crate) fn complete_operator_edge_transition(
+        &self,
+        call: OperatorCall,
+        result: &OperatorYield<S>,
+    ) -> RuntimeNetEdgeTransition {
+        let adding = match result {
+            OperatorYield::Data(_) => RuntimeNetEdgeSet::node(self.next_node(0)),
+            // The structural Bind is allocated first.
+            OperatorYield::Operator(_) => RuntimeNetEdgeSet::node(self.next_node(1)),
+        };
+        RuntimeNetEdgeTransition::new(RuntimeNetEdgeSet::nodes(call.operator, call.data), adding)
+    }
+
+    pub(crate) fn fail_operator_edge_transition(
+        &self,
+        call: OperatorCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::default(),
+            RuntimeNetEdgeSet::active(call.pair),
+        )
+    }
+
+    pub(crate) fn resolve_cursor_dependency_edge_transition(
+        &self,
+        cursor: NodeId,
+        expected: &CursorDependency<S>,
+    ) -> RuntimeNetEdgeTransition {
+        let leaving = match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair))
+                if matches!(
+                    self.active.get(&pair),
+                    Some(ActivePairState::BlockedCursor {
+                        cursor: blocked,
+                        blockage: CursorBlockage::Dependency(actual),
+                    }) if *blocked == cursor && actual == expected
+                ) =>
+            {
+                RuntimeNetEdgeSet::active(pair)
+            }
+            Some(CursorClaimOwner::Obligation)
+                if matches!(
+                    self.cursor_obligations.get(&cursor),
+                    Some(PairlessCursorObligation {
+                        state: PairlessCursorState::Blocked(actual),
+                        ..
+                    }) if actual == expected
+                ) =>
+            {
+                RuntimeNetEdgeSet::default().with_obligation(cursor)
+            }
+            _ => RuntimeNetEdgeSet::default(),
+        };
+        RuntimeNetEdgeTransition::new(leaving, RuntimeNetEdgeSet::default())
     }
 
     #[cfg(test)]

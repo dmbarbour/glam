@@ -5,6 +5,8 @@ use std::cell::Cell;
 use std::sync::{Arc, Weak};
 
 use super::{CoreValueFactory, RuntimeValueDomain};
+#[cfg(test)]
+use super::{LazySource, LazyValue};
 use crate::runtime::EvaluationRuntimeId;
 
 /// Initial minimum slot extent for Glam-owned managed representations.
@@ -654,6 +656,19 @@ impl RuntimeValueAccess<'_> {
 
 #[cfg(test)]
 impl CoreValueFactory {
+    pub(crate) fn rooted_error_lazy_for_test(
+        &self,
+        label: impl Into<Arc<str>>,
+    ) -> (ManagedLazyRoot, LazyValue) {
+        self.with_runtime_value_access(|access| {
+            let root = access
+                .construct_rooted_managed_lazy(label, LazySource::Error)
+                .expect("test lazy should fit one managed slot");
+            let lazy = LazyValue::from_root(&root, &access);
+            (root, lazy)
+        })
+    }
+
     pub(crate) fn install_edge_transition_probe_for_test(
         &self,
         observation: glam_gc::EdgeTransitionObservation,

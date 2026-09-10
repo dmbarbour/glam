@@ -79,6 +79,68 @@ impl<S: NetSpecialization> PreparedCopySource<S> {
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {
+    pub(super) fn finish_cursor_claim_edge_transition(
+        &self,
+        claim: &CursorClaim<S>,
+        frontier: &SourceFrontier<S>,
+    ) -> RuntimeNetEdgeTransition {
+        let frontier_port = match &frontier.shape {
+            SourceFrontierShape::Principal { port, .. }
+            | SourceFrontierShape::StableAuxiliary { port, .. } => *port,
+            SourceFrontierShape::ActiveAuxiliary { entered, .. } => *entered,
+        };
+        let converging_cursor = self
+            .copies
+            .get(&claim.copy)
+            .and_then(|state| state.frontiers.get(&frontier_port).copied());
+
+        let mut leaving = RuntimeNetEdgeSet::default();
+        if let Some(peer) = converging_cursor
+            && !self.cursor_claim_is_in_flight(peer)
+        {
+            match self.cursor_claim_owner(peer) {
+                Some(CursorClaimOwner::ActivePair(pair)) => {
+                    leaving = leaving.with_active(pair);
+                }
+                Some(CursorClaimOwner::Obligation) => {
+                    leaving = leaving.with_obligation(peer);
+                }
+                None => {}
+            }
+            if self
+                .copies
+                .get(&claim.copy)
+                .is_some_and(|state| state.frontiers.len() == 2)
+            {
+                leaving = leaving.with_copy(claim.copy);
+            }
+        }
+
+        let mut adding = match &frontier.shape {
+            SourceFrontierShape::Principal {
+                node:
+                    RuntimeNode::Bind
+                    | RuntimeNode::Fan { .. }
+                    | RuntimeNode::Erase
+                    | RuntimeNode::Data(_)
+                    | RuntimeNode::Operator(_),
+                ..
+            } if converging_cursor.is_none() => RuntimeNetEdgeSet::node(self.next_node(0)),
+            SourceFrontierShape::Principal {
+                node: RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. },
+                ..
+            }
+            | SourceFrontierShape::StableAuxiliary { .. }
+            | SourceFrontierShape::ActiveAuxiliary { .. }
+            | SourceFrontierShape::Principal { .. } => RuntimeNetEdgeSet::default(),
+        };
+        match claim.owner {
+            CursorClaimOwner::ActivePair(pair) => adding = adding.with_active(pair),
+            CursorClaimOwner::Obligation => adding = adding.with_obligation(claim.cursor),
+        }
+        RuntimeNetEdgeTransition::new(leaving, adding)
+    }
+
     /// Starts one logical copy and returns its initially unwired remote cursor.
     ///
     /// Source inspection has already happened in `prepare_copy_source`, so

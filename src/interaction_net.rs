@@ -16,9 +16,9 @@ pub(crate) use runtime::{
     ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
-    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell, RuntimeNetMutation,
-    RuntimeNetMutationGateway, RuntimeNetPayload, RuntimeNetPayloadVisitStats, SourceFrontier,
-    StuckReason,
+    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell,
+    RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway, RuntimeNetPayload,
+    RuntimeNetPayloadVisitStats, SourceFrontier, StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

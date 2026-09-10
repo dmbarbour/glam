@@ -23,7 +23,8 @@ use crate::evaluation::{
     EvaluationWorkCoordinator, PromiseProducerObligation, WakeRegistration,
 };
 use crate::interaction_net::{
-    RuntimeNet, RuntimeNetCell, RuntimeNetMutationGateway, RuntimeNetPayload,
+    RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutationGateway,
+    RuntimeNetPayload,
 };
 use crate::runtime::RuntimeMutationAuthority;
 
@@ -884,22 +885,31 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
 
 impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, '_> {
     #[inline(always)]
-    fn transition<Result>(
+    fn transition_edges<Result>(
         &self,
         runtime: &mut RuntimeNet<CoreSpecialization>,
+        edges: RuntimeNetEdgeTransition,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Result,
     ) -> Result {
         // SAFETY: this access proves the managed owner is live in the exact
-        // value region. Both visitors enumerate the complete synchronized net
-        // state at their respective side of the one coupled update. The
-        // caller already holds the sole runtime-net mutation mutex, and these
-        // visitors operate on the borrowed state rather than reacquiring it.
+        // value region. Each visitor resolves only the exact representation
+        // owners selected for its side of this update. The caller already
+        // holds the sole runtime-net mutation mutex, and these visitors
+        // operate on the borrowed state rather than reacquiring it.
         unsafe {
             self.authority.with_managed_edge_state_transition(
                 self.owner.0,
                 runtime,
-                trace_core_runtime_net,
-                trace_core_runtime_net,
+                |runtime, visitor| {
+                    edges.visit_leaving(runtime, &mut |payload| {
+                        trace_core_runtime_payload(payload, visitor);
+                    });
+                },
+                |runtime, visitor| {
+                    edges.visit_adding(runtime, &mut |payload| {
+                        trace_core_runtime_payload(payload, visitor);
+                    });
+                },
                 update,
             )
         }
@@ -982,8 +992,11 @@ unsafe impl Trace for ManagedPromiseCell {
     }
 }
 
-fn trace_core_runtime_net(runtime: &RuntimeNet<CoreSpecialization>, visitor: &mut Visitor<'_>) {
-    runtime.visit_logical_payloads(&mut |payload| match payload {
+fn trace_core_runtime_payload(
+    payload: RuntimeNetPayload<'_, CoreSpecialization>,
+    visitor: &mut Visitor<'_>,
+) {
+    match payload {
         RuntimeNetPayload::Data(value) => {
             visit_compatibility_managed_edges(value, visitor);
         }
@@ -999,7 +1012,7 @@ fn trace_core_runtime_net(runtime: &RuntimeNet<CoreSpecialization>, visitor: &mu
                 visit_compatibility_managed_edges(value, visitor);
             });
         }
-    });
+    }
 }
 
 // SAFETY: the owner-neutral runtime cell exposes one stable logical payload
@@ -1011,25 +1024,7 @@ unsafe impl Trace for ManagedCoreNetCell {
 
     fn trace(&self, visitor: &mut Visitor<'_>) {
         self.runtime.try_visit_logical_payloads(&mut |payload| {
-            // Reuse the same per-payload traversal as the mutation bridge
-            // without attempting to reacquire the runtime-net mutex.
-            match payload {
-                RuntimeNetPayload::Data(value) => {
-                    visit_compatibility_managed_edges(value, visitor);
-                }
-                RuntimeNetPayload::Operator(operator) => {
-                    visit_compatibility_payload_managed_edges(operator, visitor);
-                    operator.visit_compatibility_net_edges(&mut |net| {
-                        net.trace_managed_edge(visitor);
-                    });
-                }
-                RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
-                RuntimeNetPayload::StuckReason(reason) => {
-                    visit_halt_value_edges(reason, &mut |value| {
-                        visit_compatibility_managed_edges(value, visitor);
-                    });
-                }
-            }
+            trace_core_runtime_payload(payload, visitor);
         });
     }
 }
@@ -2049,41 +2044,6 @@ mod tests {
         unrelated.with_runtime_value_access(|access| {
             assert!(root.access(&access).is_none());
         });
-    }
-
-    #[test]
-    fn core_net_transition_visits_locked_pre_and_post_payloads() {
-        let values = new_values();
-        let (old_root, new_root, net_root) = values.with_runtime_value_access(|access| {
-            let old_root = access
-                .construct_rooted_managed_lazy("old net payload", LazySource::Error)
-                .expect("the old managed lazy should fit one collector slot");
-            let new_root = access
-                .construct_rooted_managed_lazy("new net payload", LazySource::Error)
-                .expect("the new managed lazy should fit one collector slot");
-            let net_root = access
-                .construct_rooted_managed_core_net(runtime_with_data(Value::Lazy(
-                    LazyValue::from_root(&old_root, &access),
-                )))
-                .expect("the managed core net should fit one collector slot");
-            (old_root, new_root, net_root)
-        });
-        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
-
-        values.with_runtime_value_access(|access| {
-            let net = net_root
-                .access(&access)
-                .expect("the rooted core net should remain accessible");
-            net.with_mut(|runtime| {
-                *runtime = runtime_with_data(Value::Lazy(LazyValue::from_root(&new_root, &access)));
-            });
-        });
-
-        let records = probe.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].leaving_edges(), 1);
-        assert_eq!(records[0].adding_edges(), 1);
-        drop((old_root, new_root, net_root));
     }
 
     #[test]

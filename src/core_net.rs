@@ -477,9 +477,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
         expected: &CoreCursorDependency,
         disposition: CursorDependencyDisposition,
     ) -> CursorDependencyResolution {
-        self.runtime
-            .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| {
+                runtime.resolve_cursor_dependency_edge_transition(
+                    cursor,
+                    &expected.to_generic(self.values),
+                )
+            },
+            |runtime| {
                 let resolution = runtime.resolve_cursor_dependency(
                     cursor,
                     &expected.to_generic(self.values),
@@ -490,7 +496,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 } else {
                     RuntimeNetMutation::Unchanged(resolution)
                 }
-            })
+            },
+        )
     }
 
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
@@ -563,9 +570,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         source: CorePreparedCopySource,
     ) {
         let (source, _source_root) = source.into_inner_for(self.values);
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.resume_claimed_call_with_copy(call, source)
-        });
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.resume_call_with_copy_edge_transition(call),
+            |runtime| runtime.resume_claimed_call_with_copy(call, source),
+        );
     }
 
     pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
@@ -605,9 +614,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         operator: CoreOperator,
     ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.resume_claimed_call_with_operator(call, operator);
-        });
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.resume_call_with_operator_edge_transition(call),
+            |runtime| runtime.resume_claimed_call_with_operator(call, operator),
+        );
     }
 
     pub(crate) fn block_claimed_call(
@@ -625,9 +636,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::Call,
         error: EvaluationHalt,
     ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.fail_claimed_call(call, error)
-        });
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.fail_call_edge_transition(call),
+            |runtime| runtime.fail_claimed_call(call, error),
+        );
     }
 
     pub(crate) fn release_claimed_call(&self, call: crate::interaction_net::Call) -> bool {
@@ -692,9 +705,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         result: OperatorYield<CoreSpecialization>,
     ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.complete_operator_call(call, result);
-        });
+        self.runtime.cell().with_input_edge_mut_via(
+            &self.runtime,
+            result,
+            |runtime, result| runtime.complete_operator_edge_transition(call, result),
+            |runtime, result| runtime.complete_operator_call(call, result),
+        );
     }
 
     pub(crate) fn block_claimed_operator_call(
@@ -712,9 +728,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::OperatorCall,
         error: EvaluationHalt,
     ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.fail_operator_call(call, error)
-        });
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.fail_operator_edge_transition(call),
+            |runtime| runtime.fail_operator_call(call, error),
+        );
     }
 
     pub(crate) fn release_claimed_operator_call(
@@ -1002,9 +1020,49 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+    use glam_gc::EdgeTransitionObservation;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use syn::visit::{self, Visit};
+
+    #[derive(Default)]
+    struct MethodCallInventory {
+        current: Option<String>,
+        calls: BTreeMap<String, BTreeSet<String>>,
+    }
+
+    impl<'ast> Visit<'ast> for MethodCallInventory {
+        fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+            let previous = self.current.replace(function.sig.ident.to_string());
+            visit::visit_block(self, &function.block);
+            self.current = previous;
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if let Some(current) = self.current.as_ref() {
+                self.calls
+                    .entry(current.clone())
+                    .or_default()
+                    .insert(call.method.to_string());
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    fn method_call_inventory(relative: &str) -> BTreeMap<String, BTreeSet<String>> {
+        let source = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join(relative),
+        )
+        .expect("inventoried Rust source must be readable");
+        let syntax = syn::parse_file(&source).expect("inventoried Rust source must parse");
+        let mut inventory = MethodCallInventory::default();
+        inventory.visit_file(&syntax);
+        inventory.calls
+    }
 
     fn assert_core_net_durable_owner_inventory(
         runtime: &CoreRuntimeNet,
@@ -1114,6 +1172,293 @@ mod tests {
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let data = builder.data(values.unit());
         builder.finish(data)
+    }
+
+    fn claimed_call(
+        values: &CoreValueFactory,
+        callable: Value,
+    ) -> (CoreRuntimeNet, crate::interaction_net::Call) {
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [function, argument, result] = builder.bind();
+        let callable = builder.data(callable);
+        let supplied = builder.data(Value::Number(11.into()));
+        builder.wire(function, callable);
+        builder.wire(argument, supplied);
+        let runtime = values.instantiate_core_net(&builder.finish(result));
+        let pair = runtime.test_with(values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("call pair should be active")
+        });
+        let reduction = runtime.with_test_access(values, |runtime| runtime.step_active_pair(pair));
+        let CoreActivePairStep::Reduction(Reduction {
+            kind: crate::interaction_net::ReductionKind::Call { bind, data },
+            ..
+        }) = reduction
+        else {
+            panic!("callable data should claim a Bind/Data call, got {reduction:?}")
+        };
+        (runtime, crate::interaction_net::Call { pair, bind, data })
+    }
+
+    fn claimed_operator_call(
+        values: &CoreValueFactory,
+        operator: CoreOperator,
+        argument: Value,
+    ) -> (CoreRuntimeNet, crate::interaction_net::OperatorCall) {
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [input, result] = builder.operator(operator);
+        let argument = builder.data(argument);
+        builder.wire(input, argument);
+        let runtime = values.instantiate_core_net(&builder.finish(result));
+        let pair = runtime.test_with(values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("operator pair should be active")
+        });
+        let reduction = runtime.with_test_access(values, |runtime| runtime.step_active_pair(pair));
+        let CoreActivePairStep::Reduction(Reduction {
+            kind: crate::interaction_net::ReductionKind::OperatorCall { operator, data },
+            ..
+        }) = reduction
+        else {
+            panic!("operator data should claim an Operator/Data call, got {reduction:?}")
+        };
+        (
+            runtime,
+            crate::interaction_net::OperatorCall {
+                pair,
+                operator,
+                data,
+            },
+        )
+    }
+
+    fn duplicating_runtime(
+        values: &CoreValueFactory,
+        payload: Value,
+        operator: bool,
+    ) -> CoreRuntimeNet {
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let copies = builder.copy(2);
+        if operator {
+            let [input, result] = builder.operator(CoreOperator::Applicable(payload));
+            builder.wire(copies.input, input);
+            let discard = builder.copy(0).input;
+            builder.wire(result, discard);
+        } else {
+            let data = builder.data(payload);
+            builder.wire(copies.input, data);
+        }
+        for output in copies.outputs {
+            let discard = builder.copy(0).input;
+            builder.wire(output, discard);
+        }
+        let exposed = builder.data(values.unit());
+        values.instantiate_core_net(&builder.finish(exposed))
+    }
+
+    #[test]
+    fn exact_duplication_deltas_report_one_replaced_and_two_installed_payloads() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (payload_root, payload) = values.rooted_error_lazy_for_test("duplicated payload");
+        let data = duplicating_runtime(&values, Value::Lazy(payload.clone()), false);
+        let operator = duplicating_runtime(&values, Value::Lazy(payload), true);
+        let data_pair = data.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("Fan/Data pair should be active")
+        });
+        let operator_pair = operator.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("Fan/Operator pair should be active")
+        });
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        assert!(matches!(
+            data.with_test_access(&values, |runtime| runtime.step_active_pair(data_pair)),
+            CoreActivePairStep::Reduction(Reduction {
+                kind: crate::interaction_net::ReductionKind::FanData { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            operator.with_test_access(&values, |runtime| runtime.step_active_pair(operator_pair)),
+            CoreActivePairStep::Reduction(Reduction {
+                kind: crate::interaction_net::ReductionKind::FanOperator { .. },
+                ..
+            })
+        ));
+
+        let records = probe.records();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record.leaving_edges(), 1);
+            assert_eq!(record.adding_edges(), 2);
+        }
+        drop((payload_root, data, operator));
+    }
+
+    #[test]
+    fn exact_call_lowering_deltas_report_copy_and_operator_payloads() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (old_root, old) = values.rooted_error_lazy_for_test("old callable");
+        let (new_root, new) = values.rooted_error_lazy_for_test("new operator");
+        let old = Value::Lazy(old);
+        let new = Value::Lazy(new);
+
+        let source = values.instantiate_core_net(&closed_unit_template(&values));
+        let prepared = source.test_prepare_copy_source(&values);
+        let (copy_call, call) = claimed_call(&values, old.clone());
+        let (operator_call, operator_call_claim) = claimed_call(&values, old);
+        let copy_probe =
+            values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        copy_call.with_test_access(&values, |runtime| {
+            runtime.resume_claimed_call_with_copy(call, prepared);
+        });
+        let records = copy_probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 1);
+
+        operator_call.with_test_access(&values, |runtime| {
+            runtime.resume_claimed_call_with_operator(
+                operator_call_claim,
+                CoreOperator::Applicable(new),
+            );
+        });
+        let records = copy_probe.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].leaving_edges(), 1);
+        assert_eq!(records[1].adding_edges(), 1);
+        drop((old_root, new_root, source, copy_call, operator_call));
+    }
+
+    #[test]
+    fn exact_operator_completion_and_stuck_deltas_report_only_changed_payloads() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (first_root, first) = values.rooted_error_lazy_for_test("operator payload");
+        let (second_root, second) = values.rooted_error_lazy_for_test("operator argument");
+        let (third_root, third) = values.rooted_error_lazy_for_test("operator result");
+        let first = Value::Lazy(first);
+        let second = Value::Lazy(second);
+        let third = Value::Lazy(third);
+
+        let (operator, call) =
+            claimed_operator_call(&values, CoreOperator::Applicable(first), second);
+        let (failed, failed_call) = claimed_call(&values, Value::Number(1.into()));
+        let completion_probe =
+            values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        operator.with_test_access(&values, |runtime| {
+            runtime.complete_claimed_operator_call(call, OperatorYield::Data(third.clone()));
+        });
+        let records = completion_probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 2);
+        assert_eq!(records[0].adding_edges(), 1);
+
+        failed.with_test_access(&values, |runtime| {
+            runtime.fail_claimed_call(failed_call, EvaluationHalt::from_value(third));
+        });
+        let records = completion_probe.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].leaving_edges(), 0);
+        assert_eq!(records[1].adding_edges(), 1);
+        drop((first_root, second_root, third_root, operator, failed));
+    }
+
+    #[test]
+    fn exact_cursor_materialization_delta_reports_only_the_new_payload() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (payload_root, payload) = values.rooted_error_lazy_for_test("cursor payload");
+        let payload = Value::Lazy(payload);
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let exposed = builder.data(payload);
+        let source = values.instantiate_core_net(&builder.finish(exposed));
+        let (target, _, cursor) =
+            CoreRuntimeNet::test_pair_owned_copy_layer(&values, source.clone());
+        let pair = target.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("copy cursor pair should be active")
+        });
+        assert!(matches!(
+            target.test_with_optional_mut(&values, |runtime| runtime.reduce_pair(pair)),
+            Some(Reduction {
+                kind: crate::interaction_net::ReductionKind::RemoteCursor {
+                    progress: CursorProgress::Claimed,
+                    ..
+                },
+                ..
+            })
+        ));
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        assert!(matches!(
+            target.test_advance_claimed_cursor(&values, cursor),
+            Some(CursorProgress::Materialized { .. })
+        ));
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 0);
+        assert_eq!(records[0].adding_edges(), 1);
+        drop((payload_root, source, target));
+    }
+
+    #[test]
+    fn cursor_dependency_resolution_reports_exact_removal_and_publishes_only_on_match() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let leaf = values.instantiate_core_net(&closed_unit_template(&values));
+        let (source, _) = CoreRuntimeNet::test_copy_layer(&values, leaf);
+        let (target, interface) = CoreRuntimeNet::test_copy_layer(&values, source);
+        let cursor = match target.test_poll_interface_demand(&values, interface) {
+            InterfaceDemand::Cursor(cursor) => cursor,
+            demand => panic!("nested copy should demand a cursor, got {demand:?}"),
+        };
+        let dependency = match target.test_step_cursor(&values, cursor) {
+            CoreCursorStep::Dependency(dependency) => dependency,
+            step => panic!("nested copy should block on its source, got {step:?}"),
+        };
+        let before = target.test_with_revisions(&values, |_| ()).1;
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+
+        let stale = CoreCursorDependency::LocalCursor(cursor);
+        assert_eq!(
+            target.with_test_access(&values, |runtime| runtime.resolve_cursor_dependency(
+                cursor,
+                &stale,
+                CursorDependencyDisposition::Progressed,
+            )),
+            CursorDependencyResolution::Disturbed
+        );
+        let after_stale = target.test_with_revisions(&values, |_| ()).1;
+        assert_eq!(after_stale, before);
+
+        assert_eq!(
+            target.with_test_access(&values, |runtime| runtime.resolve_cursor_dependency(
+                cursor,
+                &dependency,
+                CursorDependencyDisposition::Progressed,
+            )),
+            CursorDependencyResolution::Resolved
+        );
+        let after = target.test_with_revisions(&values, |_| ()).1;
+        assert_eq!(after.topology_revision(), before.topology_revision() + 1);
+        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
+
+        let records = probe.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].leaving_edges(), 0);
+        assert_eq!(records[0].adding_edges(), 0);
+        assert_eq!(records[1].leaving_edges(), 1);
+        assert_eq!(records[1].adding_edges(), 0);
+        drop((target, dependency));
     }
 
     #[test]
@@ -1573,5 +1918,48 @@ mod tests {
                 "durable core-net facade regained authority-free operation {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn managed_core_net_semantic_writers_use_exact_delta_gateways() {
+        let core_calls = method_call_inventory("core_net.rs");
+        for (writer, gateway) in [
+            ("resolve_cursor_dependency", "with_conditional_edge_mut_via"),
+            ("resume_claimed_call_with_copy", "with_edge_mut_via"),
+            ("resume_claimed_call_with_operator", "with_edge_mut_via"),
+            ("fail_claimed_call", "with_edge_mut_via"),
+            ("complete_claimed_operator_call", "with_input_edge_mut_via"),
+            ("fail_claimed_operator_call", "with_edge_mut_via"),
+        ] {
+            assert!(
+                core_calls
+                    .get(writer)
+                    .is_some_and(|calls| calls.contains(gateway)),
+                "managed core-net writer {writer} lost exact gateway {gateway}"
+            );
+        }
+
+        let runtime_calls = method_call_inventory("interaction_net/runtime.rs");
+        assert!(
+            runtime_calls
+                .get("step_active_pair_with_gateway")
+                .is_some_and(|calls| calls.contains("transition_edges")),
+            "active-pair reduction lost its exact edge transition"
+        );
+        assert!(
+            runtime_calls
+                .get("finish")
+                .is_some_and(|calls| calls.contains("with_input_edge_mut_via")),
+            "cursor publication lost its exact edge transition"
+        );
+
+        let recursive = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/core/managed/recursive_cells.rs"),
+        )
+        .expect("managed recursive-cell source must be readable");
+        assert!(
+            !recursive.contains("fn trace_core_runtime_net("),
+            "the retired whole-net mutation bridge returned"
+        );
     }
 }

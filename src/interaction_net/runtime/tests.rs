@@ -156,6 +156,8 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
     shared: &SharedRuntimeNetState<S>,
     normalization_batches: &NormalizationBatchState,
     batch: &ActiveNormalizationBatch,
+    edge_set: &RuntimeNetEdgeSet,
+    transition: &RuntimeNetEdgeTransition,
 ) {
     let InteractionNet {
         nodes,
@@ -300,6 +302,21 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         dirty,
     } = batch;
     let _: (&u64, &bool, &bool) = (id, contended, dirty);
+
+    let RuntimeNetEdgeSet {
+        nodes,
+        copy,
+        active,
+        obligation,
+    } = edge_set;
+    let _: (
+        &[Option<NodeId>; 2],
+        &Option<CopyId>,
+        &Option<ActivePairKey>,
+        &Option<NodeId>,
+    ) = (nodes, copy, active, obligation);
+    let RuntimeNetEdgeTransition { leaving, adding } = transition;
+    let _: (&RuntimeNetEdgeSet, &RuntimeNetEdgeSet) = (leaving, adding);
 }
 
 #[test]

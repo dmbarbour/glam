@@ -238,6 +238,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review passed |
 | I8A.0 | complete | core-net facade and durable root observer retirement |
 | I8A.1 | complete | final payload and visitor reconciliation |
+| I8A.2 | complete | exact per-edit runtime-net mutation deltas |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5604,6 +5605,21 @@ added. Production remains `NoAuto`.
 Verification: the writer inventory, one exact-delta test per value-installing
 rewrite family, and the real erase-reduction probe. A source latch must reject
 any writer which bypasses both the exact gateway and its current bridge.
+
+Completed 2026-09-10. `RuntimeNetMutationGateway` now distinguishes edge-free
+coordination changes from exact semantic-edge transitions. Each exact delta is
+an allocation-free set of at most two node owners plus the relevant copy,
+active-pair, or pairless-obligation owner; collector-selected visitors resolve
+only those addresses against the locked pre- or post-write net. Production
+`NoAuto` therefore clones no payload and walks neither edge set or whole net.
+
+Fan data/operator duplication, erase, call-to-copy, call-to-operator, operator
+completion, specialization failure, cursor materialization, and cursor-
+dependency resolution all publish through exact gateways. Deterministic probes
+verify their occurrence counts, including a stale dependency resolution which
+publishes neither a topology revision nor a semantic edge. A compile/source
+inventory covers the new address representation and every production semantic
+writer, and rejects restoration of the retired whole-net mutation visitor.
 
 ### Phase I8A.3 — Lock, Access, and Lifecycle Revalidation
 
