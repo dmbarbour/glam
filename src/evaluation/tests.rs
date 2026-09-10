@@ -6103,13 +6103,24 @@ fn pending_session_activation_roots_retire_with_their_reservations() {
         .collect_managed_for_test()
         .expect("the pending activation should retain its effect root");
     assert_eq!(activation_live.root_entries(), baseline.root_entries() + 1);
-    drop(activation);
+    activation.activate();
+    assert!(matches!(
+        context.run_until_quiescent(),
+        crate::evaluation::EvaluationSessionRun::Complete(_)
+    ));
     let activation_reclaimed = context
         .values()
         .collect_managed_for_test()
-        .expect("dropping the activation should cancel and release its effect root");
-    assert_eq!(activation_reclaimed.root_entries(), baseline.root_entries());
-    assert_eq!(activation_reclaimed.finalized_slots(), 1);
+        .expect("activation should consume and release its temporary effect root");
+    assert_eq!(
+        activation_reclaimed.root_entries(),
+        baseline.root_entries() + 1,
+        "only the coordinator-owned terminal task result should remain rooted"
+    );
+    assert!(
+        activation_reclaimed.finalized_slots() >= 1,
+        "the temporary activation root must retire after task ownership is installed"
+    );
 }
 
 #[test]

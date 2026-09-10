@@ -73,10 +73,10 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        5,
+        3,
         1,
-        "post-domain canonical-root initialization, test mutation-root publication, and externalized reflection effect/target roots",
-        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; I4F.2b.2 reflection ownership; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation"
+        "post-domain canonical-root initialization and test mutation-root publication",
+        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges"
     ),
     entry!(
         "src/core_net.rs",

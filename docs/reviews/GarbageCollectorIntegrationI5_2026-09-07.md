@@ -1616,10 +1616,11 @@ does not authorize collection outside the existing closed fixtures.
 **Classification:** future ownership chronology conflict  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; blocks I6D.1 and Gate G2 planning
+**Status:** open; A-C completed 2026-09-10; D-F remain; owns I6D.1 and blocks Gate G2
 
-`ReflectionComputation` is the one compatibility adapter which deliberately
-reports no semantic value edge. Its runtime external owner currently retains:
+At the review baseline, `ReflectionComputation` was the one compatibility
+adapter which deliberately reported no semantic value edge. Its runtime
+external owner retained:
 
 - a rooted reflection effect;
 - an optional rooted gate target; and
@@ -1655,9 +1656,273 @@ Separate:
 4. publication and retirement order; and
 5. the forced-order and closed-cycle matrix.
 
-The phase must prove that no active external owner becomes reachable from a
-managed allocation and that no effect/target root remains merely to conceal
-an internal cycle.
+The phase must prove that a managed-reachable external owner contains neither
+a semantic value root nor a strong route back to its own value domain. The
+managed value may still retain an edge-free handle to externally destroyed
+reservation authority; that is the purpose of the registry extraction. No
+effect/target root may remain merely to conceal an internal cycle.
+
+#### Construction investigation
+
+This is a production-representable ownership cycle, not merely a broad Rust
+type or test-constructor concern. `ReflectionComputation` is created at exactly
+two evaluator boundaries:
+
+- `anno refl:Effect Target` constructs a gate computation whose task must
+  finish before `Target` is returned; and
+- `anno meta_refl:Update Carriers` constructs a result computation which stays
+  latent until reflection inspects the corresponding carrier metadata.
+
+The direct `Value::reflection_gate` and `Value::reflection_task_result`
+wrappers are test-only, but both delegate to the same production `_in`
+constructors used by annotation evaluation. Ordinary `.g` recursion can close
+the effect or target over the containing definition. A direct gate such as
+
+```g
+x = anno refl:(.r ()) x
+```
+
+already reaches the ordinary lazy-dependency-cycle diagnostic. That demanded
+case proves source-level constructibility, but eventual cycle failure may also
+release its lazy source and is therefore not the strongest reclamation witness.
+
+The passive case is `meta_refl`:
+
+```g
+x = anno meta_refl:(\_ -> .r x) [anno 'meta_init ()]
+asm.result = anno seq:x "OK"
+```
+
+Forcing `x` to WHNF constructs the carrier list while leaving its hidden
+reflection result undemanded. The carrier reaches the reflection-result lazy;
+its registered owner roots the update effect; and the update closure reaches
+`x` through the module's recursive final-definitions promise. The program can
+return `"OK"` while leaving this passive cycle in a live runtime:
+
+```text
+cached x
+  -> carrier metadata projection
+  -> reflection-result lazy
+  -> ReflectionComputation handle
+  -> ReflectionComputationOwner.effect root
+  -> recursive final definitions
+  -> cached x
+```
+
+The source compiler also wraps ordinary non-`refl`/`meta`/`spec` definitions
+in an automatic reflection boundary whose effect closes over final module
+definitions. That increases the number of ways a reflection computation may
+participate in recursive runtime state; it does not make static rejection a
+viable solution.
+
+The baseline representation had three distinct backedge hazards:
+
+1. `ReflectionComputationOwner::{effect,target}` are registered roots as soon
+   as the reflection lazy is constructed.
+2. After first observation, its `task` cell retains a cloned
+   `ReflectionTaskReservation`. The reservation owns another rooted effect,
+   and `activate()` currently borrows rather than consumes that activation
+   payload, so the duplicate root survives activation.
+3. The reservation retains an `EvalContext`, whose demand state strongly owns
+   the `CoreValueFactory`. Because the owner registry belongs to that value
+   domain, leaving this context in a persistent registry entry can also close
+   an ordinary Rust ownership cycle through the domain itself.
+
+The installed reservation error is currently produced only from an
+`Arc<str>` admission failure and therefore contains no recursive managed edge
+in practice. Its storage type is nevertheless the general
+`Arc<EvaluationFailure>`, whose emission and context values are allowed to
+contain managed identities. The remediation must either narrow this state to
+its actual scalar failure vocabulary or place it on an exactly traced/rooted
+boundary; it may not rely on the current constructor accidentally remaining
+edge-free.
+
+Parser rejection cannot address indirect closure through functions, objects,
+imports, fixpoints, or metadata and would prohibit intended recursive values.
+Evaluator dependency-cycle detection covers only demanded waits, not the
+passive `meta_refl` graph. Treating the registry roots as weak would instead
+make legitimate effects and targets collectible during the evaluator-to-task
+handoff. The fix therefore belongs to the representation and lifecycle split
+in I6D.1.
+
+#### GCI5R-005 remediation plan
+
+The target representation has three ownership classes:
+
+- immutable effect and target `Value` edges belong to the managed-reachable
+  reflection computation and participate in its exact compatibility trace;
+- a persistent external reservation record contains only an edge-free weak
+  task/wait observation, cancellation state, and weak coordinator authority;
+  the ordinary strong task handle remains transient because its terminal cell
+  may contain a value or failure root; and
+- a first-observer activation permit temporarily roots the effect while it
+  crosses from a completed evaluator step into coordinator-owned task state.
+  It is consumed by activation or dropped on unwind and is never cached in the
+  external owner.
+
+Once activated, the coordinator's task machine is the intentional durable
+owner of the effect and result. The reflection computation retains only the
+stable weak task observation needed to reacquire a transient polling handle.
+Collection of an unobserved
+reflection lazy drops no active Rust lifecycle object; collection after
+reservation retires the external record at the existing known-safe drain,
+which cancels only a still-unactivated task.
+
+##### GCI5R-005A — Production mismatch and owner inventory
+
+1. Add an isolated source-level fixture based on the latent `meta_refl`
+   example. Force `x` only to WHNF, drop every module/client root, and force a
+   full collection while retaining the runtime long enough to inspect managed
+   slots and external owners.
+2. Before changing the representation, latch that the registered effect root
+   retains the closed graph. Record the mismatch in this review, then update
+   the committed test to require exact reclamation after the fix; do not leave
+   a permanently failing or ignored test.
+3. Add a smaller core fixture using the production `_in` constructors so the
+   exact reflection lazy, owner entry, and semantic backedge counts are
+   independently observable without substituting a test-only representation.
+4. Destructure `ReflectionComputation`, `ReflectionComputationOwner`,
+   `ReflectionTaskReservationInner`, `ReflectionTaskActivation`, and the
+   relevant coordinator task records. Record every `Value`,
+   `RuntimeValueRoot`, `RuntimeFailureRoot`, `CoreValueFactory`, `EvalContext`,
+   task handle, and active `Drop` path.
+5. Add a source-backed inventory which fails if a managed-reachable reflection
+   owner gains another semantic root or strong value-domain route during the
+   remediation.
+
+Completed 2026-09-10. Before the repair, the direct `_in` fixture retained one
+additional registered root after both semantic facades were dropped (`8`
+roots versus a baseline of `7`) rather than finalizing its promise/reflection-
+lazy pair. The first source witness likewise left two reflection owners after
+its module was dropped. The committed source fixture places the latent binding
+under `meta` to avoid conflating its hidden `meta_refl` result with automatic
+ordinary-definition reflection tasks, warms compiler-cache roots before its
+baseline, forces the carrier only to WHNF, and now requires exact root, slot,
+and external-owner reclamation. A separate production-constructor cycle
+requires exact two-cell finalization. Compile-time field destructuring and
+source latches cover the managed computation, external owner, stable
+observation, activation payload, task handle/weak observer, and cancellation
+route.
+
+##### GCI5R-005B — Restore exact semantic edges
+
+1. Move the immutable effect and optional gate target out of
+   `ReflectionComputationOwner` and into the managed-reachable
+   `ReflectionComputation` payload. Do not introduce another managed identity
+   unless an independent representation benefit is demonstrated; the existing
+   lazy identity and compatibility visitor are sufficient to close this cycle.
+2. Make `CompatibilityValueEdges for ReflectionComputation` report effect and
+   target in stable semantic order without evaluating, formatting, comparing,
+   or acquiring coordinator/registry locks.
+3. Route construction through the GCI5R-001 regional allocation rule: the new
+   reflection lazy and its direct edges must acquire the evaluator-step
+   publication root or another exact traced owner before managed access ends.
+4. Remove the immediate effect and target `RuntimeValueRoot`s from the
+   external owner. The never-observed passive `meta_refl` fixture must then
+   reclaim its complete graph and retire the empty external entry.
+
+Completed 2026-09-10. `ReflectionComputation` now directly owns effect then
+optional target in that stable trace order. Its external owner contains only
+the task-publication cell, and construction continues through the existing
+evaluator-step publication nursery. Both passive reclamation fixtures pass;
+the exact-edge and durable/root-publication inventories now classify the two
+former registered roots as ordinary managed semantic edges.
+
+##### GCI5R-005C — Split stable reservation from activation ownership
+
+1. Replace the externally cached `ReflectionTaskReservation` with an edge-free
+   stable observation record. It may retain a weak task/wait identity, atomic
+   activation or cancellation disposition, and weak coordinator route, but no
+   `Value`, runtime value/failure root, `EvalContext`, `CoreValueFactory`, or
+   strong demand-session/value-domain lease.
+2. Make the first observer produce a distinct activation permit containing the
+   temporary `RuntimeValueRoot(effect)`, selected task profile, result policy,
+   and whatever short-lived context task construction requires. Store that
+   permit only in `EvaluatorStepContext::pending_reflection_activations`.
+3. Activation consumes the permit and transfers effect ownership into the
+   coordinator task machine before releasing the temporary root. Dropping the
+   permit because of unwind or abandoned evaluator-step publication releases
+   its root and leaves the stable reservation eligible for external
+   cancellation/retirement.
+4. Subsequent observers share the published task handle without allocating a
+   second effect root or activation permit. If implementation uses speculative
+   reservation, every losing reservation must be deterministically cancelled;
+   prefer a one-winner publication protocol which never calls coordinator code
+   while holding a registry or managed-value lock.
+5. Give the edge-free task observer the small cancellation operation currently
+   reached through `EvalContext::cancel_reserved_task`, so external-owner drop
+   does not need to retain the value domain merely to discard reserved work.
+
+Completed 2026-09-10. The cached record is now a
+`ReflectionTaskObservation`: an atomic disposition plus an
+`EvaluationTaskObserver` containing scalar identity and weak coordinator/wait
+routes. A strong `EvaluationTaskHandle` is reacquired only for the active
+observation because the wait terminal may own a value or failure root. The
+first `OnceLock` initializer alone publishes a shared one-use activation
+permit; cloned copies share one mutex-protected payload, while later observers
+receive no permit. Activation consumes the temporary effect root after the
+launcher transfers ownership into coordinator task state. Dropping an
+unconsumed permit deterministically discards its still-reserved work through
+the weak task observer. The externally cached error was narrowed early to its
+actual `Arc<str>` admission vocabulary; GCI5R-005D still owns the complete
+failure/terminal/retirement audit.
+
+##### GCI5R-005D — Failure, completion, and retirement ownership
+
+1. Audit the only current reservation-error producer. Prefer storing its
+   actual scalar admission failure and constructing `EvaluationFailure` at the
+   evaluator boundary. If general structured failure identity must be
+   preserved, store it on an exactly traced managed field or an independently
+   retiring `RuntimeFailureRoot` which cannot lead back through the external
+   owner.
+2. Prove that successful gate targets are projected from the direct traced
+   field only under matching evaluator access. A completed return-value task
+   obtains its value from coordinator-owned terminal state; it is not copied
+   into the external owner.
+3. Specify retirement for never observed, reserved but unactivated, activated,
+   completed, failed, cancelled, abandoned, exited, and killed tasks. The
+   external owner may lag until the next known-safe drain, but it must not keep
+   either the managed graph or value domain alive while waiting.
+4. Preserve first-observer task identity and current result-policy semantics.
+   No cleanup path may run a launcher, callback, value destruction, or
+   coordinator mutation under a collector, registry, or managed-value lock.
+
+##### GCI5R-005E — Forced-order verification
+
+1. Force both first-observer orderings across two sessions in one runtime and
+   prove exactly one task reservation and one activation permit are produced.
+2. Force collection at the construction/publication boundary, after stable
+   reservation but before activation, during activation handoff, while the
+   task is blocked, and after each terminal disposition. Each point must name
+   the intentional root retaining the effect and target.
+3. Force source retirement before activation and prove cancellation occurs at
+   the safe external-owner drain. Force activation first and prove later owner
+   retirement does not cancel committed work.
+4. Exercise an effect backedge, a gate-target backedge, and the latent
+   source-level `meta_refl` backedge. Include a runtime-drop probe which proves
+   no registry-owner-to-value-domain `Arc` cycle remains.
+5. Use barriers, latches, and explicit collection points for concurrency
+   claims. Passing under repetition is not evidence for either publication or
+   cancellation ordering.
+
+##### GCI5R-005F — Reconcile plans and inventories
+
+1. Update the active-owner inventory so reflection semantic closure is owned
+   by I6D.1/GCI5R-005, while arbitrary host callback environments remain
+   deferred to I10A. Keep reflection reservation destruction classified as an
+   external active action, but assert that its payload is semantic-edge-free
+   and value-domain-lease-free.
+2. Update the durable-owner and compatibility-edge inventories, source
+   comments, ownership ledger, and evaluator/reflection architecture docs to
+   name the final three-way split.
+3. Re-run the reflection annotation, metadata, task lifecycle, cross-session,
+   recursive-cycle, runtime-retirement, and managed-closure suites. Then run
+   formatting, all-target/all-feature Clippy with warnings denied, the full
+   repository tests, and a targeted strict-provenance Miri probe over the new
+   trace and activation handoff.
+4. Close GCI5R-005 only when the source-level passive cycle reclaims exactly,
+   no external reflection owner contains a semantic root or strong value-domain
+   route, and Gate G2 can treat reflection computation as closed.
 
 ### GCI5R-006 — I7-I11 need delta-oriented checkpoints after the I5 cutover
 
@@ -1979,8 +2244,9 @@ the managed root/edge identity projection fixture.
 4. **Completed:** GCI5R-004 rewrote I6A-C and I6D.2 around the immutable-shell
    result, with audit-only completion and independently justified optional
    conversions.
-5. Resolve GCI5R-005 by partitioning reflection computation into semantic and
-   external-lifecycle checkpoints.
+5. **Planned:** resolve GCI5R-005 through the A-F semantic-edge,
+   activation-lifecycle, retirement, forced-order, and reconciliation
+   checkpoints now assigned to I6D.1.
 6. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
    above.
 7. Re-run the focused and routine checks, update phase status and stale source

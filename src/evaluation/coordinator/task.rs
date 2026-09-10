@@ -788,6 +788,21 @@ pub(crate) struct EvaluationTaskHandle {
     pub(in crate::evaluation) wait: EvaluationWaitToken,
 }
 
+/// Edge-free route back to a task retained elsewhere by the coordinator or
+/// an active observer.
+///
+/// Unlike [`EvaluationTaskHandle`], this record does not keep the wait cell's
+/// terminal value or failure root alive.
+#[derive(Clone)]
+pub(crate) struct EvaluationTaskObserver {
+    id: EvaluationTaskId,
+    work: EvaluationWorkId,
+    owner_session: EvaluationSessionId,
+    runtime: EvaluationRuntimeId,
+    coordinator: Weak<EvaluationWorkCoordinator>,
+    wait: Weak<EvaluationWaitState>,
+}
+
 impl EvaluationTaskHandle {
     pub(crate) fn new(
         coordinator: &Arc<EvaluationWorkCoordinator>,
@@ -829,6 +844,17 @@ impl EvaluationTaskHandle {
         self.acknowledge_failure();
     }
 
+    pub(crate) fn observer(&self) -> EvaluationTaskObserver {
+        EvaluationTaskObserver {
+            id: self.id,
+            work: self.work,
+            owner_session: self.owner_session,
+            runtime: self.runtime_id(),
+            coordinator: self.coordinator.clone(),
+            wait: Arc::downgrade(&self.wait.0),
+        }
+    }
+
     pub(crate) fn acknowledge_failure(&self) {
         if let Some(coordinator) = self.coordinator.upgrade() {
             debug_assert_eq!(coordinator.runtime_id(), self.runtime_id());
@@ -862,6 +888,67 @@ impl EvaluationTaskHandle {
             }
         }
     }
+}
+
+impl EvaluationTaskObserver {
+    pub(crate) fn upgrade(&self) -> Option<EvaluationTaskHandle> {
+        let wait = EvaluationWaitToken(self.wait.upgrade()?);
+        debug_assert_eq!(wait.runtime_id(), self.runtime);
+        Some(EvaluationTaskHandle {
+            id: self.id,
+            work: self.work,
+            owner_session: self.owner_session,
+            coordinator: self.coordinator.clone(),
+            wait,
+        })
+    }
+
+    pub(crate) fn discard_reservation(&self) {
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            debug_assert_eq!(coordinator.runtime_id(), self.runtime);
+            let _ = coordinator.discard_reserved_reflection(self.work);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn evaluation_task_handle_retains_only_identity_wait_and_weak_coordinator_authority() {
+    fn fields(handle: &EvaluationTaskHandle) {
+        let EvaluationTaskHandle {
+            id,
+            work,
+            owner_session,
+            coordinator,
+            wait,
+        } = handle;
+        let _: &EvaluationTaskId = id;
+        let _: &EvaluationWorkId = work;
+        let _: &EvaluationSessionId = owner_session;
+        let _: &Weak<EvaluationWorkCoordinator> = coordinator;
+        let _: &EvaluationWaitToken = wait;
+    }
+
+    let _ = fields as fn(&EvaluationTaskHandle);
+
+    fn observer_fields(observer: &EvaluationTaskObserver) {
+        let EvaluationTaskObserver {
+            id,
+            work,
+            owner_session,
+            runtime,
+            coordinator,
+            wait,
+        } = observer;
+        let _: &EvaluationTaskId = id;
+        let _: &EvaluationWorkId = work;
+        let _: &EvaluationSessionId = owner_session;
+        let _: &EvaluationRuntimeId = runtime;
+        let _: &Weak<EvaluationWorkCoordinator> = coordinator;
+        let _: &Weak<EvaluationWaitState> = wait;
+    }
+
+    let _ = observer_fields as fn(&EvaluationTaskObserver);
 }
 
 /// A fully constructed reflection task retained in the coordinator's

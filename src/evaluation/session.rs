@@ -2,11 +2,10 @@
 
 use std::fmt;
 use std::ops::Deref;
-#[cfg(test)]
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{
@@ -19,11 +18,11 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use super::coordinator::{
     self, ClientDemandHandle, ClientDemandOperation, ClientDemandResult, ClientDemandSink,
     ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation, EvaluationSessionId,
-    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
-    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, InitialTaskDisposition,
-    LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation,
-    ReflectionCancellation, ReflectionTaskResultPolicy, TaskFailureLedger, TaskStatusPublisher,
-    WorkDependency,
+    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskObserver,
+    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
+    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
+    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
+    TaskFailureLedger, TaskStatusPublisher, WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -90,47 +89,212 @@ pub(crate) struct PendingReflectionTask {
     inner: Arc<PendingReflectionTaskInner>,
 }
 
-/// One lazily activated `anno refl:...` task reservation.
-///
-/// Pure evaluation may discover this reservation and retain its stable wait,
-/// but launcher construction belongs to the evaluator-step boundary. Every
-/// observer may request activation; the first request owns construction and
-/// later requests are inexpensive no-ops.
+/// One observer of a stable `anno refl:...` task reservation, optionally
+/// carrying the first observer's one-use activation permit.
 #[derive(Clone)]
 pub(crate) struct ReflectionTaskReservation {
-    inner: Arc<ReflectionTaskReservationInner>,
+    observation: ReflectionTaskObservation,
+    handle: EvaluationTaskHandle,
+    activation: Option<Arc<ReflectionTaskActivationPermit>>,
 }
 
-struct ReflectionTaskReservationInner {
-    context: EvalContext,
-    handle: EvaluationTaskHandle,
-    activation: Option<ReflectionTaskActivation>,
-    activated: AtomicBool,
+/// Edge-free task identity retained by a reflection computation's external
+/// owner after its first observation.
+#[derive(Clone)]
+pub(crate) struct ReflectionTaskObservation {
+    inner: Arc<ReflectionTaskObservationInner>,
+}
+
+struct ReflectionTaskObservationInner {
+    task: EvaluationTaskObserver,
+    disposition: AtomicU8,
 }
 
 struct ReflectionTaskActivation {
+    context: EvalContext,
     effect: RuntimeValueRoot,
     result_policy: ReflectionTaskResultPolicy,
     task_profile: Arc<super::ReflectionTaskProfile>,
 }
 
-impl ReflectionTaskReservation {
-    pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
-        &self.inner.handle
+pub(crate) struct ReflectionTaskActivationPermit {
+    observation: ReflectionTaskObservation,
+    activation: Mutex<Option<ReflectionTaskActivation>>,
+}
+
+const REFLECTION_RESERVED: u8 = 0;
+const REFLECTION_ACTIVATED: u8 = 1;
+const REFLECTION_CANCELLED: u8 = 2;
+
+#[cfg(test)]
+#[test]
+fn reflection_reservation_storage_separates_stable_observation_from_activation_payload() {
+    fn reservation_fields(reservation: &ReflectionTaskReservation) {
+        let ReflectionTaskReservation {
+            observation,
+            handle,
+            activation,
+        } = reservation;
+        let _: &ReflectionTaskObservation = observation;
+        let _: &EvaluationTaskHandle = handle;
+        let _: &Option<Arc<ReflectionTaskActivationPermit>> = activation;
+    }
+    fn observation_fields(observation: &ReflectionTaskObservation) {
+        let ReflectionTaskObservation { inner } = observation;
+        let _: &Arc<ReflectionTaskObservationInner> = inner;
+    }
+    fn observation_inner_fields(observation: &ReflectionTaskObservationInner) {
+        let ReflectionTaskObservationInner { task, disposition } = observation;
+        let _: &EvaluationTaskObserver = task;
+        let _: &AtomicU8 = disposition;
+    }
+    fn permit_fields(permit: &ReflectionTaskActivationPermit) {
+        let ReflectionTaskActivationPermit {
+            observation,
+            activation,
+        } = permit;
+        let _: &ReflectionTaskObservation = observation;
+        let _: &Mutex<Option<ReflectionTaskActivation>> = activation;
+    }
+    fn activation_fields(activation: &ReflectionTaskActivation) {
+        let ReflectionTaskActivation {
+            context,
+            effect,
+            result_policy,
+            task_profile,
+        } = activation;
+        let _: &EvalContext = context;
+        let _: &RuntimeValueRoot = effect;
+        let _: &ReflectionTaskResultPolicy = result_policy;
+        let _: &Arc<ReflectionTaskProfile> = task_profile;
     }
 
-    pub(crate) fn activate(&self) {
-        let Some(activation) = &self.inner.activation else {
+    let _ = (
+        reservation_fields as fn(&ReflectionTaskReservation),
+        observation_fields as fn(&ReflectionTaskObservation),
+        observation_inner_fields as fn(&ReflectionTaskObservationInner),
+        permit_fields as fn(&ReflectionTaskActivationPermit),
+        activation_fields as fn(&ReflectionTaskActivation),
+    );
+}
+
+impl ReflectionTaskReservation {
+    pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
+        &self.handle
+    }
+
+    pub(crate) fn into_cache_parts(
+        self,
+    ) -> (
+        ReflectionTaskObservation,
+        EvaluationTaskHandle,
+        Option<Arc<ReflectionTaskActivationPermit>>,
+    ) {
+        (self.observation, self.handle, self.activation)
+    }
+
+    pub(crate) fn from_cache_parts(
+        observation: ReflectionTaskObservation,
+        handle: EvaluationTaskHandle,
+        activation: Option<Arc<ReflectionTaskActivationPermit>>,
+    ) -> Self {
+        Self {
+            observation,
+            handle,
+            activation,
+        }
+    }
+
+    pub(crate) fn activate(self) {
+        let Some(permit) = self.activation else {
             return;
         };
-        if self.inner.activated.swap(true, Ordering::AcqRel) {
+        permit.activate();
+    }
+}
+
+impl ReflectionTaskObservation {
+    fn reserved(handle: EvaluationTaskHandle) -> Self {
+        Self {
+            inner: Arc::new(ReflectionTaskObservationInner {
+                task: handle.observer(),
+                disposition: AtomicU8::new(REFLECTION_RESERVED),
+            }),
+        }
+    }
+
+    fn already_active(handle: EvaluationTaskHandle) -> Self {
+        Self {
+            inner: Arc::new(ReflectionTaskObservationInner {
+                task: handle.observer(),
+                disposition: AtomicU8::new(REFLECTION_ACTIVATED),
+            }),
+        }
+    }
+
+    pub(crate) fn handle(&self) -> Option<EvaluationTaskHandle> {
+        self.inner.task.upgrade()
+    }
+
+    fn begin_activation(&self) -> bool {
+        self.inner
+            .disposition
+            .compare_exchange(
+                REFLECTION_RESERVED,
+                REFLECTION_ACTIVATED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel_if_reserved(&self) {
+        if self
+            .inner
+            .disposition
+            .compare_exchange(
+                REFLECTION_RESERVED,
+                REFLECTION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.inner.task.discard_reservation();
+        }
+    }
+}
+
+impl Drop for ReflectionTaskObservationInner {
+    fn drop(&mut self) {
+        if *self.disposition.get_mut() == REFLECTION_RESERVED {
+            *self.disposition.get_mut() = REFLECTION_CANCELLED;
+            self.task.discard_reservation();
+        }
+    }
+}
+
+impl ReflectionTaskActivationPermit {
+    fn activate(&self) {
+        let Some(activation) = self
+            .activation
+            .lock()
+            .expect("reflection activation permit was poisoned")
+            .take()
+        else {
+            return;
+        };
+        if !self.observation.begin_activation() {
             return;
         }
-        if self.inner.handle.wait.terminal_poll().is_some() {
+        let Some(handle) = self.observation.handle() else {
+            return;
+        };
+        if handle.wait.terminal_poll().is_some() {
             return;
         }
-        self.inner.context.activate_reflection_task(
-            &self.inner.handle,
+        activation.context.activate_reflection_task(
+            &handle,
             &activation.effect,
             activation.result_policy,
             activation.task_profile.clone(),
@@ -140,10 +304,16 @@ impl ReflectionTaskReservation {
     }
 }
 
-impl Drop for ReflectionTaskReservationInner {
+impl Drop for ReflectionTaskActivationPermit {
     fn drop(&mut self) {
-        if self.activation.is_some() && !self.activated.load(Ordering::Acquire) {
-            self.context.cancel_reserved_task(&self.handle);
+        if self
+            .activation
+            .get_mut()
+            .expect("reflection activation permit was poisoned")
+            .take()
+            .is_some()
+        {
+            self.observation.cancel_if_reserved();
         }
     }
 }
@@ -1295,17 +1465,19 @@ impl EvalContext {
         let default_profile = self.session.default_reflection_profile.clone();
         if default_profile.is_sealed() {
             let handle = self.reserve_task()?;
+            let observation = ReflectionTaskObservation::reserved(handle.clone());
             return Ok(ReflectionTaskReservation {
-                inner: Arc::new(ReflectionTaskReservationInner {
-                    context: self.clone(),
-                    handle,
-                    activation: Some(ReflectionTaskActivation {
+                observation: observation.clone(),
+                handle,
+                activation: Some(Arc::new(ReflectionTaskActivationPermit {
+                    observation,
+                    activation: Mutex::new(Some(ReflectionTaskActivation {
+                        context: self.clone(),
                         effect: RuntimeValueRoot::new(self.values(), effect),
                         result_policy,
                         task_profile: default_profile,
-                    }),
-                    activated: AtomicBool::new(false),
-                }),
+                    })),
+                })),
             });
         }
 
@@ -1321,13 +1493,11 @@ impl EvalContext {
         let id = allocate_task_id(self.values())?;
         let wait = allocate_wait_token(&self.session, id)?;
         let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
+        let handle = EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait);
         Ok(ReflectionTaskReservation {
-            inner: Arc::new(ReflectionTaskReservationInner {
-                context: self.clone(),
-                handle: EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait),
-                activation: None,
-                activated: AtomicBool::new(true),
-            }),
+            observation: ReflectionTaskObservation::already_active(handle.clone()),
+            handle,
+            activation: None,
         })
     }
 

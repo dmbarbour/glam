@@ -5223,24 +5223,47 @@ cross-session failure observation, and structured diagnostic projection.
 
 ### Phase I6D.1 — Reflection Computation Payloads
 
-- Re-read and apply the
-  [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
-  to any managed reflection-computation allocation introduced by the selected
-  ownership split.
-- Migrate reflection effect, optional gate target, and installed failure/result
-  ownership according to the external-owner split established by I4F.2b.2.
-  Keep reservation activation and cancellation as external lifecycle state;
-  only actual semantic value edges become managed.
-- Route one-write managed fields through representation-local gateways and
-  preserve reservation-inside/activation-outside evaluator-scope ordering.
-- Reconcile the final representation with I4C's deferred compatibility record,
-  retiring the reflection-specific adapter only after the production managed
-  trace is exact.
+GCI5R-005 established that this is a production-representable ownership cycle,
+not an audit-only immutable-shell decision. Execute the bounded remediation
+checkpoints in
+[`GarbageCollectorIntegrationI5_2026-09-07.md`](../reviews/GarbageCollectorIntegrationI5_2026-09-07.md#gci5r-005-remediation-plan)
+as this phase's authoritative chronology:
 
-Verification: `managed_reflection_gate_cycle_reclaims`, current task-result
-publication tests, and forced reservation/activation/cancellation orderings.
-Production remains `NoAuto`; only the closed reflection-computation fixture may
-force collection.
+1. latch the source-level latent `meta_refl` mismatch and complete the owner
+   inventory;
+2. restore effect and optional gate target as exact managed-reachable semantic
+   edges, applying the
+   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
+   without introducing a redundant managed identity;
+3. split the persistent edge-free reservation record from the short-lived
+   first-observer activation permit and coordinator-owned active task;
+4. close failure, completion, cancellation, and external-owner retirement
+   ownership;
+5. force every publication/activation ordering and all terminal dispositions;
+   and
+6. reconcile the active-owner, durable-owner, compatibility, and architecture
+   inventories before admitting Gate G2.
+
+Checkpoints 1-3 completed 2026-09-10. The source and direct-constructor
+mismatches are latched and repaired; effect/target are exact direct semantic
+edges; and the external owner caches only a weak task observation plus scalar
+admission failure. The first observer alone receives a one-use activation
+permit, while strong task handles remain transient because their terminal wait
+cells may contain runtime roots. Checkpoints 4-6 remain open.
+
+The final representation may keep an external handle for active reservation
+destruction, but that owner contains no semantic value root, `EvalContext`,
+`CoreValueFactory`, or other strong route to its own value domain. Effect and
+target are visited directly without semantic work or coordinator/registry
+locking. The activation permit is never cached in the external owner: it owns
+the temporary effect root only across evaluator-step completion and transfers
+that ownership to the coordinator on activation.
+
+Verification includes the source-level passive `meta_refl` cycle, direct
+effect and gate-target backedges, current task-result publication tests,
+forced first-observer and activation/cancellation orderings, all terminal task
+dispositions, and value-domain retirement. Production remains `NoAuto`; only
+closed reflection-computation fixtures may force collection.
 
 ### Phase I6D.2 — Net-Construction Payloads
 

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use crate::core::{
     Builtin, ClosedCompatibilityValue, Dict, FunctionValue, HostCallProducer, HostCallRecord,
     LazySource, LazyValue, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
-    PromisedValue, ReflectionComputation, Value,
+    PromisedValue, ReflectionComputation, ReflectionComputationOwner, Value, set_test_promise,
 };
 use crate::core_net::CoreSpecialization;
 use crate::interaction_net::NetBuilder;
@@ -34,6 +34,7 @@ enum ActiveDestructionKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecursiveBackedgePolicy {
     DeferredToI10A,
+    ClosedByI6D1,
     ForbiddenByAdmission,
 }
 
@@ -58,10 +59,10 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::ReflectionReservation,
         path: "Value::Lazy -> LazyCell::source -> LazySource::ReflectionTask -> ReflectionComputation::handle -> runtime external-owner registry",
-        owner: "runtime-owned reflection reservation and rooted activation",
+        owner: "runtime-owned edge-free reflection task observation",
         active_action: "unactivated reservation cancellation is externally drained",
-        extraction: "I4F.2b.2 reflection-reservation registry",
-        recursive_backedge: RecursiveBackedgePolicy::DeferredToI10A,
+        extraction: "I4F.2b.2 registry with I6D.1 semantic-edge closure",
+        recursive_backedge: RecursiveBackedgePolicy::ClosedByI6D1,
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::OpaquePayload,
@@ -112,20 +113,26 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
     },
     SourceLatch {
         path: "src/core.rs",
-        needle: "task: OnceLock<Result<ReflectionTaskReservation, Arc<EvaluationFailure>>>",
+        needle: "task: OnceLock<Result<ReflectionTaskObservation, Arc<str>>>",
         expected: 1,
         frontier: ActiveDestructionKind::ReflectionReservation,
     },
     SourceLatch {
         path: "src/evaluation/session.rs",
-        needle: "impl Drop for ReflectionTaskReservationInner",
+        needle: "struct ReflectionTaskObservationInner {",
         expected: 1,
         frontier: ActiveDestructionKind::ReflectionReservation,
     },
     SourceLatch {
         path: "src/evaluation/session.rs",
-        needle: "self.context.cancel_reserved_task(&self.handle)",
-        expected: 2,
+        needle: "pub(crate) struct ReflectionTaskActivationPermit {",
+        expected: 1,
+        frontier: ActiveDestructionKind::ReflectionReservation,
+    },
+    SourceLatch {
+        path: "src/evaluation/coordinator/task.rs",
+        needle: "pub(crate) fn discard_reservation(&self)",
+        expected: 1,
         frontier: ActiveDestructionKind::ReflectionReservation,
     },
     SourceLatch {
@@ -218,8 +225,21 @@ fn assert_host_call_fields(producer: &HostCallProducer) {
 }
 
 fn assert_reflection_fields(computation: &ReflectionComputation) {
-    let ReflectionComputation { handle, completion } = computation;
+    let ReflectionComputation {
+        effect,
+        target,
+        handle,
+        completion,
+    } = computation;
+    let _: &Value = effect;
+    let _: &Option<Value> = target;
     let _ = (handle, completion);
+}
+
+fn assert_reflection_owner_fields(owner: &ReflectionComputationOwner) {
+    let ReflectionComputationOwner { task } = owner;
+    let _: &std::sync::OnceLock<Result<crate::evaluation::ReflectionTaskObservation, Arc<str>>> =
+        task;
 }
 
 fn assert_opaque_fields(opaque: &OpaqueValue) {
@@ -362,12 +382,15 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
         .collect::<Vec<_>>();
     assert_eq!(
         deferred,
-        [
-            ActiveDestructionKind::HostCallback,
-            ActiveDestructionKind::ReflectionReservation,
-        ],
-        "root-capable external boundaries remain explicit I10A work"
+        [ActiveDestructionKind::HostCallback],
+        "only arbitrary host-callback environments remain I10A work"
     );
+    let closed = ACTIVE_DESTRUCTION_FRONTIERS
+        .iter()
+        .filter(|frontier| frontier.recursive_backedge == RecursiveBackedgePolicy::ClosedByI6D1)
+        .map(|frontier| frontier.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(closed, [ActiveDestructionKind::ReflectionReservation]);
     let forbidden = ACTIVE_DESTRUCTION_FRONTIERS
         .iter()
         .filter(|frontier| {
@@ -390,8 +413,11 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
         "the formatted host-call insertion requires a recursive-backedge classification"
     );
     assert!(core.contains("type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot"));
-    assert!(core.contains("effect: RuntimeValueRoot"));
-    assert!(core.contains("target: Option<RuntimeValueRoot>"));
+    let _: fn(&ReflectionComputationOwner) = assert_reflection_owner_fields;
+    assert!(core.contains("effect: Value"));
+    assert!(core.contains("target: Option<Value>"));
+    assert!(!core.contains("effect: RuntimeValueRoot"));
+    assert!(!core.contains("target: Option<RuntimeValueRoot>"));
     assert_eq!(
         core.matches("fn new<T: OpaquePayloadFamily>").count(),
         1,
@@ -455,6 +481,33 @@ fn host_callback_root_backedge_remains_explicitly_deferred_to_i10a() {
         .collect_managed_for_test()
         .expect("removing the explicit external root should make the lazy collectible");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.finalized_slots(), 2);
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(values.external_owner_count_for_test(), 0);
+}
+
+#[test]
+fn production_reflection_result_edges_do_not_need_an_external_root() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("the reflection-edge fixture should start collectible");
+    {
+        let promise = PromisedValue::new(&values, "reflection effect backedge");
+        let reflected = values.with_runtime_value_access(|access| {
+            Value::reflection_task_result_in(&access, Value::Promised(promise.clone()))
+        });
+        set_test_promise(&values, &promise, reflected.clone())
+            .expect("the reflection backedge promise should start unassigned");
+    }
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("direct reflection edges should be traced without registered roots");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
     assert_eq!(reclaimed.finalized_slots(), 2);
     assert_eq!(values.drain_external_owners_for_test(), 1);
     assert_eq!(values.external_owner_count_for_test(), 0);

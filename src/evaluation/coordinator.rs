@@ -72,8 +72,8 @@ use spark::{SparkRetirement, claim_ready_spark, detach_spark, queue_spark};
 pub(crate) use task::{
     EvaluationExitBlock, EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock,
     EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken,
-    ExitIntent, InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy,
+    EvaluationTaskObserver, EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitTerminal,
+    EvaluationWaitToken, ExitIntent, InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy,
     PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
     ReflectionTaskResultPolicy, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
     TaskStatusWake,

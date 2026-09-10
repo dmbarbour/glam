@@ -4977,7 +4977,7 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
 }
 
 #[test]
-fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain() {
+fn abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain() {
     let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -5002,12 +5002,14 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
             .expect("the closed reflection value should fit a managed run");
         scope.root(allocator.alloc(ClosedCompatibilityValue::new(value, &managed_drops)))
     });
-    assert!(matches!(
-        context.poll_reflection_task(&handle),
-        EvaluationWaitPoll::Pending(_)
-    ));
+    let abandoned_poll = context.poll_reflection_task(&handle);
+    assert!(
+        matches!(abandoned_poll, EvaluationWaitPoll::Pending(_)),
+        "discarding an unpublished reservation returned {abandoned_poll:?}"
+    );
 
     drop(reservation);
+    assert_eq!(context.task_registry_counts().reflection_active, 0);
     drop(computation);
     drop(root);
     let report = context
@@ -5020,11 +5022,6 @@ fn unactivated_reflection_reservation_cancels_only_during_external_owner_drain()
         "collection retires both the closed wrapper and its managed reflection lazy"
     );
     assert_eq!(managed_drops.load(Ordering::Relaxed), 1);
-    assert!(matches!(
-        context.poll_reflection_task(&handle),
-        EvaluationWaitPoll::Pending(_)
-    ));
-
     assert_eq!(context.values().drain_external_owners_for_test(), 1);
     assert_eq!(context.task_registry_counts().reflection_active, 0);
 }
@@ -5078,23 +5075,17 @@ fn assert_reflection_gate_order(
     assert_eq!(second_task.handle().id(), first_task.handle().id());
     assert_eq!(second_task.handle().session_id(), first.session_id());
 
-    let (owner_task, observer_task) = match first_observer {
-        ReflectionParticipant::Owner => (first_task, second_task),
-        ReflectionParticipant::Observer => (second_task, first_task),
+    // Only the first observation carries the one-use activation permit. The
+    // permit is intentionally transferable to either same-runtime evaluator
+    // step, while the later observation carries only the stable task handle.
+    let (activation_context, overlapping_context) = match first_activator {
+        ReflectionParticipant::Owner => ((*owner).clone(), &*observer),
+        ReflectionParticipant::Observer => ((*observer).clone(), &*owner),
     };
-    let (activation_context, activation_task, overlapping_context, overlapping_task) =
-        match first_activator {
-            ReflectionParticipant::Owner => {
-                ((*owner).clone(), owner_task, &*observer, observer_task)
-            }
-            ReflectionParticipant::Observer => {
-                ((*observer).clone(), observer_task, &*owner, owner_task)
-            }
-        };
     let activation = std::thread::spawn(move || {
         let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
         poll.evaluate(&activation_context, |evaluator| {
-            evaluator.defer_reflection_activation(activation_task);
+            evaluator.defer_reflection_activation(first_task);
         });
     });
     entry
@@ -5104,7 +5095,7 @@ fn assert_reflection_gate_order(
 
     let second_poll = crate::evaluation::EvaluationPollContext::for_context(overlapping_context);
     second_poll.evaluate(overlapping_context, |evaluator| {
-        evaluator.defer_reflection_activation(overlapping_task);
+        evaluator.defer_reflection_activation(second_task);
     });
     assert_eq!(
         builds.load(Ordering::SeqCst),

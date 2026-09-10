@@ -87,9 +87,11 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core/managed.rs", GatewayCounts::new(3, 2)),
         // I4F.2b's test-only passive-closure matrix allocates each real
         // compatibility value variant through the same bounded gateway.
+        // GCI5R-005A adds one production reflection-cycle construction and a
+        // matching-runtime source inspection.
         (
             "src/core/managed/active_owner_inventory.rs",
-            GatewayCounts::new(0, 2),
+            GatewayCounts::new(1, 2),
         ),
         (
             "src/core/managed/payload_edges/persistent.rs",
@@ -128,7 +130,8 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // managed access to mutate themselves. GCI5R-003F removes their weak
         // observers; seven test-only inspection helpers now require an
         // explicit matching factory and enter through this counted gateway.
-        ("src/core.rs", GatewayCounts::new(30, 5)),
+        // GCI5R-005B removes the former external reflection-root projection.
+        ("src/core.rs", GatewayCounts::new(29, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching
@@ -136,8 +139,8 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core_net.rs", GatewayCounts::new(13, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
-        // The reflection active-owner fixture proves that managed
-        // finalization leaves reservation cancellation to the external drain.
+        // Reflection evaluator fixtures construct their managed wrapper under
+        // one bounded access region.
         ("src/eval/tests.rs", GatewayCounts::new(0, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         // Promise terminalization projects a managed assignment through the

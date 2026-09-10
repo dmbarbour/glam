@@ -16,8 +16,8 @@ use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 #[cfg(test)]
 use crate::evaluation::PromiseProducerObligation;
 use crate::evaluation::{
-    EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext, ReflectionTaskReservation,
-    ReflectionTaskResultPolicy,
+    EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext, ReflectionTaskObservation,
+    ReflectionTaskReservation, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
@@ -1543,14 +1543,14 @@ impl CoreValueFactory {
 /// `LazySource`. Task execution state belongs to the runtime work coordinator;
 /// this cell only remembers which task the first observer started.
 pub(crate) struct ReflectionComputation {
+    effect: Value,
+    target: Option<Value>,
     handle: ExternalOwnerHandle,
     completion: ReflectionCompletionKind,
 }
 
 struct ReflectionComputationOwner {
-    effect: RuntimeValueRoot,
-    target: Option<RuntimeValueRoot>,
-    task: OnceLock<Result<ReflectionTaskReservation, Arc<EvaluationFailure>>>,
+    task: OnceLock<Result<ReflectionTaskObservation, Arc<str>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1575,11 +1575,11 @@ impl ReflectionComputation {
         completion: ReflectionCompletionKind,
     ) -> Self {
         let owner = Arc::new(ReflectionComputationOwner {
-            effect: RuntimeValueRoot::new(values, effect),
-            target: target.map(|target| RuntimeValueRoot::new(values, target)),
             task: OnceLock::new(),
         });
         Self {
+            effect,
+            target,
             handle: values.domain.external_owners.insert(owner),
             completion,
         }
@@ -1597,17 +1597,32 @@ impl ReflectionComputation {
         context: &EvalContext,
     ) -> Result<ReflectionTaskReservation, Arc<EvaluationFailure>> {
         let owner = self.owner(context.values());
-        owner
+        let mut handle = None;
+        let mut activation = None;
+        let observation = owner
             .task
             .get_or_init(|| {
-                let effect = context
-                    .values()
-                    .with_runtime_value_access(|access| owner.effect.clone_core_with(&access));
                 context
-                    .reserve_reflection_activation(effect, self.result_policy())
-                    .map_err(|error| Arc::new(EvaluationFailure::message(error)))
+                    .reserve_reflection_activation(self.effect.clone(), self.result_policy())
+                    .map(|reservation| {
+                        let (observation, reserved_handle, permit) = reservation.into_cache_parts();
+                        handle = Some(reserved_handle);
+                        activation = permit;
+                        observation
+                    })
             })
             .clone()
+            .map_err(|error| Arc::new(EvaluationFailure::message(error)))?;
+        let handle = handle.or_else(|| observation.handle()).ok_or_else(|| {
+            Arc::new(EvaluationFailure::message(
+                "reflection task observation is no longer available",
+            ))
+        })?;
+        Ok(ReflectionTaskReservation::from_cache_parts(
+            observation,
+            handle,
+            activation,
+        ))
     }
 
     pub(crate) fn completion(&self) -> ReflectionCompletionKind {
@@ -1615,11 +1630,7 @@ impl ReflectionComputation {
     }
 
     pub(crate) fn target(&self, context: &EvaluatorStepContext<'_>) -> Option<Value> {
-        let owner = self.owner(context.context().values());
-        owner
-            .target
-            .as_ref()
-            .map(|target| context.project_root(target))
+        context.with_value_access(|_| self.target.clone())
     }
 
     fn result_policy(&self) -> ReflectionTaskResultPolicy {

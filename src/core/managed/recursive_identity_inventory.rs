@@ -636,8 +636,8 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
 // represented Rust ownership was reviewed as construction-acyclic: it may
 // connect managed identities but cannot independently manufacture a recursive
 // identity. Exact identity projections terminate at one of I5's managed cells.
-// Reflection computation is deliberately an external-root boundary whose
-// effect/target containment remains I10A work.
+// GCI5R-005B moved reflection effect/target containment into its exact direct
+// compatibility trace; only active reservation authority remains external.
 const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
@@ -684,8 +684,8 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for ReflectionComputation {",
-        role: CompatibilityRecursionRole::ExternalRootBoundary,
-        reason: "effect and target roots live in the external-owner registry pending I10A",
+        role: CompatibilityRecursionRole::ImmutablePath,
+        reason: "immutable effect and optional gate-target paths owned by a managed lazy",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
@@ -868,17 +868,14 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
         );
     }
 
-    assert_eq!(roles, [15, 3, 1]);
+    assert_eq!(roles, [16, 3, 0]);
     let external = COMPATIBILITY_ADAPTER_INVENTORY
         .iter()
         .filter(|entry| entry.role == CompatibilityRecursionRole::ExternalRootBoundary)
         .collect::<Vec<_>>();
-    let [external] = external.as_slice() else {
-        panic!("exactly one compatibility adapter should cross an external-root boundary")
-    };
-    assert_eq!(
-        external.declaration,
-        "impl CompatibilityValueEdges for ReflectionComputation {"
+    assert!(
+        external.is_empty(),
+        "no compatibility semantic edge may cross an external-root boundary"
     );
 }
 

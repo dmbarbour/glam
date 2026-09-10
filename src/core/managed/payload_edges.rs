@@ -100,10 +100,11 @@ impl CompatibilityValueEdges for SemanticComputation {
 }
 
 impl CompatibilityValueEdges for ReflectionComputation {
-    fn visit_compatibility_value_edges(&self, _visit: &mut dyn FnMut(&Value)) {
-        // I4F.2b.2 keeps effect, target, and reservation failure values rooted
-        // in the runtime external-owner registry. The managed-reachable
-        // computation is an edge-free lease.
+    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
+        visit(&self.effect);
+        if let Some(target) = &self.target {
+            visit(target);
+        }
     }
 }
 
@@ -262,9 +263,10 @@ mod tests {
         else {
             unreachable!("the reflection fixture must retain its source")
         };
-        assert!(
-            edges(reflection.as_ref()).is_empty(),
-            "reflection semantic values must remain in the external owner"
+        assert_eq!(
+            edges(reflection.as_ref()),
+            [first.clone(), second.clone()],
+            "reflection effect and target are direct managed semantic edges"
         );
 
         let promise = PromisedValue::new(&values, "compatibility visitor promise");

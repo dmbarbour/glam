@@ -256,6 +256,66 @@ fn reflection_test_module(
     (assembler, eval_context, definitions, diagnostics)
 }
 
+#[test]
+fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
+    let runtime = crate::api::EvaluationRuntime::new(0)
+        .expect("reflection-cycle test runtime should be constructible");
+    let assembler = crate::api::Assembler::builder()
+        .evaluation_runtime(runtime)
+        .build()
+        .expect("reflection-cycle test assembler should be constructible");
+    let values = assembler.core_values();
+    {
+        let warm_context =
+            CompileContext::from_module_path_with_values(values.clone(), ["meta_refl_warmup"]);
+        let warm = lower_parsed_source(
+            parse("language g0\nimport 'std\nmeta.warm = {}\n"),
+            &warm_context,
+        );
+        assert_eq!(warm.diagnostics, []);
+    }
+    values.collect_and_drain_external_owners_for_test();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("the source reflection-cycle fixture should start collectible");
+    let baseline_owners = values.external_owner_count_for_test();
+
+    {
+        let context =
+            CompileContext::from_module_path_with_values(values.clone(), ["meta_refl_cycle"]);
+        let lowered = lower_parsed_source(
+            parse(
+                "language g0\n\
+                 import 'std\n\
+                 meta.x = anno meta_refl:(\\_ -> .r meta.x) [anno 'meta_init ()]\n",
+            ),
+            &context,
+        );
+        assert_eq!(lowered.diagnostics, []);
+        let Value::Promised(final_defs) = context.final_defs() else {
+            panic!("final module binding should be promised");
+        };
+        crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
+            .expect("final module binding should start unassigned");
+
+        let eval_context = assembler.eval_context();
+        let module = crate::eval::eval_value(&eval_context, &lowered.definitions)
+            .expect("the source reflection-cycle module should expose its dictionary");
+        assert!(matches!(
+            resolved_value_at_path_with_context(&eval_context, &module, &["meta", "x"]),
+            Value::List(_)
+        ));
+    }
+
+    values.collect_and_drain_external_owners_for_test();
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("dropping the module should reclaim its latent reflection cycle");
+    assert_eq!(values.external_owner_count_for_test(), baseline_owners);
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
+}
+
 fn take_reflection_diagnostics(
     diagnostics: &Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
 ) -> Vec<crate::api::DiagnosticEvent> {
