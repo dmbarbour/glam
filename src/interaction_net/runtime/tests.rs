@@ -138,6 +138,175 @@ impl NetSpecialization for OwnershipNeutralSpecialization {
     type StuckReason = ();
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecialization>(
+    template: &InteractionNet<S>,
+    node: &Node<S>,
+    runtime: &RuntimeNet<S>,
+    entry: &RuntimeEntry<S>,
+    copy: &CopyState<S>,
+    obligation: &PairlessCursorObligation<S>,
+    pairless: &PairlessCursorState<S>,
+    dependency: &CursorDependency<S>,
+    observation: &FrontierObservation<S>,
+    active_state: &ActivePairState<S>,
+    blockage: &CursorBlockage<S>,
+    stuck: &StuckReason<S::StuckReason>,
+    runtime_node: &RuntimeNode<S>,
+    shared: &SharedRuntimeNetState<S>,
+    normalization_batches: &NormalizationBatchState,
+    batch: &ActiveNormalizationBatch,
+) {
+    let InteractionNet {
+        nodes,
+        wires,
+        exposed,
+        active_pairs,
+    } = template;
+    let _: (&Arc<[Node<S>]>, &Arc<[Wire]>, &Port, &Arc<[ActivePairKey]>) =
+        (nodes, wires, exposed, active_pairs);
+
+    match node {
+        Node::Bind | Node::Erase => {}
+        Node::Fan { site } => {
+            let _: &FanSite = site;
+        }
+        Node::Data(data) => {
+            let _: &S::Data = data;
+        }
+        Node::Operator(operator) => {
+            let _: &S::Operator = operator;
+        }
+    }
+
+    let RuntimeNet {
+        next_node_id,
+        next_fan_site,
+        exposed,
+        nodes,
+        next_copy_id,
+        copies,
+        cursor_obligations,
+        active,
+    } = runtime;
+    let _: (
+        &u64,
+        &u64,
+        &Option<Port>,
+        &HashMap<NodeId, RuntimeEntry<S>>,
+        &u64,
+        &HashMap<CopyId, CopyState<S>>,
+        &HashMap<NodeId, PairlessCursorObligation<S>>,
+        &BTreeMap<ActivePairKey, ActivePairState<S>>,
+    ) = (
+        next_node_id,
+        next_fan_site,
+        exposed,
+        nodes,
+        next_copy_id,
+        copies,
+        cursor_obligations,
+        active,
+    );
+
+    let RuntimeEntry { node, links } = entry;
+    let _: (&RuntimeNode<S>, &[Option<Port>; 3]) = (node, links);
+
+    match runtime_node {
+        RuntimeNode::Bind | RuntimeNode::Erase | RuntimeNode::Interface => {}
+        RuntimeNode::Fan { identity } => {
+            let _: &FanIdentity = identity;
+        }
+        RuntimeNode::Data(data) => {
+            let _: &S::Data = data;
+        }
+        RuntimeNode::Operator(operator) => {
+            let _: &S::Operator = operator;
+        }
+        RuntimeNode::RemoteCursor { copy, remote } => {
+            let _: (&CopyId, &Port) = (copy, remote);
+        }
+    }
+
+    let CopyState {
+        source,
+        frontiers,
+        fan_sites,
+    } = copy;
+    let _: (
+        &S::RuntimeSource,
+        &HashMap<Port, NodeId>,
+        &HashMap<FanSite, FanSite>,
+    ) = (source, frontiers, fan_sites);
+
+    let PairlessCursorObligation { cursor, state } = obligation;
+    let _: (&NodeId, &PairlessCursorState<S>) = (cursor, state);
+    match pairless {
+        PairlessCursorState::Ready | PairlessCursorState::Claimed | PairlessCursorState::Stable => {
+        }
+        PairlessCursorState::Blocked(dependency) => {
+            let _: &CursorDependency<S> = dependency;
+        }
+    }
+
+    match dependency {
+        CursorDependency::LocalCursor(cursor) => {
+            let _: &NodeId = cursor;
+        }
+        CursorDependency::SourceCursor(observation)
+        | CursorDependency::SourceFrontier(observation) => {
+            let _: &FrontierObservation<S> = observation;
+        }
+    }
+    let FrontierObservation {
+        source,
+        observed_topology,
+        endpoint,
+    } = observation;
+    let _: (&S::RuntimeSource, &u64, &DemandEndpoint) = (source, observed_topology, endpoint);
+
+    match active_state {
+        ActivePairState::Ready | ActivePairState::Claimed => {}
+        ActivePairState::BlockedCall { wait } | ActivePairState::BlockedOperatorCall { wait } => {
+            let _: &S::WaitToken = wait;
+        }
+        ActivePairState::BlockedCursor { cursor, blockage } => {
+            let _: (&NodeId, &CursorBlockage<S>) = (cursor, blockage);
+        }
+        ActivePairState::Stuck(reason) => {
+            let _: &StuckReason<S::StuckReason> = reason;
+        }
+    }
+    match blockage {
+        CursorBlockage::Dependency(dependency) => {
+            let _: &CursorDependency<S> = dependency;
+        }
+        CursorBlockage::Stable => {}
+    }
+    match stuck {
+        StuckReason::NoRule => {}
+        StuckReason::Specialization(reason) => {
+            let _: &S::StuckReason = reason;
+        }
+    }
+
+    let SharedRuntimeNetState { runtime, batches } = shared;
+    let _: (&RuntimeNet<S>, &NormalizationBatchState) = (runtime, batches);
+    let NormalizationBatchState { next_id, active } = normalization_batches;
+    let _: (&u64, &Option<ActiveNormalizationBatch>) = (next_id, active);
+    let ActiveNormalizationBatch {
+        id,
+        contended,
+        dirty,
+    } = batch;
+    let _: (&u64, &bool, &bool) = (id, contended, dirty);
+}
+
+#[test]
+fn runtime_payload_owner_inventory_is_compile_exhaustive() {
+    let _ = assert_runtime_payload_owner_inventory_is_compile_exhaustive::<i32>;
+}
+
 #[test]
 fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
     let source = OpaqueRuntimeSource(42);

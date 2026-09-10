@@ -237,6 +237,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I7C | complete | persistent logical-work accounting reconciliation |
 | I7 | complete | persistent list and dictionary trace audit; grouped post-I6/I7 review passed |
 | I8A.0 | complete | core-net facade and durable root observer retirement |
+| I8A.1 | complete | final payload and visitor reconciliation |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
 | I9 | pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
@@ -5572,6 +5573,17 @@ projection/net-access probe. Production remains `NoAuto`.
 Verification: refreshed compile-exhaustive payload inventory, the existing
 non-reducing logical-walk tests, and focused fixtures only for post-GCI5R-002D
 payload deltas.
+
+Completed 2026-09-10. A compile-exhaustive topology-owner inventory now
+destructures the immutable template, runtime graph and entries, copy/source
+state, pairless and active cursor state, dependency observations,
+specialization stuck reasons, and edge-free normalization companions. The
+existing exhaustive `RuntimeNetPayload` and `CoreOperator` adapters still map
+every semantic field to the managed core-net trace without reduction, cursor
+following, or semantic callbacks. No semantic payload field or variant was
+introduced after GCI5R-002D, so the existing non-reducing data/operator/stuck/
+source fixture is the focused behavior evidence and no duplicate fixture was
+added. Production remains `NoAuto`.
 
 ### Phase I8A.2 — Exact Per-Edit Mutation Deltas
 
