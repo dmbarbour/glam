@@ -341,6 +341,13 @@ root before that region ends. Gate review consumes the exact constructor
 inventory and forced-boundary evidence rather than inferring this chronology
 from declarations alone.
 
+GCI5R-005/I6D.1 has closed the reflection-computation contribution to this
+gate. Its managed lazy traces effect and optional target directly, its durable
+external registry record is an edge-free weak task observation, and its
+first-observer activation permit is an explicitly tested temporary root. This
+is component progress only; it does not establish G2 until the remaining
+families and external boundaries satisfy the same inventory and chronology.
+
 Only after G2 may tests force a full collection over the complete production
 graph.
 

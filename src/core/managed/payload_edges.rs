@@ -101,6 +101,9 @@ impl CompatibilityValueEdges for SemanticComputation {
 
 impl CompatibilityValueEdges for ReflectionComputation {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
+        // The managed lazy owns these immutable semantic edges directly. The
+        // external handle reaches only lifecycle/cancellation authority and
+        // must never substitute registered roots for this trace.
         visit(&self.effect);
         if let Some(target) = &self.target {
             visit(target);

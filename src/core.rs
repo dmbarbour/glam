@@ -1540,8 +1540,11 @@ impl CoreValueFactory {
 /// A lazy reflection task which either gates a target or returns its result.
 ///
 /// The payload is boxed so adding reflection does not enlarge every
-/// `LazySource`. Task execution state belongs to the runtime work coordinator;
-/// this cell only remembers which task the first observer started.
+/// `LazySource`. This managed-reachable payload owns the immutable effect and
+/// optional gate target as exact semantic edges. Its external-owner handle
+/// reaches only an edge-free stable task observation; the first observer's
+/// temporary activation permit roots the effect until ownership transfers to
+/// the runtime work coordinator's task machine.
 pub(crate) struct ReflectionComputation {
     effect: Value,
     target: Option<Value>,

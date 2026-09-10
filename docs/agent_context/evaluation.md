@@ -224,6 +224,13 @@ control-flow overview.
   effect vocabulary, environment, diagnostic routing, and shared host
   resources. An annotation child therefore inherits the runtime default which
   its parent received.
+- A reflection lazy itself traces the immutable effect and optional gate
+  target. Its external-owner record caches only a scalar admission error or an
+  edge-free observation with scalar identity/disposition and weak task routes.
+  The first observer's one-use permit temporarily roots the effect until
+  activation transfers ownership to the coordinator machine. Draining the
+  external owner does not cancel or retain work while that permit survives;
+  dropping an unconsumed permit cancels the still-reserved task.
 - The boxed reflection lazy source has an explicit completion policy. A gate
   selects `RequireUnit` and then exposes its target; the internal
   result-producing form selects `ReturnValue` and forwards the task result

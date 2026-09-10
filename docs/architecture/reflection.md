@@ -54,9 +54,16 @@ and query handles; they contain no hidden semantic value. The mutation token
 used by query writers is borrowed for one guarded callback and cannot escape.
 
 Demanding one of those annotations first reserves a stable task and wait
-inside pure evaluation. The evaluator-step boundary then ends before a
-one-time activation invokes the type-erased launcher. Concurrent observers
-share the reservation rather than constructing competing machines. A
+inside pure evaluation. The managed reflection computation continues to own
+and trace the immutable effect and optional gate target. Its external registry
+record retains only an edge-free weak task observation (or scalar admission
+failure), never a semantic root or value-domain lease. The first observer also
+receives a one-use permit which temporarily roots the effect and selected
+launch policy. The evaluator-step boundary ends before that permit invokes the
+type-erased launcher; successful activation transfers ownership into the
+coordinator task machine. Concurrent observers share the observation without
+constructing competing machines or permits. Dropping an unconsumed permit
+cancels the reservation, while external-owner drain alone is inert. A
 pre-activation cancellation suppresses launcher construction; cancellation
 or demand closure racing an already-entered launcher keeps the terminal state
 and discards the unused machine.

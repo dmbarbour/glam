@@ -2,7 +2,7 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; GCI5R-001 through GCI5R-004 and GCI5R-008 are closed.
+Status: review complete; GCI5R-001 through GCI5R-005 and GCI5R-008 are closed.
 The implemented I5
 graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
 closed isolated collection fixtures provide strong evidence for recursive
@@ -1601,9 +1601,9 @@ effect edge.
 Every audit may close without representation work when the existing visitor,
 passive destruction, and external-owner boundary remain exact. Any selected
 managed conversion must name an independent benefit and apply GCI5R-001's
-regional allocation/first-owner rule. Reflection computation remains the
-deliberate exception: I6D.1 must resolve its effect/target registered-root
-backedge under GCI5R-005 rather than using audit-only completion.
+regional allocation/first-owner rule. Reflection computation was the
+deliberate exception; GCI5R-005/I6D.1 has now resolved its effect/target
+registered-root backedge rather than using audit-only completion.
 
 Closure verification passed the failure-boundary, public-facade,
 recursive-identity, and durable-owner source inventories. Formatting,
@@ -1616,7 +1616,7 @@ does not authorize collection outside the existing closed fixtures.
 **Classification:** future ownership chronology conflict  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; A-D completed 2026-09-10; E-F remain; owns I6D.1 and blocks Gate G2
+**Status:** closed 2026-09-10; owns completed I6D.1 and no longer blocks Gate G2
 
 At the review baseline, `ReflectionComputation` was the one compatibility
 adapter which deliberately reported no semantic value edge. Its runtime
@@ -1646,8 +1646,9 @@ Reflection computation is structurally knowable and should be resolved in
 I6D.1. Arbitrary `HostCallOperation` closure environments are not structurally
 knowable and remain I10A. Update the inventory and plan accordingly.
 
-I6D.1 also needs bounded checkpoints. The current `ReflectionComputationOwner`
-combines immutable semantic roots with active one-write reservation state.
+The remediation also required bounded I6D.1 checkpoints. The review-baseline
+`ReflectionComputationOwner` combined immutable semantic roots with active
+one-write reservation state.
 Separate:
 
 1. managed-reachable effect/target edges and their exact trace;
@@ -1997,6 +1998,34 @@ repetition-based evidence was added.
    no external reflection owner contains a semantic root or strong value-domain
    route, and Gate G2 can treat reflection computation as closed.
 
+Completed 2026-09-10. The active-owner inventory now distinguishes arbitrary
+host callback environments (still I10A) from reflection's externally active
+but semantic-edge-free cancellation authority. Source latches tie that claim
+to compile-exhaustive field inventories for the stable observation, temporary
+activation payload, and weak task observer. The durable-owner inventory names
+the permit's temporary effect root separately from cached weak observation;
+the compatibility inventory continues to require effect-then-target visitation
+from the managed computation itself.
+
+The ownership ledger, implementation map, evaluator/reflection architecture,
+I6D.1 phase record, and Gate G2 roadmap now describe the same three owners:
+managed semantic payload, edge-free registry observation, and temporary
+first-observer activation permit followed by coordinator task ownership. Dated
+I4/I5 descriptions retain their historical decisions but explicitly identify
+the GCI5R-005 supersession. I6D.1 is marked complete, and reflection
+computation is closed input to Gate G2 without claiming that the whole gate is
+complete.
+
+Focused reflection, metadata, cross-session, runtime-domain, managed-closure,
+and source-inventory suites pass. Formatting, all-target/all-feature Clippy
+with warnings denied, and the complete repository test suite pass. Two
+strict-provenance Miri probes pass over the barrier-controlled activation
+handoff and gate-target backedge trace/reclamation. Miri emitted only current
+nightly compatibility warnings, not an interpreter or provenance failure. The
+source-level latent `meta_refl` fixture reclaims exactly, and both the
+field/source latches and runtime-drop probe establish that no external
+reflection owner retains a semantic root or strong value-domain route.
+
 ### GCI5R-006 — I7-I11 need delta-oriented checkpoints after the I5 cutover
 
 **Classification:** future verification and checkpoint drift  
@@ -2027,7 +2056,7 @@ which I5 already completed:
   audited in I5E; I9 should test only ownership/lifecycle deltas introduced by
   I6-I8 plus the mandatory final external-RAII/source inventory.
 - **I10:** retain arbitrary host-callback containment and the opaque decision
-  gate. Remove reflection computation from I10A once I6D.1 owns it.
+  gate. GCI5R-005/I6D.1 has removed reflection computation from I10A.
 - **I11/Gate G2:** consume GCI5R-001's exact temporal root-publication
   inventory and forced-order evidence. A declaration-only root inventory does
   not prove that an allocation remains live between allocation, handoff, and
@@ -2291,12 +2320,12 @@ the managed root/edge identity projection fixture.
 | Phase | Current disposition after I5 | Required adjustment before execution |
 | --- | --- | --- |
 | I6A-C | Exact compatibility tracing already closes cycles through these immutable shells. | Resolved by GCI5R-004: representation-specific audits default to retaining exact compatibility paths; conversion is optional and requires an independent benefit plus the regional allocation proof. |
-| I6D.1 | Required to eliminate reflection effect/target root backedges. | Split semantic edges from active reservation lifecycle and take ownership away from I10A. |
+| I6D.1 | Complete: reflection effect/target root backedges are eliminated. | Managed semantic edges, edge-free stable observation, one-use activation ownership, and forced-order lifecycle evidence are reconciled under GCI5R-005. |
 | I6D.2 | Net-construction `Arc<Value>` is immutable and already traced. | Treat conversion as optional representation cleanup unless another identity/lifecycle need is found. |
 | I7 | Visitor and most cycle evidence already exist. | Narrow to delta audit, missing thunk/backedge shape, and duplicate-work measurement. |
 | I8 | Managed core-net owner and a conservative synchronized transition gateway already exist. | Split final payload audit, exact per-edit delta conversion, delta cycle states, and adapter/comment retirement. |
 | I9 | I5 already changed and audited several root/RAII surfaces. | Start from I5 inventories and test only I6-I8 deltas plus final mandatory source audits. |
-| I10 | Host callbacks and opaque storage remain real deferred boundaries. | Remove reflection after I6D.1; preserve host-capture and opaque decision gates. |
+| I10 | Host callbacks and opaque storage remain real deferred boundaries. | Reflection is removed from I10A; preserve host-capture and opaque decision gates. |
 | I11 | Stable-boundary forced collection remains viable in principle. | Gate worker-concurrent collection on root-before-exit chronology and complete barrier/source audits. |
 | I12 | Automatic entry can collect at the most dangerous handoff boundary. | Consume GCI5R-001's closed evidence as a hard policy-review prerequisite and inventory second-entry constructors. |
 | I13 | Redundant compatibility/provenance cleanup remains appropriate. | Do not defer liveness or mutation safety here; add any accepted ID/label cache to its cleanup ledger. |
@@ -2317,13 +2346,14 @@ the managed root/edge identity projection fixture.
 4. **Completed:** GCI5R-004 rewrote I6A-C and I6D.2 around the immutable-shell
    result, with audit-only completion and independently justified optional
    conversions.
-5. **Planned:** resolve GCI5R-005 through the A-F semantic-edge,
+5. **Completed:** GCI5R-005 resolved the semantic-edge,
    activation-lifecycle, retirement, forced-order, and reconciliation
-   checkpoints now assigned to I6D.1.
+   checkpoints assigned to I6D.1.
 6. Narrow I7, repartition I8, and update the I9-I12 entry conditions described
    above.
 7. Re-run the focused and routine checks, update phase status and stale source
    comments, and close I5 before implementation proceeds into I6.
 
 Production remains `CollectionPolicy::NoAuto`. This review authorizes no full
-collection over a production runtime and does not advance Gate G2.
+collection over a production runtime. GCI5R-005 advances only the closed
+reflection-computation input to Gate G2; the gate as a whole remains pending.

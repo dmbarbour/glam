@@ -685,7 +685,7 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for ReflectionComputation {",
         role: CompatibilityRecursionRole::ImmutablePath,
-        reason: "immutable effect and optional gate-target paths owned by a managed lazy",
+        reason: "immutable effect and optional gate-target paths owned by a managed lazy; its external handle reaches only edge-free lifecycle authority",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",

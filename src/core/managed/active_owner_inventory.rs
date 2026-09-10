@@ -4,9 +4,13 @@
 //! Most compatibility payloads recursively release values, synchronized net
 //! storage, scheduler identities, or ordinary Rust resources. I4F.2b.1-.3
 //! moved the three active frontiers into a runtime registry: host-call closure
-//! environments, reflection reservations, and opaque payloads. Managed-
-//! reachable values now retain only passive handles. The source latches below
-//! keep both sides of that boundary explicit.
+//! environments, reflection reservation cancellation, and opaque payloads.
+//! GCI5R-005 then restored reflection effect/target values to the managed
+//! computation's exact trace and left only an edge-free stable observation in
+//! that registry. The one-use activation permit is a transient external root,
+//! not registry state. Managed-reachable values therefore retain only passive
+//! handles, while arbitrary host callback environments remain deferred to
+//! I10A. The source latches below keep both sides of that boundary explicit.
 
 use std::fs;
 use std::path::Path;
@@ -126,6 +130,18 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
     SourceLatch {
         path: "src/evaluation/session.rs",
         needle: "pub(crate) struct ReflectionTaskActivationPermit {",
+        expected: 1,
+        frontier: ActiveDestructionKind::ReflectionReservation,
+    },
+    SourceLatch {
+        path: "src/evaluation/session.rs",
+        needle: "fn reflection_reservation_storage_separates_stable_observation_from_activation_payload()",
+        expected: 1,
+        frontier: ActiveDestructionKind::ReflectionReservation,
+    },
+    SourceLatch {
+        path: "src/evaluation/coordinator/task.rs",
+        needle: "fn evaluation_task_handle_retains_only_identity_wait_and_weak_coordinator_authority()",
         expected: 1,
         frontier: ActiveDestructionKind::ReflectionReservation,
     },

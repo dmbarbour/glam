@@ -372,17 +372,26 @@ asserting that it remains reserved. Blocked reflection and deferred work
 retain their machines in their coordinator records. Terminal work retires from
 coordinator indexes and destroys its detached machine outside runtime locks.
 
-An `anno refl:Task` or metadata-reflection computation caches a stable task
-reservation, not a launched machine. The evaluator phase may reserve or
-discover that handle and report its wait, while its thread-bound step carrier
-collects an activation request. Poll orchestration drops the evaluator carrier
-before draining those requests. The first request builds and queues the task;
-concurrent observers share the reservation and subsequent requests are
-no-ops. A task terminal before activation skips the launcher. Cancellation or
-owner closure racing an entered launcher retains the terminal result and makes
-machine installation discard the unused machine outside coordinator locks.
-Annotation tasks always use the runtime-default reflection profile; this split
-does not make their host policy observer-dependent.
+An `anno refl:Task` or metadata-reflection lazy traces its immutable effect and
+optional gate target as direct semantic edges. Its runtime external-owner
+record caches only a scalar admission error or a stable task observation made
+of scalar identity/disposition and weak coordinator/wait routes; it owns no
+semantic root or value-domain lease. The evaluator phase may reserve or
+discover a transient strong handle and report its wait, while its thread-bound
+step carrier collects the first observer's one-use activation permit. That
+permit temporarily roots the effect together with the selected profile,
+result policy, and bounded context. Poll orchestration drops the evaluator
+carrier before draining activation requests, and successful activation
+transfers effect ownership into the coordinator task machine.
+
+Concurrent observers share the reservation and receive no second permit. A
+task terminal before activation skips the launcher. Dropping an unconsumed
+permit cancels reserved work; merely draining the edge-free external owner is
+inert while a permit remains. Cancellation or owner closure racing an entered
+launcher retains the terminal result and makes machine installation discard
+the unused machine outside coordinator locks. Annotation tasks always use the
+runtime-default reflection profile; this split does not make their host policy
+observer-dependent.
 
 Every scheduler wait token is one shared cell containing runtime-local
 identity, scalar producer/owner provenance, an optional terminal result, and
@@ -424,6 +433,9 @@ state:
 
 | State | Owner |
 | --- | --- |
+| reflection effect and optional gate target before terminal lazy caching | managed `ReflectionComputation` beneath its lazy cell |
+| stable reflection reservation identity/disposition | edge-free runtime external-owner observation |
+| unactivated effect and launch policy | first observer's shared one-use activation permit |
 | reserved, dormant, queued, running, blocked, or terminalizing reflection/deferred work | runtime work coordinator |
 | queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
 | opaque live reflection/deferred machines | runtime work coordinator or its exclusive claim |
@@ -431,7 +443,7 @@ state:
 | unacknowledged task failures, partitioned by owner session | runtime work coordinator ledger |
 | task wait, current published status, and optional protected-query publisher | coordinator `TaskTerminalPublisher` obligation |
 | task/wait lookup and retirement indexes | runtime work coordinator |
-| completed, failed, cancelled, or abandoned outcome | shared `EvaluationWaitToken` cell |
+| completed, failed, cancelled, abandoned, exited, or killed outcome | shared `EvaluationWaitToken` cell |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks

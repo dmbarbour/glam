@@ -252,10 +252,10 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/evaluation/session.rs",
-        "EvaluationSession and pending activation/effect state",
-        "RuntimeValueRoot effects plus RuntimeFailureRoot reports and unfinished state",
-        "session and parked reflection/effect lifecycle",
-        "session demand or activation reservation",
+        "EvaluationSession, edge-free reflection observations, and pending activation/effect state",
+        "temporary RuntimeValueRoot effects in one-use activation permits plus RuntimeFailureRoot reports and unfinished state; cached observations retain only scalar identity and weak task authority",
+        "session state and transient reflection/effect lifecycle",
+        "session demand or first-observer activation reservation",
         "session close, cancellation, or terminal settlement",
         ManagedRootSurface,
         RootSurface,
@@ -872,7 +872,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     {
         "task, wait, exit, terminal, and failure-ledger records"
     } else if declaration.starts_with("src/evaluation/session.rs::") {
-        "EvaluationSession and pending activation/effect state"
+        "EvaluationSession, edge-free reflection observations, and pending activation/effect state"
     } else if declaration.starts_with("src/g_syntax/compiler_values.rs::") {
         "GCompilerValues / BuiltinModule / BuildingEffectValues"
     } else if declaration.starts_with("src/g_syntax/diagnostic_formatter.rs::") {

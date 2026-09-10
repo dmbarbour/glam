@@ -213,6 +213,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5E | complete | external lifecycle and coordination closure |
 | I5F.1 | complete | direct managed-family self-cycle survival and reclamation |
 | I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
+| I6D.1 | complete | reflection semantic-edge restoration, edge-free observation, one-use activation ownership, and forced-order closure |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
 | I8 | pending | post-cutover core-net trace, mutation, cursor, and lifecycle audit |
@@ -3880,6 +3881,12 @@ owner, and durable-owner inventories pass at this gate. Compatibility `Value`
 itself remains deliberately unadmitted; I4F.2c introduces the private
 production node rather than making the old enum a collector allocation.
 
+GCI5R-005/I6D.1 supersedes only the reflection payload portion of this dated
+checkpoint. The external owner still isolates active reservation
+cancellation, but effect and target now remain exact semantic edges beneath
+the managed lazy. A first-observer permit temporarily roots only the effect
+until coordinator activation; registry drain does not own that transfer.
+
 #### Phase I4F.2c — Private Production Root and Shell Preparation
 
 Prepare the cutover without publishing a managed production value:
@@ -5034,19 +5041,25 @@ marked cells; removing the promise root finalizes all three. This exercises
 the production cursor/source topology rather than approximating it with an
 ordinary data payload.
 
-I5F.4 completed 2026-09-07. The refreshed fail-closed source inventory still
-identifies exactly `ManagedLazyCell`, `ManagedPromiseCell`, and
-`ManagedCoreNetCell` as mutable recursive semantic identities. A second
-inventory now classifies all 20 compatibility edge adapters: 15 are immutable
-construction-acyclic paths between identities, four project an exact managed
-identity, and `ReflectionComputation` is the sole adapter boundary whose
-semantic values deliberately live in external registered roots. Adding an
-adapter without a recursion disposition now fails the audit.
+I5F.4 completed 2026-09-07. At that checkpoint, the refreshed fail-closed
+source inventory still identified exactly `ManagedLazyCell`,
+`ManagedPromiseCell`, and `ManagedCoreNetCell` as mutable recursive semantic
+identities. A second inventory classified its 19 compatibility edge adapters:
+15 were immutable construction-acyclic paths between identities, three
+projected an exact managed identity, and `ReflectionComputation` was the sole
+external-root boundary. Adding an adapter without a recursion disposition
+fails the audit. GCI5R-005/I6D.1 has since removed that exception: the current
+inventory has 16 immutable paths, three exact identity projections, and no
+external semantic-edge boundary. Reflection effect and target are exact
+managed-reachable edges, while only edge-free reservation authority remains
+external.
 
 The external-owner audit records all three registry insertion boundaries.
-Host callback environments and reflection effect/target ownership remain
-explicit root-capable I10A work; opaque payload admission continues to forbid
-`RuntimeValueRoot`, bare `Gc`, and unrooted recursive values. A production
+Host callback environments remain explicit root-capable I10A work; reflection
+reservation cancellation remains an external active action but its durable
+registry record is semantic-edge-free and value-domain-lease-free. Opaque
+payload admission continues to forbid `RuntimeValueRoot`, bare `Gc`, and
+unrooted recursive values. A production
 host-call fixture demonstrates the distinction: an external callback capture
 retains one rooted value shell and its managed lazy, removal of that explicit
 root makes both cells collectible, and the retired callback owner drains only
@@ -5244,7 +5257,7 @@ as this phase's authoritative chronology:
 6. reconcile the active-owner, durable-owner, compatibility, and architecture
    inventories before admitting Gate G2.
 
-Checkpoints 1-4 completed 2026-09-10. The source and direct-constructor
+All six checkpoints completed 2026-09-10. The source and direct-constructor
 mismatches are latched and repaired; effect/target are exact direct semantic
 edges; and the external owner caches only a weak task observation plus scalar
 admission failure. The first observer alone receives a one-use activation
@@ -5252,7 +5265,17 @@ permit, while strong task handles remain transient because their terminal wait
 cells may contain runtime roots. Failure, completion, and every terminal
 disposition now have an explicit owner/retirement ledger; admission failures
 are scalar, gate targets project only the traced field, and return values come
-only from coordinator terminal state. Checkpoints 5-6 remain open.
+only from coordinator terminal state.
+
+Forced barriers cover all four first-observer/activator session orderings and
+the evaluator-to-launcher ownership handoff. Exact collections cover client
+publication, reserved permit, handoff, queued/blocked machine, cancellation,
+all six terminal payload shapes, effect and target backedges, the source-level
+latent `meta_refl` graph, and value-domain retirement with an undrained owner.
+The active-owner, durable-owner, compatibility-edge, ownership-ledger, and
+architecture descriptions now agree on the three-way split. Reflection
+computation is therefore closed input to Gate G2; this does not certify any
+other graph family or Gate G2 as a whole.
 
 The final representation may keep an external handle for active reservation
 destruction, but that owner contains no semantic value root, `EvalContext`,

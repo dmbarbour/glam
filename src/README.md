@@ -49,16 +49,16 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed nets |
 | `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
 | `text_pattern.rs` | Shared capture-free text-pattern language |
-| `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins |
+| `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins, and reflection computations whose effect/target remain exact semantic edges |
 | `core/managed.rs` | Factory-qualified collector access and `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns a no-auto heap while recursive payload families migrate in I5-I8 |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation/mutation and non-reducing semantic-payload views for core interaction nets; raw shared-net ownership remains private |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |
-| `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, cooperative and runtime pumping |
+| `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, edge-free reflection observations, one-use activation permits, cooperative pumping, and runtime pumping |
 | `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, remaining non-effect direct-evaluator compatibility, and temporary machine-completion root seam |
-| `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; completed wait observations retain roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
+| `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
 | `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
