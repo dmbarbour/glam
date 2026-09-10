@@ -1,9 +1,9 @@
-//! Exact semantic-value edges in the pre-managed compatibility representation.
+//! Exact semantic-value edges in compatibility structural payloads.
 //!
-//! I5-I8 replace these adapters in the same checkpoint that each payload
-//! becomes a collector-managed representation. Until then, they make the
-//! required edge vocabulary compile-exhaustive without pretending that an
-//! owning `Arc<Value>` is already a `Gc` edge.
+//! I5 replaced the recursive lazy, promise, and core-net identities. The
+//! remaining adapters keep immutable Rust-owned shells compile-exhaustive and
+//! compose into those exact managed leaves. I6-I8 may retire an adapter only
+//! when an audited managed replacement reports the same edges.
 
 use super::super::{
     BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
@@ -19,7 +19,7 @@ use super::super::{
 /// remains governed by its own root inventory.
 #[allow(
     dead_code,
-    reason = "I4C installs compatibility adapters consumed as managed families migrate in I5-I8"
+    reason = "I4C compatibility adapters remain the exact walk for audited structural shells"
 )]
 pub(crate) trait CompatibilityValueEdges {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value));

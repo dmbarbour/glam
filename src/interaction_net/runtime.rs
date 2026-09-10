@@ -297,7 +297,7 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
 impl<S: NetSpecialization> CursorDependency<S> {
     #[allow(
         dead_code,
-        reason = "I4E installs exact runtime-net source visitation before I8 uses it in production tracing"
+        reason = "I4E source visitation is consumed by the I5D production core-net trace and I8 audit"
     )]
     fn source_runtime(&self) -> Option<&S::RuntimeSource> {
         match self {
@@ -1562,7 +1562,7 @@ struct RuntimeEntry<S: NetSpecialization> {
 /// it never follows or materializes the cursor.
 #[allow(
     dead_code,
-    reason = "I4E installs exact runtime-net payload visitation before I8 uses it in production tracing"
+    reason = "I4E payload visitation is consumed by the I5D production core-net trace and I8 audit"
 )]
 pub(crate) enum RuntimeNetPayload<'payload, S: NetSpecialization> {
     Data(&'payload S::Data),
@@ -1674,7 +1674,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// states contain no specialization payload and are intentionally omitted.
     #[allow(
         dead_code,
-        reason = "I4E installs exact runtime-net payload visitation before I8 uses it in production tracing"
+        reason = "I4E payload visitation is consumed by the I5D production core-net trace and I8 audit"
     )]
     pub(crate) fn visit_logical_payloads(
         &self,

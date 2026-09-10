@@ -1,13 +1,14 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I4 are complete and reviewed. The production
-inline-or-registered-root facade, managed outer value node, passive active-owner
-split, exact durable-owner inventory, and closed owner-level collection matrix
-are current. Recursive payloads deliberately retain their compatibility Rust
-ownership and I4 edge adapters until I5-I8 replace each family with exact
-managed edges. Stable integration facts are reconciled when each later
-representation family receives its concrete managed wrapper and trace
-implementation.
+Status: Phases I0 through I5 are complete and reviewed, and I6D.1's
+reflection-computation repair is complete. The production inline-or-registered-
+root facade, managed outer value node, passive active-owner split, exact
+durable-owner inventory, and closed owner-level collection matrix are current.
+Lazy, promise, core-net, and reflection-computation recursion now reaches exact
+managed edges. Immutable structural payload shells continue to use the
+compile-exhaustive I4 compatibility walk unless an I6-I8 audit selects an
+independently justified managed representation; that walk is not evidence of
+an unperformed recursive-identity cutover.
 Collector-private class topology is verified inside `glam-gc` and is not part
 of this ledger. Every applicable family record must be complete before Gate G2
 permits production collection.

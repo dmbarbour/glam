@@ -403,11 +403,11 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     exact_managed!(
         "src/core/managed/recursive_cells.rs",
-        "prepared recursive identity cells and edges",
+        "production recursive identity cells and edges",
         "managed lazy, promise, and core-net cells plus exact interior Gc edges",
-        "dormant until the atomic I5D production switch",
+        "active beneath production values since the atomic I5D switch",
         CompatibilityPayload,
-        "I5C exact traces and bounded-access fixtures prepare the closed identity graph"
+        "I5D exact traces and bounded-access fixtures close the production identity graph"
     ),
     closed_durable!(
         "src/g_syntax/module_lowering.rs",
@@ -840,7 +840,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration == "src/core/managed/value_node.rs::ManagedValueNode" {
         "production managed core value node"
     } else if declaration.starts_with("src/core/managed/recursive_cells.rs::") {
-        "prepared recursive identity cells and edges"
+        "production recursive identity cells and edges"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"
     } else if declaration.starts_with("src/core/evaluation_halt.rs::")

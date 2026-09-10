@@ -127,7 +127,7 @@ impl CompatibilityNetEdges for CoreOperator {
 
 #[allow(
     dead_code,
-    reason = "I4E installs exact halt visitation before I8 uses the core net adapter in production tracing"
+    reason = "I4E halt visitation is retained by the production managed core-net trace and I8 audit"
 )]
 pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMut(&Value)) {
     match halt.payload() {
@@ -149,7 +149,7 @@ pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMu
 /// re-enter this net.
 #[allow(
     dead_code,
-    reason = "I4E installs the core net adapter before I8 uses it in production tracing"
+    reason = "I4E core-net visitation is consumed by the I5D production trace and retained for I8 audit"
 )]
 pub(crate) fn visit_core_runtime_net_edges(
     access: &CoreRuntimeNetAccess<'_, '_>,

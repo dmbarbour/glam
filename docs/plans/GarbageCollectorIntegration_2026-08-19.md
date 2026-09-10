@@ -1,10 +1,13 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I4 and their mandatory reviews are
-complete. The production public-value facade now uses an inline-or-registered-
-root representation, every durable owner stores that facade, and production
-collection remains disabled while I5-I10 migrate recursive payloads and close
-the remaining graph families. Collector Gate G1 passed on 2026-08-25.
+Status: in progress; Phases I0 through I5 and their mandatory reviews are
+complete, and I6D.1's reflection-computation repair is also complete. The
+production public-value facade uses an inline-or-registered-root
+representation, every durable owner stores that facade, and lazy, promise,
+and core-net identities are one exact managed graph. Production collection
+remains disabled while I6-I10 audit or migrate the remaining immutable shells
+and close the remaining graph families. Collector Gate G1 passed on
+2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -212,7 +215,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I5D | complete | atomic managed lazy/promise/core-net identity cutover |
 | I5E | complete | external lifecycle and coordination closure |
 | I5F.1 | complete | direct managed-family self-cycle survival and reclamation |
-| I5 | pending | atomic managed lazy/promise/core-net identity closure and cycle audit |
+| I5F.2 | complete | pairwise and three-family recursive-identity cycle closure |
+| I5F.3a | complete | aggregate and persistent-shell cycle matrix |
+| I5F.3b | complete | function-stage and structured-failure cycle matrix |
+| I5F.3c | complete | remote-cursor source-topology cycle closure |
+| I5F.4 | complete | recursive-source and external-owner closure audit |
+| I5 | complete | atomic managed lazy/promise/core-net identity closure and post-I5 review |
 | I6D.1 | complete | reflection semantic-edge restoration, edge-free observation, one-use activation ownership, and forced-order closure |
 | I6 | pending | functions, applications, metadata, failures |
 | I7 | pending | persistent list and dictionary tracing |
@@ -5309,25 +5317,50 @@ Only a selected managed-conversion fixture may add another forced collection.
 
 ## Phase I7 — Persistent List and Dictionary Trace Audit
 
-- Keep RPDS and FingerTree/`Arc` spines initially.
+I4D installed the compile-exhaustive logical list/dictionary visitors and
+their no-forcing counters. I5F.3a has already proved cycles through lists,
+dictionaries, partial builtins, metadata, shared list spines, and persistent
+dictionary versions. I7 consumes that evidence as its baseline; it is a final
+delta audit, not a second implementation or fixture matrix.
+
+### Phase I7A — Representation and Source Delta
+
+- Keep RPDS and FingerTree/`Arc` spines initially. Diff the current list,
+  dictionary, key, thunk, concatenation, slice, and iterator representations
+  against I4D's source-backed visitor inventory.
+- For every shape added or changed since I4D/I5F.3a, prove that the already-
+  active central managed-edge walk visits each contained managed identity
+  without forcing a thunk. Record an unchanged row instead of inventing a new
+  test when the representation and visitor are identical to the baseline.
 - If this audit discovers that a persistent representation must become a new
   managed allocation family, stop and partition that migration under the
   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
   rather than introducing its allocator incidentally during the audit.
-- Audit the already-active central managed-edge walk through keys, values, list
-  chunks, lazy list thunks, concatenation nodes, and shared slices against the
-  concrete representation inventory. Nested managed identities must already be
-  traceable from their introduction in I5/I6; I7 is not permission to leave a
-  missing production edge until this audit.
-- In an isolated collector-ready fixture, construct the same persistent
-  representation exposed through the real production value facade in a fresh
-  runtime. Verify it retains all contained managed objects across full
-  collection and that dropping its final fixture root permits a backedge cycle
-  to be reclaimed. Do not borrow a shared or otherwise unclassified production
-  graph for this collection.
-- Measure and record duplicate trace work for heavily shared versions. Defer a
-  threshold or collector-aware physical-node migration until profiling shows
-  the logical walk is material.
+
+Verification: a compile-exhaustive representation-to-visitor inventory and
+the existing no-forcing logical-walk suite. Nested managed identities must
+already be traceable from their introduction in I5/I6; I7 is not permission
+to defer a missing production edge until this audit.
+
+### Phase I7B — Missing Closed Topology Deltas
+
+- Add the one known missing topology: a closed list-thunk backedge through a
+  production managed lazy or promise identity. Verify rooted survival and
+  exact reclamation after the final fixture root is removed.
+- Add another isolated fixture only for a genuinely new I6/I7 shape which is
+  not already exercised by I5F.3a. Do not repeat the existing list,
+  dictionary, partial-builtin, metadata, shared-spine, or persistent-version
+  cycles under new names.
+- Use a fresh runtime and the real production value facade for each new closed
+  fixture; never collect a shared or otherwise unclassified production graph.
+
+### Phase I7C — Accounting and Closeout
+
+- Reconcile the existing logical duplicate-work counters with the final
+  representation inventory. Rerun the shared-version measurements; add a new
+  counter or benchmark only if I7A discovered an unaccounted traversal shape.
+- Defer a threshold or collector-aware physical-node migration until profiling
+  shows that the logical walk is material.
 
 Logical duplicate visits are a performance issue in a mark collector, not an
 edge-counting soundness problem. This phase must not silently turn collection
@@ -5378,54 +5411,94 @@ lazy/promise cleanup.
   cycles. Run a targeted strict-provenance Miri probe over root projection and
   net access.
 
-This checkpoint precedes I8A so its representation changes are included in the
-final payload and mutation audit rather than invalidating that audit later.
+This checkpoint precedes I8A.1 so its representation changes are included in
+the final payload and mutation audits rather than invalidating those audits
+later.
 Production remains `NoAuto`.
 
-### Phase I8A — Final Net Payload and Mutation Audit
+### Phase I8A.1 — Final Payload and Visitor Reconciliation
 
 - Reconcile every core value stored in templates, agents, active pairs, stuck
   pairs, cursors, logical copies, normalization state, and callable/copy/
   frontier/contention records against the final I5-I7 representation.
 - Destructure every `RuntimeNet`, runtime-entry/node, `CoreOperator`, stuck
-  reason, and pending-state variant. Prove the I5 trace reports every current
-  managed identity without reducing the net, following a cursor, or invoking
-  semantic work.
+  reason, and pending-state variant. Prove the production managed core-net
+  trace reports every current managed identity without reducing the net,
+  following a cursor, or invoking semantic work.
+- Consume GCI5R-002D's compile-exhaustive payload and writer inventories as the
+  baseline. Add only fields or variants introduced or changed after that
+  repair; an unchanged row is evidence and does not need a duplicate fixture.
+
+Verification: refreshed compile-exhaustive payload inventory, the existing
+non-reducing logical-walk tests, and focused fixtures only for post-GCI5R-002D
+payload deltas.
+
+### Phase I8A.2 — Exact Per-Edit Mutation Deltas
+
 - Re-audit every insertion, replacement, and removal of a managed edge against
   the owner-qualified gateway installed by GCI5R-002D. That corrective
   checkpoint routes every managed core-net writer through one
   `RuntimeNetMutationGateway` while the semantic mutex remains held and uses a
   lazily selected whole-net pre/post visitor as its correctness bridge. The
   current `NoAuto` STW policy walks neither side.
-- Replace that whole-net bridge with exact per-edit semantic deltas before any
+- Replace the whole-net bridge with exact per-edit semantic deltas before any
   concurrent or incremental policy can make net mutation a high-volume
-  traversal. Prefer singular managed-edge edits after a later managed-node
+  traversal. Prefer singular leaving-edge reports after a later managed-node
   representation, but do not require per-agent GC allocation merely to finish
-  the current compatibility representation. Preserve revision,
-  materialization, disturbance, and active-pair publication ordering.
+  the current compatibility representation.
+- Preserve the deterministic whole-net pre/post probes until every writer has
+  an exact delta probe, then retire the bridge and its source latch atomically.
+
+Verification: the writer inventory, one exact-delta test per value-installing
+rewrite family, and the real erase-reduction probe. A source latch must reject
+any writer which bypasses both the exact gateway and its current bridge.
+
+### Phase I8A.3 — Lock, Access, and Lifecycle Revalidation
+
+- Recheck revision, materialization, disturbance, active-pair publication, and
+  unwind ordering after I8A.2 without reopening the mutation representation.
 - Recheck nonblocking trace acquisition under exclusive collection,
   `CoreRuntimeNetAccess` scope confinement, durable rooted net holders, and
   edge-free normalization/wait companions. Generic non-core specializations
   remain collector-independent.
 
-Verification: compile-exhaustive payload and writer inventories, existing
-interaction-net and Cursor-WHNF suites, mutation-gateway tests for every
-value-installing rewrite, and privacy tests rejecting unscoped dereference or
-parked bare net handles. Retain the deterministic whole-net pre/post and real
-erase-reduction probes until exact delta probes supersede them. Production
-remains `NoAuto`.
+Verification: existing interaction-net and Cursor-WHNF suites, deterministic
+barriers for each changed publication ordering, and privacy tests rejecting
+unscoped dereference or parked bare net handles. Production remains `NoAuto`.
 
 ### Phase I8B — Final Net Cycle Matrix
 
-- In closed isolated fixtures, repeat rooted survival and unrooted reclamation
-  for a direct net-to-value-to-the-same-net cycle, mutually linked nets, shared
-  function stages, cursor materialization, stuck nets, pending active-pair
-  work, and hierarchical copy-source references.
-- Include values from every family migrated in I6 and the persistent forms
-  audited in I7 so the final net visitor is tested against the complete
-  pre-Gate-G2 payload vocabulary.
-- Re-audit normalization batches, contention waits, unwind dispositions,
-  finalization, and Cursor-WHNF ownership against I3D and the ownership ledger.
+I5F.1-I5F.3c already cover direct self-cycles, pairwise identity cycles,
+function-stage edges, and the production remote-cursor copy-source topology.
+The checkpoints below exercise only topology or payload state added by the
+I6-I8 delta; they do not reproduce that baseline matrix.
+
+#### Phase I8B.1 — Quiescent and Stuck-State Deltas
+
+- Add closed fixtures for managed values retained only by a specialization
+  stuck reason or another quiescent topology field not covered by I5.
+- Include an I6 or I7 payload only when its audit introduced a new edge shape.
+  An unchanged compatibility shell consumes its existing I5 fixture.
+
+#### Phase I8B.2 — Scheduled and In-Flight Deltas
+
+- Exercise managed values retained solely by pending active-pair work,
+  normalization batches, callable/copy work, or an unwind disposition which
+  was not present in the I5 matrix.
+- Use deterministic barriers where ownership changes across a claim or
+  publication boundary; repetition is stress evidence, not ordering proof.
+
+#### Phase I8B.3 — Cursor and Copy-Source Deltas
+
+- Reconcile cursor materialization, contention waits, frontier state, and
+  hierarchical copy-source ownership against I5F.3c and Cursor WHNF.
+- Add a reclamation fixture only for a source/cursor state introduced or
+  materially changed after I5F.3c. The existing three-cell remote-cursor cycle
+  remains the baseline for unchanged source topology.
+
+Each new closed fixture proves rooted survival and exact unrooted reclamation
+in an isolated runtime. Finish with one source-backed mapping from every final
+topology state to either its I5 baseline or its I8 delta fixture.
 
 ### Phase I8C — Net-Specific Compatibility Retirement
 
@@ -5486,12 +5559,15 @@ not force collection over the complete runtime.
 
 ### Phase I9F — External Active-RAII Lifecycle Audit
 
-- Inventory every external/rooted `Drop` implementation which performs or may
+- Consume I5E/I5F.4's active-owner inventory as the baseline, including its
+  completed promise-resolver, producer-root, session, client-demand, and
+  reflection-reservation retirement audits. Re-run the exhaustive source
+  search for external/rooted `Drop` implementations which perform or may
   trigger cancellation, failure, abandonment, notification, logging, task
-  terminalization, or another runtime action. At minimum cover
-  `PromiseResolver`, `EvaluationSession`, `ClientDemandHandle`, and an
-  unactivated pending reflection task, then reconcile the source search rather
-  than treating that list as permanently exhaustive.
+  terminalization, or another runtime action.
+- Audit in detail only an owner added or materially changed by I6-I8. Preserve
+  the existing forced-order evidence for unchanged owners rather than
+  recreating equivalent tests under I9 names.
 - For each owner, record its strong runtime/value-domain capability, registered
   roots, explicit idempotent retirement operation, `Drop` fallback, terminal
   status/error semantics, lock ordering, and callback/destruction boundary.
@@ -5503,12 +5579,13 @@ not force collection over the complete runtime.
   rename these paths as managed finalizers and do not make them passive merely
   because the values they control have moved into managed cells.
 
-Verification: after the referenced values become managed, preserve
-unresolved-resolver failure, session closure and owned-work terminalization,
-client-demand abandonment, and unactivated-reflection-task cancellation.
-Forced-order tests cover explicit retirement followed by `Drop`, `Drop` alone,
-and concurrent observation, proving exactly one terminal transition and no
-callback/destruction under a component lock. Add
+Verification: map every discovered owner to either its named I5 forced-order
+baseline or a new I6-I8 delta test. Each new or changed owner covers explicit
+retirement followed by `Drop`, `Drop` alone, and concurrent observation,
+proving exactly one terminal transition and no callback/destruction under a
+component lock. Rerun the existing unresolved-resolver failure, session
+closure, client-demand abandonment, and reflection cancellation tests without
+duplicating them. Add
 `active_external_raii_inventory_is_reconciled` and
 `managed_graph_reaches_no_active_raii_owner`. Production remains `NoAuto`.
 
@@ -5520,7 +5597,8 @@ callback/destruction under a component lock. Add
 - Match every result to one stable ledger family and named owner. An unmatched
   field blocks I10/Gate G2.
 - Compare the result with the latched I4F.1 inventory and I9F active-RAII
-  inventory. A newly discovered
+  inventory, and consume I5's M/R/A/C and active-owner inventories as the
+  recursive-identity baseline. A newly discovered
   durable bare value reopens and repairs its earliest managed-edge checkpoint;
   it is not converted opportunistically in I9G.
 
@@ -5833,6 +5911,14 @@ must appear in the inventory. Before an automatic runtime can be selected by
 I12B.0, privacy/compile-time evidence must prove production callers cannot
 bypass the facade.
 
+The inventory must separately identify every constructor or helper which can
+open a second mutator region while its caller retains an interior managed edge.
+Controlled I11 maintenance may never exercise that gap, but a future
+`Automatic` heap can elect collection on precisely the second outer entry.
+Each such constructor must either reuse the caller's access region, publish or
+root the edge before re-entry, or carry the same deterministic temporal proof
+required by the I6+ regional allocation rule.
+
 The review must also select a durable disposition for a finalizer panic which
 leaves a pending batch. An inactive pending batch may not remain anonymous
 permanent `Busy`. The decision must choose and specify either a reportable
@@ -5968,6 +6054,11 @@ entry services production pressure and exercise each explicit maintenance
 boundary under `NoAuto`.
 
 ## Phase I13 — Retire Redundant Ownership and Document the Boundary
+
+I13 is cleanup after the graph and lifecycle boundaries are proven. It must
+not be the first phase to discover or repair a missing trace edge, temporal
+publication gap, mutation barrier, durable owner, or active-lifecycle escape;
+such a defect reopens the earliest phase which introduced it.
 
 - Remove `Arc` wrappers whose only remaining role was recursive value
   lifetime. Retain intentional `Arc`s for public roots, immutable leaf buffers,

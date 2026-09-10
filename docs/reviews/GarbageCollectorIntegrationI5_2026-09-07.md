@@ -2,9 +2,9 @@
 
 Baseline: `37186c1`, including completed implementation checkpoints I5A-I5F.4.
 
-Status: review complete; GCI5R-001 through GCI5R-005 and GCI5R-008 are closed.
-The implemented I5
-graph is sound under the current `CollectionPolicy::NoAuto` boundary and the
+Status: review complete; GCI5R-001 through GCI5R-008 are closed.
+The implemented I5 graph is sound under the current
+`CollectionPolicy::NoAuto` boundary and the
 closed isolated collection fixtures provide strong evidence for recursive
 cycle reclamation. Regional construction establishes an exact traced or rooted
 owner before managed access ends, and every current mutable managed family now
@@ -2031,7 +2031,7 @@ reflection owner retains a semantic root or strong value-domain route.
 **Classification:** future verification and checkpoint drift  
 **Priority:** medium  
 **Confidence:** high  
-**Status:** open plan update
+**Status:** closed 2026-09-10
 
 The remaining direction is sound, but several phases still describe work
 which I5 already completed:
@@ -2070,12 +2070,27 @@ collector can elect on precisely that second entry. I13 should own only
 redundant wrapper/provenance cleanup after these semantic boundaries are
 stable; it must not be the first phase to discover a liveness or barrier gap.
 
+Resolved in the integration plan. I7 is now a three-checkpoint delta audit
+which consumes I4D/I5F.3a and adds only the missing list-thunk backedge or a
+genuinely new representation. I8 separates observer retirement, payload
+reconciliation, exact per-edit mutation deltas, lock/lifecycle revalidation,
+and three topology-state delta groups. Its cycle matrix explicitly consumes
+the I5 self, pairwise, function, and remote-cursor fixtures.
+
+I9 now consumes the I5 M/R/A/C and active-owner inventories, and requires new
+owner/drop fixtures only for I6-I8 deltas. I10 keeps only arbitrary host
+callback and opaque-boundary work. I11 consumes the temporal
+allocation-to-first-owner inventory and requires every later managed family to
+extend that evidence. I12A.0 now inventories second-entry constructors which
+could elect automatic collection while an interior edge is held, and I13 is
+explicitly prohibited from becoming a delayed correctness phase.
+
 ### GCI5R-007 — Phase status and source comments lag the atomic cutover
 
 **Classification:** documentation drift  
 **Priority:** low  
 **Confidence:** high  
-**Status:** open; resolve with the substantive findings
+**Status:** closed 2026-09-10
 
 The integration phase table still marks only I5F.1 complete and I5 itself
 pending, despite completion records for I5F.2-I5F.4. The ownership ledger's
@@ -2091,6 +2106,15 @@ execution but actively misstate the chronology used by later reviewers.
 Do not mark I5 fully complete merely by updating the table. First disposition
 GCI5R-001 and GCI5R-002, then reconcile the table, ledger header, stale
 `before I8` comments, and the future phase text in one closeout.
+
+Resolved after GCI5R-001 and GCI5R-002 closed. The integration status now
+records I5F.2-I5F.4 and the complete post-I5 boundary; its introduction and
+the ownership ledger distinguish the managed recursive identities from the
+remaining compatibility structural shells. Production comments and durable-
+owner labels now describe the I5D core-net trace as active, with I8 owning a
+delta audit rather than first production use. Historical dated checkpoint
+narratives remain intact where they describe the state or expectation at that
+checkpoint.
 
 ### GCI5R-008 — Registered roots cannot project their managed allocation
 

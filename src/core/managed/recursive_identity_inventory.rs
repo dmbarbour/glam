@@ -880,8 +880,8 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
 }
 
 #[test]
-fn every_inventoried_identity_role_has_a_prepared_cutover_destination() {
-    let prepared = include_str!("recursive_cells.rs");
+fn every_inventoried_identity_role_has_a_production_destination() {
+    let production = include_str!("recursive_cells.rs");
     let destination = |family: CycleSource, target: TargetDisposition| match (family, target) {
         (CycleSource::Lazy, TargetDisposition::ExactManagedEdge) => "ManagedLazyEdge",
         (CycleSource::Lazy, TargetDisposition::DurableRoot) => "ManagedLazyRoot",
@@ -905,8 +905,8 @@ fn every_inventoried_identity_role_has_a_prepared_cutover_destination() {
             }
             let destination = destination(family, entry.target);
             assert!(
-                prepared.contains(&format!("struct {destination}")),
-                "{} has no prepared {:?} destination {destination}",
+                production.contains(&format!("struct {destination}")),
+                "{} has no production {:?} destination {destination}",
                 entry.declaration,
                 entry.target
             );

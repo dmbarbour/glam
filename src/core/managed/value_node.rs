@@ -1,8 +1,10 @@
 //! Private production managed storage for one core value.
 //!
 //! I4F.2d routes every production runtime root through this private node or
-//! the allocation-free inline arm. Payload families remain compatibility Rust
-//! ownership until I5-I8 replace them with exact managed edges.
+//! the allocation-free inline arm. Lazy, promise, and core-net identities now
+//! expose exact managed edges; immutable structural payload shells continue to
+//! compose through the central compatibility walk until an audited exact
+//! replacement exists.
 
 use std::fmt;
 
