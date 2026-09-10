@@ -4977,6 +4977,48 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
 }
 
 #[test]
+fn reflection_reservation_admission_failure_is_scalar_and_retires_with_its_source() {
+    let (coordinator, _executor) = crate::evaluation::test_execution_resources(0)
+        .expect("reflection admission fixture should build");
+    let owner = crate::evaluation::EvaluationSession::shared(&coordinator);
+    let (context, owner) = OwnedEvalContext::new(owner).into_parts();
+    let values = context.values().clone();
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("reflection admission fixture should start collectible");
+    let baseline_owners = values.external_owner_count_for_test();
+
+    let value = Value::reflection_task_result(&values, n(0));
+    let computation = reflection_computation(&values, &value);
+    drop(owner);
+
+    for _ in 0..2 {
+        let error = match computation.task(&context) {
+            Ok(_) => panic!("a closed demand must reject reflection task admission"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "evaluation demand session is closed");
+    }
+    assert_eq!(
+        context.task_registry_counts().reflection_active,
+        0,
+        "a cached admission failure must not retain a partial task reservation"
+    );
+
+    drop(computation);
+    drop(value);
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("the failed reflection source should remain collectible");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
+    assert_eq!(reclaimed.finalized_slots(), 1);
+    assert_eq!(values.external_owner_count_for_test(), baseline_owners + 1);
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(values.external_owner_count_for_test(), baseline_owners);
+}
+
+#[test]
 fn abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain() {
     let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),

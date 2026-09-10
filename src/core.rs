@@ -1596,6 +1596,8 @@ impl ReflectionComputation {
         &self,
         context: &EvalContext,
     ) -> Result<ReflectionTaskReservation, Arc<EvaluationFailure>> {
+        // `owner` is an independent `Arc`: the registry lock used to find it
+        // is gone before the `OnceLock` initializer admits coordinator work.
         let owner = self.owner(context.values());
         let mut handle = None;
         let mut activation = None;
@@ -1630,6 +1632,8 @@ impl ReflectionComputation {
     }
 
     pub(crate) fn target(&self, context: &EvaluatorStepContext<'_>) -> Option<Value> {
+        // The target is the direct traced field. Reopen matching evaluator
+        // access only for its projection; no external owner caches a copy.
         context.with_value_access(|_| self.target.clone())
     }
 

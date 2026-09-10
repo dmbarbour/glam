@@ -1616,7 +1616,7 @@ does not authorize collection outside the existing closed fixtures.
 **Classification:** future ownership chronology conflict  
 **Priority:** high  
 **Confidence:** high  
-**Status:** open; A-C completed 2026-09-10; D-F remain; owns I6D.1 and blocks Gate G2
+**Status:** open; A-D completed 2026-09-10; E-F remain; owns I6D.1 and blocks Gate G2
 
 At the review baseline, `ReflectionComputation` was the one compatibility
 adapter which deliberately reported no semantic value edge. Its runtime
@@ -1886,6 +1886,47 @@ failure/terminal/retirement audit.
 4. Preserve first-observer task identity and current result-policy semantics.
    No cleanup path may run a launcher, callback, value destruction, or
    coordinator mutation under a collector, registry, or managed-value lock.
+
+Completed 2026-09-10. The reservation admission surface returns only
+`Arc<str>` from closed-demand, expired-coordinator, identity-allocation,
+wait-allocation, profile, and coordinator-reservation checks. The external
+owner caches that scalar result and constructs a fresh `EvaluationFailure` at
+the evaluator boundary; it never stores a general failure or failure root. A
+closed-demand regression observes the same cached message twice, proves that
+no partial task exists, then collects exactly the reflection lazy and drains
+its edge-free external owner.
+
+The terminal ownership audit records the following final split. "Observation"
+below always means the cached weak task/wait record, never a strong wait cell:
+
+| Disposition | Intentional durable owner | Retirement path |
+| --- | --- | --- |
+| Never observed | The managed computation traces effect and optional target; its external owner has an empty task cell. | Managed collection drops the scalar owner lease; a later safe registry drain drops the empty owner. |
+| Admission rejected | The managed computation still owns its semantic fields; the owner caches only `Arc<str>`. | Collection and registry drain are identical to the never-observed case; no coordinator work was published. |
+| Reserved, unactivated | The caller/evaluator step owns the strong task handle and one shared activation permit; the permit temporarily roots the effect. | Consuming the permit transfers ownership to a task machine. Dropping it first releases its payload, then discards reserved work through weak coordinator authority. |
+| Activated, queued, running, blocked, or retryably exit-waiting | The coordinator owns the task machine and its semantic closure. Active pollers may transiently own a strong wait handle; the external owner remains weak. | Normal release, cancellation, demand-session closure, or settlement owns terminalization and machine destruction. Owner retirement cannot cancel activated work. |
+| Complete | A live strong wait holds the coordinator-published result root. Gate success instead projects the direct traced target; return-value success projects this terminal root. | Evaluation installs the resulting value in the managed lazy cache, releases the source/owner lease, and leaves no result copy in the external owner. The terminal root lasts only as long as its real wait/status observers. |
+| Failed | The wait and, until acknowledgement, the task failure ledger own the failure root. | The lazy caches the propagated semantic failure and releases its source. Propagation acknowledges the independent ledger entry; external-owner retirement owns neither copy. |
+| Cancelled or abandoned | The terminal wait contains only the scalar disposition. An observer constructs the contextual semantic failure at the evaluator boundary. | Task retirement destroys or cancels the machine outside coordinator locking; lazy failure caching releases the reflection source. |
+| Exited | The terminal wait contains only the scalar disposition; quiescence settlement has already disposed of the task machine. | An observer constructs the no-result semantic failure, then normal lazy-source retirement applies. |
+| Killed | The terminal wait owns the settlement failure root; it is not copied into the external owner. | The observer propagates that failure into the lazy cache, after which ordinary source and wait retirement apply. |
+
+`ReflectionComputation::target` reopens matching evaluator access and projects
+only its direct traced field. Return-value completion continues to project the
+coordinator terminal root. Existing gate-target laziness, arbitrary returned
+value, failure-context, cancellation, shared-task, and result-policy tests
+cover those semantic distinctions; GCI5R-005E owns forced collection and
+interleaving at every row of this table.
+
+Cleanup ordering is structural. Registry lookup returns an independent owner
+`Arc` before first-observer admission begins, and registry draining detaches
+entries under its mutex but destroys them afterward. Activation extracts its
+payload before launcher construction. Permit unwind drops the effect root,
+profile, and `EvalContext` before requesting coordinator discard. Terminal
+machine destruction/cancellation likewise occurs after coordinator mutation
+locks are released. Thus no reflection cleanup path nests semantic destruction
+or user callbacks under collector, external-owner-registry, or coordinator
+locks.
 
 ##### GCI5R-005E — Forced-order verification
 

@@ -5244,12 +5244,15 @@ as this phase's authoritative chronology:
 6. reconcile the active-owner, durable-owner, compatibility, and architecture
    inventories before admitting Gate G2.
 
-Checkpoints 1-3 completed 2026-09-10. The source and direct-constructor
+Checkpoints 1-4 completed 2026-09-10. The source and direct-constructor
 mismatches are latched and repaired; effect/target are exact direct semantic
 edges; and the external owner caches only a weak task observation plus scalar
 admission failure. The first observer alone receives a one-use activation
 permit, while strong task handles remain transient because their terminal wait
-cells may contain runtime roots. Checkpoints 4-6 remain open.
+cells may contain runtime roots. Failure, completion, and every terminal
+disposition now have an explicit owner/retirement ledger; admission failures
+are scalar, gate targets project only the traced field, and return values come
+only from coordinator terminal state. Checkpoints 5-6 remain open.
 
 The final representation may keep an external handle for active reservation
 destruction, but that owner contains no semantic value root, `EvalContext`,

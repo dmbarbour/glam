@@ -269,6 +269,10 @@ impl Drop for ReflectionTaskObservationInner {
     fn drop(&mut self) {
         if *self.disposition.get_mut() == REFLECTION_RESERVED {
             *self.disposition.get_mut() = REFLECTION_CANCELLED;
+            // Managed finalization drops only the scalar external-owner
+            // lease. The registry detaches and unlocks before it destroys
+            // this observation, so coordinator mutation cannot nest beneath
+            // either collector or registry locking.
             self.task.discard_reservation();
         }
     }
@@ -276,12 +280,14 @@ impl Drop for ReflectionTaskObservationInner {
 
 impl ReflectionTaskActivationPermit {
     fn activate(&self) {
-        let Some(activation) = self
-            .activation
-            .lock()
-            .expect("reflection activation permit was poisoned")
-            .take()
-        else {
+        let activation = {
+            let mut slot = self
+                .activation
+                .lock()
+                .expect("reflection activation permit was poisoned");
+            slot.take()
+        };
+        let Some(activation) = activation else {
             return;
         };
         if !self.observation.begin_activation() {
@@ -306,13 +312,16 @@ impl ReflectionTaskActivationPermit {
 
 impl Drop for ReflectionTaskActivationPermit {
     fn drop(&mut self) {
-        if self
+        let abandoned = self
             .activation
             .get_mut()
             .expect("reflection activation permit was poisoned")
-            .take()
-            .is_some()
-        {
+            .take();
+        if abandoned.is_some() {
+            // Release the value root and demand context before coordinator
+            // cancellation. No payload destruction occurs under scheduler
+            // mutation admission or coordinator locking.
+            drop(abandoned);
             self.observation.cancel_if_reserved();
         }
     }
