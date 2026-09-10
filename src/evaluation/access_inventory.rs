@@ -87,11 +87,11 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/core/managed.rs", GatewayCounts::new(3, 2)),
         // I4F.2b's test-only passive-closure matrix allocates each real
         // compatibility value variant through the same bounded gateway.
-        // GCI5R-005A adds one production reflection-cycle construction and a
-        // matching-runtime source inspection.
+        // GCI5R-005A/E add production effect- and target-backedge reflection
+        // cycles plus matching-runtime source inspection.
         (
             "src/core/managed/active_owner_inventory.rs",
-            GatewayCounts::new(1, 2),
+            GatewayCounts::new(2, 2),
         ),
         (
             "src/core/managed/payload_edges/persistent.rs",

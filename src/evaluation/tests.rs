@@ -2230,6 +2230,68 @@ fn terminal_task_wait_root_survives_collection_until_handle_drop() {
 }
 
 #[test]
+fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
+    let context = isolated_standalone_context();
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the terminal disposition fixture should start collectible");
+
+    let exercise = |terminal: EvaluationWaitTerminal, retains_root: bool| {
+        let task = allocate_task_id(context.values()).expect("task ID should allocate");
+        let wait = allocate_wait_token(&context.session, task).expect("wait ID should allocate");
+        wait.publish_terminal(terminal);
+
+        let live = context
+            .values()
+            .collect_managed_for_test()
+            .expect("a published terminal disposition should remain collectible");
+        let retained = usize::from(retains_root);
+        assert_eq!(live.root_entries(), baseline.root_entries() + retained);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + retained);
+        assert_eq!(live.finalized_slots(), 0);
+
+        drop(wait);
+        let reclaimed = context
+            .values()
+            .collect_managed_for_test()
+            .expect("dropping the terminal wait should release its owned root, if any");
+        assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+        assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
+        assert_eq!(reclaimed.finalized_slots(), retained);
+    };
+
+    exercise(
+        EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            context.values(),
+            Value::binary_from_text("completed reflection result"),
+        )),
+        true,
+    );
+    exercise(
+        EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
+            context.values(),
+            Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+                "failed reflection result",
+            ))),
+        )),
+        true,
+    );
+    exercise(EvaluationWaitTerminal::Cancelled, false);
+    exercise(EvaluationWaitTerminal::Abandoned, false);
+    exercise(EvaluationWaitTerminal::Exited, false);
+    exercise(
+        EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
+            context.values(),
+            Arc::new(EvaluationFailure::emission(Value::binary_from_text(
+                "killed reflection result",
+            ))),
+        )),
+        true,
+    );
+}
+
+#[test]
 fn blocked_task_record_root_survives_collection_until_cancellation() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

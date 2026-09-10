@@ -1936,15 +1936,47 @@ locks.
    reservation but before activation, during activation handoff, while the
    task is blocked, and after each terminal disposition. Each point must name
    the intentional root retaining the effect and target.
-3. Force source retirement before activation and prove cancellation occurs at
-   the safe external-owner drain. Force activation first and prove later owner
-   retirement does not cancel committed work.
+3. Force source retirement and external-owner drain while the unactivated
+   one-use permit remains. Prove that the drain neither cancels nor retains the
+   reservation, activation can still transfer ownership, and dropping the
+   permit is the action that cancels unactivated work. Force activation first
+   and prove later owner retirement does not cancel committed work.
 4. Exercise an effect backedge, a gate-target backedge, and the latent
    source-level `meta_refl` backedge. Include a runtime-drop probe which proves
    no registry-owner-to-value-domain `Arc` cycle remains.
 5. Use barriers, latches, and explicit collection points for concurrency
    claims. Passing under repetition is not evidence for either publication or
    cancellation ordering.
+
+Completed 2026-09-10. The same-runtime two-session fixture forces all four
+combinations of first observer and activation session. Every combination
+publishes exactly one task in the first observer's registry, gives only that
+observation the shared one-use permit, overlaps the other attempted activation
+with launcher construction behind a barrier, and constructs the launcher
+exactly once.
+
+The collection fixture names each ownership transfer explicitly. A client
+publication root retains its compatibility shell, reflection lazy, and
+promise; the reserved activation root retains only its compatibility shell
+and promise effect; that same root remains authoritative during the forced
+launcher handoff; and the installed queued/blocked task machine owns the root
+after handoff. Cancellation retires the final root and reclaims the remaining
+shell/promise pair. Source and external-owner retirement are forced before
+activation while the permit remains: draining the edge-free owner neither
+cancels nor retains the reservation, and activation still succeeds. The
+existing permit-abandonment fixture separately proves that dropping the
+unconsumed permit cancels reserved work before a later owner drain.
+
+A terminal-wait ownership matrix collects after each disposition. `Complete`,
+`Failed`, and `Killed` retain exactly their documented value/failure root;
+`Cancelled`, `Abandoned`, and `Exited` retain no semantic root. Dropping each
+wait reclaims only the root-bearing cases. The production effect-backedge,
+new gate-target-backedge, and source-level latent `meta_refl` fixtures all
+require exact cycle reclamation. Finally, an undrained completed external
+owner is retained across runtime wrapper teardown while a weak value-domain
+probe proves that the edge-free registry record does not keep that domain
+alive. All concurrency claims use explicit barriers or ordered calls; no
+repetition-based evidence was added.
 
 ##### GCI5R-005F — Reconcile plans and inventories
 

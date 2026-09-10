@@ -514,6 +514,38 @@ fn production_reflection_result_edges_do_not_need_an_external_root() {
 }
 
 #[test]
+fn production_reflection_gate_target_backedge_reclaims_without_an_external_root() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("the reflection-target fixture should start collectible");
+    {
+        let promise = PromisedValue::new(&values, "reflection target backedge");
+        let reflected = values.with_runtime_value_access(|access| {
+            Value::Lazy(LazyValue::from_reflection_gate_in(
+                &access,
+                values.unit(),
+                Value::Promised(promise.clone()),
+            ))
+        });
+        set_test_promise(&values, &promise, reflected.clone())
+            .expect("the reflection target promise should start unassigned");
+    }
+
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("the direct reflection target edge should close its managed cycle");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
+    assert_eq!(reclaimed.finalized_slots(), 2);
+    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(values.external_owner_count_for_test(), 0);
+}
+
+#[test]
 fn every_real_value_variant_has_passive_managed_destruction() {
     assert_eq!(
         <ClosedCompatibilityValue as super::ManagedFamily>::DROP_RECORD.fields(),

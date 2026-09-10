@@ -211,6 +211,11 @@ impl ReflectionTaskReservation {
         };
         permit.activate();
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_activation_permit(&self) -> bool {
+        self.activation.is_some()
+    }
 }
 
 impl ReflectionTaskObservation {
