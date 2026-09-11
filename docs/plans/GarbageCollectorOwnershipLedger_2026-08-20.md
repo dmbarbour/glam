@@ -1,6 +1,6 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I7 and their mandatory reviews are complete. The
+Status: Phases I0 through I10 and their mandatory reviews are complete. The
 production inline-or-registered-root facade, managed outer value
 node, passive active-owner split, exact durable-owner inventory, and closed
 owner-level collection matrix are current. Lazy, promise, core-net, and
@@ -8,7 +8,9 @@ reflection-computation recursion reaches exact managed edges. I6 and I7
 audited and retained the immutable structural payload and persistent-container
 walks because no independent managed representation benefit was found; that
 compatibility vocabulary is not evidence of an unperformed recursive-identity
-cutover.
+cutover. I8 closes managed-net topology and mutation, I9 closes runtime-root
+lifecycle and retirement, and I10 closes deferred-callback, opaque/type-erased,
+cache, and managed-backedge containment.
 Collector-private class topology is verified inside `glam-gc` and is not part
 of this ledger. Every applicable family record must be complete before Gate G2
 permits production collection.
@@ -98,11 +100,11 @@ They are diagnostics for representation planning, not a stable ABI.
 | `PromisedValue`, `ManagedPromiseCell` | 8/8, 104/8 | GCI5R-003F made `PromisedValue` one managed edge and removed the cell's otherwise unread label. The cell retains semantic assignment and its root-free coordination sidecars; `ManagedPromiseRoot` owns publication and `PromiseResolver` alone retains a host diagnostic label and weak runtime route. |
 | `ManagedLazyRoot`, `ManagedPromiseRoot`, `ManagedCoreNetRoot` | 32/8, 40/8, 8/8 | GCI5R-008 removed each separately cached managed edge; GCI5R-003F then removed lazy/promise root observers and the promise root's unused label, and I8A.0 removed the final core-net root observer. Lazy ID/label and promise ID copies have reviewed scheduler/diagnostic roles. Each root projects its exact edge only through matching bounded runtime access. These are measured implementation layouts, not ABI. |
 | `CorePreparedCopySource`, `CoreFrontierObservation`, `NormalizationRequest` | 16/8, 32/8, 16/8 | GCI5R-008 replaced wrapper-hidden semantic net facades with one registered source/root plus edge-free operation snapshots. I8A.0 reduced that root to one word; the generic facade is reconstructed only at its bounded consumption point. I9 adds isolated retain-then-drop fixtures for all three temporary roots. |
-| `MetadataCarrier`, `OpaqueValue` | 8/8, 16/8 | I6B retained metadata's exact one-edge immutable shell; opaque remains a checked I10 boundary. |
+| `MetadataCarrier`, `OpaqueValue` | 8/8, 16/8 | I6B retained metadata's exact one-edge immutable shell; I10 selected and closed opaque as a passive handle to an inventoried external owner. |
 | `NetValue`, `FunctionCode`, `FunctionValue` | 8/8, 24/8, 16/8 | I6A.0 retained the immutable scalar wrappers over I5's exact managed net identity. |
 | `BuiltinCall`, `EvaluationFailure` | 24/8, 80/8 | I6 retained their exact immutable compatibility visitors. |
 | `List`, `ListThunk` | 8/8, 16/8 | I7 retained the non-forcing logical persistent-container trace. |
-| `RuntimeValueRoot`, `CoreOperator` | 72/8, 96/8 | Root facade selected in I2 and installed in I4; I9 completed its lifecycle/source audit. Net payload trace/gateways arrived in I5 and their final audit completed in I8. |
+| `RuntimeValueRoot`, `CoreOperator` | 32/8, 96/8 | Root facade selected in I2 and installed in I4; the root now stores the private inline-or-managed representation. I9 completed its lifecycle/source audit. Net payload trace/gateways arrived in I5 and their final audit completed in I8. |
 | `ListNode`, `ListChunk`, `SharedSlice`, `FingerList` | 40/8, 40/8, 32/8, 16/8 | Existing external persistent spines, logically visited in I7. |
 | `CoreRuntimeNet`, `ManagedCoreNetCell` | 8/8, 248/8 | I5D replaced the production core owner with the managed cell. I8A.0 made `CoreRuntimeNet` one exact managed edge, removed access-free self-rooting, and left runtime qualification to explicit bounded access and root projection. |
 | `SharedRuntimeNet`, `SharedRuntimeNetState`, `RuntimeNetDisturbance` | 8/8 generic test facade, 224/8 state, 8/8 companion | The generic `Arc` facade remains test-only; individual topology entries remain ordinary storage. |
@@ -364,6 +366,7 @@ kept with the subsystem whose contract they exercise.
 | I10A deferred callback containment, traceable host-call captures, typed invocation roots, and weak production loader routes | `managed_deferred_state_cycle_reclaims`; `external_closure_bundle_retains_only_declared_roots`; `external_callback_constructors_require_capture_classification`; `deferred_closure_constructor_inventory_is_reconciled`; `deferred_compiler_loaders_do_not_retain_their_runtime`; `external_owner_recursive_backedges_are_explicitly_classified`. |
 | I10B external-only opaque decision, exhaustive source boundary, direct-field proof, lifecycle retention, and access/identity closure | `opaque_representation_review_inventory_is_complete`; `opaque_representation_plan_has_no_undecided_family`; `opaque_representation_plan_links_are_consistent`; `opaque_family_inventory_is_reconciled`; `opaque_type_erasure_inventory_is_reconciled`; `opaque_edge_free_families_have_no_runtime_or_managed_edge`; `opaque_compilation_origin_round_trips_only_through_its_reflection_cap`; `construction_ports_are_scoped_to_one_invocation`; `opaque_external_capabilities_retain_only_reviewed_routes`; `effect_token_domain_retirement_is_external`; `task_handle_root_backedge_is_conservatively_external`; `opaque_downcast_requires_matching_runtime_and_preserves_owner_identity`; the three `opaque_payload_rejects_*` negative tests; existing `runtime_cache_family_source_inventory_is_complete`. |
 | I10C passive opaque destruction, active external retirement, panic recovery, teardown, and conservative-root closure | `managed_drop_has_no_runtime_or_heap_capability`; `managed_graph_reaches_no_active_raii_owner`; `retired_owner_is_destroyed_after_registry_unlock`; `opaque_external_lifecycle_matches_active_raii_inventory`; `effect_token_domain_retirement_is_external`; `terminal_task_handle_cell_releases_the_final_query_lease`; `query_state_is_transactional_and_retired_after_the_last_handle`; `external_root_owner_drop_invokes_idempotent_retire`; `managed_drop_during_domain_teardown_is_passive`; `opaque_drop_panic_retries_untouched_suffix`; `opaque_external_retention_never_reclaims_a_live_root`. Production remains `NoAuto`. |
+| I10D final closure/type-erasure/cache/root reconciliation and managed-backedge exclusion | `final_closure_opaque_and_any_inventory_is_reconciled`; `managed_payloads_have_no_strong_value_domain_backedge`. These aggregate the independently authoritative closure, opaque-family, runtime-cache, durable-root, recursive-identity, and active-owner gates without introducing a second source-count baseline. |
 | Cross-runtime rejection | `public_value_factories_reject_foreign_composite_members`; `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`; `runtime_input_endpoints_are_local_monotonic_capabilities`. |
 | Fulfilled/unfulfilled lazy and resolver promise | `value_evaluator_caches_lazy_success_and_preserves_structured_failure`; `value_evaluator_resumes_a_retained_resolver_promise_subscription`; `promised_assignments_retain_deferred_aliases`. |
 | Pure lazy cycle | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle`; `concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure`; `two_sessions_share_and_retire_one_pure_lazy_cycle_failure`. |
@@ -381,12 +384,12 @@ The matrix is a migration checklist: when a representation moves, its named
 tests must still pass under forced collection at the phase named in the main
 plan. It does not substitute for the I11 whole-graph forced-collection suite.
 
-## Gate G2 Blockers and Reconciliation
+## Gate G2 Reconciliation Record
 
 I4B and I4F resolved the original raw `CompilationOrigin`, production
 semantic-thunk, unrestricted opaque-constructor, type-erased cache, and durable
-root-surface blockers. The remaining findings block collection rather than
-receiving a guessing/conservative classification:
+root-surface blockers. I5-I10 then closed the remaining integration-side
+findings without guessing at a traceable classification:
 
 1. I10A closed the managed-to-external callback backedge: deferred import
    definitions are traced source values, invocation roots are temporary, and
@@ -415,9 +418,10 @@ allocator-discovery acceptance, drop/finalization policy, mutation gateway,
 and external-root classification. Do not record its metadata address, dense
 class ID, or derived run geometry here.
 
-Before Gate G2, re-run the source inventory for new value fields,
+I10D now performs the aggregate source reconciliation for new value fields,
 `Arc<dyn Fn...>`, `Any`, opaque constructors, and interaction-net payloads;
-match every result to one stable family record. Separately run the collector's
-layout/class verification for every requested extent used by those families.
-An unmatched source result, incomplete stable record, rejected layout, or
-missing collector test keeps Gate G2 closed.
+each result must match one stable family record. I11A must independently rerun
+that evidence, run the collector's layout/class verification for every
+requested extent, and record the dated Gate G2 certification. An unmatched
+source result, incomplete stable record, rejected layout, or missing collector
+test keeps Gate G2 closed.

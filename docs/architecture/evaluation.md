@@ -60,13 +60,14 @@ it in runtime-owned state.
 
 The concrete value-lifetime boundary is one internal `RuntimeValueDomain`
 shared by `CoreValueFactory` clones. It owns runtime-local value IDs, canonical
-and compiler-layer caches, a no-auto collector heap, and only a weak route to
-the work coordinator. Explicit construction and evaluation capabilities retain
-the domain; a public `Value` does not. Retaining `Values`, a demand context, or
-a runtime service can therefore keep value construction usable without also
-preserving the scheduler, executor, runtime facade, or default reflection
-profile. The collector heap exists at this checkpoint, but production values
-remain in their compatibility representation and are not collected yet.
+and compiler-layer caches, a no-auto collector heap, an external-owner
+registry, and only a weak route to the work coordinator. Explicit construction
+and evaluation capabilities retain the domain; a public `Value` does not.
+Retaining `Values`, a demand context, or a runtime service can therefore keep
+value construction usable without also preserving the scheduler, executor,
+runtime facade, or default reflection profile. Production non-inline values
+already use registered roots over managed outer value nodes, but collection
+remains `NoAuto` until Gate G2 and the controlled production-collection phase.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
@@ -154,12 +155,12 @@ cancellation, destruction, coordinator waits, and worker sleeps therefore run
 without inherited mutator authority.
 
 Successful type-erased machine polls cross that release boundary as a
-`RuntimeValueRoot`, never a bare `core::Value`. A currently bare evaluator
-result is wrapped through the checked poll domain, while an effect result keeps
-the public root it already owns. Coordinator release only publishes the root.
-This is the compatibility shape before managed semantic values: I3B moves root
-construction to the evaluator-step publication boundary, and I4F.2 replaces
-the root's interior representation without reopening the scheduler boundary.
+`RuntimeValueRoot`, never a bare `core::Value`. Evaluator results are published
+through the checked poll domain, while an effect result keeps the public root
+it already owns. Coordinator release only publishes the root. The private root
+representation is now either an inline small integer or one registered root to
+a managed outer value node; projecting its compatibility core shell requires
+matching bounded runtime access and never reopens the scheduler boundary.
 
 Callback-free value construction uses the same regional rule. A
 `RuntimeValueAccess` borrows the exact entering `CoreValueFactory`, including
@@ -192,6 +193,17 @@ edge-only semantic facade, including when stored as a cross-net source;
 projection always require an explicit matching `RuntimeValueAccess` rather
 than retaining weak value-domain re-entry on either representation.
 
+Deferred external host calls separate traceable semantics from opaque host
+behavior. `HostCallProducer` keeps every recursive Glam capture as an ordinary
+managed edge; immediately before invocation those captures become a typed
+same-runtime `HostCallRootBundle`, and the callback runs after managed access
+has ended. The callback environment itself is an external conservative owner
+held in the runtime registry. `OpaqueValue` similarly stores only a passive
+`ExternalOwnerHandle`; its four admitted production families are source-
+inventoried as either edge-free data or explicit external capabilities. No
+managed node can reach a strong value-domain/runtime authority or a registered
+root through those handles.
+
 Post-publication changes to those families use the same bounded value-access
 authority. The lazy cache reports its deferred source as leaving and its
 terminal result as adding while preserving result-before-source-release.
@@ -211,11 +223,10 @@ Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluatorStepContext::project_root` may clone its semantic value back into a
 bounded evaluator region. Non-evaluator consumers, including scheduled effect
 lifecycle and `.task.join`, transfer the root directly into the public value
-facade. While `RuntimeValueRoot` still embeds the large compatibility `Value`,
-the poll variant boxes the observation and is compile-time limited to two
-machine words so recursive evaluator frames do not regress. The authoritative
-terminal record remains inline, and I4F.2 may remove this transitional box once
-the managed root itself is pointer-sized.
+facade. `RuntimeValueRoot` now holds the compact private inline-or-managed-root
+representation. The poll variant remains boxed and compile-time limited to two
+machine words so recursive evaluator frames do not regress; the authoritative
+terminal record remains inline.
 
 Within a claimed or explicitly owner-driven poll, `EvaluatorStepContext` pairs
 the poll authority with the durable evaluator context without activating the

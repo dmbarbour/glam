@@ -241,9 +241,9 @@ impl RuntimeValueRoot {
     /// Clones the compatibility core representation under matching admitted
     /// value-domain authority.
     ///
-    /// This remains a transitional bridge for bounded evaluator/compiler
-    /// regions while I5-I8 migrate recursive payloads. Durable storage must
-    /// retain this root rather than the returned compatibility shell.
+    /// This is the bounded semantic projection used by evaluator/compiler
+    /// regions. Durable storage must retain this root rather than the returned
+    /// compatibility shell.
     pub(crate) fn clone_core_with(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
         self.with_core(access, Clone::clone)
             .expect("runtime root and managed access must share one value domain")
@@ -257,12 +257,11 @@ impl RuntimeValueRoot {
         self.value.with_value(access, operation)
     }
 
-    /// Reopens this root's weak domain solely for transitional owner-local
-    /// recovery where no caller-supplied access region exists yet.
+    /// Reopens this root's weak domain solely for inventoried owner-local
+    /// recovery where no caller-supplied access region exists.
     ///
-    /// The remaining callers are source-latched to the payload migrations
-    /// which remove them: promise/lazy ownership in I5, failure and metadata
-    /// ownership in I6, and the final compatibility edge vocabulary in I8.
+    /// Callers may use the returned core shell only inside their bounded
+    /// operation; durable state must retain the original registered root.
     pub(crate) fn clone_core_in_own_domain(&self) -> Option<Value> {
         let values = self.value.observer().upgrade()?;
         Some(values.with_runtime_value_access(|access| self.clone_core_with(&access)))

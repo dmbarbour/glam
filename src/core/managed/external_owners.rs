@@ -126,11 +126,12 @@ impl ExternalOwnerRegistry {
     /// Detaches dead entries under the registry lock and destroys their active
     /// owners one at a time only after releasing it.
     ///
-    /// IDs establish a deterministic retirement order. If one destructor
-    /// unwinds, that attempted owner remains detached while every untouched
-    /// later owner remains registered for the next drain. Concurrent drains
-    /// may divide the work, but removal under the registry lock still gives
-    /// exactly one caller ownership of each destructor.
+    /// IDs establish a deterministic candidate order within one drain. If one
+    /// destructor unwinds, that attempted owner remains detached while every
+    /// untouched later owner remains registered for the next drain. Concurrent
+    /// drains may divide and interleave destruction; removal under the registry
+    /// lock still gives exactly one caller ownership of each destructor, but
+    /// destructor order is not a semantic guarantee.
     pub(crate) fn drain_retired(&self) -> usize {
         let retired_ids = {
             let owners = self

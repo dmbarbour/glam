@@ -855,6 +855,52 @@ fn managed_graph_reaches_no_active_raii_owner() {
 }
 
 #[test]
+fn managed_payloads_have_no_strong_value_domain_backedge() {
+    let managed_value = include_str!("value_node.rs");
+    let recursive = include_str!("recursive_cells.rs");
+    let core = include_str!("../../core.rs");
+    let managed_declarations = [
+        declaration_fragment(managed_value, "pub(crate) struct ManagedValueNode"),
+        declaration_fragment(recursive, "pub(crate) struct ManagedLazyCell"),
+        declaration_fragment(recursive, "pub(crate) struct ManagedPromiseCell"),
+        declaration_fragment(recursive, "pub(crate) struct ManagedCoreNetCell"),
+        declaration_fragment(core, "pub struct OpaqueValue"),
+        declaration_fragment(core, "pub(crate) struct HostCallProducer"),
+        declaration_fragment(core, "pub(crate) struct ReflectionComputation"),
+    ];
+    for declaration in managed_declarations {
+        for forbidden in [
+            "RuntimeValueDomain",
+            "CoreValueFactory",
+            "RuntimeValueAccess",
+            "RuntimeValueObserver",
+            "EvaluationRuntime",
+            "RuntimeSharedResources",
+            "RuntimeValueRoot",
+            "Root<",
+        ] {
+            assert!(
+                !declaration.contains(forbidden),
+                "managed-reachable declaration regained value-domain authority through {forbidden}: {declaration}"
+            );
+        }
+    }
+
+    // The direct declaration latch composes with the exhaustive variant,
+    // callback, opaque-family, recursive-identity, and active-owner scans. It
+    // does not pretend that spelling searches replace those transitive gates.
+    let containment = include_str!("containment_inventory.rs");
+    for verification in [
+        "fn closure_and_opaque_constructor_inventory_is_classified()",
+        "fn deferred_closure_constructor_inventory_is_reconciled()",
+        "fn opaque_family_inventory_is_reconciled()",
+        "fn opaque_type_erasure_inventory_is_reconciled()",
+    ] {
+        assert_eq!(containment.matches(verification).count(), 1);
+    }
+}
+
+#[test]
 fn opaque_external_lifecycle_matches_active_raii_inventory() {
     let active = production_drop_inventory();
     assert_eq!(

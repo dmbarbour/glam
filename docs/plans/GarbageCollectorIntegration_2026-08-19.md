@@ -1,13 +1,12 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I9 and their mandatory reviews are
+Status: in progress; Phases I0 through I10 and their mandatory reviews are
 complete. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled while I10 closes the remaining host/opaque containment
-boundaries. Collector Gate G1 passed on
-2026-08-25.
+remains disabled until I11 certifies Gate G2 and exercises controlled
+whole-runtime collection. Collector Gate G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -250,7 +249,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I9F | complete | exhaustive production active-RAII lifecycle audit |
 | I9G | complete | reconciled runtime-root source inventory |
 | I9 | complete | runtime-root lifecycle and retirement audits; post-I9 review passed |
-| I10 | pending | deferred closures and opaque boundaries |
+| I10 | complete | deferred closure and external-only opaque containment; post-I10 review passed |
 | I10A | complete | traceable deferred host-call captures and reconciled external callback boundaries |
 | I10B.0 | complete | selected external-only opaque storage for the bootstrap |
 | I10B.1 | complete | exhaustive opaque family, cache, and type-erasure source inventories |
@@ -262,6 +261,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10C.2 | complete | external token/query lifecycle reconciliation and idempotent retirement |
 | I10C.3 | complete | teardown, panic/retry, and conservative live-root retention closure |
 | I10C | complete | final opaque destruction and external-lifecycle audit |
+| I10D | complete | final closure, type-erasure, cache, root, and managed-backedge reconciliation |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -335,10 +335,11 @@ ownership includes at least:
 - reflection store snapshots, volumes, queries, and transactions;
 - task waits, client demands, sparks, deferred work, diagnostic values, and
   event input/output records; and
-- type-erased opaque payloads and deferred Rust closures which may hide public
-  roots.
+- externally owned callback environments and opaque capabilities whose
+  conservative root retention is classified by I10.
 
-No production collection may run until this graph is completely classified.
+The complete graph is now classified through I10, but no production collection
+may run until I11A independently certifies Gate G2 from those records.
 
 ## Intended Value Shape
 
@@ -6221,10 +6222,11 @@ query-retirement forced-order fixtures, and
 #### Phase I10C.3 — Destruction and Retention Closure
 
 Completed 2026-09-11. Domain teardown drops a collected opaque shell's active
-owner exactly once without granting the managed shell authority. External
-owner drain is deterministic by owner ID and detaches/destroys one entry at a
-time: if `Drop` unwinds, that attempted entry is terminally detached while the
-untouched suffix remains registered for a later drain. An external
+owner exactly once without granting the managed shell authority. Each external
+owner drain selects candidate IDs in order and detaches/destroys one entry at a
+time; concurrent drains may interleave destruction, whose order is not
+semantic. If `Drop` unwinds, that attempted entry is terminally detached while
+the untouched suffix remains registered for a later drain. An external
 effect-token domain retaining a public root keeps its managed opaque payload
 live until the capability retires, proving conservative retention cannot
 cause premature collection. Any opaque family needing a collector-visible
@@ -6244,6 +6246,16 @@ Verification: `managed_drop_during_domain_teardown_is_passive`,
 
 ### Phase I10D — Final Closure/Opaque Containment Audit
 
+Completed 2026-09-11 as the certification checkpoint for the mandatory
+post-I10 review. The aggregate source gate executes the closure/constructor,
+external-callback, opaque-family, and `Any` inventories and source-latches the
+independently authoritative cache, durable-root, recursive-identity, and
+active-lifecycle gates. A separate direct-declaration latch proves that every
+managed allocation and managed-reachable external frontier remains free of a
+strong value-domain, runtime, root, or managed-access capability; it composes
+with the existing exhaustive edge and active-owner scans rather than claiming
+that spelling checks prove transitive containment on their own.
+
 - Re-run the complete closure, `Any`, opaque-constructor, downcast, compiler
   cache, launcher, and managed-payload source inventory.
 - Match every result to the selected external edge-free/capability record or a
@@ -6256,6 +6268,11 @@ Verification: `final_closure_opaque_and_any_inventory_is_reconciled`,
 `managed_payloads_have_no_strong_value_domain_backedge`, all I4B/I10 negative
 fixtures, and the focused collector finalization suite. Production remains
 `NoAuto`. An unmatched family blocks I11A and Gate G2.
+
+The mandatory post-I10 review passed on 2026-09-11 with no open finding. Its
+implementation accounting, drift classification, future-phase audit, and
+verification record are in
+[`GarbageCollectorIntegrationI10_2026-09-11.md`](../reviews/GarbageCollectorIntegrationI10_2026-09-11.md).
 
 ## Phase I11 — Whole-Graph Forced Full Collection
 
@@ -6286,9 +6303,11 @@ Verification: `gate_g2_source_inventory_is_closed`, the complete stable-ledger
 check, I9's `runtime_root_lifecycle_delta_is_reconciled`,
 `active_external_raii_inventory_is_reconciled`,
 `managed_graph_reaches_no_active_raii_owner`, and
-`runtime_root_source_inventory_is_reconciled`, plus a dated Gate G2 review
-with no unmatched graph-bearing field or incomplete family record. Until it
-passes, no full collection may run over a production runtime.
+`runtime_root_source_inventory_is_reconciled`, plus I10D's
+`final_closure_opaque_and_any_inventory_is_reconciled` and
+`managed_payloads_have_no_strong_value_domain_backedge` and a dated Gate G2
+review with no unmatched graph-bearing field or incomplete family record.
+Until it passes, no full collection may run over a production runtime.
 
 ### Phase I11B — Controlled Production Forced Collection
 
@@ -6296,8 +6315,10 @@ passes, no full collection may run over a production runtime.
   runtime maintenance operation.
 - Run it at stable serial boundaries around module compilation, reflection
   quiescence, event delivery, logger supervision, and settlement.
-- Repeat every I5-I10 ownership/reclamation case against the actual production
-  runtime rather than only its isolated fixture.
+- Repeat every I5-I10 ownership case against the actual production runtime.
+  Require reclamation for managed cycles and the documented retention and
+  retirement outcome for conservative external callback/opaque owners; do not
+  reinterpret an accepted external root as a collector-visible edge.
 
 Verification: `production_collection_preserves_each_serial_boundary` covers
 assembly results, diagnostics, transaction data, readiness, observation epochs,
@@ -6309,9 +6330,11 @@ explicit controlled calls.
 
 - Force collection before, during, and after worker activity using deterministic
   barriers, then add the aggressive debug request-before-outer-entry mode.
-- Finalize passive opaque payloads while logger supervision and workers are
-  active. Prove finalization produces no diagnostics, events, tasks, managed
-  allocations, or other runtime work.
+- Finalize passive managed value shells, including shells whose opaque variant
+  holds only an `ExternalOwnerHandle`, while logger supervision and workers are
+  active. Active opaque payload destruction remains an external-registry
+  operation after collection. Prove managed finalization produces no
+  diagnostics, events, tasks, managed allocations, or other runtime work.
 - Issue collection requests from external runtime work while finalization is
   active and prove coalescing avoids recursive collection or an immediate
   second pass. Worker entry into the same heap remains governed by ordinary

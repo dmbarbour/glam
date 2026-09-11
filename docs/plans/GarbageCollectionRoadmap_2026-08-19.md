@@ -1,15 +1,14 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
-follow-up, and integration Phases I0 through I4 are complete. Gates G0 and G1
+follow-up, and integration Phases I0 through I10 are complete. Gates G0 and G1
 are established, and all mandatory collector reviews through post-C6 plus the
-post-I1 through post-I4 integration reviews have been performed. Collector
-stress, metrics, and tuning continue in C7/C8 while recursive production
-payload integration proceeds with collection disabled. The focused I5-I10
-forward review is recorded in
+post-I1 through post-I10 integration reviews have been performed. Collector
+stress, metrics, and tuning continue in C7/C8 while production collection
+remains disabled. The original focused I5-I10 forward review is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
-its recursive-identity chronology is resolved, while the remaining I5.0
-durable/scoped/coordination and weak promise handle decision blocks I5C.
+its findings have been resolved by the completed phases and remediation
+reviews. I11A is now the independent Gate G2 certification boundary.
 
 This roadmap keeps two large transitions aligned:
 
@@ -343,12 +342,13 @@ root before that region ends. Gate review consumes the exact constructor
 inventory and forced-boundary evidence rather than inferring this chronology
 from declarations alone.
 
-GCI5R-005/I6D.1 has closed the reflection-computation contribution to this
-gate. Its managed lazy traces effect and optional target directly, its durable
-external registry record is an edge-free weak task observation, and its
-first-observer activation permit is an explicitly tested temporary root. This
-is component progress only; it does not establish G2 until the remaining
-families and external boundaries satisfy the same inventory and chronology.
+I5-I10 have closed the integration-side family, chronology, reflection,
+persistent-container, net, runtime-root, callback, opaque/type-erasure, and
+external-lifecycle records. I10D composes those independently authoritative
+inventories and rejects a strong value-domain/root backedge from managed
+payloads. This completed component accounting still does not establish G2:
+I11A must rerun the evidence, verify every collector layout/class record, and
+record the dated independent gate review.
 
 Only after G2 may tests force a full collection over the complete production
 graph.

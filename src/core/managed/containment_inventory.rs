@@ -302,6 +302,50 @@ const RUNTIME_CACHE_INVENTORY: &[RuntimeCacheInventoryEntry] = &[
     },
 ];
 
+struct FinalContainmentEvidence {
+    path: &'static str,
+    verification: &'static str,
+    role: &'static str,
+}
+
+/// I10D's inventory of the independently authoritative source gates which
+/// close the parts of the final containment boundary owned outside this
+/// module. The four local inventories are executed directly by the aggregate
+/// test below; these entries ensure the cache, root, and active-lifecycle
+/// gates cannot silently disappear while their source phases remain closed.
+const FINAL_CONTAINMENT_EVIDENCE: &[FinalContainmentEvidence] = &[
+    FinalContainmentEvidence {
+        path: "src/core/runtime_cache.rs",
+        verification: "runtime_cache_family_source_inventory_is_complete",
+        role: "type-erased runtime cache families and exact registered roots",
+    },
+    FinalContainmentEvidence {
+        path: "src/core/managed/durable_owner_inventory.rs",
+        verification: "runtime_root_source_inventory_is_reconciled",
+        role: "complete durable runtime-root source inventory",
+    },
+    FinalContainmentEvidence {
+        path: "src/core/managed/active_owner_inventory.rs",
+        verification: "active_external_raii_inventory_is_reconciled",
+        role: "active external lifecycle and retirement inventory",
+    },
+    FinalContainmentEvidence {
+        path: "src/core/managed/active_owner_inventory.rs",
+        verification: "managed_graph_reaches_no_active_raii_owner",
+        role: "managed-to-active-owner exclusion",
+    },
+    FinalContainmentEvidence {
+        path: "src/core/managed/active_owner_inventory.rs",
+        verification: "external_owner_recursive_backedges_are_explicitly_classified",
+        role: "external callback and capability backedge classification",
+    },
+    FinalContainmentEvidence {
+        path: "src/core/managed/recursive_identity_inventory.rs",
+        verification: "recursive_identity_source_inventory_is_complete",
+        role: "recursive identity and exact managed-edge inventory",
+    },
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OpaqueSurfaceCounts {
     admissions: usize,
@@ -700,6 +744,33 @@ fn opaque_type_erasure_inventory_is_reconciled() {
         actual, expected,
         "an owned or borrowed type-erasure boundary changed without I10B.0 review"
     );
+}
+
+#[test]
+fn final_closure_opaque_and_any_inventory_is_reconciled() {
+    // Execute the four source scans owned by this module. Calling the test
+    // functions is deliberate: I10D is a composite certification rather than
+    // a second independently drifting source-count baseline.
+    closure_and_opaque_constructor_inventory_is_classified();
+    deferred_closure_constructor_inventory_is_reconciled();
+    opaque_family_inventory_is_reconciled();
+    opaque_type_erasure_inventory_is_reconciled();
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for evidence in FINAL_CONTAINMENT_EVIDENCE {
+        assert!(!evidence.role.is_empty());
+        let source = fs::read_to_string(manifest.join(evidence.path))
+            .expect("final containment evidence source should be readable");
+        let declaration = format!("fn {}(", evidence.verification);
+        assert_eq!(
+            source.matches(&declaration).count(),
+            1,
+            "I10D lost its {} gate `{}` in {}",
+            evidence.role,
+            evidence.verification,
+            evidence.path,
+        );
+    }
 }
 
 #[test]
