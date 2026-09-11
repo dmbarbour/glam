@@ -254,6 +254,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10A | complete | traceable deferred host-call captures and reconciled external callback boundaries |
 | I10B.0 | complete | selected external-only opaque storage for the bootstrap |
 | I10B.1 | complete | exhaustive opaque family, cache, and type-erasure source inventories |
+| I10B.2 | complete | compile-exhaustive edge-free provenance and construction-token proofs |
+| I10B.3 | complete | external effect-token/task-handle lifecycle and conservative-retention proofs |
+| I10B.4 | complete | matching-runtime access, owner identity, and negative-boundary closure |
+| I10B | complete | external-only opaque family, access, identity, and retention audit |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6107,6 +6111,13 @@ Verification: `opaque_family_inventory_is_reconciled` and
 
 #### Phase I10B.2 — Edge-Free Provenance and Construction Tokens
 
+Completed 2026-09-11. Owning-module, compile-exhaustive destructuring now
+closes every direct field of `CompilationOrigin`/`CompilationTrace` and
+`ConstructionPort`, including the recursive import-provenance record and the
+construction-local brand. Both proofs assert their source-recorded edge-free
+family disposition. The existing origin capability and construction-brand
+behavior tests retain the only authorized observation paths.
+
 - Compile-exhaustively inspect `CompilationOrigin` and `ConstructionPort`
   fields and prove they contain no runtime service, root, raw `Value`, managed
   pointer, or active destructor.
@@ -6118,6 +6129,14 @@ Verification: `opaque_edge_free_families_have_no_runtime_or_managed_edge`,
 `construction_ports_are_scoped_to_one_invocation`.
 
 #### Phase I10B.3 — External Effect-Token and Task-Handle Capabilities
+
+Completed 2026-09-11. Compile-exhaustive owning-module proofs fix the token to
+one scalar ID plus weak domain route and the task handle to its runtime, task,
+and query capabilities. Token payload retirement is now observed only after
+managed-shell collection and external-owner draining. A terminal task result
+which points to its own opaque handle deliberately remains retained through
+external task/query state, recording the accepted bootstrap boundary rather
+than claiming collection can break it.
 
 - Compile-exhaustively inspect `EffectToken<T>` and `TaskHandleCell`. The token
   retains only a weak domain route; the task handle's task/query state remains
@@ -6133,6 +6152,13 @@ Verification: `opaque_external_capabilities_retain_only_reviewed_routes`,
 
 #### Phase I10B.4 — Access, Identity, and Negative Boundary Closure
 
+Completed 2026-09-11. A focused access fixture proves that cloning preserves
+the shared opaque owner identity, registering the same `Arc<T>` twice creates
+distinct Glam identities, and typed access returns the owning `Arc<T>` only
+for the matching runtime and family. The existing compile-time negative
+admission latches remain the authoritative names below. I10B adds no managed
+opaque arm, mutator-bound access, or automatic collection policy.
+
 - Preserve matching-runtime typed downcast to an owning `Arc<T>` and shared-
   lease opaque identity. No mutator-bound opaque access is introduced.
 - Re-run compile-time rejection of bare `Gc<T>`, unrooted recursive `Value`,
@@ -6140,9 +6166,9 @@ Verification: `opaque_external_capabilities_retain_only_reviewed_routes`,
 - Close the source inventory and update the stable ownership ledger.
 
 Verification: `opaque_downcast_requires_matching_runtime_and_preserves_owner_identity`,
-`opaque_registration_rejects_bare_managed_pointer`,
-`opaque_registration_rejects_unrooted_core_value`, and
-`opaque_registration_rejects_foreign_root`. Production remains `NoAuto`.
+`opaque_payload_rejects_bare_managed_pointer`,
+`opaque_payload_rejects_unrooted_core_value`, and
+`opaque_payload_rejects_foreign_root`. Production remains `NoAuto`.
 
 ### Phase I10C — Final Opaque Destruction and External-Lifecycle Audit
 

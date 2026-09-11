@@ -971,3 +971,34 @@ fn opaque_payload_requires_matching_runtime_and_retires_during_registry_drain() 
     assert!(retained.upgrade().is_none());
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn opaque_external_capabilities_retain_only_reviewed_routes() {
+    crate::api::assert_effect_token_family_shape();
+    crate::reflection::assert_task_handle_family_shape();
+}
+
+#[test]
+fn opaque_downcast_requires_matching_runtime_and_preserves_owner_identity() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let other_values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let payload = Arc::new(OpaqueDropSignal(Arc::new(AtomicUsize::new(0))));
+    let opaque = OpaqueValue::new(&values, Arc::clone(&payload));
+    let same_owner = opaque.clone();
+    let distinct_owner = OpaqueValue::new(&values, Arc::clone(&payload));
+
+    assert_eq!(opaque, same_owner);
+    assert_ne!(opaque, distinct_owner);
+    let extracted = opaque
+        .downcast::<OpaqueDropSignal>(&values)
+        .expect("matching runtime and family should open the opaque owner");
+    assert!(Arc::ptr_eq(&extracted, &payload));
+    assert!(opaque.downcast::<u64>(&values).is_none());
+    assert!(opaque.downcast::<OpaqueDropSignal>(&other_values).is_none());
+}

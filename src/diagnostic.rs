@@ -52,6 +52,43 @@ struct CompilationOrigin {
     trace: CompilationTrace,
 }
 
+#[cfg(test)]
+pub(crate) fn assert_compilation_origin_family_shape() {
+    fn inspect_origin(origin: &CompilationOrigin) {
+        let CompilationOrigin { trace } = origin;
+        let CompilationTrace {
+            invocation,
+            source,
+            digest,
+            namespace,
+            imported_from,
+        } = trace;
+        let _: &CompilationInvocationId = invocation;
+        let _: &SourceIdentity = source;
+        let _: &ContentDigest = digest;
+        let _: &Arc<[String]> = namespace;
+        let _: &Option<ImportOrigin> = imported_from;
+        if let Some(imported_from) = imported_from {
+            let ImportOrigin {
+                parent,
+                request,
+                extends,
+            } = imported_from;
+            let _: &Arc<CompilationTrace> = parent;
+            let _: &Arc<str> = request;
+            let _: &Arc<[String]> = extends;
+        }
+    }
+
+    let _: fn(&CompilationOrigin) = inspect_origin;
+    assert_eq!(
+        <CompilationOrigin as OpaquePayloadFamily>::PAYLOAD_RECORD
+            .fields()
+            .2,
+        "edge-free token"
+    );
+}
+
 // SAFETY: the compilation trace contains source identities, digests, static
 // namespace labels, and parent trace provenance only. It contains no Glam
 // value, runtime root, managed pointer, or active runtime capability.
@@ -436,6 +473,12 @@ mod tests {
         )
         .expect("closed provenance list should not fail");
         values
+    }
+
+    #[test]
+    fn opaque_edge_free_families_have_no_runtime_or_managed_edge() {
+        assert_compilation_origin_family_shape();
+        crate::eval::assert_construction_port_family_shape();
     }
 
     #[test]

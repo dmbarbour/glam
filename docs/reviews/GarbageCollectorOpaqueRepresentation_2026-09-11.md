@@ -104,6 +104,20 @@ it is not an extension of `OpaquePayloadFamily`.
 The review artifact is latched by
 `opaque_representation_review_inventory_is_complete`,
 `opaque_representation_plan_has_no_undecided_family`, and
-`opaque_representation_plan_links_are_consistent`. I10B will add the concrete
-family/access/lifecycle fixtures named by the revised implementation phases.
+`opaque_representation_plan_links_are_consistent`. I10B completed the concrete
+family/access/lifecycle closure on 2026-09-11:
 
+- `opaque_edge_free_families_have_no_runtime_or_managed_edge` and the
+  construction-port scope fixture compile-exhaustively close both edge-free
+  families;
+- `opaque_external_capabilities_retain_only_reviewed_routes`,
+  `effect_token_domain_retirement_is_external`, and
+  `task_handle_root_backedge_is_conservatively_external` close the two active
+  external families without misclassifying them as managed finalizers; and
+- `opaque_downcast_requires_matching_runtime_and_preserves_owner_identity`
+  plus the three compile-time negative payload-admission tests close access,
+  identity, runtime, and family boundaries.
+
+The task-handle backedge fixture intentionally observes retention. It records
+the review's accepted bootstrap cost: external task/query state may retain a
+pathological terminal result-to-own-handle cycle until runtime teardown.

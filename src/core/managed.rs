@@ -302,7 +302,7 @@ impl OpaquePayloadRecord {
     }
 
     #[cfg(test)]
-    const fn fields(self) -> (&'static str, &'static str, &'static str) {
+    pub(crate) const fn fields(self) -> (&'static str, &'static str, &'static str) {
         (self.family, self.source, self.ownership)
     }
 }

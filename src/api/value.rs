@@ -196,6 +196,23 @@ struct EffectToken<T> {
     domain: Weak<EffectTokenDomainState<T>>,
 }
 
+#[cfg(test)]
+pub(crate) fn assert_effect_token_family_shape() {
+    fn inspect(token: &EffectToken<()>) {
+        let EffectToken { id, domain } = token;
+        let _: &NonZeroU64 = id;
+        let _: &Weak<EffectTokenDomainState<()>> = domain;
+    }
+
+    let _: fn(&EffectToken<()>) = inspect;
+    assert_eq!(
+        <EffectToken<()> as crate::core::OpaquePayloadFamily>::PAYLOAD_RECORD
+            .fields()
+            .2,
+        "external capability"
+    );
+}
+
 impl<T> Clone for EffectTokenDomain<T> {
     fn clone(&self) -> Self {
         Self {

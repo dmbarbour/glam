@@ -28,6 +28,8 @@ pub use search::{
     IsolatedTaskHost,
 };
 
+#[cfg(test)]
+pub(crate) use requests::assert_task_handle_family_shape;
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionServices, ReflectionTransaction,

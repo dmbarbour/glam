@@ -27,6 +27,8 @@ pub use evaluator::{ReflectionInspector, ValueEvaluator};
 #[cfg(test)]
 use runtime::publish_runtime_observation;
 pub use runtime::*;
+#[cfg(test)]
+pub(crate) use value::assert_effect_token_family_shape;
 pub use value::{
     EffectTokenDomain, EvaluatedValue, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
     Value, ValueKind, Values,

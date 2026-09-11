@@ -32,6 +32,23 @@ struct ConstructionPort {
     id: ConstructionPortId,
 }
 
+#[cfg(test)]
+pub(crate) fn assert_construction_port_family_shape() {
+    fn inspect(port: &ConstructionPort) {
+        let ConstructionPort { brand, id } = port;
+        let _: &Arc<ConstructionBrand> = brand;
+        let _: &ConstructionPortId = id;
+    }
+
+    let _: fn(&ConstructionPort) = inspect;
+    assert_eq!(
+        <ConstructionPort as OpaquePayloadFamily>::PAYLOAD_RECORD
+            .fields()
+            .2,
+        "edge-free token"
+    );
+}
+
 // SAFETY: a construction port contains only one construction-local brand and
 // a scalar port ID. Neither field can contain or reach a Glam value, runtime
 // root, managed pointer, or active runtime capability.
@@ -563,6 +580,7 @@ mod tests {
 
     #[test]
     fn construction_ports_are_scoped_to_one_invocation() {
+        assert_construction_port_family_shape();
         let values = crate::core::test_value_factory();
         let local = Arc::new(ConstructionBrand);
         let foreign = Arc::new(ConstructionBrand);

@@ -36,9 +36,9 @@ mod value;
 
 #[cfg(test)]
 pub(crate) use application::apply_values;
-#[cfg(test)]
-pub(crate) use builtins::demand_strategy_value;
 pub(crate) use builtins::demand_strategy_value_in;
+#[cfg(test)]
+pub(crate) use builtins::{assert_construction_port_family_shape, demand_strategy_value};
 #[cfg(test)]
 pub(crate) use operator::constant_effect;
 pub(crate) use operator::{

@@ -601,6 +601,28 @@ struct TaskHandleCell {
     status: Arc<EvaluationQueryHandle>,
 }
 
+#[cfg(test)]
+pub(crate) fn assert_task_handle_family_shape() {
+    fn inspect(handle: &TaskHandleCell) {
+        let TaskHandleCell {
+            runtime,
+            task,
+            status,
+        } = handle;
+        let _: &crate::runtime::EvaluationRuntimeId = runtime;
+        let _: &EvaluationTaskHandle = task;
+        let _: &Arc<EvaluationQueryHandle> = status;
+    }
+
+    let _: fn(&TaskHandleCell) = inspect;
+    assert_eq!(
+        <TaskHandleCell as crate::core::OpaquePayloadFamily>::PAYLOAD_RECORD
+            .fields()
+            .2,
+        "external capability"
+    );
+}
+
 // SAFETY: the handle contains no bare core value, runtime value root, or
 // managed pointer. It is an external lifecycle capability over coordinator
 // and query state, so I9/I10 must retain its active-retirement classification
@@ -922,17 +944,6 @@ mod tests {
         let _: &Vec<ReflectionUpdate> = updates;
     }
 
-    fn assert_task_handle_inventory(handle: &TaskHandleCell) {
-        let TaskHandleCell {
-            runtime,
-            task,
-            status,
-        } = handle;
-        let _: &crate::runtime::EvaluationRuntimeId = runtime;
-        let _: &EvaluationTaskHandle = task;
-        let _: &Arc<EvaluationQueryHandle> = status;
-    }
-
     fn assert_tagged_task_state_inventory(state: &TaggedTaskState) {
         match state {
             TaggedTaskState::Complete(value) | TaggedTaskState::Failed(value) => {
@@ -962,7 +973,7 @@ mod tests {
     fn reflection_request_root_inventory_is_complete() {
         let _: fn(&ReflectionRequest) = assert_reflection_request_inventory;
         let _: fn(&ReflectionUpdate, &ReflectionJournal) = assert_reflection_journal_inventory;
-        let _: fn(&TaskHandleCell) = assert_task_handle_inventory;
+        assert_task_handle_family_shape();
         let _: fn(&TaggedTaskState) = assert_tagged_task_state_inventory;
         let _: fn(&QueryRead) = assert_query_read_inventory;
         let _: fn(&ReflectionQueryMutation<'_>) = assert_query_mutation_inventory;
@@ -1222,6 +1233,57 @@ mod tests {
         assert!(
             status_weak.upgrade().is_none(),
             "dropping the final opaque handle must release the final query lease"
+        );
+    }
+
+    #[test]
+    fn task_handle_root_backedge_is_conservatively_external() {
+        let context = EvalContext::standalone();
+        let values = context.values().clone();
+        let public_values = Values::from_core_factory(values.clone());
+        let task = context
+            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .expect("task-handle backedge fixture should schedule");
+        let status = {
+            let mut store = crate::reflection::ReflectionStore::new(
+                values.clone(),
+                Arc::new(crate::reflection::ExactConflictAnalysis),
+            );
+            let mut journal = StoreJournal::new(store.snapshot());
+            let status = journal
+                .reserve_query_with(public_values.wrap(task_status_query_value(
+                    &public_values,
+                    EvaluationTaskStatus::Launched,
+                )))
+                .expect("task status query should reserve");
+            assert!(matches!(
+                store.try_commit(&journal),
+                crate::reflection::StoreCommitResult::Committed
+            ));
+            status
+        };
+        let status_weak = Arc::downgrade(&status);
+        let opaque = task_handle_value(
+            &context,
+            Arc::new(TaskHandleCell {
+                runtime: values.runtime_id(),
+                task: task.clone(),
+                status: status.clone(),
+            }),
+        );
+        let opaque_core = public_values
+            .clone_core(&opaque)
+            .expect("task handle belongs to the fixture runtime");
+
+        context.complete_wait_with_value(task.wait(), opaque_core);
+        drop(task);
+        drop(status);
+        drop(opaque);
+        values.collect_and_drain_external_owners_for_test();
+
+        assert!(
+            status_weak.upgrade().is_some(),
+            "a terminal task result pointing to its own opaque handle is conservatively retained"
         );
     }
 

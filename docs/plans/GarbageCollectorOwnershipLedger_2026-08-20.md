@@ -362,7 +362,7 @@ kept with the subsystem whose contract they exercise.
 | I7 final persistent representation delta, no-forcing trace, missing deferred-tail topology, and logical-work accounting | `persistent_representation_to_visitor_inventory_is_complete`; `persistent_adapter_cycle_reclaims_in_isolated_heap`; `managed_promise_cycle_through_list_thunk_is_traced_and_reclaimed`; existing I5F.3a strict/shared/version cycle fixtures. |
 | I8 managed core-net payload, exact mutation, topology-cycle, and net-specific compatibility closure | `runtime_payload_owner_inventory_is_compile_exhaustive`; `runtime_cycle_fixture_mapping_is_source_backed`; `managed_core_net_semantic_writers_use_exact_delta_gateways`; `core_net_durable_owner_inventory_is_compile_exhaustive`; `managed_core_net_trace_does_not_reduce_materialize_or_force`; `compatibility_adapter_inventory_is_closed_and_acyclic_between_identities`; `managed_core_net_has_no_legacy_owner`. |
 | I10A deferred callback containment, traceable host-call captures, typed invocation roots, and weak production loader routes | `managed_deferred_state_cycle_reclaims`; `external_closure_bundle_retains_only_declared_roots`; `external_callback_constructors_require_capture_classification`; `deferred_closure_constructor_inventory_is_reconciled`; `deferred_compiler_loaders_do_not_retain_their_runtime`; `external_owner_recursive_backedges_are_explicitly_classified`. |
-| I10B.0-I10B.1 external-only opaque decision and exhaustive source boundary | `opaque_representation_review_inventory_is_complete`; `opaque_representation_plan_has_no_undecided_family`; `opaque_representation_plan_links_are_consistent`; `opaque_family_inventory_is_reconciled`; `opaque_type_erasure_inventory_is_reconciled`; existing `runtime_cache_family_source_inventory_is_complete`. |
+| I10B external-only opaque decision, exhaustive source boundary, direct-field proof, lifecycle retention, and access/identity closure | `opaque_representation_review_inventory_is_complete`; `opaque_representation_plan_has_no_undecided_family`; `opaque_representation_plan_links_are_consistent`; `opaque_family_inventory_is_reconciled`; `opaque_type_erasure_inventory_is_reconciled`; `opaque_edge_free_families_have_no_runtime_or_managed_edge`; `opaque_compilation_origin_round_trips_only_through_its_reflection_cap`; `construction_ports_are_scoped_to_one_invocation`; `opaque_external_capabilities_retain_only_reviewed_routes`; `effect_token_domain_retirement_is_external`; `task_handle_root_backedge_is_conservatively_external`; `opaque_downcast_requires_matching_runtime_and_preserves_owner_identity`; the three `opaque_payload_rejects_*` negative tests; existing `runtime_cache_family_source_inventory_is_complete`. |
 | Cross-runtime rejection | `public_value_factories_reject_foreign_composite_members`; `assembler_boundaries_reject_foreign_values_before_evaluation_or_storage`; `runtime_input_endpoints_are_local_monotonic_capabilities`. |
 | Fulfilled/unfulfilled lazy and resolver promise | `value_evaluator_caches_lazy_success_and_preserves_structured_failure`; `value_evaluator_resumes_a_retained_resolver_promise_subscription`; `promised_assignments_retain_deferred_aliases`. |
 | Pure lazy cycle | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle`; `concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure`; `two_sessions_share_and_retire_one_pure_lazy_cycle_failure`. |
@@ -399,10 +399,13 @@ receiving a guessing/conservative classification:
    evidence. GCI5R-002 supplied owner-qualified lazy, promise, and core-net
    transition gateways; I8 completed the post-cutover net audit, exact-delta
    conversion, cycle matrix, and net-specific compatibility retirement.
-3. I10B.0 selected external-only opaque storage. I10B/I10C must close the four-
-   family constructor/downcast inventory, edge-free proofs, external lifecycle
-   records, matching-runtime owning access, and conservative-retention tests
-   before Gate G2. No managed opaque family or scoped managed downcast remains.
+3. I10B selected and closed external-only opaque storage: the four-family
+   constructor/downcast inventory, compile-exhaustive edge-free and external-
+   capability field proofs, matching-runtime owning access, shared-lease
+   identity, and conservative task-handle retention now have named fixtures.
+   I10C still owns passive-handle destruction and active external-retirement
+   closure before Gate G2. No managed opaque family or scoped managed downcast
+   remains.
 
 As each M family receives its managed representation, append the stable
 reconciliation record defined above. In particular, record its Rust

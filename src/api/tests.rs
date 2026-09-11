@@ -933,6 +933,30 @@ fn effect_tokens_are_domain_scoped_unforgeable_and_revoked_with_the_domain() {
 }
 
 #[test]
+fn effect_token_domain_retirement_is_external() {
+    let runtime = EvaluationRuntime::new(0).unwrap();
+    let values = runtime.values();
+    let domain = EffectTokenDomain::new(&values);
+    let payload = Arc::new(());
+    let retained = Arc::downgrade(&payload);
+    let token = domain.issue(payload);
+
+    drop(token);
+    assert!(
+        retained.upgrade().is_some(),
+        "dropping the public root must not run active token retirement as managed destruction"
+    );
+    assert_eq!(
+        domain.collect_and_drain_retired_external_owners_for_test(),
+        1
+    );
+    assert!(
+        retained.upgrade().is_none(),
+        "external-owner retirement must drop the token and remove its domain payload"
+    );
+}
+
+#[test]
 fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let assembler = Assembler::new();
     let values = assembler.values();
@@ -1608,7 +1632,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
 }
 
 #[test]
-fn reflection_environment_explicitly_projects_compilation_origins() {
+fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
     let assembler = Assembler::new();
     let trace = test_compilation_trace("/workspace/source.g");
     let origin = crate::diagnostic::opaque_compilation_origin(&assembler.core_values(), &trace);
