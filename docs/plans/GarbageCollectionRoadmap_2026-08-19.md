@@ -3,16 +3,18 @@
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
 follow-up, and integration Phases I0 through I11C are complete. Gates G0, G1,
 and G2 are established, and all mandatory collector reviews through post-C6
-plus the post-I1 through post-I10 integration reviews and independent Gate G2
+plus the post-I1 through post-I11 integration reviews and independent Gate G2
 audit have been performed. Collector
 stress, metrics, and tuning continue in C7/C8 while production collection
 remains disabled. The original focused I5-I10 forward review is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
 its findings have been resolved by the completed phases and remediation
 reviews. I11B completed the first controlled serial whole-production-graph
-collection boundary, and I11C closed the deterministically forced worker,
-finalizer, request-coalescing, and retirement schedules. Production remains
-`NoAuto` while I11D owns the post-I11 review and Gate G3 certification.
+collection boundary, and I11C exercised worker, finalizer,
+request-coalescing, and retirement schedules. The post-I11 review found three
+verification gaps, including one missing worker/collector ordering latch.
+Production remains `NoAuto` while I11D owns their remediation and Gate G3
+certification.
 
 This roadmap keeps two large transitions aligned:
 
@@ -360,18 +362,25 @@ Production remains `NoAuto`; I11B's controlled tests now force a full
 collection over the complete production graph through a crate-private runtime
 maintenance seam. The outcome is recorded in
 [`GarbageCollectorProductionCollectionI11B_2026-09-11.md`](../reviews/GarbageCollectorProductionCollectionI11B_2026-09-11.md).
-I11C then forced the worker/finalizer concurrency schedules and runtime
+I11C then exercised the worker/finalizer concurrency schedules and runtime
 retirement boundaries recorded in
 [`GarbageCollectorWorkerFinalizationI11C_2026-09-11.md`](../reviews/GarbageCollectorWorkerFinalizationI11C_2026-09-11.md).
+The later post-I11 review in
+[`GarbageCollectorIntegrationI11_2026-09-11.md`](../reviews/GarbageCollectorIntegrationI11_2026-09-11.md)
+found that the worker fixture did not yet observe the collector's authoritative
+admission wait, and also identified missing suite-wide aggressive-mode and
+exact finalizer-allocation evidence. I11D closes those gaps before G3.
 
 Only after G2 may tests force a full collection over the complete production
 graph.
 
-### Gate G3 — full collection enabled
+### Gate G3 — production full collection certified
 
 Forced full collections pass the complete semantic, concurrency, and drop
-tests. Full collection is then enabled at explicit runtime maintenance points.
-Automatic threshold collection remains disabled until those points are stable.
+tests. Passing the gate authorizes I12 to implement collection at explicit
+runtime maintenance points; the gate does not itself enable ordinary
+collection. Automatic threshold collection remains disabled until those
+points are stable.
 Before routine concurrent maintenance or automatic construction, I12A.0 must
 integrate every may-collect entry with authoritative runtime readiness. The
 runtime records an operational-activity lease under its mutation-admission

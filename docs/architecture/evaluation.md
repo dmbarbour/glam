@@ -67,9 +67,13 @@ Retaining `Values`, a demand context, or a runtime service can therefore keep
 value construction usable without also preserving the scheduler, executor,
 runtime facade, or default reflection profile. Production non-inline values
 already use registered roots over managed outer value nodes, but collection
-remains `NoAuto`. Gate G2 and I11B permit only explicit, crate-private
-collection at controlled serial test boundaries; runtime maintenance and
-automatic policy remain later gates.
+remains `NoAuto`. Gate G2 and I11B permit explicit, crate-private collection at
+controlled serial test boundaries. I11C additionally exercises private worker
+and finalizer schedules; its finalizer ordering is deterministically probed,
+while I11D still owes an authoritative worker/collector admission-wait latch.
+These fixtures do not expose routine maintenance or change heap policy. Gate
+G3 certification, runtime maintenance, and any automatic policy remain later
+gates.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share

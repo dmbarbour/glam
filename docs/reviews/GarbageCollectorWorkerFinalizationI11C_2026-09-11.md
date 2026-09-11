@@ -3,12 +3,14 @@
 Baseline: `03aec8c`, the completed I11B controlled-production-collection
 checkpoint. This review covers I11C.1-I11C.4.
 
-Status: complete. Deterministically forced production-runtime schedules cover
-worker managed access, passive finalization beside host work, a collection
-request issued during Finalizing, and value-domain retirement before and after
-controlled collection. No unresolved accidental drift was found. Production
-heap policy remains `CollectionPolicy::NoAuto`; I11D still owns the post-I11
-review and Gate G3 certification.
+Status: implementation checkpoint complete. The later post-I11 review found
+that the worker fixture latches managed-worker entry but not the collector's
+arrival at its admission wait; that verification gap is GCI11R-001 in
+[`GarbageCollectorIntegrationI11_2026-09-11.md`](GarbageCollectorIntegrationI11_2026-09-11.md).
+The finalizer, request, and retirement schedules remain deterministically
+forced, and no implementation defect was observed. Production heap policy
+remains `CollectionPolicy::NoAuto`; I11D owns remediation and Gate G3
+certification.
 
 ## Scope and Method
 
@@ -37,7 +39,7 @@ supported embedding API.
 
 | Checkpoint | Implementation and evidence |
 | --- | --- |
-| I11C.1 | `collection_interleaves_with_worker_quantum_without_lost_work` pauses a real scheduled machine inside `EvaluationPollContext::with_value_access`, starts collection afterward, proves collection cannot complete first, releases the quantum, and observes the normal task result. A later explicit collection is exactly one epoch later. `aggressive_debug_collection_runs_before_outer_runtime_entry` and the collector-local companion prove that private aggressive mode collects once before each outer entry, never before recursive same-heap entry, and does not mutate `NoAuto`. |
+| I11C.1 | `collection_interleaves_with_worker_quantum_without_lost_work` pauses a real scheduled machine inside `EvaluationPollContext::with_value_access`, schedules a collector thread, observes no early result, releases the quantum, and observes the normal task result. The thread-start signal precedes the collection call, so this does not yet prove that the collector reached its active-mutator wait; GCI11R-001 adds that missing latch. A later explicit collection is exactly one epoch later. `aggressive_debug_collection_runs_before_outer_runtime_entry` and the collector-local companion prove that private aggressive mode collects once before each outer entry, never before recursive same-heap entry, and does not mutate `NoAuto`. |
 | I11C.2 | `passive_finalization_produces_no_runtime_work` pauses a real worker outside managed access while an unrooted managed opaque shell finalizes. Diagnostic counts, observation epoch, coordinator generation/session/work inventory, and `Busy` disposition remain fixed. Assigned-run pressure does not grow, finalizer activity retires, and the logger FIFO retains exactly its one original event. The active opaque payload drops only during the later explicit external-owner drain. |
 | I11C.3 | `FinalizingPhaseProbe` is one-shot and pauses only after finalizer-mutator installation. It removes itself from the heap under its probe-slot mutex, releases that mutex, and waits only on probe-local state. `external_request_during_finalization_is_coalesced` invokes a mutator-free output callback during that pause. Its nonblocking request becomes visible, successful completion clears it, and collection epochs prove neither recursion nor an intervening pass. |
 | I11C.4 | `runtime_retirement_before_collection_leaves_public_value_inert` proves a public root does not retain an otherwise uncollected value domain. The worker/collector fixture repeats the same proof after real work and controlled collection. In both cases the value retains runtime provenance but cannot be observed after domain retirement. `dropping_finalizing_phase_probe_releases_one_collection_only` independently proves RAII release and one-shot consumption. |
@@ -103,7 +105,11 @@ runtime-readiness authority was added by I11C.
 
 ### Accidental drift
 
-No unresolved accidental implementation drift was found.
+The post-I11 review found one unresolved verification drift: I11C.1's
+collector-start signal precedes the actual collection call and therefore does
+not force the collector-waits-on-worker ordering. This does not establish an
+implementation defect, but Gate G3 remains blocked until GCI11R-001 adds an
+authoritative admission-wait observation.
 
 ## Verification
 

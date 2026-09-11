@@ -6,9 +6,10 @@ production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
 remains disabled in ordinary execution; I11B exercised controlled serial
-whole-runtime collection and I11C closed deterministic worker, finalizer,
+whole-runtime collection and I11C exercised worker, finalizer,
 request-coalescing, and runtime-retirement schedules through private test and
-maintenance seams. Collector Gate G1 passed on 2026-08-25.
+maintenance seams. The post-I11 review found three verification gaps which
+I11D must close before Gate G3. Collector Gate G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -266,7 +267,12 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10D | complete | final closure, type-erasure, cache, root, and managed-backedge reconciliation |
 | I11A | complete | independent Gate G2 source, stable-ledger, layout, and isolated-reclamation certification |
 | I11B | complete | private serial production collection, boundary preservation, and ownership-outcome matrix |
-| I11C | complete | deterministic worker/finalizer schedules, request coalescing, and runtime retirement |
+| I11C | complete | worker/finalizer schedule fixtures, request coalescing, and runtime retirement |
+| I11D.0 | pending | post-I11 deterministic schedule and passive-finalization remediation |
+| I11D.1 | pending | repository-wide aggressive collection verification mode |
+| I11D.2 | pending | focused Miri and sanitizer verification |
+| I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
+| I11D.4 | pending | dated Gate G3 certification |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6394,9 +6400,8 @@ I11B.4 completed 2026-09-11. The dated controlled-production-collection
 review maps I5-I10 to their production-runtime fixtures and finds no missing
 family, serial-boundary mutation, public collection escape, or change to the
 heap's immutable `NoAuto` policy. The ordinary repository checks and focused
-collector suite pass. I11C remains responsible for deterministic worker,
-finalizer, and collection-request interleavings; none were folded into this
-serial phase.
+collector suite pass. I11C remains responsible for worker, finalizer, and
+collection-request schedule fixtures; none were folded into this serial phase.
 
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 
@@ -6431,17 +6436,20 @@ serial phase.
 
 Verification: `collection_interleaves_with_worker_quantum_without_lost_work`,
 `passive_finalization_produces_no_runtime_work`, and
-`external_request_during_finalization_is_coalesced`. These tests force their
-orderings with channels and the one-shot phase probe; repetition is not used
-as evidence for a concurrency contract. I11C closes with the ordinary and
-focused collector suites. I11D retains the focused Miri, sanitizer, and final
+`external_request_during_finalization_is_coalesced`. The finalizer tests force
+their orderings with channels and the one-shot phase probe; repetition is not
+used as evidence for a concurrency contract. The post-I11 review found that
+the worker test still needs an authoritative collector-admission-wait latch,
+which I11D.0 now owns. I11D also retains focused Miri, sanitizer, and final
 aggressive-mode certification runs. The production heap remains `NoAuto`;
 only explicit tests/maintenance collect.
 
 I11C.1 completed 2026-09-11. A real one-worker runtime now pauses a scheduled
-task inside its bounded managed-access region, starts a synchronous collector
-after that fact is observed, proves the collector cannot complete first, then
-releases the task and observes both collection and the ordinary task result.
+task inside its bounded managed-access region and schedules a synchronous
+collector after that fact is observed. The existing result check does not yet
+prove that the collector reached its admission wait before worker release;
+I11D.0 adds that authoritative latch. The task then releases and both
+collection and the ordinary task result complete.
 A later explicit collection advances exactly one epoch, ruling out lost work
 or an unintended extra pass. The collector's private deterministic feature now
 also supports heap-local collection before each outer entry. It discards the
@@ -6484,18 +6492,52 @@ the escaped public root does not retain or reopen the domain. The collector's
 one-shot Finalizing probe has an independent RAII fixture proving that handle
 drop releases its collector and that a later collection cannot reuse the
 consumed pause. The dated I11C review found no unresolved accidental drift,
-and all focused plus routine checks passed. Production remains immutable
-`NoAuto`; I11D owns the post-I11 review and Gate G3 certification.
+and all focused plus routine checks passed. The later post-I11 review corrected
+the worker-ordering evidence and assigned its missing admission-wait latch to
+I11D.0; it found no corresponding implementation defect. Production remains
+immutable `NoAuto`; I11D owns remediation and Gate G3 certification.
 
 ### Phase I11D — Gate G3 Certification
 
-- (Post-I11 review should run first)
-- Run the full repository suite under ordinary execution and the aggressive
-  debug-collection mode.
-- Complete focused Miri, sanitizer, unsafe-site, trace-edge, mutation-gateway,
-  and lock/region audits.
-- Publish a dated Gate G3 review accounting for every I11 schedule and any
-  intentional nondeterministic reflection behavior.
+The post-I11 review is complete in
+[`GarbageCollectorIntegrationI11_2026-09-11.md`](../reviews/GarbageCollectorIntegrationI11_2026-09-11.md).
+It found no production tracing or ownership defect, but three verification
+gaps block Gate G3. Close them and certify the boundary in these checkpoints:
+
+- **I11D.0 — Deterministic remediation.** Add a private one-shot synchronous-
+  collection admission-wait probe. It announces only after the collection
+  target exists and an active outer mutator prevents election, and it never
+  waits while holding the coordinator mutex. Use it to make
+  `collection_interleaves_with_worker_quantum_without_lost_work` prove that the
+  production collector actually waits behind the paused managed worker before
+  release. Add a baseline collection before worker scheduling so the fixture
+  literally covers before, during, and after worker activity. Add a test-only
+  exact allocated-slot snapshot over allocation bitmaps and require passive
+  finalization to satisfy
+  `allocated_after + reclaimed_slots == allocated_before`; assigned-run
+  pressure alone is not evidence that a destructor allocated no managed slot.
+- **I11D.1 — Repository-wide aggressive mode.** Add one private root-crate
+  verification feature which forwards `glam-gc/deterministic-test-hooks` and
+  enables collection before every outer entry on each newly constructed
+  production runtime value domain. Preserve immutable `NoAuto` and expose no
+  supported embedding API. Run the complete workspace suite both ordinarily
+  and with this feature. Exact operational epoch assertions may account for the
+  selected mode, but semantic, ownership, and schedule checks may not be
+  weakened or skipped.
+- **I11D.2 — Dynamic unsafe-boundary verification.** Run named focused Miri
+  tests over root publication/access, tracing and panic restart, allocation,
+  mutation transitions, collection, finalization, and the deterministic
+  probes. Run AddressSanitizer and ThreadSanitizer over supported focused
+  collector and production-runtime targets. Record an unsupported target/tool
+  combination explicitly; do not replace it with repeated ordinary runs.
+- **I11D.3 — Static closure audit.** Reconcile every unsafe site, trace edge,
+  mutation gateway, managed entry, lock/wait boundary, passive finalizer, and
+  active external owner against its authoritative inventory and the source
+  delta since Gate G2. Re-run every source latch and focused I11 fixture.
+- **I11D.4 — Certification.** Publish a dated Gate G3 review accounting for
+  every I11 schedule, both collection modes, all dynamic-tool results, and any
+  intentional nondeterministic reflection behavior. Mark I11 complete only
+  when every post-I11 finding is closed.
 
 Passing G3 authorizes I12's controlled runtime maintenance and later threshold
 service review. It does not switch any heap from `NoAuto` to `Automatic`.
@@ -6503,8 +6545,9 @@ Collection policy is immutable for one heap; I12B.0 may select a different
 construction policy only for runtimes created after that decision.
 
 Verification: the routine repository checks, `cargo test --workspace -q`, the
-aggressive debug-collection suite containing every I11B/I11C named fixture,
-focused Miri, supported sanitizers, and a dated Gate G3 review. Every existing
+complete workspace suite under the private aggressive debug-collection
+feature, every I11B/I11C named fixture, focused named Miri tests, supported
+address/thread sanitizer targets, and a dated Gate G3 review. Every existing
 heap remains `NoAuto` for its lifetime. A later I12 policy checkpoint may
 change only how new runtime heaps are constructed.
 
