@@ -454,7 +454,61 @@ This partition is diagnostic evidence, not closure of those later checkpoints.
 ### GCI11R-002D — Production Runtime Root Sweep
 
 After B and C remove the two known shared defects, rerun the exact failure
-matrix. Audit only remaining production-shaped failures:
+matrix. Begin with the evaluation-boundary cleanup below, then audit only
+remaining production-shaped failures.
+
+#### GCI11R-002D.1 — Regional Values and Rooted Orchestration
+
+Preserve the following ownership distinction explicitly:
+
+- public `api::Value` is already a durable runtime root;
+- raw `core::Value` is regional and may exist only under
+  `RuntimeValueAccess` or inside a durable owner whose trace reports its
+  managed edges;
+- `EvalContext` orchestrates work across polls, waits, worker handoff, and
+  reflection or host boundaries, and therefore must not retain an active
+  `RuntimeValueAccess`; and
+- `EvaluatorStepContext` / `EvaluationValueAccess` is the scope for operating
+  on raw values during one callback-free evaluator quantum.
+
+Make `EvalContext::evaluate_root_whnf(RuntimeValueRoot)` the ordinary
+orchestration entry. Inventory callers of the raw
+`EvalContext::evaluate_whnf(&core::Value)` compatibility facade and:
+
+1. migrate callers which already hold `api::Value` or `RuntimeValueRoot` to
+   clone/reuse that registered root rather than project, allocate a containing
+   `ManagedValueNode`, and register another root;
+2. preserve the `ClientDemandResult::Complete(RuntimeValueRoot)` directly when
+   the result becomes a public value, cache entry, or another rooted owner,
+   rather than projecting and re-rooting it;
+3. keep raw input or output only inside a bounded access region or while
+   installing it into its real traced owner; and
+4. remove, rename, or sharply narrow the raw compatibility facade so its
+   ownership transfer and allocation cost cannot be mistaken for the normal
+   path.
+
+The first migration targets are `ValueEvaluator`, the reflection inspectors,
+module sealing, and any other source-inventoried caller that begins with an
+existing runtime root. Add a focused counter/inventory fixture proving that
+such evaluation neither registers a replacement input root nor wraps the
+completed client-demand root a second time. Root cloning is allowed: it shares
+the existing `RootCell` and does not add a collector registration.
+
+Passing `RuntimeValueAccess` through the complete synchronous-looking WHNF
+driver is not a valid shortcut. The driver may suspend or invoke integration,
+so an initial raw value must be transferred to durable ownership before its
+access region closes. Today `ClientDemandOperation` obtains that ownership
+through a `RuntimeValueRoot`. Eliminating even this one per-demand root later
+requires moving client-demand state into a collector-traced owner (for example
+a managed machine state or a root-adjacent trace-immediate frame) and installing
+the input there while the initiating access remains active. That performance
+transition is not a condition for closing the aggressive-verification defect;
+this checkpoint must leave the ownership seam explicit and must not hold a
+mutator across orchestration.
+
+#### GCI11R-002D.2 — Remaining Production Owners
+
+Audit:
 
 1. public value composition and evaluation-result publication;
 2. task, client-demand, spark, wait, failure, and event/output records;
@@ -466,7 +520,9 @@ For each failure, latch the former gap, repair it through its real durable
 owner, and update the authoritative source inventory. Split this checkpoint by
 subsystem if more than one independent production representation changes.
 
-Exit: all production-shaped exact tests pass aggressively before general test
+Exit: already-rooted orchestration performs no project/re-root round trip, the
+remaining raw facade has an explicit regional justification at every caller,
+and all production-shaped exact tests pass aggressively before general test
 fixtures are migrated. This ordering prevents a fixture helper from hiding a
 runtime defect.
 
