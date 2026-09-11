@@ -524,6 +524,26 @@ impl EvaluationRuntime {
         self.state.shared_resources.values()
     }
 
+    /// Performs one explicit full collection at a caller-established stable
+    /// runtime maintenance boundary.
+    ///
+    /// This remains crate-private through I11. It deliberately does not infer
+    /// readiness or acquire settlement authority: I11B tests call it only from
+    /// serial boundaries, while I12 owns integration with runtime activity.
+    #[allow(
+        dead_code,
+        reason = "I11B establishes this private seam before I12 runtime maintenance"
+    )]
+    pub(crate) fn collect_managed_for_maintenance(
+        &self,
+    ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .collect_managed_for_maintenance()
+    }
+
     /// Registers a runtime-local FIFO input boundary.
     ///
     /// The converter is host policy: it runs before mutation admission and

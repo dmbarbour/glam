@@ -6324,20 +6324,44 @@ ordinary production execution.
 
 ### Phase I11B — Controlled Production Forced Collection
 
-- After Gate G2, expose forced collection only to explicit tests and a private
-  runtime maintenance operation.
-- Run it at stable serial boundaries around module compilation, reflection
-  quiescence, event delivery, logger supervision, and settlement.
-- Repeat every I5-I10 ownership case against the actual production runtime.
-  Require reclamation for managed cycles and the documented retention and
-  retirement outcome for conservative external callback/opaque owners; do not
-  reinterpret an accepted external root as a collector-visible edge.
+- **I11B.1 — Private runtime maintenance seam.** After Gate G2, route forced
+  collection through one private `EvaluationRuntime` maintenance operation.
+  The core factory keeps only a subordinate implementation hook for isolated
+  tests. Neither operation is public API, and construction continues to select
+  immutable `CollectionPolicy::NoAuto`.
+- **I11B.2 — Stable serial boundaries.** Run the private operation at stable
+  serial boundaries around module compilation, reflection quiescence, event
+  delivery, logger-facing diagnostic ingress, and settlement. Collection must
+  preserve assembly results, diagnostics, transaction data, readiness stamps,
+  observation epochs, and net revisions. The fixture may model logger
+  supervision with its production diagnostic ingress and a same-runtime
+  service session; executable rendering policy is outside the managed value
+  graph and need not receive collection authority.
+- **I11B.3 — Production ownership outcomes.** Repeat the I5-I10 managed-family
+  and compatibility-owner cases through actual `EvaluationRuntime` and public
+  assembler/value construction boundaries. Require reclamation for closed
+  managed cycles and the documented retention then explicit retirement outcome
+  for conservative external callback/opaque owners. An accepted external root
+  remains external ownership and must not be reinterpreted as a
+  collector-visible edge.
+- **I11B.4 — Closure and verification.** Reconcile the new production fixtures
+  with the Gate G2 family inventory, record the controlled-collection outcome,
+  and run the routine repository checks. This phase remains serial; worker and
+  finalizer interleavings belong to I11C.
 
 Verification: `production_collection_preserves_each_serial_boundary` covers
 assembly results, diagnostics, transaction data, readiness, observation epochs,
 and net revisions; each I5-I10 family also gains a production reclamation
 fixture. The heap policy remains `NoAuto`; collection occurs only through
 explicit controlled calls.
+
+I11B.1 completed 2026-09-11. `EvaluationRuntime` now owns the sole private
+production maintenance call, which delegates to a subordinate value-domain
+hook without exposing collection through `Values`, `Assembler`, or the public
+embedding API. The runtime still constructs its heap with immutable `NoAuto`
+policy. Neither hook infers readiness: controlled serial-boundary selection
+remains explicit until I12 integrates collector activity with runtime
+maintenance.
 
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 

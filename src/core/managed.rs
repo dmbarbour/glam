@@ -467,11 +467,28 @@ impl CoreValueFactory {
         self.domain.heap.statistics()
     }
 
+    /// Performs one explicit full collection for a caller which has already
+    /// established a stable maintenance boundary.
+    ///
+    /// This is the subordinate value-domain hook behind the runtime's private
+    /// maintenance operation. Ordinary evaluation remains `NoAuto`; choosing
+    /// when collection is compatible with runtime activity belongs to the
+    /// runtime owner rather than the value factory.
+    #[allow(
+        dead_code,
+        reason = "I11B establishes this private seam before I12 runtime maintenance"
+    )]
+    pub(crate) fn collect_managed_for_maintenance(
+        &self,
+    ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
+        self.domain.heap.collect_full()
+    }
+
     #[cfg(test)]
     pub(crate) fn collect_managed_for_test(
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
-        self.domain.heap.collect_full()
+        self.collect_managed_for_maintenance()
     }
 }
 
