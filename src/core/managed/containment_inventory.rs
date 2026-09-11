@@ -232,7 +232,7 @@ enum OpaqueBootstrapDisposition {
     ExternalCapability,
 }
 
-struct OpaqueFamilyReviewEntry {
+struct OpaqueFamilyInventoryEntry {
     family: &'static str,
     path: &'static str,
     admission: &'static str,
@@ -244,8 +244,8 @@ struct OpaqueFamilyReviewEntry {
 
 /// I10B.0's complete production opaque-family surface. Each family has one
 /// admitted representation, one production wrapper site, and one typed reader.
-const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
-    OpaqueFamilyReviewEntry {
+const OPAQUE_FAMILY_INVENTORY: &[OpaqueFamilyInventoryEntry] = &[
+    OpaqueFamilyInventoryEntry {
         family: "CompilationOrigin",
         path: "src/diagnostic.rs",
         admission: "OpaquePayloadFamily for CompilationOrigin",
@@ -254,7 +254,7 @@ const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
         disposition: OpaqueBootstrapDisposition::ExternalEdgeFree,
         retention: "immutable source provenance only",
     },
-    OpaqueFamilyReviewEntry {
+    OpaqueFamilyInventoryEntry {
         family: "ConstructionPort",
         path: "src/eval/builtins/net/construction.rs",
         admission: "OpaquePayloadFamily for ConstructionPort",
@@ -263,7 +263,7 @@ const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
         disposition: OpaqueBootstrapDisposition::ExternalEdgeFree,
         retention: "construction-local brand and scalar port identity only",
     },
-    OpaqueFamilyReviewEntry {
+    OpaqueFamilyInventoryEntry {
         family: "EffectToken<T>",
         path: "src/api/value.rs",
         admission: "OpaquePayloadFamily for EffectToken<T>",
@@ -272,7 +272,7 @@ const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
         disposition: OpaqueBootstrapDisposition::ExternalCapability,
         retention: "weak token-domain route; generic payload remains in external domain state",
     },
-    OpaqueFamilyReviewEntry {
+    OpaqueFamilyInventoryEntry {
         family: "TaskHandleCell",
         path: "src/reflection/requests.rs",
         admission: "OpaquePayloadFamily for TaskHandleCell",
@@ -283,24 +283,53 @@ const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
     },
 ];
 
-struct RuntimeCacheReviewEntry {
+struct RuntimeCacheInventoryEntry {
     family: &'static str,
     path: &'static str,
     admission: &'static str,
 }
 
-const RUNTIME_CACHE_REVIEW: &[RuntimeCacheReviewEntry] = &[
-    RuntimeCacheReviewEntry {
+const RUNTIME_CACHE_INVENTORY: &[RuntimeCacheInventoryEntry] = &[
+    RuntimeCacheInventoryEntry {
         family: "GCompilerValues",
         path: "src/g_syntax/compiler_values.rs",
         admission: "RuntimeCacheFamily for GCompilerValues",
     },
-    RuntimeCacheReviewEntry {
+    RuntimeCacheInventoryEntry {
         family: "CachedDiagnosticFormatter",
         path: "src/g_syntax/diagnostic_formatter.rs",
         admission: "RuntimeCacheFamily for CachedDiagnosticFormatter",
     },
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpaqueSurfaceCounts {
+    admissions: usize,
+    constructors: usize,
+    downcasts: usize,
+}
+
+impl OpaqueSurfaceCounts {
+    const fn new(admissions: usize, constructors: usize, downcasts: usize) -> Self {
+        Self {
+            admissions,
+            constructors,
+            downcasts,
+        }
+    }
+
+    fn in_source(source: &str) -> Self {
+        Self::new(
+            source.matches("OpaquePayloadFamily for").count(),
+            source.matches("OpaqueValue::new(").count(),
+            source.matches(".downcast::<").count(),
+        )
+    }
+
+    fn is_empty(self) -> bool {
+        self == Self::new(0, 0, 0)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TypeErasureCounts {
@@ -481,11 +510,10 @@ fn external_callback_constructors_require_capture_classification() {
     );
 }
 
-#[test]
-fn opaque_representation_review_inventory_is_complete() {
+fn assert_opaque_family_inventory() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut dispositions = BTreeMap::new();
-    for entry in OPAQUE_FAMILY_REVIEW {
+    for entry in OPAQUE_FAMILY_INVENTORY {
         assert!(!entry.family.is_empty(), "opaque family must be named");
         assert!(
             !entry.retention.is_empty(),
@@ -530,7 +558,7 @@ fn opaque_representation_review_inventory_is_complete() {
         2
     );
 
-    for entry in RUNTIME_CACHE_REVIEW {
+    for entry in RUNTIME_CACHE_INVENTORY {
         assert!(
             !entry.family.is_empty(),
             "runtime cache family must be named"
@@ -544,6 +572,93 @@ fn opaque_representation_review_inventory_is_complete() {
             entry.family
         );
     }
+
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+    let actual_opaque = sources
+        .iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(manifest)
+                .expect("source path should be below the manifest");
+            if !is_production_inventory_source(relative) {
+                return None;
+            }
+            let source = fs::read_to_string(path).expect("Rust source should be readable");
+            let counts = OpaqueSurfaceCounts::in_source(production_prefix(&source));
+            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected_opaque = OPAQUE_FAMILY_INVENTORY
+        .iter()
+        .map(|entry| (PathBuf::from(entry.path), OpaqueSurfaceCounts::new(1, 1, 1)))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual_opaque, expected_opaque,
+        "the production opaque family/constructor/downcast surface changed"
+    );
+
+    let actual_caches = sources
+        .iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(manifest)
+                .expect("source path should be below the manifest");
+            if !is_production_inventory_source(relative) {
+                return None;
+            }
+            let source = fs::read_to_string(path).expect("Rust source should be readable");
+            let count = production_prefix(&source)
+                .matches("RuntimeCacheFamily for")
+                .count();
+            (count != 0).then(|| (relative.to_path_buf(), count))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected_caches = RUNTIME_CACHE_INVENTORY
+        .iter()
+        .map(|entry| (PathBuf::from(entry.path), 1))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual_caches, expected_caches,
+        "the production runtime-cache family surface changed"
+    );
+
+    // The generic `OpaqueValue` API lives in `core.rs`, which the older I4B
+    // call-site inventory excludes to avoid counting its test-only helpers.
+    // Keep that declaration owner explicitly closed as part of I10B.1.
+    let core = fs::read_to_string(manifest.join("src/core.rs"))
+        .expect("the core value declaration source should be readable");
+    assert!(
+        OpaqueSurfaceCounts::in_source(production_prefix(&core)).is_empty(),
+        "core.rs gained an opaque family or call site outside the production inventory"
+    );
+    assert_eq!(
+        production_prefix(&core)
+            .matches("RuntimeCacheFamily for")
+            .count(),
+        0,
+        "core.rs gained a production runtime-cache family outside its dedicated modules"
+    );
+
+    // `core/managed.rs` owns the admission trait and one deliberately
+    // test-only scalar fixture before its conventional test module. A second
+    // implementation here would be an unreviewed production-family shortcut.
+    let managed = fs::read_to_string(manifest.join("src/core/managed.rs"))
+        .expect("the managed admission source should be readable");
+    assert_eq!(managed.matches("OpaquePayloadFamily for").count(), 1);
+    assert!(
+        managed.contains("#[cfg(test)]\n// SAFETY: scalar opaque fixtures contain no managed edge")
+    );
+}
+
+#[test]
+fn opaque_representation_review_inventory_is_complete() {
+    assert_opaque_family_inventory();
+}
+
+#[test]
+fn opaque_family_inventory_is_reconciled() {
+    assert_opaque_family_inventory();
 }
 
 #[test]
@@ -599,7 +714,7 @@ fn opaque_representation_plan_has_no_undecided_family() {
         plan.contains("I10B implements the selected external-only policy. Arbitrary host `Any`")
     );
     assert!(!plan.contains("This phase is deliberately not implementation-ready until I10B.0"));
-    assert_eq!(OPAQUE_FAMILY_REVIEW.len(), 4);
+    assert_eq!(OPAQUE_FAMILY_INVENTORY.len(), 4);
 }
 
 #[test]

@@ -253,6 +253,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10 | pending | deferred closures and opaque boundaries |
 | I10A | complete | traceable deferred host-call captures and reconciled external callback boundaries |
 | I10B.0 | complete | selected external-only opaque storage for the bootstrap |
+| I10B.1 | complete | exhaustive opaque family, cache, and type-erasure source inventories |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6078,6 +6079,20 @@ forbidden, and generic host payloads remain in host-owned side tables rather
 than behind the token.
 
 #### Phase I10B.1 — Family, Constructor, and Downcast Inventory
+
+Completed 2026-09-11. `OPAQUE_FAMILY_INVENTORY` is now the exhaustive
+production map from each of the four admitted families to its one family
+admission, wrapper-construction site, typed downcast, selected edge-free or
+external-capability disposition, and explicit retention policy. Its named
+I10B.1 test scans the whole production tree before comparing that table, so an
+unlisted family, constructor, or downcast fails this checkpoint directly.
+
+The companion cache scan likewise admits exactly `GCompilerValues` and
+`CachedDiagnosticFormatter`; it composes with their existing exact root-family
+inventory rather than treating runtime caches as opaque values. A separate
+trait-object scan records the external-owner registry, runtime cache, and
+borrowed panic-payload inspection as the complete current `dyn Any` surface.
+Production remains `NoAuto`.
 
 - Make the review's four-family table source-authoritative: one admission,
   production constructor family, and typed downcast per family.
