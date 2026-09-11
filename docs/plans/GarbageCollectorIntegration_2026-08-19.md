@@ -6523,7 +6523,10 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
   supported embedding API. Run the complete workspace suite both ordinarily
   and with this feature. Exact operational epoch assertions may account for the
   selected mode, but semantic, ownership, and schedule checks may not be
-  weakened or skipped.
+  weakened or skipped. The feature exposed regional lifetime gaps rather than
+  immediately producing a passing suite; its audit and subordinate repair
+  checkpoints are specified in
+  [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 - **I11D.2 — Dynamic unsafe-boundary verification.** Run named focused Miri
   tests over root publication/access, tracing and panic restart, allocation,
   mutation transitions, collection, finalization, and the deterministic
@@ -6574,6 +6577,8 @@ as well as test-only fixtures which deliberately return raw managed values
 between access regions. Gate G3 remains closed until those paths are
 classified and repaired; the feature is retained as their deterministic
 reproducer rather than weakened into a passing but uninformative mode.
+Complete the linked GCI11R-002A-H remediation and repository certification
+before marking this checkpoint complete or beginning I11D.2.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

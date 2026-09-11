@@ -18,6 +18,9 @@ when their historical value no longer justifies keeping them.
   builds and verifies the standalone collector subcrate.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
+- [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md)
+  closes the regional ownership, fixture, and schedule issues exposed by the
+  integration plan's repository-wide aggressive collection mode.
 
 ## Recent Completed Plans
 

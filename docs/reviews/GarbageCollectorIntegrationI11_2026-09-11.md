@@ -4,14 +4,14 @@ Baseline: `6746551`, the completed I11A-I11C implementation. Gate G2 was
 certified independently at `585cfec`; this review covers the production
 collection work from that gate through I11C.
 
-Status: review complete; Gate G3 remains closed. The implemented collection,
-ownership, finalization, request-coalescing, and runtime-retirement boundaries
-remain coherent, and no production tracing defect was found. Three
-verification gaps must be closed before I11D can certify the boundary:
-GCI11R-001 does not yet force the collector to reach its active-mutator wait,
-GCI11R-002 leaves the promised repository-wide aggressive mode unavailable,
-and GCI11R-003 does not dynamically prove the absence of managed allocation
-during passive finalization. Production remains `CollectionPolicy::NoAuto`.
+Status: review follow-up active; Gate G3 remains closed. The implemented
+collector, finalization, request-coalescing, and runtime-retirement boundaries
+remain coherent, and no collector tracing-algorithm defect has been found.
+GCI11R-001 and GCI11R-003 are resolved. Implementing GCI11R-002's aggressive
+mode exposed two downstream production regional-ownership defects, invalid
+test-fixture handoffs, and schedule-probe interference. Those findings now
+have a dedicated remediation plan. Production remains
+`CollectionPolicy::NoAuto`.
 
 ## Scope and Method
 
@@ -133,12 +133,20 @@ repository aggressive mode adds unrelated pre-entry collections.
 **Status:** implementation present; aggressive suite remains failing and the
 finding remains open.
 
-`Heap::enable_collection_before_outer_entry` is a sound heap-local
-deterministic hook, and focused collector/runtime tests prove its outer-versus-
-recursive-entry behavior. Nothing enables it for every production
-`RuntimeValueDomain` constructed by a repository test run. The only root
-wrappers are `#[cfg(test)]` helpers, so I11D's promised full repository suite
-under aggressive debug collection is not currently an executable command.
+The audit and executable remediation sequence now live in
+[`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](../plans/GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
+It separates two confirmed production ownership defects, invalid test-fixture
+handoffs, and one-shot schedule-probe interference. GCI11R-002 is resolved only
+after that plan's ordinary/aggressive repository certification; the existence
+of the feature alone is not closure.
+
+At the reviewed baseline, `Heap::enable_collection_before_outer_entry` was a
+sound heap-local deterministic hook, and focused collector/runtime tests proved
+its outer-versus-recursive-entry behavior, but nothing enabled it for every
+production `RuntimeValueDomain` constructed by a repository test run. I11D.1
+has since added that missing root-crate mode; the remaining finding is that the
+mode exposes regional ownership defects and therefore does not yet complete a
+repository run.
 
 Add one private root-crate verification feature which forwards the collector's
 `deterministic-test-hooks` feature and enables aggressive pre-entry collection
@@ -156,13 +164,18 @@ and policy preservation. The first complete-workspace command exposed widespread
 stale-edge failures instead of passing. One production issue was repaired:
 closed runtime-cache construction now retains one outer access region until
 the completed cache family's declared roots exist, and the focused compiler-
-cache lifecycle test passes under the mode. At least one remaining source-
-compilation/reflection path still deterministically reaches
-`collector edge does not identify an allocated value`; several test helpers
-also construct a raw managed identity in one region and root it only in a later
-region. These require a regional-handoff audit beyond the test-only remediation
-assumed at review time. The failing feature run is now the authoritative
-reproducer and Gate G3 remains closed.
+cache lifecycle test passes under the mode. The follow-up audit identified two
+remaining shared production gaps: deferred lazy follow state retains an
+unowned bare value across evaluator polls, and closed compiler evaluation
+projects its owned completion to a raw value before the caller publishes the
+final owner. Promise follow state has a similar raw field, but its retained
+promise root continues to trace the immutable assignment and is an explicitly
+verified indirect-owner case rather than a confirmed defect.
+Several test helpers independently construct a raw managed identity in one
+region and root it only in a later region. The feature also changes when a
+one-shot phase probe may be consumed, requiring schedule-fixture setup to be
+ordered more precisely without weakening its assertion. The failing feature
+run is now the authoritative reproducer and Gate G3 remains closed.
 
 ### GCI11R-003 — Passive-finalizer allocation absence is not measured exactly
 
