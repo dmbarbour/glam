@@ -441,7 +441,7 @@ impl EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
         });
-        Ok(Self {
+        let runtime = Self {
             state: Arc::new(RuntimeState {
                 executor,
                 work,
@@ -449,7 +449,15 @@ impl EvaluationRuntime {
                 diagnostic_ingresses: Mutex::new(Vec::new()),
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
-        })
+        };
+        #[cfg(feature = "aggressive-gc-verification")]
+        runtime
+            .state
+            .shared_resources
+            .values
+            .core()
+            .enable_collection_before_outer_entry_for_verification();
+        Ok(runtime)
     }
 
     pub fn id(&self) -> EvaluationRuntimeId {
@@ -560,6 +568,26 @@ impl EvaluationRuntime {
             .values
             .core()
             .install_finalizing_phase_probe_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_synchronous_collection_wait_probe_for_test(
+        &self,
+    ) -> glam_gc::SynchronousCollectionWaitProbe {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .install_synchronous_collection_wait_probe_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_managed_collection_epoch_for_test(&self) -> u64 {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .completed_collection_epoch_for_test()
     }
 
     /// Registers a runtime-local FIFO input boundary.

@@ -24,7 +24,7 @@ use crate::{
 #[cfg(feature = "deterministic-test-hooks")]
 use crate::deterministic::{
     EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionProbeState, FinalizingPhaseProbe,
-    FinalizingPhaseProbeState,
+    FinalizingPhaseProbeState, SynchronousCollectionWaitProbe, SynchronousCollectionWaitProbeState,
 };
 
 const FIXED_SURVIVOR_RUN_HEADROOM: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
@@ -339,6 +339,7 @@ impl Heap {
                 .inner
                 .collect_before_outer_entry
                 .load(Ordering::Acquire)
+            && !thread_has_any_active_mutator()
         {
             // The inert prepared entry owns no admission or active TLS depth.
             // Retire it before collection so the collector may discard this
@@ -392,8 +393,9 @@ impl Heap {
     ///
     /// This private-feature mode is intentionally aggressive verification,
     /// not collection policy. It leaves [`CollectionPolicy::NoAuto`] intact,
-    /// does not affect recursive same-heap entry, and panics if an outer entry
-    /// is attempted while the calling thread already mutates another heap.
+    /// does not affect recursive same-heap entry, and defers a forced
+    /// collection when the calling thread already mutates another heap. The
+    /// next eligible outer entry performs the collection.
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
     #[doc(hidden)]
     pub fn enable_collection_before_outer_entry(&self) {
@@ -474,6 +476,48 @@ impl Heap {
         probe
     }
 
+    /// Installs a one-shot observation of a synchronous collector blocked by
+    /// an active outer mutator.
+    ///
+    /// The collector reports the authoritative coordinator condition and then
+    /// continues through its ordinary wait; it never pauses on this probe.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn install_synchronous_collection_wait_probe(&self) -> SynchronousCollectionWaitProbe {
+        let probe = SynchronousCollectionWaitProbe::new();
+        let mut installed = self
+            .inner
+            .synchronous_collection_wait_probe
+            .lock()
+            .expect("collection-wait test probe was poisoned");
+        assert!(
+            installed.is_none(),
+            "synchronous collection-wait probe already installed"
+        );
+        *installed = Some(Arc::clone(&probe.state));
+        probe
+    }
+
+    /// Counts allocated slots across attached runs for deterministic
+    /// verification.
+    ///
+    /// The caller must establish that no managed allocation or finalization is
+    /// concurrent with the snapshot. A pending finalization batch is rejected
+    /// so detached runs cannot be omitted.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn allocated_slots_for_verification(&self) -> usize {
+        self.inner.allocated_slots_for_verification()
+    }
+
+    /// Returns the latest completed collection epoch for deterministic
+    /// schedule assertions.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn completed_collection_epoch_for_verification(&self) -> u64 {
+        self.inner.completed_collection_epoch_for_verification()
+    }
+
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
     /// The collector clears mark state, seeds the stable root registry, traces
@@ -526,6 +570,8 @@ pub(crate) struct HeapInner {
     edge_transition_probe: Mutex<Option<Arc<EdgeTransitionProbeState>>>,
     #[cfg(feature = "deterministic-test-hooks")]
     finalizing_phase_probe: Mutex<Option<Arc<FinalizingPhaseProbeState>>>,
+    #[cfg(feature = "deterministic-test-hooks")]
+    synchronous_collection_wait_probe: Mutex<Option<Arc<SynchronousCollectionWaitProbeState>>>,
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
     collect_before_outer_entry: AtomicBool,
     #[cfg(test)]
@@ -592,6 +638,8 @@ impl HeapInner {
             edge_transition_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
             finalizing_phase_probe: Mutex::new(None),
+            #[cfg(feature = "deterministic-test-hooks")]
+            synchronous_collection_wait_probe: Mutex::new(None),
             #[cfg(any(test, feature = "deterministic-test-hooks"))]
             collect_before_outer_entry: AtomicBool::new(false),
             #[cfg(test)]
@@ -2394,6 +2442,8 @@ impl HeapInner {
             target
         };
 
+        #[cfg(feature = "deterministic-test-hooks")]
+        let mut wait_probe_checked = false;
         loop {
             let elected = {
                 let mut coordinator = self
@@ -2423,6 +2473,24 @@ impl HeapInner {
                     if let Some(elected) = coordinator.elect_idle_collection(requested) {
                         self.notify_coordinator_waiters();
                         break elected;
+                    }
+                    #[cfg(feature = "deterministic-test-hooks")]
+                    if !wait_probe_checked
+                        && coordinator.phase == AdmissionPhase::Ordinary
+                        && coordinator.active_outer_mutators != 0
+                    {
+                        // Do not nest the test-probe mutex beneath the
+                        // authoritative coordinator mutex. The observed state
+                        // cannot become an elected collection while this guard
+                        // is held; ordinary revalidation follows publication.
+                        drop(coordinator);
+                        self.announce_synchronous_collection_wait();
+                        wait_probe_checked = true;
+                        coordinator = self
+                            .coordinator
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        continue;
                     }
                     #[cfg(test)]
                     {
@@ -3323,6 +3391,49 @@ impl HeapInner {
         if let Some(probe) = probe {
             probe.reach_and_wait();
         }
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    fn announce_synchronous_collection_wait(&self) {
+        let probe = self
+            .synchronous_collection_wait_probe
+            .lock()
+            .expect("collection-wait test probe was poisoned")
+            .take();
+        if let Some(probe) = probe {
+            probe.reach();
+        }
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    fn allocated_slots_for_verification(&self) -> usize {
+        let data = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            data.finalization_batch.pending_slot_count(),
+            0,
+            "allocated-slot verification requires no detached finalizers"
+        );
+        let mut allocated_slots = 0_usize;
+        for (class_index, class) in data.classes.iter().enumerate() {
+            let class_id = class_id(class_index);
+            for run in class.runs() {
+                allocated_slots = allocated_slots
+                    .checked_add(data.arena.allocated_slot_count(**run, class_id))
+                    .expect("allocated-slot verification count exhausted");
+            }
+        }
+        allocated_slots
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    fn completed_collection_epoch_for_verification(&self) -> u64 {
+        self.coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completed_collection_epoch
     }
 
     pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {
@@ -4823,6 +4934,35 @@ mod tests {
         let after = heap.collect_full().unwrap();
         assert_eq!(after.epoch(), baseline.epoch() + 2);
         assert_eq!(heap.collection_policy(), CollectionPolicy::NoAuto);
+    }
+
+    #[test]
+    fn aggressive_debug_mode_defers_collection_during_cross_heap_entry() {
+        let outer = Heap::new_with_policy(CollectionPolicy::NoAuto);
+        let target = Heap::new_with_policy(CollectionPolicy::NoAuto);
+        let baseline = target.collect_full().unwrap();
+        target.enable_collection_before_outer_entry();
+
+        outer.with_mutator(|_| target.with_mutator(|_| {}));
+        assert_eq!(
+            target
+                .inner
+                .coordinator_snapshot()
+                .completed_collection_epoch,
+            baseline.epoch(),
+            "a cross-heap nested entry cannot synchronously collect its target"
+        );
+
+        target.with_mutator(|_| {});
+        assert_eq!(
+            target
+                .inner
+                .coordinator_snapshot()
+                .completed_collection_epoch,
+            baseline.epoch() + 1,
+            "the next eligible outer entry must perform the deferred aggressive collection"
+        );
+        assert_eq!(target.collection_policy(), CollectionPolicy::NoAuto);
     }
 
     #[test]

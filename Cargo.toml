@@ -7,6 +7,12 @@ name = "glam"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Private repository verification mode. This is not a supported embedding
+# policy or public runtime switch.
+aggressive-gc-verification = ["glam-gc/deterministic-test-hooks"]
+
 [dependencies]
 bytes = "1.10.1"
 chumsky = "0.13.0"

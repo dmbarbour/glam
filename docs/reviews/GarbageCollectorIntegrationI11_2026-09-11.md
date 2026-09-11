@@ -95,6 +95,8 @@ or defer a concurrent readiness observation while maintenance is active.
 
 **Severity:** high verification gap; blocks Gate G3.
 
+**Status:** resolved by I11D.0 on 2026-09-11.
+
 `collection_interleaves_with_worker_quantum_without_lost_work` correctly waits
 until the worker is inside real managed access. Its collector thread then sends
 `collector_started` immediately *before* calling
@@ -117,9 +119,19 @@ worker is scheduled so the named before/during/after matrix is literal.
 Use bounded waits only as harness watchdogs. The proof remains the probe's
 state transition, not elapsed time or repeated runs.
 
+The one-shot probe now announces after target reservation and an authoritative
+`Ordinary + active_outer_mutators != 0` observation, outside the coordinator
+mutex. The production fixture waits for that transition, observes the absent
+result, releases the worker, and checks exact collection epochs immediately
+before and after both disputed boundaries. This remains exact when the
+repository aggressive mode adds unrelated pre-entry collections.
+
 ### GCI11R-002 — Aggressive collection is not a repository-wide test mode
 
 **Severity:** high verification gap; blocks Gate G3.
+
+**Status:** implementation present; aggressive suite remains failing and the
+finding remains open.
 
 `Heap::enable_collection_before_outer_entry` is a sound heap-local
 deterministic hook, and focused collector/runtime tests prove its outer-versus-
@@ -137,9 +149,26 @@ that feature. Assertions about exact operational collection epochs may be made
 mode-aware, but semantic, ownership, and schedule assertions must not be
 weakened or skipped.
 
+I11D.1 added `aggressive-gc-verification`, enabled it after complete production
+runtime construction, retained `NoAuto`, and made cross-heap nested entry defer
+to the next eligible outer entry. A focused fixture proves automatic enablement
+and policy preservation. The first complete-workspace command exposed widespread
+stale-edge failures instead of passing. One production issue was repaired:
+closed runtime-cache construction now retains one outer access region until
+the completed cache family's declared roots exist, and the focused compiler-
+cache lifecycle test passes under the mode. At least one remaining source-
+compilation/reflection path still deterministically reaches
+`collector edge does not identify an allocated value`; several test helpers
+also construct a raw managed identity in one region and root it only in a later
+region. These require a regional-handoff audit beyond the test-only remediation
+assumed at review time. The failing feature run is now the authoritative
+reproducer and Gate G3 remains closed.
+
 ### GCI11R-003 — Passive-finalizer allocation absence is not measured exactly
 
 **Severity:** medium verification gap; blocks Gate G3's finalization claim.
+
+**Status:** resolved by I11D.0 on 2026-09-11.
 
 `passive_finalization_produces_no_runtime_work` proves that diagnostic counts,
 observation epoch, coordinator inventory, readiness, event contents, and
@@ -160,6 +189,11 @@ collection retired the reported slots and introduced no replacement managed
 allocation. Keep the structural `ManagedDropRecord` and active-owner
 inventories: exact dynamic accounting complements rather than replaces their
 compile-time change detection.
+
+The deterministic hook now atomically counts valid allocation bits across
+attached runs at a fixture-established stable boundary and rejects pending
+detached finalizers. The passive-finalization test proves the exact equation
+above in both ordinary and aggressive focused runs.
 
 ### GCI11R-004 — Gate naming and current architecture text lag I11C
 

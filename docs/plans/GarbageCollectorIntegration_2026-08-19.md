@@ -268,8 +268,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11A | complete | independent Gate G2 source, stable-ledger, layout, and isolated-reclamation certification |
 | I11B | complete | private serial production collection, boundary preservation, and ownership-outcome matrix |
 | I11C | complete | worker/finalizer schedule fixtures, request coalescing, and runtime retirement |
-| I11D.0 | pending | post-I11 deterministic schedule and passive-finalization remediation |
-| I11D.1 | pending | repository-wide aggressive collection verification mode |
+| I11D.0 | complete | post-I11 deterministic schedule and passive-finalization remediation |
+| I11D.1 | in progress | repository-wide aggressive mode implemented; full-suite regional-ownership failures remain |
 | I11D.2 | pending | focused Miri and sanitizer verification |
 | I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
 | I11D.4 | pending | dated Gate G3 certification |
@@ -6550,6 +6550,30 @@ feature, every I11B/I11C named fixture, focused named Miri tests, supported
 address/thread sanitizer targets, and a dated Gate G3 review. Every existing
 heap remains `NoAuto` for its lifetime. A later I12 policy checkpoint may
 change only how new runtime heaps are constructed.
+
+I11D.0 completed 2026-09-11. A one-shot collector-wait probe now publishes
+only after the synchronous target exists and authoritative coordinator state
+still contains a blocking outer mutator. The production worker fixture uses
+that transition—not elapsed time—to order release, and snapshots the exact
+completed epoch immediately around the disputed collection so the same proof
+remains exact under aggressive verification. A bitmap-derived allocation
+snapshot also proves passive finalization satisfies
+`allocated_after + reclaimed_slots == allocated_before` without adding a
+production allocation counter.
+
+I11D.1 is implemented but not complete. The private
+`aggressive-gc-verification` root feature forwards deterministic collector
+hooks, enables forced pre-entry collection only after a production
+`EvaluationRuntime` has finished construction, skips structurally invalid
+cross-heap nested collection points, and leaves the heap's immutable policy at
+`NoAuto`. It immediately exposed and helped repair one real regional handoff:
+closed runtime-cache candidates are now built under one outer managed-access
+region until their declared roots exist. The complete-workspace aggressive
+command still finds stale managed edges in ordinary compilation/reflection paths,
+as well as test-only fixtures which deliberately return raw managed values
+between access regions. Gate G3 remains closed until those paths are
+classified and repaired; the feature is retained as their deterministic
+reproducer rather than weakened into a passing but uninformative mode.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

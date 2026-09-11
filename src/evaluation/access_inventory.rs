@@ -141,7 +141,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // GCI5R-005B removes the former external reflection-root projection.
         // I10A adds one bounded access region which turns a HostCall's
         // declared semantic captures into its one-shot external root bundle.
-        ("src/core.rs", GatewayCounts::new(31, 5)),
+        // Closed runtime-cache candidates keep one outer access region until
+        // their declared runtime roots have been installed.
+        ("src/core.rs", GatewayCounts::new(32, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

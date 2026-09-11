@@ -595,7 +595,11 @@ impl CoreValueFactory {
             return value;
         }
 
-        let candidate = Arc::new(build());
+        // A closed cache family may compose helpers which each open managed
+        // access. Keep one outer region around the complete build so those
+        // nested entries cannot collect an intermediate managed edge before
+        // the family's declared runtime roots have been installed.
+        let candidate = Arc::new(self.with_runtime_value_access(|_| build()));
         let candidate = Arc::new(RuntimeCacheEntry::admit(self.runtime_id(), candidate));
         let entry = {
             let mut values = self

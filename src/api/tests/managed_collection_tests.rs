@@ -1,6 +1,7 @@
 use super::super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use crate::core::{Key, OpaqueValue, Value as CoreValue};
 use crate::diagnostic::Severity;
@@ -433,6 +434,9 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         .build()
         .expect("assembler should build");
     let context = assembler.eval_context();
+    let before = runtime
+        .collect_managed_for_maintenance()
+        .expect("pre-worker serial collection should complete");
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let task = context
@@ -445,16 +449,18 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         })
         .expect("worker fixture should schedule");
     entered_rx
-        .recv()
+        .recv_timeout(Duration::from_secs(2))
         .expect("worker should pause while holding managed access");
+    let immediately_before = runtime.completed_managed_collection_epoch_for_test();
+    assert!(
+        immediately_before >= before.epoch(),
+        "verification-only aggressive entries may add collections before the worker pause"
+    );
 
-    let (collector_started_tx, collector_started_rx) = mpsc::channel();
+    let wait_probe = runtime.install_synchronous_collection_wait_probe_for_test();
     let (collection_tx, collection_rx) = mpsc::channel();
     let collector_runtime = runtime.clone();
     let collector = std::thread::spawn(move || {
-        collector_started_tx
-            .send(())
-            .expect("collector-start observer should remain live");
         let report = collector_runtime
             .collect_managed_for_maintenance()
             .expect("collection should resume after worker access ends");
@@ -462,9 +468,10 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
             .send(report)
             .expect("collection observer should remain live");
     });
-    collector_started_rx
-        .recv()
-        .expect("collector thread should begin");
+    assert!(
+        wait_probe.wait_until_reached(Duration::from_secs(2)),
+        "collector must observe the active worker before worker release"
+    );
     assert!(
         matches!(collection_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
         "a collector ordered after active managed access must not complete first"
@@ -474,8 +481,13 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         .send(())
         .expect("managed worker should be releasable");
     let during = collection_rx
-        .recv()
+        .recv_timeout(Duration::from_secs(2))
         .expect("collector should complete after worker release");
+    assert_eq!(
+        during.epoch(),
+        immediately_before + 1,
+        "exactly one collection should occur while the worker is active"
+    );
     collector.join().expect("collector thread should not panic");
     runtime.pump_until_stable();
     assert!(matches!(
@@ -483,13 +495,14 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         EvaluationWaitPoll::Complete(_)
     ));
 
+    let immediately_after_worker = runtime.completed_managed_collection_epoch_for_test();
     let after = runtime
         .collect_managed_for_maintenance()
         .expect("post-worker serial collection should complete");
     assert_eq!(
         after.epoch(),
-        during.epoch() + 1,
-        "worker completion must not lose work or trigger an unrequested collection"
+        immediately_after_worker + 1,
+        "the post-worker explicit collection must be exactly one new pass"
     );
 
     let values = runtime.values();
@@ -582,6 +595,7 @@ fn passive_finalization_produces_no_runtime_work() {
     let (observation_epoch, _, _) = runtime.transaction_snapshot();
     let scheduler = runtime.state.work.scheduler_inventory_for_test();
     let managed_before = core_values.managed_statistics();
+    let allocated_before = core_values.allocated_managed_slots_for_test();
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
 
     let report = runtime
@@ -598,6 +612,14 @@ fn passive_finalization_produces_no_runtime_work() {
         "passive managed destruction must not publish or retire scheduler work"
     );
     let managed_after = core_values.managed_statistics();
+    let allocated_after = core_values.allocated_managed_slots_for_test();
+    assert_eq!(
+        allocated_after
+            .checked_add(report.reclaimed_slots())
+            .expect("managed allocation count should remain representable"),
+        allocated_before,
+        "passive finalization must retire the reported slots without allocating replacements"
+    );
     assert!(managed_after.assigned_runs() <= managed_before.assigned_runs());
     assert_eq!(managed_after.pending_finalizers(), 0);
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
@@ -769,5 +791,34 @@ fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
             .collection_policy(),
         glam_gc::CollectionPolicy::NoAuto,
         "aggressive verification must not mutate heap policy"
+    );
+}
+
+#[cfg(feature = "aggressive-gc-verification")]
+#[test]
+fn repository_aggressive_mode_enables_each_production_runtime() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let before = runtime
+        .collect_managed_for_maintenance()
+        .expect("baseline collection should complete");
+
+    let value = runtime.values().empty_dict();
+    assert_eq!(value.runtime_id(), runtime.id());
+    let after = runtime
+        .collect_managed_for_maintenance()
+        .expect("explicit post-entry collection should complete");
+    assert_eq!(
+        after.epoch(),
+        before.epoch() + 2,
+        "the repository feature must force one collection before an eligible outer entry"
+    );
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto,
+        "repository verification must leave production collection policy immutable"
     );
 }

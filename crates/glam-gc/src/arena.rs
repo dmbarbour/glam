@@ -482,6 +482,34 @@ impl Arena {
         }
     }
 
+    /// Counts allocated slots in one published run for deterministic
+    /// verification.
+    ///
+    /// Each allocation word is observed atomically. The caller establishes a
+    /// boundary without concurrent allocation or finalization when it needs an
+    /// exact whole-heap count.
+    #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn allocated_slot_count(
+        &self,
+        target: RunClaimTarget,
+        class_id: AllocationClassId,
+    ) -> usize {
+        let (_, run) = self.resolved_claim_target(target, class_id);
+        let mut slots = 0_usize;
+        for word_index in 0..target.geometry.allocation_bitmap.word_len {
+            let valid = valid_slot_mask(target.geometry.slot_count, word_index);
+            let allocation = allocation_word_pointer(run, target.geometry, word_index);
+            // SAFETY: validated published-run geometry places this initialized
+            // atomic allocation word in the retained arena. Acquire observes
+            // every payload publication before its allocation bit.
+            let allocated = unsafe { allocation.as_ref() }.load(Ordering::Acquire) & valid;
+            slots = slots
+                .checked_add(allocated.count_ones() as usize)
+                .expect("allocated-slot verification count exhausted");
+        }
+        slots
+    }
+
     /// Retains exactly the marked allocations in one partial no-drop run.
     ///
     /// The caller must hold exclusive collection authority with every cursor

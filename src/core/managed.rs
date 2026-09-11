@@ -472,9 +472,33 @@ impl CoreValueFactory {
         self.domain.heap.enable_collection_before_outer_entry();
     }
 
+    #[cfg(feature = "aggressive-gc-verification")]
+    pub(crate) fn enable_collection_before_outer_entry_for_verification(&self) {
+        self.domain.heap.enable_collection_before_outer_entry();
+    }
+
     #[cfg(test)]
     pub(crate) fn install_finalizing_phase_probe_for_test(&self) -> glam_gc::FinalizingPhaseProbe {
         self.domain.heap.install_finalizing_phase_probe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_synchronous_collection_wait_probe_for_test(
+        &self,
+    ) -> glam_gc::SynchronousCollectionWaitProbe {
+        self.domain.heap.install_synchronous_collection_wait_probe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_managed_slots_for_test(&self) -> usize {
+        self.domain.heap.allocated_slots_for_verification()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_collection_epoch_for_test(&self) -> u64 {
+        self.domain
+            .heap
+            .completed_collection_epoch_for_verification()
     }
 
     #[cfg(test)]

@@ -5,8 +5,62 @@
 //! semantic result.
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use crate::{Mutator, Visitor, trace::ErasedGc};
+
+/// One-shot observation that a synchronous collector is blocked by a mutator.
+///
+/// Reaching this probe proves that the collection target has been reserved and
+/// that authoritative coordinator state still contains an active outer
+/// mutator. The collector does not wait on the probe itself.
+pub struct SynchronousCollectionWaitProbe {
+    pub(crate) state: Arc<SynchronousCollectionWaitProbeState>,
+}
+
+impl SynchronousCollectionWaitProbe {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(SynchronousCollectionWaitProbeState {
+                reached: Mutex::new(false),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Waits at most `timeout` for the collector to observe its blocking
+    /// mutator and returns whether that authoritative boundary was reached.
+    #[must_use]
+    pub fn wait_until_reached(&self, timeout: Duration) -> bool {
+        let reached = self
+            .state
+            .reached
+            .lock()
+            .expect("collection-wait test probe was poisoned");
+        let (reached, _) = self
+            .state
+            .changed
+            .wait_timeout_while(reached, timeout, |reached| !*reached)
+            .expect("collection-wait test probe was poisoned");
+        *reached
+    }
+}
+
+pub(crate) struct SynchronousCollectionWaitProbeState {
+    reached: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl SynchronousCollectionWaitProbeState {
+    pub(crate) fn reach(&self) {
+        let mut reached = self
+            .reached
+            .lock()
+            .expect("collection-wait test probe was poisoned");
+        *reached = true;
+        self.changed.notify_all();
+    }
+}
 
 /// One-shot pause after a collector has established its Finalizing phase.
 ///
