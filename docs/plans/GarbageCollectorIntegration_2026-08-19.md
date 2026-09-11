@@ -6374,6 +6374,19 @@ an already captured readiness snapshot still validates, and collection does
 not advance the net's topology revision. A final collection with the retained
 settlement report exercises the post-settlement boundary as well.
 
+I11B.3 completed 2026-09-11. Fresh actual runtimes now close and reclaim a
+public promise self-cycle, public access-lazy/promise cycle, and public
+core-net/promise cycle, exercising all three recursive identity families
+through `Assembler` and `Values`. Independent list, persistent dictionary, and
+application fixtures route cycles through the I6/I7 compatibility visitors.
+Each case retains exactly one final public root, checks its exact marked graph,
+then checks exact reclamation after that root is dropped. The existing I9
+inline-or-managed public facade fixture now collects through the runtime seam
+rather than its core factory. Finally, an I10 production opaque/effect-token
+fixture proves a conservative external root survives collection, then retires
+the token owner and opaque payload owner explicitly across the two required
+later collections. No external owner was reclassified as a managed edge.
+
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 
 - Force collection before, during, and after worker activity using deterministic

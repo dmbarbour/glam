@@ -23,14 +23,13 @@ fn same_representation(runtime: &EvaluationRuntime, left: &Value, right: &Value)
 #[test]
 fn public_values_use_inline_or_shared_registered_roots() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let core = runtime.values().core().clone();
-    let baseline = core
-        .collect_managed_for_test()
+    let baseline = runtime
+        .collect_managed_for_maintenance()
         .expect("canonical roots should collect before the public-value fixture");
 
     let inline = runtime.values().integer(42);
-    let after_inline = core
-        .collect_managed_for_test()
+    let after_inline = runtime
+        .collect_managed_for_maintenance()
         .expect("an inline public value should not add a managed root");
     assert_eq!(after_inline.root_entries(), baseline.root_entries());
     assert_eq!(after_inline.marked_slots(), baseline.marked_slots());
@@ -38,21 +37,21 @@ fn public_values_use_inline_or_shared_registered_roots() {
 
     let managed = runtime.values().empty_dict();
     let alias = managed.clone();
-    let after_clone = core
-        .collect_managed_for_test()
+    let after_clone = runtime
+        .collect_managed_for_maintenance()
         .expect("a managed public value should survive collection");
     assert_eq!(after_clone.root_entries(), baseline.root_entries() + 1);
     assert_eq!(after_clone.marked_slots(), baseline.marked_slots() + 1);
 
     drop(managed);
-    let after_one_drop = core
-        .collect_managed_for_test()
+    let after_one_drop = runtime
+        .collect_managed_for_maintenance()
         .expect("a public clone should retain the shared root cell");
     assert_eq!(after_one_drop.root_entries(), baseline.root_entries() + 1);
 
     drop(alias);
-    let reclaimed = core
-        .collect_managed_for_test()
+    let reclaimed = runtime
+        .collect_managed_for_maintenance()
         .expect("dropping the last public clone should permit reclamation");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
     assert_eq!(reclaimed.finalized_slots(), 1);

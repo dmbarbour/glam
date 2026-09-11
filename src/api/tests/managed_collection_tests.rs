@@ -1,12 +1,13 @@
 use super::super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::core::{Key, Value as CoreValue};
+use crate::core::{Key, OpaqueValue, Value as CoreValue};
 use crate::diagnostic::Severity;
 use crate::reflection::{StoreCommitResult, StoreJournal};
 
-use super::access_path;
 use super::runtime_tests::{decode_test_integer, input_transaction};
+use super::{OpaqueRetentionProbe, access_path, public_value};
 
 fn net_topology_revision(runtime: &EvaluationRuntime, value: &Value) -> u64 {
     let CoreValue::Net(net) = value.clone_core_for_test() else {
@@ -16,6 +17,48 @@ fn net_topology_revision(runtime: &EvaluationRuntime, value: &Value) -> u64 {
         .test_with_revisions(runtime.values().core(), |_| ())
         .1
         .topology_revision()
+}
+
+fn assert_production_cycle_reclaimed(
+    label: &str,
+    live_managed_slots: usize,
+    construct: impl FnOnce(&Assembler) -> Value,
+) {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let baseline = runtime
+        .collect_managed_for_maintenance()
+        .unwrap_or_else(|failure| panic!("{label}: baseline collection failed: {failure}"));
+
+    let retained = construct(&assembler);
+    let live = runtime
+        .collect_managed_for_maintenance()
+        .unwrap_or_else(|failure| panic!("{label}: rooted collection failed: {failure}"));
+    assert_eq!(
+        live.root_entries(),
+        baseline.root_entries() + 1,
+        "{label}: the fixture should retain exactly one final public root"
+    );
+    assert_eq!(
+        live.marked_slots(),
+        baseline.marked_slots() + live_managed_slots,
+        "{label}: every member of the closed graph should be traced"
+    );
+
+    drop(retained);
+    let reclaimed = runtime
+        .collect_managed_for_maintenance()
+        .unwrap_or_else(|failure| panic!("{label}: reclamation collection failed: {failure}"));
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries(), "{label}");
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots(), "{label}");
+    assert_eq!(
+        reclaimed.finalized_slots(),
+        live_managed_slots,
+        "{label}: the exact unrooted closed graph should be reclaimed"
+    );
 }
 
 #[test]
@@ -198,4 +241,134 @@ fn production_collection_preserves_each_serial_boundary() {
             .as_deref(),
         Some(b"preserved".as_slice())
     );
+}
+
+#[test]
+fn production_runtime_reclaims_each_recursive_identity_family() {
+    assert_production_cycle_reclaimed("promise self-cycle", 2, |assembler| {
+        let (promise, resolver) = assembler.promise("I11B promise self-cycle");
+        resolver
+            .resolve(promise.clone())
+            .expect("promise should accept its own semantic value");
+        promise
+    });
+
+    assert_production_cycle_reclaimed("lazy/promise cycle", 3, |assembler| {
+        let values = assembler.values();
+        let (promise, resolver) = assembler.promise("I11B lazy/promise cycle");
+        let lazy = values
+            .access(&promise, values.atom_from_text("member"))
+            .expect("ordinary access should construct a managed lazy");
+        resolver
+            .resolve(lazy.clone())
+            .expect("promise should close the lazy cycle");
+        drop(promise);
+        lazy
+    });
+
+    assert_production_cycle_reclaimed("core-net/promise cycle", 3, |assembler| {
+        let (promise, resolver) = assembler.promise("I11B net/promise cycle");
+        let net = assembler
+            .net(|builder| builder.data(promise.clone()))
+            .expect("production net should contain the promise");
+        resolver
+            .resolve(net.clone())
+            .expect("promise should close the net cycle");
+        drop(promise);
+        net
+    });
+}
+
+#[test]
+fn production_runtime_reclaims_compatibility_aggregate_cycles() {
+    assert_production_cycle_reclaimed("list compatibility cycle", 2, |assembler| {
+        let values = assembler.values();
+        let (promise, resolver) = assembler.promise("I11B list cycle");
+        let list = values
+            .list([promise.clone()])
+            .expect("list should contain the promise");
+        resolver
+            .resolve(list.clone())
+            .expect("promise should close the list cycle");
+        drop(promise);
+        list
+    });
+
+    assert_production_cycle_reclaimed("dictionary compatibility cycle", 2, |assembler| {
+        let values = assembler.values();
+        let (promise, resolver) = assembler.promise("I11B dictionary cycle");
+        let dictionary = values
+            .record([("self", promise.clone())])
+            .expect("dictionary should contain the promise");
+        resolver
+            .resolve(dictionary.clone())
+            .expect("promise should close the dictionary cycle");
+        drop(promise);
+        dictionary
+    });
+
+    assert_production_cycle_reclaimed("application compatibility cycle", 3, |assembler| {
+        let values = assembler.values();
+        let (promise, resolver) = assembler.promise("I11B application cycle");
+        let application = values
+            .apply(&promise, [values.integer(1)])
+            .expect("application should construct a managed lazy");
+        resolver
+            .resolve(application.clone())
+            .expect("promise should close the application cycle");
+        drop(promise);
+        application
+    });
+}
+
+#[test]
+fn production_runtime_preserves_external_owners_until_explicit_retirement() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let domain = EffectTokenDomain::new(&values);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let payload = public_value(
+        &core_values,
+        CoreValue::Opaque(OpaqueValue::new(
+            &core_values,
+            Arc::new(OpaqueRetentionProbe(Arc::clone(&drops))),
+        )),
+    );
+    let token = domain.issue(payload.clone());
+    drop(payload);
+
+    runtime
+        .collect_managed_for_maintenance()
+        .expect("a live external token owner should be safe to collect around");
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        0,
+        "collection must not reinterpret the token's external root as garbage"
+    );
+
+    drop(token);
+    runtime
+        .collect_managed_for_maintenance()
+        .expect("the retired token shell should collect");
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        core_values.drain_external_owners_for_test(),
+        1,
+        "explicit retirement should release the token owner's payload root"
+    );
+    runtime
+        .collect_managed_for_maintenance()
+        .expect("the payload shell should collect after its external root retires");
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        core_values.drain_external_owners_for_test(),
+        1,
+        "the collected opaque shell should retire its external payload owner"
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
