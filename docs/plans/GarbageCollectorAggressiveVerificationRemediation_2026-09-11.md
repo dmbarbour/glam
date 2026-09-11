@@ -462,9 +462,14 @@ remaining production-shaped failures.
 Preserve the following ownership distinction explicitly:
 
 - public `api::Value` is already a durable runtime root;
-- raw `core::Value` is regional and may exist only under
-  `RuntimeValueAccess` or inside a durable owner whose trace reports its
+- raw `core::Value` is regional: it may be stored outside an access region
+  only as the unobserved payload of a durable owner whose trace reports its
   managed edges;
+- every API which constructs, projects, inspects, clones, or transfers a
+  `core::Value` must itself carry matching `RuntimeValueAccess` (directly or
+  through `EvaluationValueAccess`) and must not return that raw value beyond
+  the access lifetime unless the same operation installs it into durable
+  traced ownership;
 - `EvalContext` orchestrates work across polls, waits, worker handoff, and
   reflection or host boundaries, and therefore must not retain an active
   `RuntimeValueAccess`; and
@@ -481,8 +486,9 @@ orchestration entry. Inventory callers of the raw
 2. preserve the `ClientDemandResult::Complete(RuntimeValueRoot)` directly when
    the result becomes a public value, cache entry, or another rooted owner,
    rather than projecting and re-rooting it;
-3. keep raw input or output only inside a bounded access region or while
-   installing it into its real traced owner; and
+3. require a matching access for every raw input, output, or handoff; a
+   handoff may consume `RuntimeValueAccess` authority to install the value into
+   its real traced owner before returning only the durable handle; and
 4. remove, rename, or sharply narrow the raw compatibility facade so its
    ownership transfer and allocation cost cannot be mistaken for the normal
    path.
@@ -494,16 +500,27 @@ such evaluation neither registers a replacement input root nor wraps the
 completed client-demand root a second time. Root cloning is allowed: it shares
 the existing `RootCell` and does not add a collector registration.
 
-Passing `RuntimeValueAccess` through the complete synchronous-looking WHNF
-driver is not a valid shortcut. The driver may suspend or invoke integration,
-so an initial raw value must be transferred to durable ownership before its
-access region closes. Today `ClientDemandOperation` obtains that ownership
-through a `RuntimeValueRoot`. Eliminating even this one per-demand root later
-requires moving client-demand state into a collector-traced owner (for example
-a managed machine state or a root-adjacent trace-immediate frame) and installing
-the input there while the initiating access remains active. That performance
-transition is not a condition for closing the aggressive-verification defect;
-this checkpoint must leave the ownership seam explicit and must not hold a
+`RuntimeValueAccess` is appropriate for the *handoff* but must not remain live
+through the complete synchronous-looking WHNF driver. The driver may suspend
+or invoke integration, so an initial raw value must be installed into durable
+ownership while the initiating access remains active; that access then closes
+before orchestration begins. Today `ClientDemandOperation` obtains durable
+ownership through a `RuntimeValueRoot`.
+
+Eliminating even this one per-demand root later requires moving client-demand
+state into a collector-traced owner, such as a managed machine state or the
+root-adjacent trace-immediate `RootFrame` model recorded for concurrent GC. A
+future evaluator access/frame may similarly replace
+`pending_managed_publications`' bundle of temporary family roots: it would
+trace its regional values as one durable frame between quantums, while every
+read or mutation of those values still occurs under matching
+`RuntimeValueAccess` and the relevant edge-transition protocol. This is an
+ownership representation change, not permission for raw-value APIs to operate
+without a mutator.
+
+That performance transition is not a condition for closing the
+aggressive-verification defect. This checkpoint must nevertheless leave the
+handoff seam explicit, prohibit unaccompanied raw-value APIs, and never hold a
 mutator across orchestration.
 
 #### GCI11R-002D.2 — Remaining Production Owners
@@ -520,11 +537,11 @@ For each failure, latch the former gap, repair it through its real durable
 owner, and update the authoritative source inventory. Split this checkpoint by
 subsystem if more than one independent production representation changes.
 
-Exit: already-rooted orchestration performs no project/re-root round trip, the
-remaining raw facade has an explicit regional justification at every caller,
-and all production-shaped exact tests pass aggressively before general test
-fixtures are migrated. This ordering prevents a fixture helper from hiding a
-runtime defect.
+Exit: already-rooted orchestration performs no project/re-root round trip;
+every remaining raw-value API carries matching mutator authority and has an
+explicit regional handoff at every caller; and all production-shaped exact
+tests pass aggressively before general test fixtures are migrated. This
+ordering prevents a fixture helper from hiding a runtime defect.
 
 ### GCI11R-002E — Test Fixture Regional Migration
 
