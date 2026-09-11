@@ -1698,8 +1698,27 @@ mod tests {
     #[test]
     fn recursive_cell_layouts_are_recorded() {
         assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 144);
+        assert_eq!(std::mem::align_of::<ManagedLazyCell>(), 8);
+        assert_eq!(
+            <ManagedLazyCell as Trace>::REQUESTED_SLOT_SIZE,
+            Some(crate::core::managed::managed_slot_extent::<ManagedLazyCell>())
+        );
         assert_eq!(std::mem::size_of::<ManagedPromiseCell>(), 104);
+        assert_eq!(std::mem::align_of::<ManagedPromiseCell>(), 8);
+        assert_eq!(
+            <ManagedPromiseCell as Trace>::REQUESTED_SLOT_SIZE,
+            Some(crate::core::managed::managed_slot_extent::<
+                ManagedPromiseCell,
+            >())
+        );
         assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
+        assert_eq!(std::mem::align_of::<ManagedCoreNetCell>(), 8);
+        assert_eq!(
+            <ManagedCoreNetCell as Trace>::REQUESTED_SLOT_SIZE,
+            Some(crate::core::managed::managed_slot_extent::<
+                ManagedCoreNetCell,
+            >())
+        );
         assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 32);
         assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 40);
         assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 8);
@@ -2935,8 +2954,9 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
         let inventory_path = manifest.join("src/core/managed/recursive_identity_inventory.rs");
-        // I9's active-owner audit names the managed cells only as source text
-        // whose field declarations must reject external lifecycle owners.
+        let gate_inventory_path = manifest.join("src/core/managed/gate_g2_inventory.rs");
+        // The I9 active-owner and I11A gate audits name the managed cells only
+        // as test-only inventory data; neither may construct or expose them.
         let active_inventory_path = manifest.join("src/core/managed/active_owner_inventory.rs");
         let owner = fs::read_to_string(&owner_path).expect("the recursive-cell source should read");
         let count = |parts: &[&str]| owner.matches(&parts.concat()).count();
@@ -2977,6 +2997,7 @@ mod tests {
                 if path.extension().is_none_or(|extension| extension != "rs")
                     || path == owner_path
                     || path == inventory_path
+                    || path == gate_inventory_path
                     || path == active_inventory_path
                 {
                     continue;

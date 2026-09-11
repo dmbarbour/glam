@@ -1,12 +1,13 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I10 and their mandatory reviews are
-complete. The
+Status: in progress; Phases I0 through I11A and their mandatory reviews are
+complete. Gate G2 passed on 2026-09-11. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled until I11 certifies Gate G2 and exercises controlled
-whole-runtime collection. Collector Gate G1 passed on 2026-08-25.
+remains disabled in ordinary execution; Gate G2 now authorizes I11B's
+controlled whole-runtime collection tests. Collector Gate G1 passed on
+2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -262,6 +263,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10C.3 | complete | teardown, panic/retry, and conservative live-root retention closure |
 | I10C | complete | final opaque destruction and external-lifecycle audit |
 | I10D | complete | final closure, type-erasure, cache, root, and managed-backedge reconciliation |
+| I11A | complete | independent Gate G2 source, stable-ledger, layout, and isolated-reclamation certification |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6308,6 +6310,17 @@ check, I9's `runtime_root_lifecycle_delta_is_reconciled`,
 `managed_payloads_have_no_strong_value_domain_backedge` and a dated Gate G2
 review with no unmatched graph-bearing field or incomplete family record.
 Until it passes, no full collection may run over a production runtime.
+
+**Completed 2026-09-11.** The two final Gate G2 latches compose the existing
+authoritative source inventories without copying their counts, require one
+complete stable ledger row for each of the four production managed families,
+and pin the dated certification review. Requested slot extents are now
+explicitly checked for all three recursive cells as well as the managed value
+node; the family lifecycle tests exercise allocator acceptance, rooted
+survival, and unrooted reclamation under `NoAuto`. The independent audit is in
+[`GarbageCollectorGateG2_2026-09-11.md`](../reviews/GarbageCollectorGateG2_2026-09-11.md).
+Gate G2 authorizes I11B's controlled tests; it does not enable collection in
+ordinary production execution.
 
 ### Phase I11B — Controlled Production Forced Collection
 

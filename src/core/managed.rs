@@ -760,6 +760,9 @@ mod durable_owner_inventory;
 #[cfg(test)]
 mod recursive_identity_inventory;
 
+#[cfg(test)]
+mod gate_g2_inventory;
+
 mod payload_edges;
 
 #[cfg(test)]
