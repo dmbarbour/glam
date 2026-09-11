@@ -49,9 +49,14 @@ Entry requires:
 
 Compact values from
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
-are not a prerequisite. If that transition begins first, CG0 must inventory its
-actual pointer decoder and managed layouts rather than assuming the older
-representation.
+are not a semantic prerequisite, but the expected implementation order is now
+to complete that transition before beginning CG0. Concurrent collection is
+likely to follow several intervening representation and performance changes,
+and its root protocol should be designed around the compact `Value`, managed
+layouts, and evaluator-machine shapes which are actually intended to remain.
+If concurrent collection is pulled forward instead, CG0 must inventory the
+then-current pointer decoder and managed layouts rather than assuming either
+the older representation or the refinement plan's target.
 
 The existing non-moving full collector remains the reference implementation
 and reachability oracle throughout this plan. This plan does not rewrite its
@@ -203,6 +208,79 @@ valid for its mutator borrow without adding a pointer-local lock or per-read
 run pin. It does not prove semantic reachability of an otherwise unregistered
 local `Gc<T>`; CG0-CG1 must close that root problem separately.
 
+### Root-adjacent trace-immediate frames (tentative)
+
+One promising transient-root representation is a collector-owned
+`RootFrame<T>` for mutable, root-adjacent state which lives outside the managed
+heap. Runtime machine state is the motivating example. A frame would be the
+canonical state itself, not a second root record maintained in parallel with
+an independently mutable structure. This distinction matters: the feature is
+intended to replace transitional parallel-root scaffolding after the managed
+representation is established, not make that duplication permanent.
+
+A frame would have the following provisional contract:
+
+- it belongs to exactly one heap and implements the ordinary passive `Trace`
+  contract over every managed edge it currently contains;
+- construction, registration, access, and mutation require a matching
+  mutator;
+- mutation occurs through a frame guard authorized by that mutator. A uniquely
+  owned machine may be able to use an exclusive Rust borrow; a genuinely shared
+  frame may need frame-local synchronization. Possession of a mutator alone
+  does not imply exclusive ownership of every frame;
+- no unrooted `Gc<T>` obtained from the frame may outlive the mutator region;
+  and
+- registration and removal participate in the collector's root protocol
+  rather than being invisible host-container operations.
+
+At concurrent-mark initiation, the collector would use a bounded participant
+handshake to close frame mutation briefly, trace all registered frames as part
+of the initial root snapshot, establish the mark epoch, and then allow normal
+concurrent mutator progress. The frame is therefore *trace-immediate* at the
+snapshot boundary, not rescanned continuously throughout concurrent marking.
+This pause must not wait while holding another heap's locks and must retain the
+plan's arbitrary multi-heap entry guarantee.
+
+The attractive property is that ordinary root-frame edits may not need a
+per-edge SATB barrier. That omission is sound only if all of the following are
+proved together:
+
+1. every edge present at the snapshot was traced before frame edits resumed;
+2. an older managed value installed afterward came from another exact,
+   already-snapshotted source, such as a frame, heap edge, or mutator-local
+   transient root;
+3. allocations born during the epoch are retained by the selected CG2 birth
+   policy; and
+4. a frame registered after the snapshot has its initial contents traced or
+   otherwise retained before publication.
+
+Removal may then leave snapshot objects floating until the next cycle, which
+is the intended SATB behavior. If the exact-origin proof for an insertion is
+too difficult at any call site, that edit must use the ordinary root/edge
+barrier instead; `RootFrame` is not a blanket exemption from mutation
+barriers. Heap-object mutation remains behind the ordinary transition gateway.
+
+This representation must also leave a path to moving collection. During a
+future relocation pause, the collector must be able to visit and rewrite every
+managed pointer held by a frame while frame mutation is excluded. The initial
+non-moving implementation needs only `Trace`, but its registration and guard
+APIs must not make immutable pointer copies or diagnostic identities part of
+the frame contract. Integration should wrap this GC primitive if runtime-level
+identity or ergonomics are needed rather than teaching the generic collector
+about evaluator machines.
+
+CG0 must revisit this concept against the post-refinement machine inventory and
+decide at least:
+
+- whether the whole machine state or only its managed semantic substate belongs
+  in a frame;
+- whether unique borrowing covers the common edit path or a frame mutex is
+  justified;
+- the exact post-snapshot registration and removal linearization points;
+- how mutator-local sources establish the no-new-white-edge proof; and
+- whether the initial root-snapshot pause is acceptably bounded in the actual
+  runtime topology.
+
 ### Concurrent marking
 
 The provisional baseline is a conservative SATB-style protocol:
@@ -302,8 +380,11 @@ or accidental under the same policy as the integration plan.
 - Inventory every way a bare managed pointer or managed reference can remain
   local across concurrent epoch initiation.
 - Select the transient-root protocol: explicit local-root handles, registered
-  mutator root frames, or another exact construction. Do not assume that the
-  Rust stack can be scanned.
+  mutator root frames as sketched above, or another exact construction. Review
+  the decision against the completed Value Representation Refinement and the
+  then-current evaluator-machine layout. Do not assume that the Rust stack can
+  be scanned, and do not retain a raw state plus parallel root record merely as
+  migration scaffolding.
 - Record baseline pause, throughput, run pressure, lease retention, and memory
   behavior under the reference collector.
 
@@ -458,7 +539,9 @@ repair.
 These are deliberately unresolved until CG0 supplies the post-integration
 inventory:
 
-1. The exact transient-root representation for bare/local managed pointers.
+1. The exact transient-root representation for bare/local managed pointers,
+   including whether canonical root-adjacent `RootFrame<T>` state can provide
+   barrier-free mutation under the stated SATB origin proof.
 2. SATB-only barriers versus initially shading both old and new edges.
 3. Black allocation, birth epochs, or segregated runs for post-snapshot
    allocation.
