@@ -4,9 +4,95 @@
 //! They may observe or pause a production transition, but must not alter its
 //! semantic result.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::{Mutator, Visitor, trace::ErasedGc};
+
+/// One-shot pause after a collector has established its Finalizing phase.
+///
+/// The collector holds its finalizer mutator admission, but no collector
+/// component mutex, while it waits for [`Self::release`]. This hook exists
+/// only to force request/finalization orderings in repository verification.
+pub struct FinalizingPhaseProbe {
+    pub(crate) state: Arc<FinalizingPhaseProbeState>,
+}
+
+impl FinalizingPhaseProbe {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(FinalizingPhaseProbeState {
+                gate: Mutex::new(FinalizingPhaseGate {
+                    reached: false,
+                    released: false,
+                }),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Waits until the collector is paused in Finalizing.
+    pub fn wait_until_reached(&self) {
+        let mut gate = self
+            .state
+            .gate
+            .lock()
+            .expect("finalizing-phase test probe was poisoned");
+        while !gate.reached {
+            gate = self
+                .state
+                .changed
+                .wait(gate)
+                .expect("finalizing-phase test probe was poisoned");
+        }
+    }
+
+    /// Releases the paused collector. Repeated release is harmless.
+    pub fn release(&self) {
+        self.state.release();
+    }
+}
+
+impl Drop for FinalizingPhaseProbe {
+    fn drop(&mut self) {
+        self.state.release();
+    }
+}
+
+struct FinalizingPhaseGate {
+    reached: bool,
+    released: bool,
+}
+
+pub(crate) struct FinalizingPhaseProbeState {
+    gate: Mutex<FinalizingPhaseGate>,
+    changed: Condvar,
+}
+
+impl FinalizingPhaseProbeState {
+    pub(crate) fn reach_and_wait(&self) {
+        let mut gate = self
+            .gate
+            .lock()
+            .expect("finalizing-phase test probe was poisoned");
+        gate.reached = true;
+        self.changed.notify_all();
+        while !gate.released {
+            gate = self
+                .changed
+                .wait(gate)
+                .expect("finalizing-phase test probe was poisoned");
+        }
+    }
+
+    fn release(&self) {
+        let mut gate = self
+            .gate
+            .lock()
+            .expect("finalizing-phase test probe was poisoned");
+        gate.released = true;
+        self.changed.notify_all();
+    }
+}
 
 /// Selects the edge sets traversed by a deterministic mutation probe.
 ///

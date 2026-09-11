@@ -472,6 +472,16 @@ impl CoreValueFactory {
         self.domain.heap.enable_collection_before_outer_entry();
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_finalizing_phase_probe_for_test(&self) -> glam_gc::FinalizingPhaseProbe {
+        self.domain.heap.install_finalizing_phase_probe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_managed_collection_for_test(&self) {
+        self.domain.heap.request_collection();
+    }
+
     /// Performs one explicit full collection for a caller which has already
     /// established a stable maintenance boundary.
     ///

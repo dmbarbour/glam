@@ -613,6 +613,101 @@ fn passive_finalization_produces_no_runtime_work() {
 }
 
 #[test]
+fn external_request_during_finalization_is_coalesced() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let output_values = runtime.values().core().clone();
+    let (requested_tx, requested_rx) = mpsc::channel();
+    let output = runtime
+        .output_endpoint(
+            |_| Ok(()),
+            move |()| {
+                output_values.request_managed_collection_for_test();
+                requested_tx
+                    .send(())
+                    .expect("request observer should remain live");
+                Ok(())
+            },
+        )
+        .expect("requesting output endpoint should register");
+    let baseline = runtime
+        .collect_managed_for_maintenance()
+        .expect("baseline collection should complete");
+
+    let dead_shell = runtime.values().empty_dict();
+    drop(dead_shell);
+    let probe = runtime.install_finalizing_phase_probe_for_test();
+    let (store, mut events) = input_transaction(&runtime);
+    events
+        .write(&output.writer(), runtime.values().unit())
+        .expect("requesting output should journal");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        StoreCommitResult::Committed
+    );
+    drop((store, events));
+
+    let collector_runtime = runtime.clone();
+    let collector = std::thread::spawn(move || {
+        collector_runtime
+            .collect_managed_for_maintenance()
+            .expect("paused collection should complete after release")
+    });
+    probe.wait_until_reached();
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .pending_finalizers()
+            > 0,
+        "the pause must occur after finalizer obligations become durable"
+    );
+
+    assert!(matches!(
+        output
+            .delivery()
+            .deliver_next()
+            .expect("requesting delivery should run without managed access"),
+        Some(RuntimeDeliveryOutcome::Delivered(_))
+    ));
+    requested_rx
+        .recv()
+        .expect("the external delivery should issue its request");
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested(),
+        "a request issued during Finalizing must remain visible until completion"
+    );
+
+    probe.release();
+    let completed = collector.join().expect("collector thread should not panic");
+    assert_eq!(completed.epoch(), baseline.epoch() + 1);
+    assert_eq!(completed.finalized_slots(), 1);
+    assert!(
+        !runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested(),
+        "successful completion should coalesce a request from its Finalizing window"
+    );
+
+    let surviving_entry = runtime.values().empty_dict();
+    let later = runtime
+        .collect_managed_for_maintenance()
+        .expect("one later explicit collection should complete");
+    assert_eq!(
+        later.epoch(),
+        completed.epoch() + 1,
+        "the Finalizing request must not cause recursion or an intervening pass"
+    );
+    drop(surviving_entry);
+}
+
+#[test]
 fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let _assembler = Assembler::builder()

@@ -46,7 +46,9 @@ mod deterministic;
 
 #[cfg(feature = "deterministic-test-hooks")]
 #[doc(hidden)]
-pub use deterministic::{EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionRecord};
+pub use deterministic::{
+    EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionRecord, FinalizingPhaseProbe,
+};
 
 pub use class::UnsupportedLayout;
 pub use heap::{

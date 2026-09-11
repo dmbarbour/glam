@@ -23,7 +23,8 @@ use crate::{
 
 #[cfg(feature = "deterministic-test-hooks")]
 use crate::deterministic::{
-    EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionProbeState,
+    EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionProbeState, FinalizingPhaseProbe,
+    FinalizingPhaseProbeState,
 };
 
 const FIXED_SURVIVOR_RUN_HEADROOM: usize = crate::arena::RUNS_PER_CHUNK * 7 / 8;
@@ -451,6 +452,28 @@ impl Heap {
         probe
     }
 
+    /// Installs a one-shot pause after the next collection enters Finalizing.
+    ///
+    /// The pause holds collector admission but no collector component mutex.
+    /// Dropping or explicitly releasing the returned handle resumes the
+    /// collector.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn install_finalizing_phase_probe(&self) -> FinalizingPhaseProbe {
+        let probe = FinalizingPhaseProbe::new();
+        let mut installed = self
+            .inner
+            .finalizing_phase_probe
+            .lock()
+            .expect("finalizing-phase test probe was poisoned");
+        assert!(
+            installed.is_none(),
+            "finalizing-phase probe already installed"
+        );
+        *installed = Some(Arc::clone(&probe.state));
+        probe
+    }
+
     /// Completes a full stop-the-world collection handshake synchronously.
     ///
     /// The collector clears mark state, seeds the stable root registry, traces
@@ -501,6 +524,8 @@ pub(crate) struct HeapInner {
     allocation_lease_epoch: AtomicU64,
     #[cfg(feature = "deterministic-test-hooks")]
     edge_transition_probe: Mutex<Option<Arc<EdgeTransitionProbeState>>>,
+    #[cfg(feature = "deterministic-test-hooks")]
+    finalizing_phase_probe: Mutex<Option<Arc<FinalizingPhaseProbeState>>>,
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
     collect_before_outer_entry: AtomicBool,
     #[cfg(test)]
@@ -565,6 +590,8 @@ impl HeapInner {
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             #[cfg(feature = "deterministic-test-hooks")]
             edge_transition_probe: Mutex::new(None),
+            #[cfg(feature = "deterministic-test-hooks")]
+            finalizing_phase_probe: Mutex::new(None),
             #[cfg(any(test, feature = "deterministic-test-hooks"))]
             collect_before_outer_entry: AtomicBool::new(false),
             #[cfg(test)]
@@ -2572,6 +2599,8 @@ impl HeapInner {
         let thread_entry =
             prepared.activate(self.current_allocation_lease_epoch(), Some(admission));
         let mutator = Mutator::new(self, thread_entry.cache());
+        #[cfg(feature = "deterministic-test-hooks")]
+        self.pause_in_finalizing_phase();
         // Test-only/synthetic work observes the established Finalizing
         // boundary before production destruction begins. A panic here has not
         // invoked any payload destructor and remains safely retryable.
@@ -3282,6 +3311,18 @@ impl HeapInner {
             .lock()
             .expect("edge-transition test probe was poisoned")
             .clone()
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    fn pause_in_finalizing_phase(&self) {
+        let probe = self
+            .finalizing_phase_probe
+            .lock()
+            .expect("finalizing-phase test probe was poisoned")
+            .take();
+        if let Some(probe) = probe {
+            probe.reach_and_wait();
+        }
     }
 
     pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {

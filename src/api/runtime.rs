@@ -553,6 +553,15 @@ impl EvaluationRuntime {
             .enable_collection_before_outer_entry_for_test();
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_finalizing_phase_probe_for_test(&self) -> glam_gc::FinalizingPhaseProbe {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .install_finalizing_phase_probe_for_test()
+    }
+
     /// Registers a runtime-local FIFO input boundary.
     ///
     /// The converter is host policy: it runs before mutation admission and

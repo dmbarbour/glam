@@ -6457,6 +6457,19 @@ collector-created event. Assigned-run pressure does not grow and no finalizer
 obligation remains. Only the subsequent explicit external-owner drain drops
 the opaque payload, preserving the production ownership boundary.
 
+I11C.3 completed 2026-09-11. The collector's private deterministic feature
+now offers a one-shot Finalizing-phase probe. The collector takes the probe
+only after installing its finalizer mutator, releases the probe-slot mutex,
+and pauses without any collector component mutex held; dropping or releasing
+the handle resumes it. A production runtime fixture queues a host output whose
+callback requires no managed access, pauses collection with durable finalizer
+work visible, and has that callback issue a nonblocking collection request.
+The request is observable during the pause, successful finalization coalesces
+it, the explicit collection advances exactly one epoch, and the next explicit
+pass advances exactly one more. The callback captures only the value-domain
+factory rather than its `EvaluationRuntime`, so the verification hook does not
+introduce a runtime ownership cycle or destructor-driven worker entry.
+
 ### Phase I11D — Gate G3 Certification
 
 - (Post-I11 review should run first)
