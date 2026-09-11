@@ -14,6 +14,7 @@ use crate::reflection::{ReflectionEffects, coordinator_task_launcher};
 use crate::source::{SourceArtifact, SourceIdentity};
 
 mod diagnostic_tests;
+mod managed_collection_tests;
 mod runtime_tests;
 
 use runtime_tests::{decode_test_integer, input_transaction};

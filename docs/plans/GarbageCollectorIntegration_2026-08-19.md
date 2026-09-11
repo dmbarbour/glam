@@ -6363,6 +6363,17 @@ policy. Neither hook infers readiness: controlled serial-boundary selection
 remains explicit until I12 integrates collector activity with runtime
 maintenance.
 
+I11B.2 completed 2026-09-11. The named production fixture now builds a real
+module and managed core net under one zero-worker runtime, retains a
+same-runtime logger-facing service session and diagnostic ingress, commits
+reflection and output-event roots, and forces collection only between those
+serial operations. It proves the module result and diagnostic survive, queued
+output still delivers exactly once, reflection state remains available in a
+settled report, readiness work generation and observation epoch do not change,
+an already captured readiness snapshot still validates, and collection does
+not advance the net's topology revision. A final collection with the retained
+settlement report exercises the post-settlement boundary as well.
+
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 
 - Force collection before, during, and after worker activity using deterministic
