@@ -10607,6 +10607,27 @@ mod tests {
         assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
     }
 
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[test]
+    fn dropping_finalizing_phase_probe_releases_one_collection_only() {
+        let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+        let probe = heap.install_finalizing_phase_probe();
+        let collecting_heap = heap.clone();
+        let collector = std::thread::spawn(move || {
+            collecting_heap
+                .collect_full()
+                .expect("collector should resume when its probe is dropped")
+        });
+
+        probe.wait_until_reached();
+        drop(probe);
+        let first = collector.join().expect("collector thread should not panic");
+        let second = heap
+            .collect_full()
+            .expect("the consumed one-shot probe must not pause another collection");
+        assert_eq!(second.epoch(), first.epoch() + 1);
+    }
+
     const _: fn() = || {
         fn assert_send<T: Send>() {}
         assert_send::<Arena>();

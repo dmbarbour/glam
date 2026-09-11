@@ -1,6 +1,6 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I11A and their mandatory reviews are complete. Gate
+Status: Phases I0 through I11C and their mandatory reviews are complete. Gate
 G2 passed on 2026-09-11. The
 production inline-or-registered-root facade, managed outer value
 node, passive active-owner split, exact durable-owner inventory, and closed

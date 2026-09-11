@@ -491,6 +491,38 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         during.epoch() + 1,
         "worker completion must not lose work or trigger an unrequested collection"
     );
+
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core().value_domain());
+    let escaped = values.empty_dict();
+    drop(values);
+    drop(context);
+    drop(assembler);
+    drop(runtime);
+    assert!(domain.upgrade().is_none());
+    assert!(
+        escaped.clone_core_in_own_domain().is_err(),
+        "a public value must become inert after its collected worker runtime retires"
+    );
+}
+
+#[test]
+fn runtime_retirement_before_collection_leaves_public_value_inert() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core().value_domain());
+    let escaped = values.empty_dict();
+    let runtime_id = escaped.runtime_id();
+
+    drop(values);
+    drop(runtime);
+
+    assert!(domain.upgrade().is_none());
+    assert_eq!(escaped.runtime_id(), runtime_id);
+    assert!(
+        escaped.clone_core_in_own_domain().is_err(),
+        "a public value retains provenance but no observation authority"
+    );
 }
 
 #[test]

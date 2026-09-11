@@ -1,13 +1,14 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I11B and their mandatory reviews are
+Status: in progress; Phases I0 through I11C and their mandatory reviews are
 complete. Gate G2 passed on 2026-09-11. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled in ordinary execution; I11B has exercised controlled serial
-whole-runtime collection through a private maintenance seam. Collector Gate
-G1 passed on 2026-08-25.
+remains disabled in ordinary execution; I11B exercised controlled serial
+whole-runtime collection and I11C closed deterministic worker, finalizer,
+request-coalescing, and runtime-retirement schedules through private test and
+maintenance seams. Collector Gate G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -265,6 +266,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10D | complete | final closure, type-erasure, cache, root, and managed-backedge reconciliation |
 | I11A | complete | independent Gate G2 source, stable-ledger, layout, and isolated-reclamation certification |
 | I11B | complete | private serial production collection, boundary preservation, and ownership-outcome matrix |
+| I11C | complete | deterministic worker/finalizer schedules, request coalescing, and runtime retirement |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6429,9 +6431,12 @@ serial phase.
 
 Verification: `collection_interleaves_with_worker_quantum_without_lost_work`,
 `passive_finalization_produces_no_runtime_work`, and
-`external_request_during_finalization_is_coalesced`, followed by
-repeated worker stress, focused Miri, and sanitizer runs. The production heap
-remains `NoAuto`; only explicit tests/maintenance collect.
+`external_request_during_finalization_is_coalesced`. These tests force their
+orderings with channels and the one-shot phase probe; repetition is not used
+as evidence for a concurrency contract. I11C closes with the ordinary and
+focused collector suites. I11D retains the focused Miri, sanitizer, and final
+aggressive-mode certification runs. The production heap remains `NoAuto`;
+only explicit tests/maintenance collect.
 
 I11C.1 completed 2026-09-11. A real one-worker runtime now pauses a scheduled
 task inside its bounded managed-access region, starts a synchronous collector
@@ -6469,6 +6474,18 @@ it, the explicit collection advances exactly one epoch, and the next explicit
 pass advances exactly one more. The callback captures only the value-domain
 factory rather than its `EvaluationRuntime`, so the verification hook does not
 introduce a runtime ownership cycle or destructor-driven worker entry.
+
+I11C.4 completed 2026-09-11. Runtime retirement is now explicit on both sides
+of the concurrency work. A public managed value created before any forced
+collection preserves its scalar runtime provenance but becomes inert when its
+last value-domain service disappears. The worker-quantum fixture now repeats
+that proof after two controlled collections and a completed real worker task;
+the escaped public root does not retain or reopen the domain. The collector's
+one-shot Finalizing probe has an independent RAII fixture proving that handle
+drop releases its collector and that a later collection cannot reuse the
+consumed pause. The dated I11C review found no unresolved accidental drift,
+and all focused plus routine checks passed. Production remains immutable
+`NoAuto`; I11D owns the post-I11 review and Gate G3 certification.
 
 ### Phase I11D — Gate G3 Certification
 
