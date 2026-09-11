@@ -1,9 +1,8 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: ownership and fixture audit complete; remediation planned. This plan
-expands GCI11R-002 and Phase I11D.1. The private repository mode exists and is
-useful, but its complete workspace suite does not yet pass. Gate G3 remains
-closed.
+Status: GCI11R-002A complete; GCI11R-002B-H planned. This plan expands
+GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
+but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
 ## Purpose
 
@@ -193,6 +192,36 @@ remediation must use fresh exact processes and rerun each cluster after a
 shared fix rather than assigning every current failing test an independent
 root cause.
 
+### GCI11R-002A failure matrix
+
+The initial matrix uses a fresh test process for each named row. “Pass” is a
+control which narrows the failing boundary; it is not evidence that the whole
+subsystem is closed.
+
+| Subsystem | Exact fixture | Aggressive result | Disposition |
+| --- | --- | --- | --- |
+| feature/policy | `repository_aggressive_mode_enables_each_production_runtime` | pass | mode enabled; `NoAuto` preserved |
+| closed runtime cache | `compiler_cache_does_not_form_a_value_domain_cycle` | pass | prior shared cache-build repair remains valid |
+| API fixture | `access_and_annotation_construction_do_not_demand_inputs` | fail from rooted `ManagedValueNode` edge | invalid fixture allocation/publication split; GCI11R-002E |
+| evaluator machine | `cached_defined_selection_helpers_match_glam_undefined_semantics` | fail on unallocated `ManagedLazyCell` access | confirmed `LazyTaskWork::Follow` owner defect; GCI11R-002B |
+| client-demand control | `client_demand_completes_whnf_into_its_result_cell` | pass | client-demand rooting is not categorically broken |
+| evaluation fixture | `synchronous_whnf_facade_preserves_retryable_promise_behavior` | fail from rooted `ManagedValueNode` edge | self-opening promise fixture; GCI11R-002E |
+| reflection store control | `snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing` | pass | isolated non-production factory does not enable repository mode |
+| reflection store fixture | `query_result_remains_rooted_after_store_and_handle_retirement` | fail from rooted `ManagedValueNode` edge | production-runtime `unforced_store_value` fixture splits lazy allocation/publication; GCI11R-002E |
+| macro control | `macro_runner_distinguishes_a_non_effect_value` | pass | macro runner is not categorically broken |
+| macro/source integration | `inline_macro_readers_and_writers_are_transactional` | fail from rooted `ManagedValueNode` edge | consistent with closed compiler-evaluation cascade; confirm after GCI11R-002C |
+| source/reflection | `reflection_environment_is_available_as_plain_data` | fail from rooted `ManagedValueNode` edge | confirmed closed-evaluation result handoff; GCI11R-002C |
+| collection schedule | `external_request_during_finalization_is_coalesced` | setup can consume its own probe before spawning collector | deterministic schedule-fixture interference; GCI11R-002F |
+
+The collector now enriches lookup panics with the immediate traced
+predecessor's canonical Rust type and address plus the reported edge address.
+A registered-root lookup failure similarly names its one-based retained-root
+ordinal and address. This adds no ancestry allocation, root metadata, or
+success-path lookup: it formats information already held by the failing mark
+operation. The collector's invalid-edge fixtures assert that the primary
+classification remains stable and that traced-edge failures name
+`InvalidEdgeHolder` as their predecessor.
+
 ## Remediation Invariants
 
 1. Every fresh managed edge leaves its allocation region only beneath its
@@ -219,23 +248,34 @@ root cause.
 
 ### GCI11R-002A — Failure Matrix and Attribution Support
 
+Status: complete on 2026-09-11.
+
 1. Record ordinary and aggressive outcomes for one fresh-process reproducer
    per failing subsystem. Start with the three exact tests above.
 2. Partition the full aggressive suite by API/runtime, evaluator/coordinator,
    `g_syntax`/macros, and reflection/store so one abort cannot hide all later
    results.
-3. Add the smallest deterministic-test-only attribution aid needed when a
-   collector lookup failure lacks its owning path. Prefer a root/worklist
-   predecessor and managed-family description, or tightly placed forced
-   collection checkpoints. Do not add production tracing cost merely to make
-   panic text richer.
+3. Add the smallest failure-only attribution aid needed when a collector
+   lookup failure lacks its owning path, and validate it with deterministic
+   tests. Prefer a root/worklist predecessor and managed-family description,
+   or tightly placed forced collection checkpoints. Do not add production
+   tracing cost merely to make panic text richer.
 4. Maintain a failure matrix with one of four dispositions: production owner
    defect, invalid fixture handoff, schedule-fixture interference, or cascade
    from an already identified shared defect. “Transient” is not a disposition.
 
 Exit: every stable aggressive failure cluster has an exact reproducer and an
 initial evidence-backed owner classification. Attribution instrumentation is
-test-only and independently covered.
+failure-only and independently covered.
+
+The matrix above partitions the stable failures and controls observed so far.
+Immediate-predecessor attribution is implemented directly on the collector's
+failure path because it adds no successful-trace state or production runtime
+cost; it is nevertheless verified by deterministic invalid-edge fixtures.
+The richer messages corroborate that the API fixture and compiler result both
+installed rooted `ManagedValueNode` shells containing already stale inner
+edges. Aggregate subsystem rows remain assigned to B-G and must be rerun after
+each shared fix rather than treated as independent defects.
 
 ### GCI11R-002B — Poll-Spanning Evaluator Ownership
 

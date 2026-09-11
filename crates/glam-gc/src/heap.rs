@@ -1347,16 +1347,47 @@ enum CollectorLookupError {
 }
 
 impl CollectorLookupError {
-    fn raise(self) -> ! {
-        let message = match self {
+    fn message(self) -> &'static str {
+        match self {
             Self::InvalidAddress => "collector edge does not identify an exact managed slot",
             Self::InvalidClass => "collector edge refers to an absent allocation class",
             Self::InvalidRunTopology => {
                 "collector edge refers to a run outside its allocation class"
             }
             Self::Unallocated => "collector edge does not identify an allocated value",
-        };
-        panic!("{message}")
+        }
+    }
+
+    fn raise(self) -> ! {
+        panic!("{}", self.message())
+    }
+
+    fn raise_traced_edge(self, source: TraceWork, edge: ErasedGc) -> ! {
+        panic!(
+            "{}; while tracing {} at {:p}, which reported edge {:p}",
+            self.message(),
+            source.metadata.type_name(),
+            source.value.as_ptr().as_ptr(),
+            edge.as_ptr().as_ptr(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CollectorRootLookupError {
+    error: CollectorLookupError,
+    ordinal: usize,
+    value: ErasedGc,
+}
+
+impl CollectorRootLookupError {
+    fn raise(self) -> ! {
+        panic!(
+            "{}; while seeding registered root #{} at {:p}",
+            self.error.message(),
+            self.ordinal,
+            self.value.as_ptr().as_ptr(),
+        )
     }
 }
 
@@ -2232,7 +2263,7 @@ impl MarkAttempt {
     fn seed_registered_roots(
         &mut self,
         data: &mut ManagedData,
-    ) -> Result<(), CollectorLookupError> {
+    ) -> Result<(), CollectorRootLookupError> {
         let ManagedData {
             arena,
             classes,
@@ -2245,10 +2276,15 @@ impl MarkAttempt {
                 .root_count
                 .checked_add(1)
                 .expect("root count exhausted");
+            let ordinal = self.root_count;
             if lookup_error.is_none()
                 && let Err(error) = self.discover_in(arena, classes, value)
             {
-                lookup_error = Some(error);
+                lookup_error = Some(CollectorRootLookupError {
+                    error,
+                    ordinal,
+                    value,
+                });
             }
         });
         match lookup_error {
@@ -2261,7 +2297,7 @@ impl MarkAttempt {
         while let Some(work) = self.worklist.pop() {
             let mut visit = |edge| {
                 self.discover(data, edge)
-                    .unwrap_or_else(|error| error.raise());
+                    .unwrap_or_else(|error| error.raise_traced_edge(work, edge));
             };
             let mut visitor = Visitor::new(&mut visit);
             // SAFETY: `TraceWork` is constructed only after checked discovery
@@ -4575,7 +4611,17 @@ mod tests {
         for expected_traces in 1..=2 {
             let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
                 .expect_err("reachable invalid collector edge must panic");
-            assert_eq!(panic_string(panic.as_ref()), expected_message);
+            let message = panic_string(panic.as_ref());
+            assert!(
+                message.starts_with(expected_message),
+                "collector failure should retain its primary classification: {message}"
+            );
+            assert!(
+                message.contains("while tracing")
+                    && message.contains("InvalidEdgeHolder")
+                    && message.contains("which reported edge"),
+                "collector failure should identify the immediate traced predecessor: {message}"
+            );
             assert_eq!(traces.load(Ordering::Relaxed), expected_traces);
             assert_failed_collection_restored(heap);
         }
