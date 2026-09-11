@@ -1,11 +1,11 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I8 and their mandatory reviews are
+Status: in progress; Phases I0 through I9 and their mandatory reviews are
 complete. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled while I9-I10 close the remaining root and host
+remains disabled while I10 closes the remaining host/opaque containment
 boundaries. Collector Gate G1 passed on
 2026-08-25.
 
@@ -249,7 +249,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I9A-E | complete | I5-I8 durable-owner delta and conditional subsystem audits |
 | I9F | complete | exhaustive production active-RAII lifecycle audit |
 | I9G | complete | reconciled runtime-root source inventory |
-| I9 | review pending | runtime-root lifecycle and retirement audits |
+| I9 | complete | runtime-root lifecycle and retirement audits; post-I9 review passed |
 | I10 | pending | deferred closures and opaque boundaries |
 | I10B.0 | pending | opaque representation decision review gate |
 | I11 | pending | whole-production-graph forced collection |
@@ -5915,6 +5915,11 @@ Verification: `runtime_root_source_inventory_is_reconciled` plus controlled
 owner-drop tests named by every root family. Production remains `NoAuto`; this
 checkpoint proves root classification, not whole-graph reclamation.
 
+The mandatory post-I9 review passed on 2026-09-11 with no open finding. Its
+implementation accounting, drift classification, future-phase audit, and
+verification record are in
+[`GarbageCollectorIntegrationI9_2026-09-11.md`](../reviews/GarbageCollectorIntegrationI9_2026-09-11.md).
+
 ## Phase I10 — Deferred Closures and Opaque Boundaries
 
 ### Phase I10A — Deferred Closure Containment
@@ -6113,9 +6118,12 @@ fixtures, and the focused collector finalization suite. Production remains
   `NoAuto`.
 
 Verification: `gate_g2_source_inventory_is_closed`, the complete stable-ledger
-check, and a dated Gate G2 review with no unmatched graph-bearing field or
-incomplete family record. Until it passes, no full collection may run over a
-production runtime.
+check, I9's `runtime_root_lifecycle_delta_is_reconciled`,
+`active_external_raii_inventory_is_reconciled`,
+`managed_graph_reaches_no_active_raii_owner`, and
+`runtime_root_source_inventory_is_reconciled`, plus a dated Gate G2 review
+with no unmatched graph-bearing field or incomplete family record. Until it
+passes, no full collection may run over a production runtime.
 
 ### Phase I11B — Controlled Production Forced Collection
 
