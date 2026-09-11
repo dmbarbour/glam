@@ -6,6 +6,7 @@ use crate::core::Value;
 use crate::diagnostic::Severity;
 use crate::evaluation::EvaluationPumpOutcome;
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
+use crate::runtime::RuntimeValueRoot;
 
 use super::effects::MacroEffects;
 use super::host::{MacroHost, MacroSnapshot};
@@ -76,13 +77,13 @@ impl MacroRun {
 pub(in crate::g_syntax) fn run_macro_effect(
     execution: &CompilationExecution,
     effect: Value,
-    environment: Value,
+    environment: RuntimeValueRoot,
     input: MacroInput,
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let values = execution.macro_context().values();
     let public_values = Values::from_core_factory(values.clone());
     let effect = public_values.wrap(effect);
-    let environment = public_values.wrap(environment);
+    let environment = PublicValue::from_runtime_root(environment);
     let host = Arc::new(MacroHost::new_core(
         values.clone(),
         environment.clone(),

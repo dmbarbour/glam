@@ -74,8 +74,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [22, 0, 2, 0],
-        "admitted complete rooted compiler-helper and effect caches"
+        [40, 0, 1, 0],
+        "owned closed-evaluation results and admitted complete compiler-helper and effect caches"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
@@ -84,12 +84,12 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",
-        [0, 12, 0, 0],
-        "rooted macro inputs, outputs, failures, and public diagnostic values"
+        [2, 13, 0, 0],
+        "rooted macro environment input, outputs, failures, and public diagnostic values"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [4, 0, 3, 0],
+        [3, 0, 3, 0],
         "rooted declaration-to-declaration definitions and reflection boundary"
     ),
     entry!(
@@ -139,4 +139,30 @@ fn compiler_regions_do_not_reopen_the_direct_evaluator() {
             entry.path
         );
     }
+}
+
+#[test]
+fn closed_compiler_evaluation_returns_its_client_demand_owner() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let compiler_values = fs::read_to_string(manifest.join("src/g_syntax/compiler_values.rs"))
+        .expect("compiler value source should be readable");
+    let evaluation_session = fs::read_to_string(manifest.join("src/evaluation/session.rs"))
+        .expect("evaluation session source should be readable");
+
+    assert!(
+        compiler_values.contains(
+            "pub(in crate::g_syntax) fn evaluate_closed(\n    values: &CoreValueFactory,\n    expression: ResolvedExpr<Value>,\n) -> RuntimeValueRoot"
+        ),
+        "closed compiler evaluation must return a canonical runtime root"
+    );
+    assert!(
+        compiler_values.contains(".evaluate_root_whnf(input)"),
+        "closed compiler evaluation must preserve the client-demand result owner"
+    );
+    assert!(
+        evaluation_session.contains(
+            "pub(crate) fn evaluate_root_whnf(\n        &self,\n        value: RuntimeValueRoot,\n    ) -> Result<RuntimeValueRoot"
+        ),
+        "the evaluation session must expose an owned internal WHNF boundary"
+    );
 }

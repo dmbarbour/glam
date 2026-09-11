@@ -103,10 +103,11 @@ pub(in crate::g_syntax) fn lower_local_import(
             let scoped_prior = path_value_in_definitions_in(access, target, definitions.clone())?;
             let loaded =
                 scoped_local_import_value_in(access, request, target, scoped_prior, context)?;
+            let loaded_defs = constant_object_defs(context, loaded);
             let object = extend_object_with_defs_in(
                 access,
                 target,
-                constant_object_defs(context, loaded),
+                loaded_defs.clone_core_with(access),
                 definitions.clone(),
             )?;
             *definitions = update_module_value_in(access, definitions.clone(), target, object);
@@ -190,12 +191,8 @@ fn module_object_value_in(
     module: Value,
     context: &CompileContext,
 ) -> Value {
-    module_object_value_with_defs_in(
-        access,
-        target,
-        constant_object_defs(context, module),
-        context,
-    )
+    let definitions = constant_object_defs(context, module);
+    module_object_value_with_defs_in(access, target, definitions.clone_core_with(access), context)
 }
 
 fn module_object_value_with_defs_in(
@@ -214,7 +211,10 @@ fn module_object_value_with_defs_in(
     )
 }
 
-pub(in crate::g_syntax) fn constant_object_defs(context: &CompileContext, value: Value) -> Value {
+pub(in crate::g_syntax) fn constant_object_defs(
+    context: &CompileContext,
+    value: Value,
+) -> crate::runtime::RuntimeValueRoot {
     compiler_values::constant_object_defs(context.values(), value)
 }
 

@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-B complete; GCI11R-002C-H planned. This plan expands
+Status: GCI11R-002A-C complete; GCI11R-002D-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -370,6 +370,8 @@ production machine-state repair and remain required for cluster closure.
 
 ### GCI11R-002C — Rooted Closed-Evaluation Results
 
+Status: complete on 2026-09-11.
+
 1. Add a focused failure which evaluates a closed expression to a managed
    deferred identity, forces collection at the return/publication gap, and
    then attempts to use it. Preserve an immediate-result control.
@@ -398,6 +400,56 @@ Verification:
 
 Exit: the compiler never transports an unowned managed result through a raw
 `Value` return boundary.
+
+The former gap was latched directly by
+`closed_evaluation_result_is_owned_across_return_publication`. Before the
+repair, a closed identity function was returned as a raw `Value`, an explicit
+collection reclaimed its managed core net, and publication followed by the
+next trace failed on that stale edge. A small integer survived the identical
+interval as the allocation-free control. The repaired fixture passes in both
+ordinary and aggressive modes.
+
+`EvalContext::evaluate_root_whnf` now exposes the already-authoritative
+`ClientDemandResult::Complete(RuntimeValueRoot)` to internal callers without
+projecting it. `compiler_values::evaluate_closed` accepts and returns runtime
+roots at both ends, so client-demand retirement and caller publication are one
+continuous ownership chain. The ordinary raw-returning `evaluate_whnf` facade
+is retained only for callers which consume its projection immediately; it is
+not the compiler cache boundary.
+
+The complete `evaluate_closed` call inventory has these dispositions:
+
+| Closed-result family | Final ownership |
+| --- | --- |
+| initial compiler helper bundle | each builder returns its client-demand root directly into `GCompilerValues` |
+| dynamic effect-path helper | rooted result is inserted directly into the runtime-local effect cache |
+| built-in module definitions | applied constant-definition result becomes `RootedBuiltinModule::definitions` directly |
+| module reflection annotator | returned root becomes `ModuleLowerer::module_reflection` without rerooting |
+| imported constant definitions | a local result root remains live while its projection is installed into the declaration's traced definitions under the existing access region |
+| macro environment | returned root crosses into `run_macro_effect`, which converts that same owner into the public macro value rather than wrapping a raw result |
+| default diagnostic formatter | returned root becomes `CachedDiagnosticFormatter` directly |
+| immediate compiler composition and tests | a local root remains in scope while its bounded projection is embedded or inspected |
+
+The `g_syntax` source inventory now latches both the root count changes and the
+owned `evaluate_closed -> evaluate_root_whnf` signature. The only
+raw-projecting reflection-annotator helper is `#[cfg(test)]` and uses the
+isolated compiler test factory; production module lowering uses the rooted
+form. General production-runtime fixture migration remains assigned to
+GCI11R-002E rather than weakening this boundary.
+
+Verified during this checkpoint:
+
+- the focused return/publication fixture in ordinary and aggressive modes;
+- all compiler-value and diagnostic-formatter tests in both modes;
+- `reflection_environment_is_available_as_plain_data` in both modes;
+- `inline_macro_readers_and_writers_are_transactional` in both modes; and
+- the compiler root/projection source inventory.
+
+A broader aggressive `g_syntax::` partition completed 434 of 448 tests. Its
+remaining 14 failures are reflection/macro construction fixtures or
+representation comparisons already assigned to the production sweep and
+fixture migration in D-E; neither focused C reproducer remains among them.
+This partition is diagnostic evidence, not closure of those later checkpoints.
 
 ### GCI11R-002D — Production Runtime Root Sweep
 

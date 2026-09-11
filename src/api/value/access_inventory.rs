@@ -131,22 +131,15 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/g_syntax/compiler_values.rs",
         1,
         0,
-        "complete runtime-cached compiler helper bundles",
-        "I3E.2 rooted cache publication; I4F.1 durable roots"
-    ),
-    entry!(
-        "src/g_syntax/diagnostic_formatter.rs",
-        1,
-        0,
-        "runtime-cached closed diagnostic formatter",
-        "I3E.2 rooted cache publication; I4F.1 durable roots"
+        "owned closed-evaluation results and complete runtime-cached compiler helper bundles",
+        "I3E.2 rooted cache publication; I4F.1 durable roots; GCI11R-002C direct client-demand result ownership"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
+        0,
         1,
-        1,
-        "declaration-to-declaration definitions and reflection annotator",
-        "I3E.2 bounded lowering regions; I4F.1 durable roots"
+        "declaration-to-declaration definitions and directly owned reflection annotator",
+        "I3E.2 bounded lowering regions; I4F.1 durable roots; GCI11R-002C owned closed-result handoff"
     ),
     entry!(
         "src/reflection/machine.rs",

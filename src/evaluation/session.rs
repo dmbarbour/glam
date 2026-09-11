@@ -834,14 +834,27 @@ impl EvalContext {
         &self,
         value: &Value,
     ) -> Result<Value, crate::core::EvaluationHalt> {
+        let value = self.evaluate_root_whnf(RuntimeValueRoot::new(self.values(), value.clone()))?;
+        let poll = EvaluationPollContext::for_context(self);
+        Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
+    }
+
+    /// Demands one already-owned value and preserves the client-demand result
+    /// root across the return boundary.
+    ///
+    /// Compiler and runtime caches use this form when their final owner is
+    /// installed by the caller. Projecting before return would leave managed
+    /// identities unowned between client-demand retirement and that later
+    /// publication.
+    pub(crate) fn evaluate_root_whnf(
+        &self,
+        value: RuntimeValueRoot,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
         let handle = self
-            .demand_whnf(RuntimeValueRoot::new(self.values(), value.clone()))
+            .demand_whnf(value)
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         match self.drive_client_demand(handle)? {
-            ClientDemandResult::Complete(value) => {
-                let poll = EvaluationPollContext::for_context(self);
-                Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
-            }
+            ClientDemandResult::Complete(value) => Ok(value),
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),

@@ -164,7 +164,7 @@ impl GCompilerValues {
             effects: &effects,
         };
         let not = build_not(values, &build_cache);
-        let could = build_could(values, not.clone());
+        let could = build_could(values, &not);
         let constant_object_defs = build_constant_object_defs(values);
 
         let math_value = Value::Dict(
@@ -202,8 +202,8 @@ impl GCompilerValues {
                     name_as_key("object_from_dict"),
                     Value::Builtin(Builtin::ObjectFromDict),
                 )
-                .insert(name_as_key("not"), not.clone())
-                .insert(name_as_key("could"), could.clone())
+                .insert(name_as_key("not"), project_value(values, &not))
+                .insert(name_as_key("could"), project_value(values, &could))
                 .insert(name_as_key("math"), math_value.clone())
                 .insert(name_as_key("list"), list_value.clone())
                 .insert(
@@ -216,34 +216,29 @@ impl GCompilerValues {
         );
 
         let make_module = |value: Value| RootedBuiltinModule {
-            definitions: root_value(
+            definitions: apply_closed(
                 values,
-                apply_closed(values, constant_object_defs.clone(), [value.clone()]),
+                project_value(values, &constant_object_defs),
+                [value.clone()],
             ),
             value: root_value(values, value),
         };
 
         let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
-        let defined_or = build_defined_or(values, &build_cache, pure_if_runner.clone());
+        let defined_or = build_defined_or(values, &build_cache, &pure_if_runner);
         Self {
             runtime: values.runtime_id(),
             math: make_module(math_value),
             list: make_module(list_value),
             std: make_module(std_value),
-            empty_object_defs: root_value(values, build_empty_object_defs(values)),
-            constant_object_defs: root_value(values, constant_object_defs),
-            reflection_annotator: root_value(
-                values,
-                build_reflection_annotator(values, &build_cache),
-            ),
-            require_defined: root_value(values, build_require_defined(values, defined_or.clone())),
-            defined_or: root_value(values, defined_or),
-            pure_if_runner: root_value(values, pure_if_runner),
-            pure_match_runner: root_value(
-                values,
-                build_pure_conditional_runner(values, Builtin::MatchResult),
-            ),
-            macro_environment: root_value(values, build_macro_environment(values)),
+            empty_object_defs: build_empty_object_defs(values),
+            constant_object_defs,
+            reflection_annotator: build_reflection_annotator(values, &build_cache),
+            require_defined: build_require_defined(values, &defined_or),
+            defined_or,
+            pure_if_runner,
+            pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
+            macro_environment: build_macro_environment(values),
             effects,
         }
     }
@@ -282,7 +277,10 @@ pub(in crate::g_syntax) fn empty_object_defs(values: &CoreValueFactory) -> Value
     })
 }
 
-pub(in crate::g_syntax) fn constant_object_defs(values: &CoreValueFactory, value: Value) -> Value {
+pub(in crate::g_syntax) fn constant_object_defs(
+    values: &CoreValueFactory,
+    value: Value,
+) -> RuntimeValueRoot {
     let function = with_values(values, |compiler| {
         project_value(values, &compiler.constant_object_defs)
     });
@@ -314,11 +312,11 @@ pub(in crate::g_syntax) fn reflection_annotator_resolved(
     )
 }
 
-pub(in crate::g_syntax) fn reflection_annotator_value(
+pub(in crate::g_syntax) fn reflection_annotator_root(
     values: &CoreValueFactory,
     guard: Value,
     final_defs: Value,
-) -> Value {
+) -> RuntimeValueRoot {
     evaluate_closed(
         values,
         reflection_annotator_resolved(
@@ -326,6 +324,18 @@ pub(in crate::g_syntax) fn reflection_annotator_value(
             ResolvedExpr::Provided(guard),
             ResolvedExpr::Provided(final_defs),
         ),
+    )
+}
+
+#[cfg(test)]
+pub(in crate::g_syntax) fn reflection_annotator_value(
+    values: &CoreValueFactory,
+    guard: Value,
+    final_defs: Value,
+) -> Value {
+    project_value(
+        values,
+        &reflection_annotator_root(values, guard, final_defs),
     )
 }
 
@@ -405,7 +415,7 @@ pub(in crate::g_syntax) fn macro_environment(
     values: &CoreValueFactory,
     base: Value,
     language: Value,
-) -> Value {
+) -> RuntimeValueRoot {
     let function = with_values(values, |compiler| {
         project_value(values, &compiler.macro_environment)
     });
@@ -446,7 +456,7 @@ fn effect_path_value_with_cache(
     // Construction may allocate and, after the managed representation switch,
     // may require scoped value access. Races may build an equivalent closed
     // candidate twice; only publication is serialized.
-    let candidate = root_value(values, build_effect_path_value(values, path));
+    let candidate = build_effect_path_value(values, path);
     assert_eq!(
         candidate.runtime_id(),
         values.runtime_id(),
@@ -474,7 +484,7 @@ fn apply_closed(
     values: &CoreValueFactory,
     function: Value,
     arguments: impl IntoIterator<Item = Value>,
-) -> Value {
+) -> RuntimeValueRoot {
     evaluate_closed(
         values,
         ResolvedExpr::apply(
@@ -487,12 +497,11 @@ fn apply_closed(
 pub(in crate::g_syntax) fn evaluate_closed(
     values: &CoreValueFactory,
     expression: ResolvedExpr<Value>,
-) -> Value {
+) -> RuntimeValueRoot {
     let input =
         values.construct_runtime_value_root(|access| lower_resolved_expr_in(access, expression));
-    let value = values.with_runtime_value_access(|access| input.clone_core_with(&access));
     crate::evaluation::EvalContext::private_closed(values.clone())
-        .evaluate_whnf(&value)
+        .evaluate_root_whnf(input)
         .expect("closed g compiler helper must evaluate without session capabilities")
 }
 
@@ -560,7 +569,7 @@ fn effect_then(
     effect_call(values, cache, "seq", [operation, continuation])
 }
 
-fn build_effect_path_value(values: &CoreValueFactory, path: Arc<[Key]>) -> Value {
+fn build_effect_path_value(values: &CoreValueFactory, path: Arc<[Key]>) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let api = locals.push_internal_binding("<effect-api>");
     let body = ResolvedExpr::Access {
@@ -577,7 +586,7 @@ fn build_effect_path_value(values: &CoreValueFactory, path: Arc<[Key]>) -> Value
     evaluate_closed(values, effect)
 }
 
-fn build_not(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> Value {
+fn build_not(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let condition = locals.push_internal_binding("<not-condition>");
     let fail_operation =
@@ -612,7 +621,8 @@ fn build_not(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> Value {
     evaluate_closed(values, ResolvedExpr::lambda(vec![condition], body))
 }
 
-fn build_could(values: &CoreValueFactory, not: Value) -> Value {
+fn build_could(values: &CoreValueFactory, not: &RuntimeValueRoot) -> RuntimeValueRoot {
+    let not = project_value(values, not);
     let mut locals = ResolverContext::default();
     let condition = locals.push_internal_binding("<could-condition>");
     let inner = ResolvedExpr::apply(
@@ -631,8 +641,8 @@ fn build_could(values: &CoreValueFactory, not: Value) -> Value {
 fn build_defined_or(
     values: &CoreValueFactory,
     cache: &dyn EffectValueCache,
-    pure_if_runner: Value,
-) -> Value {
+    pure_if_runner: &RuntimeValueRoot,
+) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let fallback = locals.push_internal_binding("<defined-fallback>");
     let candidate = locals.push_internal_binding("<defined-candidate>");
@@ -661,14 +671,20 @@ fn build_defined_or(
             [undefined_branch, defined_branch],
         )],
     );
-    let selected = ResolvedExpr::apply(ResolvedExpr::Embedded(pure_if_runner), [choice]);
+    let selected = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(project_value(values, pure_if_runner)),
+        [choice],
+    );
     evaluate_closed(
         values,
         ResolvedExpr::lambda(vec![fallback, candidate], selected),
     )
 }
 
-fn build_require_defined(values: &CoreValueFactory, defined_or: Value) -> Value {
+fn build_require_defined(
+    values: &CoreValueFactory,
+    defined_or: &RuntimeValueRoot,
+) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let name = locals.push_internal_binding("<required-name>");
     let candidate = locals.push_internal_binding("<required-candidate>");
@@ -700,7 +716,7 @@ fn build_require_defined(values: &CoreValueFactory, defined_or: Value) -> Value 
         ],
     );
     let required = ResolvedExpr::apply(
-        ResolvedExpr::Embedded(defined_or),
+        ResolvedExpr::Embedded(project_value(values, defined_or)),
         [failure, ResolvedExpr::Local(candidate)],
     );
     evaluate_closed(
@@ -709,7 +725,7 @@ fn build_require_defined(values: &CoreValueFactory, defined_or: Value) -> Value 
     )
 }
 
-fn build_pure_conditional_runner(values: &CoreValueFactory, selector: Builtin) -> Value {
+fn build_pure_conditional_runner(values: &CoreValueFactory, selector: Builtin) -> RuntimeValueRoot {
     assert!(matches!(selector, Builtin::IfResult | Builtin::MatchResult));
     let mut locals = ResolverContext::default();
     let operation = locals.push_internal_binding("<conditional-operation>");
@@ -718,7 +734,7 @@ fn build_pure_conditional_runner(values: &CoreValueFactory, selector: Builtin) -
     evaluate_closed(values, ResolvedExpr::lambda(vec![operation], selected))
 }
 
-fn build_macro_environment(values: &CoreValueFactory) -> Value {
+fn build_macro_environment(values: &CoreValueFactory) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let environment_parameter = locals.push_internal_binding("<macro-environment>");
     let language_parameter = locals.push_internal_binding("<macro-language>");
@@ -774,7 +790,7 @@ fn build_macro_environment(values: &CoreValueFactory) -> Value {
     )
 }
 
-fn build_empty_object_defs(values: &CoreValueFactory) -> Value {
+fn build_empty_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let prior_self = locals.push_internal_binding("<object-prior-self>");
     let final_self = locals.push_internal_binding("<object-final-self>");
@@ -794,7 +810,7 @@ fn build_empty_object_defs(values: &CoreValueFactory) -> Value {
     )
 }
 
-fn build_constant_object_defs(values: &CoreValueFactory) -> Value {
+fn build_constant_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let value = locals.push_internal_binding("<constant-object-definitions>");
     let prior_self = locals.push_internal_binding("<object-prior-self>");
@@ -808,7 +824,10 @@ fn build_constant_object_defs(values: &CoreValueFactory) -> Value {
     )
 }
 
-fn build_reflection_annotator(values: &CoreValueFactory, cache: &dyn EffectValueCache) -> Value {
+fn build_reflection_annotator(
+    values: &CoreValueFactory,
+    cache: &dyn EffectValueCache,
+) -> RuntimeValueRoot {
     let mut locals = ResolverContext::default();
     let guard = locals.push_internal_binding("<reflection-guard>");
     let final_defs = locals.push_internal_binding("<reflection-final-definitions>");
@@ -1056,6 +1075,43 @@ mod tests {
     }
 
     #[test]
+    fn closed_evaluation_result_is_owned_across_return_publication() {
+        let values = fresh_test_values();
+
+        let immediate = evaluate_closed(
+            &values,
+            ResolvedExpr::Embedded(Value::Number(Number::integer(42))),
+        );
+        values
+            .collect_managed_for_test()
+            .expect("an immediate closed result should not retain managed state");
+        values
+            .collect_managed_for_test()
+            .expect("publishing an immediate result should remain traceable");
+        assert_eq!(
+            project_value(&values, &immediate),
+            Value::Number(Number::integer(42))
+        );
+
+        let mut locals = ResolverContext::default();
+        let argument = locals.push_internal_binding("<closed-identity-argument>");
+        let identity = evaluate_closed(
+            &values,
+            ResolvedExpr::lambda(vec![argument], ResolvedExpr::Local(argument)),
+        );
+        values
+            .collect_managed_for_test()
+            .expect("the return/publication gap should be a valid collection boundary");
+        values
+            .collect_managed_for_test()
+            .expect("a published managed closed result must remain traceable");
+        assert!(matches!(
+            project_value(&values, &identity),
+            Value::Function(_)
+        ));
+    }
+
+    #[test]
     fn compiler_bundle_is_runtime_local_and_resolved_once_per_compilation_scope() {
         let first_runtime = CoreValueFactory::new(
             crate::runtime::allocate_evaluation_runtime_id(),
@@ -1133,6 +1189,7 @@ mod tests {
                     barrier.wait();
                     let environment =
                         apply_closed(&values, function, [base, Value::binary_from_text("g0")]);
+                    let environment = project_value(&values, &environment);
                     evaluate_closed(
                         &values,
                         ResolvedExpr::Access {
@@ -1145,10 +1202,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         for evaluator in evaluators {
+            let result = evaluator
+                .join()
+                .expect("cached compiler helper evaluation should not panic");
             assert_eq!(
-                evaluator
-                    .join()
-                    .expect("cached compiler helper evaluation should not panic"),
+                project_value(&values, &result),
                 Value::binary_from_text("g0")
             );
         }
@@ -1161,23 +1219,30 @@ mod tests {
             Dict::new_sync().insert(name_as_key("existing"), Value::Number(Number::integer(1))),
         );
         let environment = macro_environment(&values, base, Value::binary_from_text("g0"));
+        let environment_value = project_value(&values, &environment);
 
         let existing = evaluate_closed(
             &values,
             ResolvedExpr::Access {
-                base: Box::new(ResolvedExpr::Provided(environment.clone())),
+                base: Box::new(ResolvedExpr::Provided(environment_value.clone())),
                 path: vec![ResolvedPathPart::Key(name_as_key("existing"))],
             },
         );
         let language = evaluate_closed(
             &values,
             ResolvedExpr::Access {
-                base: Box::new(ResolvedExpr::Provided(environment)),
+                base: Box::new(ResolvedExpr::Provided(environment_value)),
                 path: vec![ResolvedPathPart::Key(name_as_key("language"))],
             },
         );
-        assert_eq!(existing, Value::Number(Number::integer(1)));
-        assert_eq!(language, Value::binary_from_text("g0"));
+        assert_eq!(
+            project_value(&values, &existing),
+            Value::Number(Number::integer(1))
+        );
+        assert_eq!(
+            project_value(&values, &language),
+            Value::binary_from_text("g0")
+        );
     }
 
     #[test]
@@ -1214,14 +1279,19 @@ mod tests {
                 ],
             ),
         );
-        let environment = macro_environment(&values, object, Value::binary_from_text("g0"));
+        let object_value = project_value(&values, &object);
+        let environment = macro_environment(&values, object_value, Value::binary_from_text("g0"));
+        let environment_value = project_value(&values, &environment);
         let adapted = evaluate_closed(
             &values,
             ResolvedExpr::Access {
-                base: Box::new(ResolvedExpr::Provided(environment)),
+                base: Box::new(ResolvedExpr::Provided(environment_value)),
                 path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
             },
         );
-        assert_eq!(adapted, Value::binary_from_text("g0"));
+        assert_eq!(
+            project_value(&values, &adapted),
+            Value::binary_from_text("g0")
+        );
     }
 }

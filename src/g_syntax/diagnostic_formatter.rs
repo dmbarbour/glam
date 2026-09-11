@@ -32,10 +32,10 @@ pub(super) fn value(values: &CoreValueFactory) -> Value {
 }
 
 fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
-    values.cached(|| CachedDiagnosticFormatter(RuntimeValueRoot::new(values, build(values))))
+    values.cached(|| CachedDiagnosticFormatter(build(values)))
 }
 
-fn build(values: &CoreValueFactory) -> Value {
+fn build(values: &CoreValueFactory) -> RuntimeValueRoot {
     fn field(local: BindingId, path: &[&str]) -> ResolvedExpr<Value> {
         ResolvedExpr::Access {
             base: Box::new(ResolvedExpr::Local(local)),

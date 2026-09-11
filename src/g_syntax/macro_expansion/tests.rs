@@ -7,6 +7,7 @@ use crate::api::{
 use crate::core::{CoreValueFactory, Dict, Key, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
+use crate::runtime::RuntimeValueRoot;
 
 use super::effects::validate_written_text;
 use super::io::{
@@ -89,9 +90,13 @@ fn run(
     run_macro_effect(
         execution,
         effect.clone_core_for_test(),
-        environment,
+        environment_root(execution, environment),
         MacroInput::empty(),
     )
+}
+
+fn environment_root(execution: &CompilationExecution, environment: Value) -> RuntimeValueRoot {
+    RuntimeValueRoot::new(execution.macro_context().values(), environment)
 }
 
 fn request_effect(values: &CoreValueFactory, path: &[&str], arguments: Vec<Value>) -> Value {
@@ -168,10 +173,11 @@ fn macro_runner_rejects_zero_multiple_and_nonunit_results() {
 #[test]
 fn macro_runner_distinguishes_a_non_effect_value() {
     let assembler = Assembler::default();
+    let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
-        &assembler.test_compilation_execution(),
+        &execution,
         assembler.values().integer(42).clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         MacroInput::empty(),
     )
     .expect_err("ordinary data is not a source macro effect");
@@ -202,10 +208,11 @@ fn macro_failure_keeps_only_furthest_active_cases() {
         10,
         14,
     );
+    let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
-        &assembler.test_compilation_execution(),
+        &execution,
         effect.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
     .expect_err("neither parsing alternative should succeed");
@@ -404,7 +411,7 @@ fn inline_macro_readers_and_writers_are_transactional() {
     let layout_run = run_macro_effect(
         &execution,
         effect.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
     .expect("fallback reader branch should succeed");
@@ -448,10 +455,11 @@ fn layout_readers_require_scoped_anchors_and_leave_root_anchor_as_failure() {
         end: 2,
         items: vec![0..1, 1..2].into(),
     }]);
+    let execution = assembler.test_compilation_execution();
     let layout_run = run_macro_effect(
-        &assembler.test_compilation_execution(),
+        &execution,
         effect.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
     .expect("anchored child layout should be consumed completely");
@@ -610,7 +618,7 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
     let run = run_macro_effect(
         &execution,
         effect.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
     .expect("text-span reader should consume its complete run");
@@ -1060,19 +1068,21 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
         )
     };
     let (assembler, balanced) = compile_effects(".read.text \"(value)\" =>> .read.end =>> .r ()");
+    let execution = assembler.test_compilation_execution();
     run_macro_effect(
-        &assembler.test_compilation_execution(),
+        &execution,
         balanced.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input(),
     )
     .expect("balanced input delimiters should be accepted");
 
     let (assembler, unbalanced) = compile_effects(".read.text \"(\" =>> .r ()");
+    let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
-        &assembler.test_compilation_execution(),
+        &execution,
         unbalanced.clone_core_for_test(),
-        Value::Dict(Dict::new_sync()),
+        environment_root(&execution, Value::Dict(Dict::new_sync())),
         input(),
     )
     .expect_err("a successful branch may not leave its input delimiter open");

@@ -142,8 +142,9 @@ of the feature alone is not closure.
 
 GCI11R-002A completed the first exact failure matrix and enriched collector
 lookup failures with their immediate traced predecessor without adding
-successful-mark state. The results confirm a poll-spanning lazy owner gap and
-a closed compiler-evaluation result gap; GCI11R-002B is next.
+successful-mark state. GCI11R-002B and C have since closed the confirmed
+poll-spanning evaluator-owner gap and closed compiler-evaluation result gap;
+the production root sweep in GCI11R-002D is next.
 
 At the reviewed baseline, `Heap::enable_collection_before_outer_entry` was a
 sound heap-local deterministic hook, and focused collector/runtime tests proved
