@@ -941,7 +941,7 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(test)]
-    pub(crate) fn cache_builder_scheduler_snapshot(&self) -> (u64, usize, usize) {
+    pub(crate) fn scheduler_inventory_for_test(&self) -> (u64, usize, usize) {
         let state = self
             .state
             .lock()

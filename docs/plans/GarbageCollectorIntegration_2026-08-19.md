@@ -6445,6 +6445,18 @@ lease epoch, and leaves recursive entry alone. Both collector and production
 runtime fixtures prove one outer entry adds exactly one pass while immutable
 policy remains `NoAuto`.
 
+I11C.2 completed 2026-09-11. A second real-worker fixture pauses a task in
+host work outside managed access while the production heap finalizes one
+unrooted `ManagedValueNode`. That shell contains an opaque value represented
+only by its passive `ExternalOwnerHandle`: collection retires the shell but
+does not run the active opaque payload destructor. Exact before/after checks
+preserve the diagnostic counts, runtime observation epoch, coordinator work
+generation, demand-session count, work-record count, and `Busy` disposition;
+the logger ingress still contains exactly its original diagnostic and no
+collector-created event. Assigned-run pressure does not grow and no finalizer
+obligation remains. Only the subsequent explicit external-owner drain drops
+the opaque payload, preserving the production ownership boundary.
+
 ### Phase I11D — Gate G3 Certification
 
 - (Post-I11 review should run first)

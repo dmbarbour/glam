@@ -70,6 +70,29 @@ struct PausedManagedWorker {
     release: mpsc::Receiver<()>,
 }
 
+struct PausedHostWorker {
+    entered: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+}
+
+impl EvaluationTaskMachine for PausedHostWorker {
+    fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        self.entered
+            .take()
+            .expect("host worker fixture should run once")
+            .send(())
+            .expect("host-worker observer should remain live");
+        self.release
+            .recv()
+            .expect("host-worker release should remain live");
+        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
+    }
+}
+
 impl EvaluationTaskMachine for PausedManagedWorker {
     fn poll(
         &mut self,
@@ -468,6 +491,125 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         during.epoch() + 1,
         "worker completion must not lose work or trigger an unrequested collection"
     );
+}
+
+#[test]
+fn passive_finalization_produces_no_runtime_work() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let bus = DiagnosticBus::for_runtime(&runtime);
+    let (_ingress, diagnostic_reader) = bus
+        .diagnostic_ingress(&runtime)
+        .expect("diagnostic ingress should attach");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .diagnostic_bus(bus.clone())
+        .build()
+        .expect("assembler should build");
+    let logger = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .diagnostic_bus(bus.clone())
+        .build()
+        .expect("same-runtime logger service should build");
+    let core_values = assembler.core_values();
+
+    bus.publish_local(Diagnostic::new(
+        &runtime.values(),
+        Severity::Info,
+        "preserved across passive finalization",
+    ));
+    runtime
+        .collect_managed_for_maintenance()
+        .expect("live logger state should survive a baseline collection");
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let passive_shell = public_value(
+        &core_values,
+        CoreValue::Opaque(OpaqueValue::new(
+            &core_values,
+            Arc::new(OpaqueRetentionProbe(Arc::clone(&drops))),
+        )),
+    );
+    drop(passive_shell);
+
+    let context = assembler.eval_context();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = context
+        .schedule_task(|_| {
+            Ok(Box::new(PausedHostWorker {
+                entered: Some(entered_tx),
+                release: release_rx,
+            }))
+        })
+        .expect("host worker fixture should schedule");
+    entered_rx
+        .recv()
+        .expect("worker should pause outside managed access");
+
+    let diagnostic_counts = bus.counts();
+    let (observation_epoch, _, _) = runtime.transaction_snapshot();
+    let scheduler = runtime.state.work.scheduler_inventory_for_test();
+    let managed_before = core_values.managed_statistics();
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
+
+    let report = runtime
+        .collect_managed_for_maintenance()
+        .expect("passive shell finalization should complete beside host work");
+
+    assert_eq!(report.finalized_slots(), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(bus.counts(), diagnostic_counts);
+    assert_eq!(runtime.transaction_snapshot().0, observation_epoch);
+    assert_eq!(
+        runtime.state.work.scheduler_inventory_for_test(),
+        scheduler,
+        "passive managed destruction must not publish or retire scheduler work"
+    );
+    let managed_after = core_values.managed_statistics();
+    assert!(managed_after.assigned_runs() <= managed_before.assigned_runs());
+    assert_eq!(managed_after.pending_finalizers(), 0);
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
+
+    assert_eq!(
+        core_values.drain_external_owners_for_test(),
+        1,
+        "active opaque payload retirement remains an explicit external-registry operation"
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+    let (_, store, events) = runtime.transaction_snapshot();
+    let mut events = RuntimeEventJournal::new(events);
+    let transported = events
+        .read(&diagnostic_reader)
+        .expect("logger-facing ingress should remain readable")
+        .expect("the diagnostic should remain queued");
+    assert!(
+        events
+            .read(&diagnostic_reader)
+            .expect("the diagnostic FIFO should remain readable")
+            .is_none(),
+        "collection must not inject another logger event"
+    );
+    assert_eq!(
+        runtime.try_commit_transaction(&StoreJournal::new(store), &events),
+        StoreCommitResult::Committed
+    );
+    let transported = Diagnostic::from_transport_value(&logger.values(), &transported)
+        .expect("logger service should decode the retained diagnostic");
+    assert_eq!(
+        transported.message(),
+        "preserved across passive finalization"
+    );
+
+    release_tx
+        .send(())
+        .expect("host worker should be releasable");
+    runtime.pump_until_stable();
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
 }
 
 #[test]

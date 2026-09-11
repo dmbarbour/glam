@@ -2223,7 +2223,7 @@ fn built_module_retains_its_published_value_after_construction_scope_exits() {
 #[test]
 fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let before = runtime.state.work.cache_builder_scheduler_snapshot();
+    let before = runtime.state.work.scheduler_inventory_for_test();
     let values = runtime.state.shared_resources.values.core();
 
     crate::g_syntax::initialize_cached_compiler_values(values);
@@ -2231,7 +2231,7 @@ fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
 
     assert!(matches!(formatter, CoreValue::Function(_)));
     assert_eq!(
-        runtime.state.work.cache_builder_scheduler_snapshot(),
+        runtime.state.work.scheduler_inventory_for_test(),
         before,
         "closed cache construction must not alter runtime work generation, demand registrations, or work records"
     );
