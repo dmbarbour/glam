@@ -467,9 +467,9 @@ Preserve the following ownership distinction explicitly:
   managed edges;
 - every API which constructs, projects, inspects, clones, or transfers a
   `core::Value` must itself carry matching `RuntimeValueAccess` (directly or
-  through `EvaluationValueAccess`) and must not return that raw value beyond
-  the access lifetime unless the same operation installs it into durable
-  traced ownership;
+  through `EvaluationValueAccess`); it may accept and return raw values while
+  producer and consumer remain in that same access region, but must install a
+  raw result into durable traced ownership before it crosses the region;
 - `EvalContext` orchestrates work across polls, waits, worker handoff, and
   reflection or host boundaries, and therefore must not retain an active
   `RuntimeValueAccess`; and
@@ -486,9 +486,10 @@ orchestration entry. Inventory callers of the raw
 2. preserve the `ClientDemandResult::Complete(RuntimeValueRoot)` directly when
    the result becomes a public value, cache entry, or another rooted owner,
    rather than projecting and re-rooting it;
-3. require a matching access for every raw input, output, or handoff; a
-   handoff may consume `RuntimeValueAccess` authority to install the value into
-   its real traced owner before returning only the durable handle; and
+3. require a matching access for every raw input, output, or handoff; permit a
+   handoff to return a raw value to a caller which still holds that access, or
+   install the value into its real traced owner before returning across the
+   access boundary; and
 4. remove, rename, or sharply narrow the raw compatibility facade so its
    ownership transfer and allocation cost cannot be mistaken for the normal
    path.
@@ -500,12 +501,22 @@ such evaluation neither registers a replacement input root nor wraps the
 completed client-demand root a second time. Root cloning is allowed: it shares
 the existing `RootCell` and does not add a collector registration.
 
-`RuntimeValueAccess` is appropriate for the *handoff* but must not remain live
-through the complete synchronous-looking WHNF driver. The driver may suspend
-or invoke integration, so an initial raw value must be installed into durable
-ownership while the initiating access remains active; that access then closes
-before orchestration begins. Today `ClientDemandOperation` obtains durable
-ownership through a `RuntimeValueRoot`.
+`RuntimeValueAccess` is appropriate for either side of a regional *handoff*.
+An ordinary callback-free helper may return raw values when its caller remains
+inside the same region and will inspect, install, or root them before releasing
+the access. The current unbranded `core::Value` type does not encode that
+lifetime, so the access-bearing API shape and source inventory must enforce the
+contract for now.
+
+The access must not remain live through the complete synchronous-looking WHNF
+driver. The driver may suspend or invoke integration, so an initial raw value
+must be installed into durable ownership while the initiating access remains
+active; that access then closes before orchestration begins. Today
+`ClientDemandOperation` obtains durable ownership through a
+`RuntimeValueRoot`. On completion, an orchestration API may either return that
+durable root or open a fresh bounded access and expose the projected raw result
+only to an access-scoped consumer. It must not return the projection after that
+fresh region has closed.
 
 Eliminating even this one per-demand root later requires moving client-demand
 state into a collector-traced owner, such as a managed machine state or the
@@ -520,8 +531,9 @@ without a mutator.
 
 That performance transition is not a condition for closing the
 aggressive-verification defect. This checkpoint must nevertheless leave the
-handoff seam explicit, prohibit unaccompanied raw-value APIs, and never hold a
-mutator across orchestration.
+handoff seam explicit, permit raw returns only within matching access
+authority, prohibit unaccompanied raw-value APIs, and never hold a mutator
+across orchestration.
 
 #### GCI11R-002D.2 — Remaining Production Owners
 
