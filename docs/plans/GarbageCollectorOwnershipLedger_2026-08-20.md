@@ -141,9 +141,11 @@ with exact per-edit deltas.
 | --- | --- | --- |
 | Production managed core value node; `ManagedValueNode`; `src/core/managed/value_node.rs` | Wildcard-free dispatch covers all thirteen `Value` variants. It recursively crosses passive compatibility aggregates and reports exact managed lazy, promise, and core-net identity edges. Current x86-64 layout is 64/8; requested extent is 64 bytes and allocator discovery is exercised by rooted survival and unrooted reclamation. The layout is compile-time latched on that target. | Passive drop under I4.0: the node has no direct `Drop`; its compatibility `Value` payload was admitted by the I4F.2b closure gate after callbacks, reflection reservations, and opaque retirement moved to external owners. Cloned public/runtime handles share one registered root cell, and neither inline nor managed roots retain the value domain. I6-I8 replace or audit its remaining compatibility steps. |
 
-The opaque arm above is variant-dispatch evidence only. It does not classify
-`OpaqueValue` as an edge-free production leaf or weaken the I4B/Gate G2 opaque
-blockers.
+The opaque dispatch arm reports no managed edge because `OpaqueValue` stores
+only a passive external-owner handle and lease. That does not classify every
+external payload as edge-free: I10B.0 distinguishes edge-free provenance/token
+families from effect-token and task-handle lifecycle capabilities whose rooted
+state remains outside the managed graph.
 
 ## `core::Value` Variant Ledger
 
@@ -161,7 +163,7 @@ blockers.
 | `Lazy` | `LazyValue` facade containing a `ManagedLazyEdge`; `ManagedLazyCell` owns source and terminal result graphs. | Identity-bearing, thread-safe, and traced from registered roots or enclosing managed values; source/result publication races are supported. | I5D installed the exact managed-cell visitor. GCI5R-002C defines the owner-qualified transition, and GCI5R-003E makes `ManagedLazyRoot` its external publication authority: leaving source, adding terminal result, with terminal publication still preceding source release. |
 | `Promised` | `PromisedValue` facade containing a `ManagedPromiseEdge`; `ManagedPromiseCell` owns an ordinary traced successful assignment plus an immutable root-free producer route. | Identity-bearing, thread-safe, and traced from registered roots or enclosing managed values; assignment and producer publication are one-write. | I5D installed the exact managed-cell visitor. GCI5R-002C defines the owner-qualified empty-to-assignment transition, and GCI5R-003E makes `ManagedPromiseRoot` its external publication authority; a losing publisher may conservatively expose its proposed addition without changing the winner. I5E made resolver retirement idempotent and releases each external producer root through a post-publication handoff after locks, mutation admission, and wake delivery. |
 | `Metadata` | `MetadataCarrier.metadata: Arc<Value>`. | Immutable identity-bearing sealed value, thread-safe. | I6B retained the one-edge shell: internal pointer identity is preserved, updates/inspection introduce no external owner, and closed cycles reclaim exactly. |
-| `Opaque` | `Arc<dyn Any + Send + Sync>`; payload-dependent. | Pointer-identity shell; arbitrary longevity/thread transfer. | I10B.0 is a hard review gate. Until it selects otherwise, opaque storage remains external: arbitrary `Any` is edge-free or owns audited same-runtime public roots. A possible managed arm must be a separate sealed exact representation outside `Any`, with one stable family record per admitted type. No managed opaque allocation or scoped managed downcast is authorized before the review. |
+| `Opaque` | `OpaqueValue::handle` is a passive `ExternalOwnerHandle`; the admitted `Arc<T>` lives in the runtime external-owner registry behind `Any`. | Shared-lease owner identity; arbitrary external longevity/thread transfer; matching-runtime owning downcast. | I10B.0 selected external-only storage. Compilation origins and construction ports are edge-free; effect tokens and task handles are reviewed external lifecycle capabilities. No managed opaque arm or scoped managed downcast is authorized. External task/query state may conservatively retain rooted terminal data until retirement/runtime teardown, but cannot cause premature collection. |
 
 ## Recursive Core Nodes
 
@@ -270,7 +272,7 @@ inventory.
 | `ConstructionPort` (`eval/builtins/net/construction.rs`) | Brand and port ID only. | Approved leaf token. |
 | `TaskHandleCell` (`reflection/requests.rs`) | Runtime ID, task handle, query handle; no raw core value. Handles reach coordinator/store obligations, not a managed pointer. | Approved external capability; re-audit in I9. |
 | `CompilationOrigin` (`diagnostic.rs`) | Stores non-value `CompilationTrace`; constructs its diagnostic value on inspected access. | Approved edge-free provenance payload under I4B. |
-| `OpaqueValue::new<T: OpaquePayloadFamily>` | Only the four source-latched production families can cross type erasure. Current payloads contain no direct `Gc`, raw `Value`, or `RuntimeValueRoot`. | I4B private unsafe admission plus mandatory family record. Root-bearing payloads are currently rejected. I10B.0 decides whether the bootstrap remains external-only or adds a distinct sealed managed arm; active external families retain idempotent retirement/RAII review under I9F/I10. |
+| `OpaqueValue::new<T: OpaquePayloadFamily>` | Only the four source-latched production families can cross type erasure. Current payloads contain no direct `Gc`, raw `Value`, or `RuntimeValueRoot`. | I4B private unsafe admission plus mandatory family record. I10B.0 selected external-only storage: root-bearing payloads remain rejected, owning access requires the matching runtime, and active external families retain idempotent retirement/RAII review under I9F/I10. |
 
 An opaque value may not contain `Gc<T>`, an unrooted recursive core value, or a
 root belonging to another runtime. The collector will not inspect `Any` or a
@@ -396,10 +398,10 @@ receiving a guessing/conservative classification:
    evidence. GCI5R-002 supplied owner-qualified lazy, promise, and core-net
    transition gateways; I8 completed the post-cutover net audit, exact-delta
    conversion, cycle matrix, and net-specific compatibility retirement.
-3. Public opaque construction needs the I10B.0 representation decision and a
-   closed leaf/root registration boundary. If that review selects a managed
-   arm, every admitted concrete family also needs its own exact stable ledger
-   record, scoped-access proof, and I4.0 destruction admission before Gate G2.
+3. I10B.0 selected external-only opaque storage. I10B/I10C must close the four-
+   family constructor/downcast inventory, edge-free proofs, external lifecycle
+   records, matching-runtime owning access, and conservative-retention tests
+   before Gate G2. No managed opaque family or scoped managed downcast remains.
 
 As each M family receives its managed representation, append the stable
 reconciliation record defined above. In particular, record its Rust

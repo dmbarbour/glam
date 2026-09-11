@@ -226,6 +226,108 @@ const EXTERNAL_CALLBACK_INVENTORY: &[ExternalCallbackEntry] = &[
     },
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpaqueBootstrapDisposition {
+    ExternalEdgeFree,
+    ExternalCapability,
+}
+
+struct OpaqueFamilyReviewEntry {
+    family: &'static str,
+    path: &'static str,
+    admission: &'static str,
+    constructor: &'static str,
+    downcast: &'static str,
+    disposition: OpaqueBootstrapDisposition,
+    retention: &'static str,
+}
+
+/// I10B.0's complete production opaque-family surface. Each family has one
+/// admitted representation, one production wrapper site, and one typed reader.
+const OPAQUE_FAMILY_REVIEW: &[OpaqueFamilyReviewEntry] = &[
+    OpaqueFamilyReviewEntry {
+        family: "CompilationOrigin",
+        path: "src/diagnostic.rs",
+        admission: "OpaquePayloadFamily for CompilationOrigin",
+        constructor: "OpaqueValue::new(",
+        downcast: ".downcast::<CompilationOrigin>",
+        disposition: OpaqueBootstrapDisposition::ExternalEdgeFree,
+        retention: "immutable source provenance only",
+    },
+    OpaqueFamilyReviewEntry {
+        family: "ConstructionPort",
+        path: "src/eval/builtins/net/construction.rs",
+        admission: "OpaquePayloadFamily for ConstructionPort",
+        constructor: "OpaqueValue::new(",
+        downcast: ".downcast::<ConstructionPort>",
+        disposition: OpaqueBootstrapDisposition::ExternalEdgeFree,
+        retention: "construction-local brand and scalar port identity only",
+    },
+    OpaqueFamilyReviewEntry {
+        family: "EffectToken<T>",
+        path: "src/api/value.rs",
+        admission: "OpaquePayloadFamily for EffectToken<T>",
+        constructor: "OpaqueValue::new(",
+        downcast: ".downcast::<EffectToken<T>>",
+        disposition: OpaqueBootstrapDisposition::ExternalCapability,
+        retention: "weak token-domain route; generic payload remains in external domain state",
+    },
+    OpaqueFamilyReviewEntry {
+        family: "TaskHandleCell",
+        path: "src/reflection/requests.rs",
+        admission: "OpaquePayloadFamily for TaskHandleCell",
+        constructor: "OpaqueValue::new(",
+        downcast: ".downcast::<TaskHandleCell>",
+        disposition: OpaqueBootstrapDisposition::ExternalCapability,
+        retention: "external task/query lifecycle may retain rooted terminal data",
+    },
+];
+
+struct RuntimeCacheReviewEntry {
+    family: &'static str,
+    path: &'static str,
+    admission: &'static str,
+}
+
+const RUNTIME_CACHE_REVIEW: &[RuntimeCacheReviewEntry] = &[
+    RuntimeCacheReviewEntry {
+        family: "GCompilerValues",
+        path: "src/g_syntax/compiler_values.rs",
+        admission: "RuntimeCacheFamily for GCompilerValues",
+    },
+    RuntimeCacheReviewEntry {
+        family: "CachedDiagnosticFormatter",
+        path: "src/g_syntax/diagnostic_formatter.rs",
+        admission: "RuntimeCacheFamily for CachedDiagnosticFormatter",
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypeErasureCounts {
+    erased_any: usize,
+    borrowed_panic_any: usize,
+}
+
+impl TypeErasureCounts {
+    const fn new(erased_any: usize, borrowed_panic_any: usize) -> Self {
+        Self {
+            erased_any,
+            borrowed_panic_any,
+        }
+    }
+
+    fn in_source(source: &str) -> Self {
+        Self::new(
+            source.matches("dyn Any").count() + source.matches("dyn std::any::Any").count(),
+            source.matches("dyn std::any::Any + Send").count(),
+        )
+    }
+
+    fn is_empty(self) -> bool {
+        self == Self::new(0, 0)
+    }
+}
+
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
@@ -377,6 +479,145 @@ fn external_callback_constructors_require_capture_classification() {
         mismatch.is_err(),
         "a host-call constructor must reject capture state which contradicts its record"
     );
+}
+
+#[test]
+fn opaque_representation_review_inventory_is_complete() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut dispositions = BTreeMap::new();
+    for entry in OPAQUE_FAMILY_REVIEW {
+        assert!(!entry.family.is_empty(), "opaque family must be named");
+        assert!(
+            !entry.retention.is_empty(),
+            "{} needs an explicit retention decision",
+            entry.family
+        );
+        let source = fs::read_to_string(manifest.join(entry.path))
+            .expect("reviewed opaque-family source should be readable");
+        let source = production_prefix(&source);
+        for (kind, needle) in [
+            ("admission", entry.admission),
+            ("constructor", entry.constructor),
+            ("downcast", entry.downcast),
+        ] {
+            assert_eq!(
+                source.matches(needle).count(),
+                1,
+                "opaque family {} has source drift at its {kind}: {needle:?}",
+                entry.family
+            );
+        }
+        assert!(
+            dispositions
+                .insert(entry.family, entry.disposition)
+                .is_none(),
+            "opaque family {} is reviewed more than once",
+            entry.family
+        );
+    }
+    assert_eq!(
+        dispositions
+            .values()
+            .filter(|disposition| **disposition == OpaqueBootstrapDisposition::ExternalEdgeFree)
+            .count(),
+        2
+    );
+    assert_eq!(
+        dispositions
+            .values()
+            .filter(|disposition| **disposition == OpaqueBootstrapDisposition::ExternalCapability)
+            .count(),
+        2
+    );
+
+    for entry in RUNTIME_CACHE_REVIEW {
+        assert!(
+            !entry.family.is_empty(),
+            "runtime cache family must be named"
+        );
+        let source = fs::read_to_string(manifest.join(entry.path))
+            .expect("reviewed runtime-cache source should be readable");
+        assert_eq!(
+            production_prefix(&source).matches(entry.admission).count(),
+            1,
+            "runtime cache family {} drifted from the I10B.0 type-erasure review",
+            entry.family
+        );
+    }
+}
+
+#[test]
+fn opaque_type_erasure_inventory_is_reconciled() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+    let actual = sources
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(manifest)
+                .expect("source path should be below the manifest");
+            if !is_production_inventory_source(relative) {
+                return None;
+            }
+            let source = fs::read_to_string(&path).expect("Rust source should be readable");
+            let counts = TypeErasureCounts::in_source(production_prefix(&source));
+            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected = [
+        (
+            PathBuf::from("src/api/runtime/events.rs"),
+            TypeErasureCounts::new(1, 1),
+        ),
+        (
+            PathBuf::from("src/core/managed/external_owners.rs"),
+            TypeErasureCounts::new(1, 0),
+        ),
+        (
+            PathBuf::from("src/core/runtime_cache.rs"),
+            TypeErasureCounts::new(1, 0),
+        ),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual, expected,
+        "an owned or borrowed type-erasure boundary changed without I10B.0 review"
+    );
+}
+
+#[test]
+fn opaque_representation_plan_has_no_undecided_family() {
+    let review =
+        include_str!("../../../docs/reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md");
+    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
+    assert!(
+        review.contains("Phase I10B.0 selects **external-only opaque storage** for the\nbootstrap")
+    );
+    assert!(
+        plan.contains("I10B implements the selected external-only policy. Arbitrary host `Any`")
+    );
+    assert!(!plan.contains("This phase is deliberately not implementation-ready until I10B.0"));
+    assert_eq!(OPAQUE_FAMILY_REVIEW.len(), 4);
+}
+
+#[test]
+fn opaque_representation_plan_links_are_consistent() {
+    let review =
+        include_str!("../../../docs/reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md");
+    let integration = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
+    let ledger = include_str!("../../../docs/plans/GarbageCollectorOwnershipLedger_2026-08-20.md");
+    let roadmap = include_str!("../../../docs/plans/GarbageCollectionRoadmap_2026-08-19.md");
+
+    assert!(review.contains("No managed opaque arm"));
+    assert!(integration.contains(
+        "[`GarbageCollectorOpaqueRepresentation_2026-09-11.md`](../reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md)"
+    ));
+    assert!(integration.contains("Require I10B.0's external-only four-family mapping"));
+    assert!(integration.contains("Every opaque value satisfies I10B.0's external-only policy"));
+    assert!(ledger.contains("I10B.0 selected external-only storage"));
+    assert!(roadmap.contains("Opaque values are external handles, never managed storage"));
 }
 
 fn return_second_capture(

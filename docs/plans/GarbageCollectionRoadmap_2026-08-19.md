@@ -224,23 +224,20 @@ permit dereference outside a region.
    or concurrent marker may extend the gateway according to its own relocation
    or Dijkstra/SATB-style invariant. Ordinary pointer reads and copies remain
    barrier-free in the initial collector.
-10. **Opaque values contain roots, never bare managed pointers.** Type-erased
-    host data is not inspected by the collector. Construction must therefore
-    ensure an opaque payload contains either no managed value edge or only an
-    ordinary runtime/public root from the same value domain. It must not
-    contain `Gc<T>`, an unrooted recursive `core::Value`, a foreign-runtime
-    root, or another internal pointer which could escape a mutator region.
-    Same-runtime roots retained inside an opaque payload appear independently
-    in the heap root registry; a backedge through one may conservatively leak,
-    but can never be reclaimed prematurely. Cross-runtime host associations
-    stay outside the value payload and communicate through validated Rust-layer
-    data/effect boundaries. Integration phase I10B.0 reviews whether the
-    bootstrap remains wholly external or also admits a separate sealed,
-    statically registered managed arm. Such an arm, if selected, is an exact
-    managed representation outside arbitrary `Any`; it does not weaken this
-    type-erased-payload rule. No managed opaque arm or Gate G2 certification is
-    authorized before that review rewrites the integration plan, ledger, and
-    completion criteria.
+10. **Opaque values are external handles, never managed storage.** I10B.0
+    selected external-only opaque storage for the bootstrap. Type-erased host
+    data is not inspected by the collector. The private admitted payload is
+    either edge-free or a reviewed external lifecycle capability; it must not
+    contain `Gc<T>`, an unrooted recursive `core::Value`, `RuntimeValueRoot`, a
+    foreign-runtime root, or another internal pointer which could escape a
+    mutator region. A managed value stores only a passive runtime-local handle
+    and lease into the external-owner registry. External task/domain state may
+    separately own registered public roots, so a backedge through such state
+    may be conservatively retained but cannot be reclaimed prematurely.
+    Cross-runtime host associations stay outside the payload and communicate
+    through validated Rust-layer data/effect boundaries. A future sealed
+    managed arm requires a new design review and exact representation outside
+    arbitrary `Any`; it is not an extension of this admission rule.
 11. **Failed collection attempts are recoverable until reclamation commits.**
     Marking and tracing reclaim nothing: an unwind guard abandons the partial
     worklist/epoch, restores the heap phase, and permits a later collection to

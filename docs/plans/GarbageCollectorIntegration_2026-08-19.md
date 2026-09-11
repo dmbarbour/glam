@@ -252,7 +252,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I9 | complete | runtime-root lifecycle and retirement audits; post-I9 review passed |
 | I10 | pending | deferred closures and opaque boundaries |
 | I10A | complete | traceable deferred host-call captures and reconciled external callback boundaries |
-| I10B.0 | pending | opaque representation decision review gate |
+| I10B.0 | complete | selected external-only opaque storage for the bootstrap |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -419,13 +419,13 @@ containing a core or public `Value`, every `Arc<dyn Fn...>` which can capture a
 value, every `OpaqueValue` payload family owned by Glam, and every interaction-
 net specialization carrying core data.
 
-Until I10B.0 selects the bootstrap opaque representation, each arbitrary
-type-erased payload family records either `no managed edge` or the exact
-same-runtime public root wrapper it may retain. Discovering a bare `Gc<T>`,
-unrooted recursive `core::Value`, foreign-runtime root, or equivalent internal
-managed pointer in `Any` remains a boundary defect under either outcome. A
-possible sealed managed arm is a separate statically registered representation
-outside arbitrary `Any`, never a relaxation of this rule.
+I10B.0 selected external-only opaque storage. Each admitted type-erased payload
+family records either `no managed edge` or an external lifecycle capability;
+any registered public roots live in that capability's external state, never in
+the opaque payload itself. Discovering a bare `Gc<T>`, unrooted recursive
+`core::Value`, `RuntimeValueRoot`, foreign-runtime root, or equivalent internal
+managed pointer in `Any` remains a boundary defect. No sealed managed arm is
+authorized by this plan.
 
 I0 can begin before collector class discovery exists. Record Rust type/layout,
 stable representation family, and projected trace/drop policy. When a concrete
@@ -5991,6 +5991,17 @@ Only isolated closure fixtures may collect; production remains `NoAuto`.
 
 ### Phase I10B.0 — Opaque Representation Decision Review
 
+Completed 2026-09-11. The dated
+[`GarbageCollectorOpaqueRepresentation_2026-09-11.md`](../reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md)
+review selects **external-only opaque storage**. The two edge-free production
+families need no managed trace; the effect-token and task-handle families are
+external lifecycle capabilities whose active retirement is incompatible with
+ordinary managed finalization. No current payload requires a collector-visible
+edge. The accepted cost is conservative retention through explicit external
+capabilities, including a pathological task-result-to-own-handle cycle until
+runtime teardown. No sealed managed arm, scoped managed downcast, or managed
+opaque allocator is authorized.
+
 This is a hard design gate, not an implementation checkpoint. It begins only
 after I4B's constructor restrictions, I4F.1's durable-owner inventory, I9F's
 external active-RAII inventory, and I10A's deferred-closure containment have
@@ -6052,71 +6063,117 @@ family and call site to the selected policy;
 deferred classification; and a plan-link check proves the decision artifact,
 ledger, I10B/I10C, Gate G2, and completion criteria agree.
 
-No I10B implementation, managed opaque allocation, scoped managed downcast,
-opaque-family collection fixture, or Gate G2 certification may begin while
-I10B.0 is pending. The current arbitrary-`Any` prohibition remains
-authoritative throughout the review.
+The completed gate authorizes the external-only I10B checkpoints below. It
+does not authorize managed opaque allocation, scoped managed downcast, or an
+opaque managed-family collection fixture. The arbitrary-`Any` prohibition is
+now the selected bootstrap policy and remains authoritative through Gate G2.
 
 ### Phase I10B — Decision-Selected Opaque Registration and Provenance
 
-This phase is deliberately not implementation-ready until I10B.0 rewrites it
-into the concrete checkpoints selected by the dated review. The selected plan
-must preserve these common invariants:
+I10B implements the selected external-only policy. Arbitrary host `Any`
+remains a tracing barrier. Every admitted family is either an edge-free token
+or a genuinely external lifecycle owner; no family is collector-managed.
+Opaque construction stays private, collector pointers and unrooted values are
+forbidden, and generic host payloads remain in host-owned side tables rather
+than behind the token.
 
-- Keep arbitrary host `Any` payloads as tracing barriers. Each such family is
-  registered as an edge-free token/companion or a genuinely external owner of
-  same-runtime public roots. A selected sealed managed arm is a distinct exact
-  representation, not data hidden inside `Any`.
-- Forbid bare `Gc<T>`, unrooted recursive core values, foreign roots, and
-  equivalent region escapes. Keep opaque construction private and do not
-  re-export collector pointers.
-- Prefer host-owned side tables for generic embedding payloads; the Glam token
-  carries only identity/provenance.
+#### Phase I10B.1 — Family, Constructor, and Downcast Inventory
 
-Verification: `opaque_family_inventory_is_reconciled`,
+- Make the review's four-family table source-authoritative: one admission,
+  production constructor family, and typed downcast per family.
+- Separately latch `ExternalOwnerRegistry`, `RuntimeValueCache`, and borrowed
+  panic-payload inspection so a new `Any` owner cannot masquerade as an opaque
+  family.
+- Record every family's edge-free or external-capability disposition with no
+  undecided/default arm.
+
+Verification: `opaque_family_inventory_is_reconciled` and
+`opaque_type_erasure_inventory_is_reconciled`.
+
+#### Phase I10B.2 — Edge-Free Provenance and Construction Tokens
+
+- Compile-exhaustively inspect `CompilationOrigin` and `ConstructionPort`
+  fields and prove they contain no runtime service, root, raw `Value`, managed
+  pointer, or active destructor.
+- Preserve source-trace reconstruction, construction-brand comparison, and
+  same-runtime/family rejection through the existing owning downcast.
+
+Verification: `opaque_edge_free_families_have_no_runtime_or_managed_edge`,
+`opaque_compilation_origin_round_trips_only_through_its_reflection_cap`, and
+`construction_ports_are_scoped_to_one_invocation`.
+
+#### Phase I10B.3 — External Effect-Token and Task-Handle Capabilities
+
+- Compile-exhaustively inspect `EffectToken<T>` and `TaskHandleCell`. The token
+  retains only a weak domain route; the task handle's task/query state remains
+  explicitly external and may retain rooted terminal data.
+- Preserve effect-domain and task/query retirement as active external
+  lifecycle behavior. Neither payload may enter managed finalization.
+- Add a focused fixture which makes the task-handle conservative-retention
+  boundary observable without claiming that collection can break it.
+
+Verification: `opaque_external_capabilities_retain_only_reviewed_routes`,
+`effect_token_domain_retirement_is_external`, and
+`task_handle_root_backedge_is_conservatively_external`.
+
+#### Phase I10B.4 — Access, Identity, and Negative Boundary Closure
+
+- Preserve matching-runtime typed downcast to an owning `Arc<T>` and shared-
+  lease opaque identity. No mutator-bound opaque access is introduced.
+- Re-run compile-time rejection of bare `Gc<T>`, unrooted recursive `Value`,
+  and `RuntimeValueRoot`; retain runtime rejection of another runtime/family.
+- Close the source inventory and update the stable ownership ledger.
+
+Verification: `opaque_downcast_requires_matching_runtime_and_preserves_owner_identity`,
 `opaque_registration_rejects_bare_managed_pointer`,
 `opaque_registration_rejects_unrooted_core_value`, and
-`opaque_registration_rejects_foreign_root`. Production remains `NoAuto`; no
-new destructor authority is selected here. Every admitted managed family is
-already subject to I4.0 before its first collection; external owners retain the
-active-RAII contract audited by I9F.
+`opaque_registration_rejects_foreign_root`. Production remains `NoAuto`.
 
 ### Phase I10C — Final Opaque Destruction and External-Lifecycle Audit
 
-- Re-audit every opaque/closure representation against I4.0's already-active
-  managed destruction rule. The collector-held mutator during `Finalizing` is
-  collector coordination state; it is neither passed to destructors nor
-  exposed through an ambient/TLS accessor. Managed direct and transitive
-  destruction releases only ordinary Rust resources and performs no runtime
-  work or `Gc` observation.
-- Reconcile opaque external/rooted lifecycle owners with I9F. Such an owner
-  performs an explicit, idempotent retirement operation while the runtime is
-  live; where scope-exit semantics require it, its ordinary Rust `Drop` may
-  call that same operation as an active fallback. It is never reachable from a
-  managed allocation and is not a managed finalizer. Not every rooted runtime
-  element needs a managed representation.
-- If I10B.0 selects a managed arm, replace owning access to that arm with a
-  scoped mutator-bound borrow for live access only. External-only payloads and
-  companions retain the access model selected by the review, may retain
-  ordinary Rust ownership and public roots, and are not finalized as managed
-  graph nodes.
-- Treat any future production managed destructor that appears to need runtime
-  or heap authority as a new design-review gate. Do not introduce a weak-domain
-  capability or TLS bridge as a local exception.
+#### Phase I10C.1 — Passive Opaque Handle Destruction
 
-Verification: rerun `managed_drop_has_no_runtime_or_heap_capability`,
-`managed_drop_releases_transitive_rust_resources_passively`,
-`external_root_owner_drop_invokes_idempotent_retire`,
-`managed_graph_reaches_no_active_raii_owner`,
-`managed_drop_during_domain_teardown_is_passive`, and
-`opaque_drop_panic_retries_untouched_suffix`. Use isolated managed-payload and
-external-owner fixtures; production remains `NoAuto`.
+- Prove managed `Value::Opaque` destruction releases only its passive
+  `ExternalOwnerHandle` lease. It does not downcast, retire the external owner,
+  invoke runtime work, or gain a heap/runtime capability.
+- Preserve detach-under-lock and destroy-after-unlock as the only registry
+  retirement path.
+
+Verification: `managed_drop_has_no_runtime_or_heap_capability`,
+`managed_graph_reaches_no_active_raii_owner`, and
+`opaque_payload_requires_matching_runtime_and_retires_during_registry_drain`.
+
+#### Phase I10C.2 — External Capability Retirement
+
+- Reconcile `EffectToken<T>` and `TaskHandleCell` with I9F's active external-
+  RAII records. Preserve idempotent/one-shot retirement, terminal semantics,
+  lock ordering, and runtime-teardown fallback.
+- Confirm edge-free provenance/construction payload drops are ordinary Rust
+  resource release and require no retirement operation.
+
+Verification: `effect_token_domain_retirement_is_external`, the existing task
+query-retirement forced-order fixtures, and
+`external_root_owner_drop_invokes_idempotent_retire`.
+
+#### Phase I10C.3 — Destruction and Retention Closure
+
+- Re-run finalization panic/retry and domain-teardown tests without introducing
+  a managed opaque payload. Document the accepted per-family conservative
+  retention and verify it cannot cause premature collection.
+- Treat any future opaque family needing a collector-visible edge or managed
+  destructor authority as a new design-review gate.
+
+Verification: `managed_drop_during_domain_teardown_is_passive`,
+`opaque_drop_panic_retries_untouched_suffix`, and
+`opaque_external_retention_never_reclaims_a_live_root`. Production remains
+`NoAuto`.
 
 ### Phase I10D — Final Closure/Opaque Containment Audit
 
 - Re-run the complete closure, `Any`, opaque-constructor, downcast, compiler
   cache, launcher, and managed-payload source inventory.
-- Match every result to a stable trace/root/leaf/finalization record. Never use
+- Match every result to the selected external edge-free/capability record or a
+  stable trace/root/leaf/finalization record. Never use
   an unsafe scan or conservative heap walk to discover hidden pointers.
 - Confirm no managed payload retains the value domain strongly and no root is
   being used to hide an internal fixpoint edge.
@@ -6133,6 +6190,9 @@ fixtures, and the focused collector finalization suite. Production remains
 - Reconcile the final source inventory one-to-one with complete stable ledger
   records for values, traces, roots, closures, opaque families, caches,
   persistent collections, nets, and runtime owners.
+- Require I10B.0's external-only four-family mapping: every opaque constructor
+  and downcast is source-latched as edge-free provenance/token state or an
+  external lifecycle capability, and no managed opaque arm exists.
 - Confirm that every managed allocation family has closed the
   [I6+ Regional Allocation Migration Rule](#i6-regional-allocation-migration-rule)
   with a private raw allocator, an exact first owner, and forced collection at
@@ -6468,12 +6528,11 @@ semantics.
 ## Integration Completion Criteria
 
 - Every production managed edge is exact or deliberately conservative.
-- Every opaque value satisfies the policy selected by I10B.0. Arbitrary `Any`
-  contains no managed edge or only ordinary same-runtime public roots. If a
-  sealed managed arm is selected, each concrete family is exact, statically
-  registered outside `Any`, passively droppable, and accessible only through
-  matching scoped runtime authority. No bare collector pointer crosses either
-  boundary.
+- Every opaque value satisfies I10B.0's external-only policy. Arbitrary `Any`
+  contains no bare managed edge or unrooted value; admitted external
+  capabilities reach rooted runtime data only through their reviewed external
+  lifecycle state. No sealed managed arm exists, and no bare collector pointer
+  crosses the boundary.
 - Public `Value` is a real runtime-local external root, remains convenient to
   clone and share, and is semantically opaque without a live matching runtime
   service.
