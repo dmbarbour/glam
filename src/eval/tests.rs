@@ -1753,7 +1753,7 @@ fn concurrent_host_calls_share_one_rooted_producer_without_parking() {
     let producer_values = values.clone();
     let producer_runs = Arc::new(AtomicUsize::new(0));
     let counted_runs = producer_runs.clone();
-    let lazy = LazyValue::host_call(&values, "contended host call", move || {
+    let lazy = LazyValue::host_call(&values, "contended host call", move |_| {
         producer_values
             .collect_managed_for_test()
             .expect("the host call must inherit no evaluator mutator");
@@ -1825,7 +1825,7 @@ fn host_call_rejects_a_foreign_runtime_root() {
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
     );
-    let lazy = LazyValue::host_call(context.values(), "foreign host result", move || {
+    let lazy = LazyValue::host_call(context.values(), "foreign host result", move |_| {
         Ok(crate::runtime::RuntimeValueRoot::new(&foreign, n(42)))
     });
 

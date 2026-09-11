@@ -251,6 +251,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I9G | complete | reconciled runtime-root source inventory |
 | I9 | complete | runtime-root lifecycle and retirement audits; post-I9 review passed |
 | I10 | pending | deferred closures and opaque boundaries |
+| I10A | complete | traceable deferred host-call captures and reconciled external callback boundaries |
 | I10B.0 | pending | opaque representation decision review gate |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
@@ -5923,6 +5924,36 @@ verification record are in
 ## Phase I10 — Deferred Closures and Opaque Boundaries
 
 ### Phase I10A — Deferred Closure Containment
+
+Completed 2026-09-11. Deferred host calls now keep recursive Glam values in an
+explicit `Arc<[Value]>` on `HostCallProducer`, where the managed lazy visitor
+traces them exactly. The opaque Rust callback receives one typed
+`HostCallRootBundle`: its declared values are rooted under a bounded access
+region, that region ends, and only then is the callback invoked. The bundle is
+one-shot at the API boundary, although an arbitrary callback may conservatively
+retain its roots. Module imports
+therefore no longer hide prior/final definition roots inside a closure, and a
+closed promise/import-style capture cycle is reclaimed by an isolated forced
+collection.
+
+The production assembler's module and binary loaders now retain a
+`DeferredAssembler` with a weak reasoning-session route. Module loaders also
+retain only a weak route to their original `CompilationExecution`; a later
+invocation recreates and drains a compilation execution when the original
+bounded build execution has ended. This removes the concrete
+`external-owner registry -> loader -> assembler/runtime` ownership cycle
+without making a built module dependent on the lifetime of one temporary
+compilation execution.
+
+`deferred_closure_constructor_inventory_is_reconciled` records the finite
+production external callback surface and distinguishes traceable deferred
+values, explicit launcher fields, bounded compiler callbacks, conservative
+embedding facades, and value-free notifications. Arbitrary embedding callback
+environments remain deliberately opaque: Rust cannot inspect them, so public
+diagnostic/event adapters and the callback portion of a host call retain their
+documented conservative external-owner policy. They may own public roots, but
+no production managed node hides its own semantic children there. Production
+remains `NoAuto`.
 
 I4B already removed production semantic closures over `EvalContext` in favor
 of function pointers plus explicit traceable captures. The remaining opaque

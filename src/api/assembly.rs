@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
 
@@ -517,8 +517,30 @@ impl ReasoningVolume {
 pub struct Assembler {
     source_system: Arc<dyn SourceSystem>,
     next_compilation_invocation: Arc<AtomicU64>,
-    pub(super) reasoning: ReasoningSession,
+    pub(super) reasoning: Arc<ReasoningSession>,
     diagnostic_attachments: Vec<DiagnosticAttachment>,
+}
+
+/// Non-owning route used by callbacks stored beneath the runtime's managed
+/// graph. Source-system and scalar-ID state are safe to retain directly; the
+/// reasoning session is weak so a deferred callback cannot retain its own
+/// value domain through the external-owner registry.
+#[derive(Clone)]
+struct DeferredAssembler {
+    source_system: Arc<dyn SourceSystem>,
+    next_compilation_invocation: Arc<AtomicU64>,
+    reasoning: Weak<ReasoningSession>,
+}
+
+impl DeferredAssembler {
+    fn upgrade(&self) -> Option<Assembler> {
+        Some(Assembler {
+            source_system: self.source_system.clone(),
+            next_compilation_invocation: self.next_compilation_invocation.clone(),
+            reasoning: self.reasoning.upgrade()?,
+            diagnostic_attachments: Vec::new(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -786,7 +808,7 @@ impl AssemblerBuilder {
         Ok(Assembler {
             source_system: self.source_system,
             next_compilation_invocation: Arc::new(AtomicU64::new(1)),
-            reasoning,
+            reasoning: Arc::new(reasoning),
             diagnostic_attachments: self.diagnostic_attachments,
         })
     }
@@ -819,6 +841,14 @@ impl Assembler {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn deferred(&self) -> DeferredAssembler {
+        DeferredAssembler {
+            source_system: self.source_system.clone(),
+            next_compilation_invocation: self.next_compilation_invocation.clone(),
+            reasoning: Arc::downgrade(&self.reasoning),
+        }
     }
 
     /// Returns this assembler's privileged reflection-inspection facade.
@@ -1099,7 +1129,7 @@ impl Assembler {
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
     ) -> Result<RuntimeValueRoot, Error> {
-        let module_loader = self.module_loader(session.clone(), execution.clone());
+        let module_loader = self.module_loader(session.clone(), &execution);
         let binary_loader = self.binary_loader();
         let module_context = CompileContext::from_module_path_with_values(
             self.core_values(),
@@ -1222,15 +1252,78 @@ impl Assembler {
     fn module_loader(
         &self,
         session: Arc<Mutex<Vec<Diagnostic>>>,
-        execution: Arc<CompilationExecution>,
+        execution: &Arc<CompilationExecution>,
     ) -> ModuleLoader {
-        let assembler = self.clone();
-        Arc::new(move |args| assembler.load_local_module(args, session.clone(), execution.clone()))
+        let assembler = self.deferred();
+        let execution = Arc::downgrade(execution);
+        Arc::new(move |args| {
+            let Some(assembler) = assembler.upgrade() else {
+                return Err(import_failure(
+                    format!(
+                        "local import `{}` cannot run after its assembler was dropped",
+                        args.request.as_str()
+                    ),
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    args.importer_source.as_deref(),
+                ));
+            };
+            let (execution, revived) = match execution.upgrade() {
+                Some(execution) => (execution, false),
+                None => (
+                    Arc::new(
+                        CompilationExecution::new(&assembler.reasoning, session.clone()).map_err(
+                            |error| {
+                                import_failure(
+                                    format!(
+                                        "local import `{}` could not create its compilation execution: {error}",
+                                        args.request.as_str()
+                                    ),
+                                    args.request.as_str(),
+                                    args.importer_trace.as_deref(),
+                                    args.importer_source.as_deref(),
+                                )
+                            },
+                        )?,
+                    ),
+                    true,
+                ),
+            };
+            let request = args.request.clone();
+            let importer_source = args.importer_source.clone();
+            let importer_trace = args.importer_trace.clone();
+            let result = assembler.load_local_module(args, session.clone(), execution.clone());
+            if revived && execution.drain() {
+                return Err(import_failure(
+                    format!(
+                        "local import `{}` encountered a macro reasoning failure",
+                        request.as_str()
+                    ),
+                    request.as_str(),
+                    importer_trace.as_deref(),
+                    importer_source.as_deref(),
+                ));
+            }
+            result
+        })
     }
 
     fn binary_loader(&self) -> BinaryFileLoader {
-        let assembler = self.clone();
-        Arc::new(move |args| assembler.load_local_binary(args))
+        let assembler = self.deferred();
+        Arc::new(move |args| {
+            let Some(assembler) = assembler.upgrade() else {
+                return Err(import_failure(
+                    format!(
+                        "binary import `{}` cannot run after its assembler was dropped",
+                        args.request.as_str()
+                    ),
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    args.importer_source.as_deref(),
+                ));
+            };
+            assembler.load_local_binary(args)
+        })
     }
 
     fn load_local_module(
@@ -1261,7 +1354,7 @@ impl Assembler {
                 Some(importer),
             )
         })?);
-        let module_loader = self.module_loader(session.clone(), execution.clone());
+        let module_loader = self.module_loader(session.clone(), &execution);
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
         let trace = match args.importer_trace {
@@ -1426,5 +1519,29 @@ impl ModuleBuilder<'_> {
     pub fn build(self) -> Result<BuiltModule, Error> {
         self.assembler
             .build_module(self.module_path, self.inputs, self.initial_definitions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_compiler_loaders_do_not_retain_their_runtime() {
+        let assembler = Assembler::new();
+        let observer = assembler.core_values().runtime_value_observer();
+        let session = Arc::new(Mutex::new(Vec::new()));
+        let execution = assembler.test_compilation_execution();
+        let module_loader = assembler.module_loader(session, &execution);
+        let binary_loader = assembler.binary_loader();
+
+        drop(execution);
+        drop(assembler);
+        assert!(
+            observer.upgrade().is_none(),
+            "deferred compiler callbacks must keep only weak routes into their runtime"
+        );
+
+        drop((module_loader, binary_loader));
     }
 }

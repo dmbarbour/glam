@@ -10,7 +10,8 @@
 //! that registry. The one-use activation permit is a transient external root,
 //! not registry state. Managed-reachable values therefore retain only passive
 //! handles, while arbitrary host callback environments remain deferred to
-//! I10A. The source latches below keep both sides of that boundary explicit.
+//! I10A. The source latches below keep both sides of that boundary explicit;
+//! arbitrary external callback environments remain conservative host owners.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -39,7 +40,7 @@ enum ActiveDestructionKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecursiveBackedgePolicy {
-    DeferredToI10A,
+    ConservativeExternalOwner,
     ClosedByI6D1,
     ForbiddenByAdmission,
 }
@@ -60,7 +61,7 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
         owner: "runtime-owned HostCallOwner closure environment",
         active_action: "arbitrary host-capture destruction is externally drained",
         extraction: "I4F.2b.1 external host-call registry",
-        recursive_backedge: RecursiveBackedgePolicy::DeferredToI10A,
+        recursive_backedge: RecursiveBackedgePolicy::ConservativeExternalOwner,
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::ReflectionReservation,
@@ -95,7 +96,7 @@ struct SourceLatch {
 const SOURCE_LATCHES: &[SourceLatch] = &[
     SourceLatch {
         path: "src/core.rs",
-        needle: "type HostCallOperation = dyn Fn()",
+        needle: "dyn Fn(HostCallRootBundle)",
         expected: 1,
         frontier: ActiveDestructionKind::HostCallback,
     },
@@ -469,8 +470,12 @@ fn assert_lazy_source_active_destruction_paths(source: &LazySource) {
 }
 
 fn assert_host_call_fields(producer: &HostCallProducer) {
-    let HostCallProducer { handle, record } = producer;
-    let _ = (handle, record);
+    let HostCallProducer {
+        handle,
+        record,
+        captures,
+    } = producer;
+    let _ = (handle, record, captures);
 }
 
 fn assert_reflection_fields(computation: &ReflectionComputation) {
@@ -569,12 +574,13 @@ pub(super) fn closed_compatibility_variants(
         Value::external_host_call(
             values,
             "I4F.2b passive closure host probe",
-            HostCallRecord::external(
+            HostCallRecord::external_without_semantic_values(
                 "I4F.2b passive closure host probe",
                 "src/core/managed/active_owner_inventory.rs",
                 "one external drop probe",
             ),
-            move || {
+            [],
+            move |_| {
                 let _ = &host_probe;
                 unreachable!("passive-closure collection must not invoke a host callback")
             },
@@ -887,15 +893,17 @@ fn active_value_destruction_frontiers_are_source_latched() {
 
 #[test]
 fn external_owner_recursive_backedges_are_explicitly_classified() {
-    let deferred = ACTIVE_DESTRUCTION_FRONTIERS
+    let conservative = ACTIVE_DESTRUCTION_FRONTIERS
         .iter()
-        .filter(|frontier| frontier.recursive_backedge == RecursiveBackedgePolicy::DeferredToI10A)
+        .filter(|frontier| {
+            frontier.recursive_backedge == RecursiveBackedgePolicy::ConservativeExternalOwner
+        })
         .map(|frontier| frontier.kind)
         .collect::<Vec<_>>();
     assert_eq!(
-        deferred,
+        conservative,
         [ActiveDestructionKind::HostCallback],
-        "only arbitrary host-callback environments remain I10A work"
+        "only arbitrary host-callback environments use conservative external ownership"
     );
     let closed = ACTIVE_DESTRUCTION_FRONTIERS
         .iter()
@@ -924,7 +932,7 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
         1,
         "the formatted host-call insertion requires a recursive-backedge classification"
     );
-    assert!(core.contains("type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot"));
+    assert!(core.contains("dyn Fn(HostCallRootBundle) -> Result<RuntimeValueRoot"));
     let _: fn(&ReflectionComputationOwner) = assert_reflection_owner_fields;
     assert!(core.contains("effect: Value"));
     assert!(core.contains("target: Option<Value>"));
@@ -942,7 +950,7 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
 }
 
 #[test]
-fn host_callback_root_backedge_remains_explicitly_deferred_to_i10a() {
+fn arbitrary_host_callback_root_backedge_is_conservative_external_ownership() {
     let values = crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -955,12 +963,13 @@ fn host_callback_root_backedge_remains_explicitly_deferred_to_i10a() {
     let value = Value::external_host_call(
         &values,
         "I5F.4 external-root backedge",
-        HostCallRecord::external(
+        HostCallRecord::external_without_semantic_values(
             "I5F.4 external-root backedge",
             "src/core/managed/active_owner_inventory.rs",
             "one explicitly removable same-runtime root",
         ),
-        move || {
+        [],
+        move |_| {
             let _ = &callback_capture;
             Err(Arc::new(crate::core::EvaluationFailure::message(
                 "the containment fixture must not invoke its callback",

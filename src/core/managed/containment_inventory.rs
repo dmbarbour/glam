@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::core::{
     EvaluationFailure, EvaluationHalt, HostCallRecord, LazySource, LazyValue, OpaquePayloadFamily,
-    OpaquePayloadRecord, OpaqueValue, Value,
+    OpaquePayloadRecord, OpaqueValue, PromisedValue, Value, set_test_promise,
 };
 use crate::evaluation::EvaluatorStepContext;
 
@@ -88,6 +88,144 @@ const INVENTORY: &[InventoryEntry] = &[
     },
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalCaptureDisposition {
+    /// Recursive Glam values are explicit managed state; the erased callback
+    /// receives one typed same-runtime root bundle rather than hidden values.
+    TraceableDeferredValues,
+    /// Concrete fields, rather than an erased closure, name the complete host
+    /// and specialization ownership.
+    ExplicitHostFields,
+    /// The callback is an embedding API owner. Its arbitrary environment is
+    /// deliberately conservative and can retain public roots supplied by the
+    /// host, but is not reachable from a managed value.
+    ExternalFacade,
+    /// The callback is bounded to compilation and does not survive as a
+    /// managed semantic edge.
+    BoundedCompiler,
+    /// The callback publishes only a wake/notification after state commit.
+    Notification,
+}
+
+struct ExternalCallbackEntry {
+    path: &'static str,
+    needle: &'static str,
+    count: usize,
+    disposition: ExternalCaptureDisposition,
+    owner: &'static str,
+}
+
+/// The finite production callback surface after I10A. This records boundary
+/// declarations and their sole production constructors, not incidental
+/// callback-local iterator closures.
+const EXTERNAL_CALLBACK_INVENTORY: &[ExternalCallbackEntry] = &[
+    ExternalCallbackEntry {
+        path: "src/core.rs",
+        needle: "dyn Fn(HostCallRootBundle)",
+        count: 1,
+        disposition: ExternalCaptureDisposition::TraceableDeferredValues,
+        owner: "runtime external-owner registry; semantic captures remain on HostCallProducer",
+    },
+    ExternalCallbackEntry {
+        path: "src/compiler.rs",
+        needle: "pub(crate) type ModuleLoader =",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "compiler host callback; deferred invocation receives explicit rooted arguments",
+    },
+    ExternalCallbackEntry {
+        path: "src/compiler.rs",
+        needle: "pub(crate) type BinaryFileLoader =",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "compiler host callback with value-free request provenance",
+    },
+    ExternalCallbackEntry {
+        path: "src/compiler.rs",
+        needle: "pub(crate) type CompileDiagnosticEmitter =",
+        count: 1,
+        disposition: ExternalCaptureDisposition::BoundedCompiler,
+        owner: "one synchronous source-compilation context",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/runtime.rs",
+        needle: "pub fn input_endpoint<T, F>",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "host input handle with a weak runtime route",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/runtime.rs",
+        needle: "pub fn output_endpoint<T, D, A>",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "host output handle with a weak runtime route",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/diagnostics.rs",
+        needle: "pub fn subscribe_shared(",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "host diagnostic subscription with explicit removal lifecycle",
+    },
+    ExternalCallbackEntry {
+        path: "src/evaluation.rs",
+        needle: "launcher: OnceLock<Arc<dyn ReflectionTaskLauncher>>",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExplicitHostFields,
+        owner: "immutable reflection profile",
+    },
+    ExternalCallbackEntry {
+        path: "src/reflection/lifecycle.rs",
+        needle: "struct EffectTaskLauncher<S: TaskSpecialization>",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExplicitHostFields,
+        owner: "reflection specialization, host, and exit policy are named fields",
+    },
+    ExternalCallbackEntry {
+        path: "src/evaluation/coordinator/task.rs",
+        needle: "pub(crate) struct TaskStatusPublisher",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "coordinator status observer with registered-root captures",
+    },
+    ExternalCallbackEntry {
+        path: "src/reflection/requests.rs",
+        needle: "fn task_status_publisher(",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "reflection query writer, handle, and value factory",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/assembly.rs",
+        needle: "fn module_loader(",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "deferred assembler route plus weak compilation execution",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/assembly.rs",
+        needle: "fn binary_loader(&self)",
+        count: 1,
+        disposition: ExternalCaptureDisposition::ExternalFacade,
+        owner: "deferred assembler route",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/assembly.rs",
+        needle: "fn compile_diagnostic_emitter(",
+        count: 1,
+        disposition: ExternalCaptureDisposition::BoundedCompiler,
+        owner: "one synchronous source-compilation context",
+    },
+    ExternalCallbackEntry {
+        path: "src/api/assembly.rs",
+        needle: "Box<dyn FnOnce() + Send>",
+        count: 1,
+        disposition: ExternalCaptureDisposition::Notification,
+        owner: "post-commit reflection query wake",
+    },
+];
+
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
@@ -155,6 +293,92 @@ fn closure_and_opaque_constructor_inventory_is_classified() {
     assert_eq!(actual, expected);
 }
 
+#[test]
+fn deferred_closure_constructor_inventory_is_reconciled() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for entry in EXTERNAL_CALLBACK_INVENTORY {
+        assert!(
+            !entry.owner.is_empty(),
+            "every callback needs a named owner"
+        );
+        let source = fs::read_to_string(manifest.join(entry.path))
+            .expect("inventoried callback source should be readable");
+        assert_eq!(
+            production_prefix(&source).matches(entry.needle).count(),
+            entry.count,
+            "external callback boundary `{}` in {} changed without an I10A classification update",
+            entry.needle,
+            entry.path,
+        );
+    }
+
+    assert!(
+        EXTERNAL_CALLBACK_INVENTORY.iter().any(|entry| {
+            entry.disposition == ExternalCaptureDisposition::TraceableDeferredValues
+        })
+    );
+    assert!(
+        EXTERNAL_CALLBACK_INVENTORY
+            .iter()
+            .any(|entry| entry.disposition == ExternalCaptureDisposition::ExplicitHostFields)
+    );
+    assert!(
+        EXTERNAL_CALLBACK_INVENTORY
+            .iter()
+            .any(|entry| entry.disposition == ExternalCaptureDisposition::ExternalFacade)
+    );
+    assert!(
+        EXTERNAL_CALLBACK_INVENTORY
+            .iter()
+            .any(|entry| entry.disposition == ExternalCaptureDisposition::BoundedCompiler)
+    );
+    assert!(
+        EXTERNAL_CALLBACK_INVENTORY
+            .iter()
+            .any(|entry| entry.disposition == ExternalCaptureDisposition::Notification)
+    );
+}
+
+#[test]
+fn external_callback_constructors_require_capture_classification() {
+    let core = include_str!("../../core.rs");
+    assert!(core.contains("captures: Arc<[Value]>,"));
+    assert!(core.contains("pub(crate) struct HostCallRootBundle"));
+    assert!(core.contains("roots: Box<[RuntimeValueRoot]>,"));
+    assert!(core.contains("HostCallSemanticCaptures::None"));
+    assert!(core.contains("HostCallSemanticCaptures::Explicit"));
+    assert!(core.contains("host-call semantic captures must match their source-backed record"));
+    assert!(!core.contains("dyn Fn() -> Result<RuntimeValueRoot"));
+    assert!(!core.contains(
+        "HostCallRootBundle {\n    runtime: EvaluationRuntimeId,\n    roots: Box<[Value]>"
+    ));
+    assert!(!core.contains(
+        "HostCallRootBundle {\n    runtime: EvaluationRuntimeId,\n    roots: Box<[glam_gc::Gc"
+    ));
+
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LazyValue::external_host_call(
+            &values,
+            "misclassified host-call capture",
+            HostCallRecord::external_without_semantic_values(
+                "misclassified host-call capture",
+                "src/core/managed/containment_inventory.rs",
+                "incorrectly claims no semantic captures",
+            ),
+            [Value::Number(1.into())],
+            |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
+        )
+    }));
+    assert!(
+        mismatch.is_err(),
+        "a host-call constructor must reject capture state which contradicts its record"
+    );
+}
+
 fn return_second_capture(
     _context: &EvaluatorStepContext<'_>,
     captures: &[Value],
@@ -192,12 +416,13 @@ fn external_host_call_requires_a_source_backed_record() {
     let lazy = LazyValue::external_host_call(
         &values,
         "external call fixture",
-        HostCallRecord::external(
+        HostCallRecord::external_without_semantic_values(
             "external call fixture",
             "src/core/managed/containment_inventory.rs",
             "no value captures",
         ),
-        || {
+        [],
+        |_| {
             Err(std::sync::Arc::new(EvaluationFailure::message(
                 "not invoked",
             )))
@@ -215,6 +440,90 @@ fn external_host_call_requires_a_source_backed_record() {
             "no value captures",
         )
     );
+}
+
+#[test]
+fn external_closure_bundle_retains_only_declared_roots() {
+    let values = crate::core::test_value_factory();
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let callback_observed = Arc::clone(&observed);
+    let lazy = LazyValue::external_host_call(
+        &values,
+        "explicit host root bundle",
+        HostCallRecord::external_with_semantic_values(
+            "explicit host root bundle",
+            "src/core/managed/containment_inventory.rs",
+            "one explicit numeric value",
+        ),
+        [Value::Number(42.into())],
+        move |captures| {
+            let runtime = captures.runtime_id();
+            let mut roots = captures.into_roots().into_vec();
+            *callback_observed
+                .lock()
+                .expect("host-call observation mutex should not be poisoned") =
+                Some((runtime, roots.len()));
+            Ok(roots
+                .pop()
+                .expect("the declared host-call capture should be present"))
+        },
+    );
+    let Some(LazySource::HostCall(producer)) = lazy.source_snapshot(&values) else {
+        panic!("external host call should retain its classified source")
+    };
+
+    let result = producer
+        .invoke(&values)
+        .expect("the explicit root-bundle callback should succeed");
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::Number(42.into()),
+        "the callback receives the declared semantic value as a temporary runtime root"
+    );
+    assert_eq!(
+        *observed
+            .lock()
+            .expect("host-call observation mutex should not be poisoned"),
+        Some((values.runtime_id(), 1))
+    );
+}
+
+#[test]
+fn managed_deferred_state_cycle_reclaims() {
+    let values = crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let baseline = values
+        .collect_managed_for_test()
+        .expect("the deferred-state fixture should start collectible");
+    {
+        let promise = PromisedValue::new(&values, "host-call capture backedge");
+        let lazy = LazyValue::external_host_call(
+            &values,
+            "traceable host-call capture",
+            HostCallRecord::external_with_semantic_values(
+                "traceable host-call capture",
+                "src/core/managed/containment_inventory.rs",
+                "one explicit promised value",
+            ),
+            [Value::Promised(promise.clone())],
+            |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
+        );
+        set_test_promise(&values, &promise, Value::Lazy(lazy))
+            .expect("the cycle promise should start unassigned");
+    }
+
+    let reclaimed = values
+        .collect_managed_for_test()
+        .expect("the explicit deferred-state cycle should collect");
+    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
+    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
+    assert!(
+        reclaimed.finalized_slots() >= 2,
+        "the host-call lazy and promise cycle should both be reclaimed"
+    );
+    assert_eq!(values.drain_external_owners_for_test(), 1);
 }
 
 struct HostCaptureDrop(Arc<AtomicUsize>);
@@ -237,12 +546,13 @@ fn host_call_capture_retires_only_during_external_registry_drain() {
         let _lazy = LazyValue::external_host_call(
             &values,
             "external owner fixture",
-            HostCallRecord::external(
+            HostCallRecord::external_without_semantic_values(
                 "external owner fixture",
                 "src/core/managed/containment_inventory.rs",
                 "passive drop observer",
             ),
-            move || {
+            [],
+            move |_| {
                 let _ = &capture;
                 Err(Arc::new(EvaluationFailure::message("not invoked")))
             },

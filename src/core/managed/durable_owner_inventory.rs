@@ -393,6 +393,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "I4F.2e.4"
     ),
+    closed_durable!(
+        "src/core.rs",
+        "HostCallProducer / HostCallRootBundle",
+        "explicit traced Value captures, an arbitrary external operation, and its one-shot RuntimeValueRoot bundle",
+        "managed deferred computation followed by the external callback's chosen bundle lifetime",
+        "HostCall construction with an explicit capture classification, then root-bundle handoff immediately before invocation",
+        "managed source collection or ordinary external bundle retirement",
+        CallbackCapture,
+        RootSurface,
+        "I10A"
+    ),
     exact_managed!(
         "src/core.rs; src/core/evaluation_halt.rs",
         "recursive core value and failure payloads",
@@ -745,10 +756,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 123;
+const DECLARATION_BASELINE_COUNT: usize = 125;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([98, 72, 1, 10, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_987_356_493_193_683_267;
+    DeclarationSignals::new([99, 73, 1, 10, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_712_709_662_929_478_885;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -841,6 +852,13 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "production managed core value node"
     } else if declaration.starts_with("src/core/managed/recursive_cells.rs::") {
         "production recursive identity cells and edges"
+    } else if matches!(
+        declaration,
+        "src/core.rs::HostCallOperation"
+            | "src/core.rs::HostCallProducer"
+            | "src/core.rs::HostCallRootBundle"
+    ) {
+        "HostCallProducer / HostCallRootBundle"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"
     } else if declaration.starts_with("src/core/evaluation_halt.rs::")

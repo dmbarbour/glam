@@ -291,27 +291,43 @@ impl CompileContext {
             }
         };
         let (module_path, extends) = self.qualify_module_path(relative_namespace);
-        let args = ModuleLoadArgs {
-            request,
-            importer_source: self.importer_source.clone(),
-            importer_trace: self.compilation_trace.clone(),
-            extends,
-            module_path,
-            prior_defs: RuntimeValueRoot::new(&self.values, prior_defs),
-            final_defs: RuntimeValueRoot::new(&self.values, final_defs),
-        };
-        let label: Arc<str> = Arc::from(format!("import {}", args.request.as_str()));
+        let importer_source = self.importer_source.clone();
+        let importer_trace = self.compilation_trace.clone();
+        let label: Arc<str> = Arc::from(format!("import {}", request.as_str()));
         let loader = self.local_module_loader.clone();
+        let expected_runtime = self.values.runtime_id();
 
         Value::Lazy(LazyValue::external_host_call_in(
             access,
             label,
-            HostCallRecord::external(
+            HostCallRecord::external_with_semantic_values(
                 "deferred module import",
                 "src/compiler.rs",
-                "module loader plus same-runtime prior/final definition roots",
+                "module loader plus explicit prior/final definition values",
             ),
-            move || {
+            [prior_defs, final_defs],
+            move |captures| {
+                debug_assert_eq!(captures.runtime_id(), expected_runtime);
+                let mut captures = captures.into_roots().into_vec().into_iter();
+                let prior_defs = captures
+                    .next()
+                    .expect("module import must receive its prior definitions");
+                let final_defs = captures
+                    .next()
+                    .expect("module import must receive its final definitions");
+                assert!(
+                    captures.next().is_none(),
+                    "module import must receive exactly two semantic captures"
+                );
+                let args = ModuleLoadArgs {
+                    request: request.clone(),
+                    importer_source: importer_source.clone(),
+                    importer_trace: importer_trace.clone(),
+                    extends: extends.clone(),
+                    module_path: module_path.clone(),
+                    prior_defs,
+                    final_defs,
+                };
                 let Some(loader) = &loader else {
                     return Err(import_failure(
                         format!(
@@ -358,16 +374,23 @@ impl CompileContext {
         };
         let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
+        let expected_runtime = self.values.runtime_id();
 
         Value::Lazy(LazyValue::external_host_call_in(
             access,
             label,
-            HostCallRecord::external(
+            HostCallRecord::external_without_semantic_values(
                 "deferred binary import",
                 "src/compiler.rs",
                 "binary loader and edge-free source provenance",
             ),
-            move || {
+            [],
+            move |captures| {
+                debug_assert_eq!(captures.runtime_id(), expected_runtime);
+                assert!(
+                    captures.into_roots().is_empty(),
+                    "binary import must remain value-free"
+                );
                 let Some(loader) = &loader else {
                     return Err(import_failure(
                         format!(

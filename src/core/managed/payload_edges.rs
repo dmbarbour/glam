@@ -117,7 +117,10 @@ impl CompatibilityValueEdges for ReflectionComputation {
 impl CompatibilityValueEdges for LazySource {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         match self {
-            Self::Error | Self::HostCall(_) => {}
+            Self::Error => {}
+            Self::HostCall(producer) => {
+                visit_values(producer.captures(), visit);
+            }
             Self::NetComputation(_) => {}
             Self::ComputedFixpoint(computation) => {
                 computation.visit_compatibility_value_edges(visit);
@@ -386,21 +389,23 @@ mod tests {
     }
 
     #[test]
-    fn external_host_call_has_no_reported_semantic_edge() {
+    fn external_host_call_reports_its_explicit_semantic_edges() {
         let values = values();
+        let capture = number(42);
         let source = LazyValue::external_host_call(
             &values,
             "compatibility visitor host call",
-            HostCallRecord::external(
+            HostCallRecord::external_with_semantic_values(
                 "compatibility visitor host call",
                 "src/core/managed/payload_edges.rs",
-                "no captures",
+                "one explicit semantic capture",
             ),
-            || Err(Arc::new(EvaluationFailure::message("not invoked"))),
+            [capture.clone()],
+            |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
         )
         .source_snapshot(&values)
         .expect("the host call should remain pending");
 
-        assert!(edges(&source).is_empty());
+        assert_eq!(edges(&source), [capture]);
     }
 }

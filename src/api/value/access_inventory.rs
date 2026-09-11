@@ -66,17 +66,17 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        9,
+        7,
         0,
-        "rooted source context, origins, definition promises, and import handoff",
-        "I3E.2 bounded compiler regions; I4F.1 durable roots"
+        "rooted source context, origins, definition promises, and import results; I10A import inputs are declared HostCall captures",
+        "I3E.2 bounded compiler regions; I4F.1 durable roots; I10A explicit deferred-capture handoff"
     ),
     entry!(
         "src/core.rs",
         3,
-        1,
-        "post-domain canonical-root initialization and test mutation-root publication",
-        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges"
+        2,
+        "post-domain canonical-root initialization, test mutation-root publication, and I10A one-shot HostCall capture bundles",
+        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment"
     ),
     entry!(
         "src/core_net.rs",

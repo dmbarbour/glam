@@ -64,8 +64,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [29, 0, 3, 0],
-        "rooted source definitions, final promise, origin, and import request"
+        [27, 0, 3, 0],
+        "rooted source definitions, final promise, origin, and import result; deferred import inputs are I10A HostCall captures"
     ),
     entry!(
         "src/g_syntax.rs",

@@ -785,7 +785,7 @@ impl LazyValue {
     /// represented explicitly in source order.
     ///
     /// The operation is a function pointer rather than a closure, so the
-    /// managed lazy representation can trace `captures` exactly after I5.
+    /// managed lazy representation traces `captures` exactly.
     #[cfg(test)]
     pub(crate) fn semantic_computation(
         values: &CoreValueFactory,
@@ -819,10 +819,14 @@ impl LazyValue {
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         record: HostCallRecord,
-        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+        captures: impl Into<Arc<[Value]>>,
+        producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         values.with_runtime_value_access(|access| {
-            Self::external_host_call_in(&access, label, record, producer)
+            Self::external_host_call_in(&access, label, record, captures, producer)
         })
     }
 
@@ -830,8 +834,18 @@ impl LazyValue {
         access: &RuntimeValueAccess<'_>,
         label: impl Into<Arc<str>>,
         record: HostCallRecord,
-        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+        captures: impl Into<Arc<[Value]>>,
+        producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
+        let captures = captures.into();
+        assert_eq!(
+            captures.is_empty(),
+            record.semantic_captures == HostCallSemanticCaptures::None,
+            "host-call semantic captures must match their source-backed record"
+        );
         let handle = access
             .values()
             .domain
@@ -842,7 +856,11 @@ impl LazyValue {
         Self::with_source_in(
             access,
             label,
-            LazySource::HostCall(Arc::new(HostCallProducer { handle, record })),
+            LazySource::HostCall(Arc::new(HostCallProducer {
+                handle,
+                record,
+                captures,
+            })),
         )
     }
 
@@ -850,16 +868,20 @@ impl LazyValue {
     pub(crate) fn host_call(
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
-        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+        producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self::external_host_call(
             values,
             label,
-            HostCallRecord::external(
+            HostCallRecord::external_without_semantic_values(
                 "host-call test fixture",
                 "test source",
                 "test-owned captures",
             ),
+            [],
             producer,
         )
     }
@@ -1442,7 +1464,50 @@ impl SemanticComputation {
 #[cfg(test)]
 pub(crate) type SemanticThunk =
     dyn Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync;
-type HostCallOperation = dyn Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
+type HostCallOperation =
+    dyn Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync;
+
+/// The exact same-runtime roots supplied to one external callback invocation.
+///
+/// Recursive semantic state remains as traceable [`Value`] captures on
+/// [`HostCallProducer`]. Immediately before invoking the opaque Rust callback,
+/// those values are rooted under a bounded value-access region and moved into
+/// this bundle. The callback therefore never inherits a mutator and the
+/// managed lazy never hides its own semantic edges in an erased closure.
+pub(crate) struct HostCallRootBundle {
+    runtime: EvaluationRuntimeId,
+    roots: Box<[RuntimeValueRoot]>,
+}
+
+impl HostCallRootBundle {
+    fn from_captures(values: &CoreValueFactory, captures: &[Value]) -> Self {
+        let roots = values.with_runtime_value_access(|access| {
+            captures
+                .iter()
+                .cloned()
+                .map(|capture| access.root_runtime_value(capture))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        });
+        debug_assert!(
+            roots
+                .iter()
+                .all(|root| root.runtime_id() == values.runtime_id())
+        );
+        Self {
+            runtime: values.runtime_id(),
+            roots,
+        }
+    }
+
+    pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime
+    }
+
+    pub(crate) fn into_roots(self) -> Box<[RuntimeValueRoot]> {
+        self.roots
+    }
+}
 
 struct HostCallOwner {
     operation: Arc<HostCallOperation>,
@@ -1452,20 +1517,45 @@ struct HostCallOwner {
 ///
 /// The record deliberately does not claim that a Rust closure environment is
 /// traceable. It makes every production constructor name the external owner
-/// and its declared rooted capture policy so I10A can reconcile or replace it
-/// before production collection.
+/// and distinguish no semantic capture from explicit traceable capture. I10A
+/// source-latches the remaining arbitrary callback environments as
+/// conservative external owners.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HostCallRecord {
     family: &'static str,
     source: &'static str,
     captures: &'static str,
+    semantic_captures: HostCallSemanticCaptures,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostCallSemanticCaptures {
+    None,
+    Explicit,
 }
 
 impl HostCallRecord {
-    pub(crate) const fn external(
+    pub(crate) const fn external_without_semantic_values(
         family: &'static str,
         source: &'static str,
         captures: &'static str,
+    ) -> Self {
+        Self::external(family, source, captures, HostCallSemanticCaptures::None)
+    }
+
+    pub(crate) const fn external_with_semantic_values(
+        family: &'static str,
+        source: &'static str,
+        captures: &'static str,
+    ) -> Self {
+        Self::external(family, source, captures, HostCallSemanticCaptures::Explicit)
+    }
+
+    const fn external(
+        family: &'static str,
+        source: &'static str,
+        captures: &'static str,
+        semantic_captures: HostCallSemanticCaptures,
     ) -> Self {
         assert!(
             !family.is_empty(),
@@ -1483,6 +1573,7 @@ impl HostCallRecord {
             family,
             source,
             captures,
+            semantic_captures,
         }
     }
 
@@ -1495,6 +1586,7 @@ impl HostCallRecord {
 pub(crate) struct HostCallProducer {
     handle: ExternalOwnerHandle,
     record: HostCallRecord,
+    captures: Arc<[Value]>,
 }
 
 impl HostCallProducer {
@@ -1510,12 +1602,17 @@ impl HostCallProducer {
             .domain
             .external_owners
             .get::<HostCallOwner>(&self.handle);
-        (owner.operation)()
+        let captures = HostCallRootBundle::from_captures(values, &self.captures);
+        (owner.operation)(captures)
     }
 
     #[cfg(test)]
     pub(crate) fn record(&self) -> HostCallRecord {
         self.record
+    }
+
+    pub(crate) fn captures(&self) -> &[Value] {
+        &self.captures
     }
 }
 
@@ -2017,10 +2114,14 @@ impl Value {
         values: &CoreValueFactory,
         label: impl Into<Arc<str>>,
         record: HostCallRecord,
-        producer: impl Fn() -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync + 'static,
+        captures: impl Into<Arc<[Value]>>,
+        producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self::Lazy(LazyValue::external_host_call(
-            values, label, record, producer,
+            values, label, record, captures, producer,
         ))
     }
 
