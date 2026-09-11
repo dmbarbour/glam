@@ -121,3 +121,20 @@ family/access/lifecycle closure on 2026-09-11:
 The task-handle backedge fixture intentionally observes retention. It records
 the review's accepted bootstrap cost: external task/query state may retain a
 pathological terminal result-to-own-handle cycle until runtime teardown.
+
+## I10C Destruction Closure
+
+I10C completed on 2026-09-11 without reopening the representation decision.
+Managed opaque shells still destroy only a passive owner lease. Explicit
+registry maintenance removes one dead owner under lock and invokes its
+destructor after unlocking; a panicking destructor terminalizes that attempted
+owner while preserving every untouched later owner for another drain.
+
+`EffectToken` and `EvaluationQueryHandle` remain the active external lifecycle
+owners behind the two capability families. The task, query, token-domain, and
+runtime-teardown fixtures preserve their existing one-shot/idempotent terminal
+behavior. Edge-free compilation origins and construction ports have no active
+destructor. Finally, an effect-token domain holding a public opaque value
+demonstrates the accepted conservative direction: an explicit external root
+may retain a managed value, but collection never reclaims that live root
+prematurely.

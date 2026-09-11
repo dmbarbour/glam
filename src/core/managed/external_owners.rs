@@ -124,28 +124,40 @@ impl ExternalOwnerRegistry {
     }
 
     /// Detaches dead entries under the registry lock and destroys their active
-    /// owners only after releasing it.
+    /// owners one at a time only after releasing it.
+    ///
+    /// IDs establish a deterministic retirement order. If one destructor
+    /// unwinds, that attempted owner remains detached while every untouched
+    /// later owner remains registered for the next drain. Concurrent drains
+    /// may divide the work, but removal under the registry lock still gives
+    /// exactly one caller ownership of each destructor.
     pub(crate) fn drain_retired(&self) -> usize {
-        let retired = {
-            let mut owners = self
+        let retired_ids = {
+            let owners = self
                 .owners
                 .lock()
                 .expect("external owner registry was poisoned");
-            let retired_ids = owners
+            let mut retired_ids = owners
                 .iter()
                 .filter_map(|(id, entry)| (entry.lease.strong_count() == 0).then_some(*id))
                 .collect::<Vec<_>>();
+            retired_ids.sort_unstable();
             retired_ids
-                .into_iter()
-                .map(|id| {
-                    owners
-                        .remove(&id)
-                        .expect("a discovered retired owner must remain registered")
-                })
-                .collect::<Vec<_>>()
         };
-        let count = retired.len();
-        drop(retired);
+
+        let mut count = 0;
+        for id in retired_ids {
+            let retired = self
+                .owners
+                .lock()
+                .expect("external owner registry was poisoned")
+                .remove(&id);
+            let Some(retired) = retired else {
+                continue;
+            };
+            drop(retired);
+            count += 1;
+        }
         count
     }
 
@@ -171,15 +183,50 @@ impl ExternalOwnerHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
     struct DropSignal(Arc<AtomicUsize>);
 
+    struct OrderedDrop {
+        id: usize,
+        panic: bool,
+        events: Arc<Mutex<Vec<usize>>>,
+    }
+
+    struct LockObservationDrop {
+        registry: Weak<ExternalOwnerRegistry>,
+        observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
+    }
+
     impl Drop for DropSignal {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for OrderedDrop {
+        fn drop(&mut self) {
+            self.events
+                .lock()
+                .expect("ordered-drop events were poisoned")
+                .push(self.id);
+            assert!(!self.panic, "injected opaque owner drop panic");
+        }
+    }
+
+    impl Drop for LockObservationDrop {
+        fn drop(&mut self) {
+            let registry = self
+                .registry
+                .upgrade()
+                .expect("registry should outlive its detached owner");
+            self.observed_unlocked.store(
+                registry.owners.try_lock().is_ok(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 
@@ -200,6 +247,48 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert_eq!(registry.drain_retired(), 1);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn retired_owner_is_destroyed_after_registry_unlock() {
+        let registry = Arc::new(ExternalOwnerRegistry::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+        ));
+        let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = registry.insert(Arc::new(LockObservationDrop {
+            registry: Arc::downgrade(&registry),
+            observed_unlocked: Arc::clone(&observed_unlocked),
+        }));
+        drop(handle);
+
+        assert_eq!(registry.drain_retired(), 1);
+        assert!(observed_unlocked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn opaque_drop_panic_retries_untouched_suffix() {
+        let registry = ExternalOwnerRegistry::new(crate::runtime::allocate_evaluation_runtime_id());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let first = registry.insert(Arc::new(OrderedDrop {
+            id: 0,
+            panic: true,
+            events: Arc::clone(&events),
+        }));
+        let second = registry.insert(Arc::new(OrderedDrop {
+            id: 1,
+            panic: false,
+            events: Arc::clone(&events),
+        }));
+        drop((first, second));
+
+        let panic = catch_unwind(AssertUnwindSafe(|| registry.drain_retired()));
+        assert!(panic.is_err());
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        assert_eq!(registry.len(), 1);
+
+        assert_eq!(registry.drain_retired(), 1);
+        assert_eq!(*events.lock().unwrap(), vec![0, 1]);
         assert_eq!(registry.len(), 0);
     }
 }

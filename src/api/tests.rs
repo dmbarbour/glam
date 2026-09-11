@@ -20,6 +20,24 @@ use runtime_tests::{decode_test_integer, input_transaction};
 
 struct FailedReasoningTask;
 
+struct OpaqueRetentionProbe(Arc<AtomicUsize>);
+
+impl Drop for OpaqueRetentionProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: this test-only payload contains one external atomic drop observer
+// and no Glam value, managed pointer, root, or runtime capability.
+unsafe impl crate::core::OpaquePayloadFamily for OpaqueRetentionProbe {
+    const PAYLOAD_RECORD: crate::core::OpaquePayloadRecord =
+        crate::core::OpaquePayloadRecord::external(
+            "opaque external-retention fixture",
+            "src/api/tests.rs",
+        );
+}
+
 fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, Error> {
     let values = assembler.values();
     let mut value = root.clone();
@@ -954,6 +972,31 @@ fn effect_token_domain_retirement_is_external() {
         retained.upgrade().is_none(),
         "external-owner retirement must drop the token and remove its domain payload"
     );
+}
+
+#[test]
+fn opaque_external_retention_never_reclaims_a_live_root() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let core_values = assembler.core_values();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let payload = public_value(
+        &core_values,
+        CoreValue::Opaque(OpaqueValue::new(
+            &core_values,
+            Arc::new(OpaqueRetentionProbe(Arc::clone(&drops))),
+        )),
+    );
+    let domain = EffectTokenDomain::new(&values);
+    let token = domain.issue(payload.clone());
+
+    drop(payload);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    drop(token);
+    domain.collect_and_drain_retired_external_owners_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]

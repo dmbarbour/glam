@@ -318,7 +318,7 @@ impl<T> Drop for EffectToken<T> {
 // SAFETY: the token stores only a scalar ID and a weak route to its external
 // domain. The generic payload remains in the domain map rather than inside the
 // opaque value, so no Glam value or managed pointer is hidden by type erasure.
-// Token retirement remains an external lifecycle operation for I9/I10.
+// Token retirement remains an inventoried external lifecycle operation.
 unsafe impl<T> crate::core::OpaquePayloadFamily for EffectToken<T>
 where
     T: Send + Sync + 'static,

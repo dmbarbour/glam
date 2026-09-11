@@ -1002,3 +1002,33 @@ fn opaque_downcast_requires_matching_runtime_and_preserves_owner_identity() {
     assert!(opaque.downcast::<u64>(&values).is_none());
     assert!(opaque.downcast::<OpaqueDropSignal>(&other_values).is_none());
 }
+
+#[test]
+fn managed_drop_during_domain_teardown_is_passive() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let domain = {
+        let values = crate::core::CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let domain = Arc::downgrade(values.value_domain());
+        let opaque = OpaqueValue::new(&values, Arc::new(OpaqueDropSignal(Arc::clone(&drops))));
+        let root = values.construct_runtime_value_root(|_| Value::Opaque(opaque));
+
+        drop(root);
+        let collected = values
+            .collect_managed_for_test()
+            .expect("the unrooted opaque shell should collect before domain teardown");
+        assert_eq!(collected.finalized_slots(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(values.external_owner_count_for_test(), 1);
+        domain
+    };
+
+    assert!(domain.upgrade().is_none());
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        1,
+        "terminal domain teardown must retire the already-detached passive opaque handle once"
+    );
+}

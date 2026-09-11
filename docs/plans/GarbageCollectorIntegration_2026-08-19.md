@@ -258,6 +258,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10B.3 | complete | external effect-token/task-handle lifecycle and conservative-retention proofs |
 | I10B.4 | complete | matching-runtime access, owner identity, and negative-boundary closure |
 | I10B | complete | external-only opaque family, access, identity, and retention audit |
+| I10C.1 | complete | passive managed opaque-handle destruction and unlocked registry retirement |
+| I10C.2 | complete | external token/query lifecycle reconciliation and idempotent retirement |
+| I10C.3 | complete | teardown, panic/retry, and conservative live-root retention closure |
+| I10C | complete | final opaque destruction and external-lifecycle audit |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6174,6 +6178,13 @@ Verification: `opaque_downcast_requires_matching_runtime_and_preserves_owner_ide
 
 #### Phase I10C.1 — Passive Opaque Handle Destruction
 
+Completed 2026-09-11. `OpaqueValue` remains a one-field passive
+`ExternalOwnerHandle`; the managed-family and active-RAII inventories exclude
+runtime, heap, downcast, and retirement authority from that path. Registry
+maintenance now identifies retired owners under its mutex, removes one owner
+under a later short lock, and destroys it only after unlocking. A focused
+lock-observation fixture latches that boundary.
+
 - Prove managed `Value::Opaque` destruction releases only its passive
   `ExternalOwnerHandle` lease. It does not downcast, retire the external owner,
   invoke runtime work, or gain a heap/runtime capability.
@@ -6182,9 +6193,19 @@ Verification: `opaque_downcast_requires_matching_runtime_and_preserves_owner_ide
 
 Verification: `managed_drop_has_no_runtime_or_heap_capability`,
 `managed_graph_reaches_no_active_raii_owner`, and
-`opaque_payload_requires_matching_runtime_and_retires_during_registry_drain`.
+`opaque_payload_requires_matching_runtime_and_retires_during_registry_drain`,
+plus `retired_owner_is_destroyed_after_registry_unlock`.
 
 #### Phase I10C.2 — External Capability Retirement
+
+Completed 2026-09-11. I9F's syntax-backed active-RAII inventory now names the
+focused effect-token retirement fixture. A companion reconciliation test
+proves that `EffectToken` and the task handle's `EvaluationQueryHandle` remain
+external lifecycle owners while `TaskHandleCell`, `CompilationOrigin`, and
+`ConstructionPort` acquire no active `Drop`. Existing query-retirement and
+terminal task-handle fixtures preserve task terminal semantics and retirement
+ordering. The generic external-root fixture separately proves explicit and
+fallback retirement are idempotent.
 
 - Reconcile `EffectToken<T>` and `TaskHandleCell` with I9F's active external-
   RAII records. Preserve idempotent/one-shot retirement, terminal semantics,
@@ -6194,9 +6215,21 @@ Verification: `managed_drop_has_no_runtime_or_heap_capability`,
 
 Verification: `effect_token_domain_retirement_is_external`, the existing task
 query-retirement forced-order fixtures, and
-`external_root_owner_drop_invokes_idempotent_retire`.
+`external_root_owner_drop_invokes_idempotent_retire`, plus
+`opaque_external_lifecycle_matches_active_raii_inventory`.
 
 #### Phase I10C.3 — Destruction and Retention Closure
+
+Completed 2026-09-11. Domain teardown drops a collected opaque shell's active
+owner exactly once without granting the managed shell authority. External
+owner drain is deterministic by owner ID and detaches/destroys one entry at a
+time: if `Drop` unwinds, that attempted entry is terminally detached while the
+untouched suffix remains registered for a later drain. An external
+effect-token domain retaining a public root keeps its managed opaque payload
+live until the capability retires, proving conservative retention cannot
+cause premature collection. Any opaque family needing a collector-visible
+edge or managed destructor authority is now explicitly outside
+`OpaquePayloadFamily` admission and requires a new representation review.
 
 - Re-run finalization panic/retry and domain-teardown tests without introducing
   a managed opaque payload. Document the accepted per-family conservative

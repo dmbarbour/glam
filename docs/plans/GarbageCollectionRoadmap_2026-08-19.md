@@ -224,9 +224,11 @@ permit dereference outside a region.
    or concurrent marker may extend the gateway according to its own relocation
    or Dijkstra/SATB-style invariant. Ordinary pointer reads and copies remain
    barrier-free in the initial collector.
-10. **Opaque values are external handles, never managed storage.** I10B.0
-    selected external-only opaque storage for the bootstrap. Type-erased host
-    data is not inspected by the collector. The private admitted payload is
+10. **Opaque values are external handles, never managed storage.** I10B
+    selected and closed external-only opaque storage for the bootstrap; I10C
+    closed its passive-handle and active external-retirement lifecycle.
+    Type-erased host data is not inspected by the collector. The private
+    admitted payload is
     either edge-free or a reviewed external lifecycle capability; it must not
     contain `Gc<T>`, an unrooted recursive `core::Value`, `RuntimeValueRoot`, a
     foreign-runtime root, or another internal pointer which could escape a
@@ -234,6 +236,9 @@ permit dereference outside a region.
     and lease into the external-owner registry. External task/domain state may
     separately own registered public roots, so a backedge through such state
     may be conservatively retained but cannot be reclaimed prematurely.
+    Explicit registry maintenance detaches and destroys one retired owner at a
+    time outside its lock, preserving untouched owners across a destructor
+    panic; runtime teardown remains the final external-owner fallback.
     Cross-runtime host associations stay outside the payload and communicate
     through validated Rust-layer data/effect boundaries. A future sealed
     managed arm requires a new design review and exact representation outside

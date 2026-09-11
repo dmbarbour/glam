@@ -226,7 +226,7 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
         owner: "EffectToken",
         disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,
         retirement: "remove one opaque payload from its external token domain",
-        verification: "effect_tokens_are_domain_scoped_unforgeable_and_revoked_with_the_domain",
+        verification: "effect_token_domain_retirement_is_external",
     },
     ActiveRaiiEntry {
         path: "src/api/value.rs",
@@ -852,6 +852,22 @@ fn managed_graph_reaches_no_active_raii_owner() {
     assert!(contract.contains("Any external owner which performs active retirement"));
     assert!(contract.contains("must remain outside"));
     assert!(contract.contains("the managed graph and hold its runtime capability"));
+}
+
+#[test]
+fn opaque_external_lifecycle_matches_active_raii_inventory() {
+    let active = production_drop_inventory();
+    assert_eq!(
+        active.get("src/api/value.rs::EffectToken"),
+        Some(&ActiveRaiiDisposition::ExternalLifecycleOwner)
+    );
+    assert_eq!(
+        active.get("src/reflection/store.rs::EvaluationQueryHandle"),
+        Some(&ActiveRaiiDisposition::ExternalLifecycleOwner)
+    );
+    assert!(!active.contains_key("src/reflection/requests.rs::TaskHandleCell"));
+    assert!(!active.contains_key("src/diagnostic.rs::CompilationOrigin"));
+    assert!(!active.contains_key("src/eval/builtins/net/construction.rs::ConstructionPort"));
 }
 
 #[test]

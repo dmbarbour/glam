@@ -625,8 +625,8 @@ pub(crate) fn assert_task_handle_family_shape() {
 
 // SAFETY: the handle contains no bare core value, runtime value root, or
 // managed pointer. It is an external lifecycle capability over coordinator
-// and query state, so I9/I10 must retain its active-retirement classification
-// rather than treating it as a managed leaf.
+// and query state, so the active-retirement inventory retains its external
+// classification rather than treating it as a managed leaf.
 unsafe impl crate::core::OpaquePayloadFamily for TaskHandleCell {
     const PAYLOAD_RECORD: crate::core::OpaquePayloadRecord =
         crate::core::OpaquePayloadRecord::external(

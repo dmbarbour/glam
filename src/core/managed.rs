@@ -260,9 +260,9 @@ unsafe impl ManagedFamily for ClosedCompatibilityValue {
 ///
 /// Unlike [`ManagedDropRecord`], this is not collector admission. It prevents
 /// `OpaqueValue`'s `Any` boundary from accepting a new family merely because
-/// the Rust type is `Send + Sync`. I10 decides whether any admitted external
-/// family remains outside the managed graph or receives a separate exact
-/// managed representation.
+/// the Rust type is `Send + Sync`. I10 keeps every admitted external family in
+/// the audited external-owner inventory; a family that instead needs managed
+/// edges or managed destructor authority requires a new representation review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
@@ -282,7 +282,7 @@ impl OpaquePayloadRecord {
     }
 
     /// Records an external capability whose lifecycle remains outside the
-    /// collector and therefore requires the later I9/I10 ownership audit.
+    /// collector and is covered by the completed I9/I10 ownership audit.
     pub(crate) const fn external(family: &'static str, source: &'static str) -> Self {
         Self::reviewed(family, source, "external capability")
     }
@@ -314,9 +314,10 @@ impl OpaquePayloadRecord {
 /// The payload must contain no bare `Gc`, unrooted recursive `core::Value`,
 /// `RuntimeValueRoot`, or other unreported managed edge. `edge_free` families
 /// contain no Glam value/runtime capability at all. `external` families may
-/// carry an audited host lifecycle capability, but must not be treated as a
-/// collector-managed leaf; I9/I10 must reconcile their ownership before the
-/// production managed value switch.
+/// carry an audited host lifecycle capability, but must remain in the active
+/// external-owner inventory rather than being treated as a collector-managed
+/// leaf. A family needing a collector-visible edge or managed destructor
+/// authority is not admissible here; it requires a new representation review.
 pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
     const PAYLOAD_RECORD: OpaquePayloadRecord;
 }
@@ -1196,5 +1197,34 @@ mod tests {
 
         drop(values);
         assert!(domain.upgrade().is_none());
+    }
+
+    #[test]
+    fn external_root_owner_drop_invokes_idempotent_retire() {
+        let values = values();
+        let direct_drops = Arc::new(AtomicUsize::new(0));
+        let resource_drops = Arc::new(AtomicUsize::new(0));
+        let retirements = Arc::new(AtomicUsize::new(0));
+        let liveness = Arc::new(());
+        let liveness_weak = Arc::downgrade(&liveness);
+        let mut owner = ExternalRetirementOwner {
+            values: values.clone(),
+            root: Some(allocate_fixture(&values, &direct_drops, &resource_drops)),
+            retirements: Arc::clone(&retirements),
+            liveness,
+        };
+
+        owner.retire();
+        owner.retire();
+        drop(owner);
+        assert_eq!(retirements.load(Ordering::Relaxed), 1);
+        assert!(liveness_weak.upgrade().is_none());
+
+        let report = values
+            .collect_managed_for_test()
+            .expect("idempotent external retirement should release its one managed root");
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(direct_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(resource_drops.load(Ordering::Relaxed), 1);
     }
 }
