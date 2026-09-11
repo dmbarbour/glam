@@ -1,13 +1,13 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I11A and their mandatory reviews are
+Status: in progress; Phases I0 through I11B and their mandatory reviews are
 complete. Gate G2 passed on 2026-09-11. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
-remains disabled in ordinary execution; Gate G2 now authorizes I11B's
-controlled whole-runtime collection tests. Collector Gate G1 passed on
-2026-08-25.
+remains disabled in ordinary execution; I11B has exercised controlled serial
+whole-runtime collection through a private maintenance seam. Collector Gate
+G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -264,6 +264,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I10C | complete | final opaque destruction and external-lifecycle audit |
 | I10D | complete | final closure, type-erasure, cache, root, and managed-backedge reconciliation |
 | I11A | complete | independent Gate G2 source, stable-ledger, layout, and isolated-reclamation certification |
+| I11B | complete | private serial production collection, boundary preservation, and ownership-outcome matrix |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
@@ -6386,6 +6387,14 @@ rather than its core factory. Finally, an I10 production opaque/effect-token
 fixture proves a conservative external root survives collection, then retires
 the token owner and opaque payload owner explicitly across the two required
 later collections. No external owner was reclassified as a managed edge.
+
+I11B.4 completed 2026-09-11. The dated controlled-production-collection
+review maps I5-I10 to their production-runtime fixtures and finds no missing
+family, serial-boundary mutation, public collection escape, or change to the
+heap's immutable `NoAuto` policy. The ordinary repository checks and focused
+collector suite pass. I11C remains responsible for deterministic worker,
+finalizer, and collection-request interleavings; none were folded into this
+serial phase.
 
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 

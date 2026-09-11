@@ -1,7 +1,7 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
-follow-up, and integration Phases I0 through I11A are complete. Gates G0, G1,
+follow-up, and integration Phases I0 through I11B are complete. Gates G0, G1,
 and G2 are established, and all mandatory collector reviews through post-C6
 plus the post-I1 through post-I10 integration reviews and independent Gate G2
 audit have been performed. Collector
@@ -9,8 +9,9 @@ stress, metrics, and tuning continue in C7/C8 while production collection
 remains disabled. The original focused I5-I10 forward review is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
 its findings have been resolved by the completed phases and remediation
-reviews. I11B is now the first controlled whole-production-graph collection
-boundary.
+reviews. I11B has completed the first controlled serial
+whole-production-graph collection boundary; production remains `NoAuto` while
+I11C owns the concurrency schedules required before Gate G3.
 
 This roadmap keeps two large transitions aligned:
 
@@ -354,8 +355,10 @@ record, and recorded the dated gate review.
 
 **Established 2026-09-11.** The certification is recorded in
 [`GarbageCollectorGateG2_2026-09-11.md`](../reviews/GarbageCollectorGateG2_2026-09-11.md).
-Production remains `NoAuto`; only I11B's controlled tests may now force a full
-collection over the complete production graph.
+Production remains `NoAuto`; I11B's controlled tests now force a full
+collection over the complete production graph through a crate-private runtime
+maintenance seam. The outcome is recorded in
+[`GarbageCollectorProductionCollectionI11B_2026-09-11.md`](../reviews/GarbageCollectorProductionCollectionI11B_2026-09-11.md).
 
 Only after G2 may tests force a full collection over the complete production
 graph.

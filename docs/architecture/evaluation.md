@@ -67,7 +67,9 @@ Retaining `Values`, a demand context, or a runtime service can therefore keep
 value construction usable without also preserving the scheduler, executor,
 runtime facade, or default reflection profile. Production non-inline values
 already use registered roots over managed outer value nodes, but collection
-remains `NoAuto` until Gate G2 and the controlled production-collection phase.
+remains `NoAuto`. Gate G2 and I11B permit only explicit, crate-private
+collection at controlled serial test boundaries; runtime maintenance and
+automatic policy remain later gates.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
