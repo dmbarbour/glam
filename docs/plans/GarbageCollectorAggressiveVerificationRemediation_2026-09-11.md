@@ -476,6 +476,59 @@ Preserve the following ownership distinction explicitly:
 - `EvaluatorStepContext` / `EvaluationValueAccess` is the scope for operating
   on raw values during one callback-free evaluator quantum.
 
+##### GCI11R-002D.1a — Exhaustive Raw-Value API Audit
+
+Do not infer closure from the known evaluation facade. The existence of
+`EvalContext::evaluate_whnf(&core::Value)`, which accepts a raw value without
+access authority and roots it internally, is the initial witness that this
+invariant has not yet received a source-wide audit.
+
+Inventory every production function, method, trait method, callback type, and
+type alias whose parameters or return shape contain `core::Value`, including
+qualified/imported spellings and wrappers such as references, `Option`,
+`Result`, `Vec`, slices, arrays, `Arc<[Value]>`, and closure arguments or
+results. Audit test-only APIs separately in GCI11R-002E rather than allowing
+fixtures to define the production contract. Also inventory inherent and
+standard-trait operations on `core::Value`: collector-exclusive `Trace` and
+destruction may have a documented authority contract other than a mutator,
+but `Clone`, equality, formatting, and similar representation operations must
+not become an unexamined escape hatch. Merely proving that all current callers
+happen to hold access is insufficient when the API shape does not carry that
+authority. Fields which durably store raw values belong to D.2's traced-owner
+audit, but every operation which reads or updates such a field remains in this
+API inventory.
+
+Classify each production occurrence as exactly one of:
+
+1. **regional access API:** matching `RuntimeValueAccess` or
+   `EvaluationValueAccess` is present and remains live while the raw value is
+   produced and consumed;
+2. **scoped exposure:** a higher-ranked/access-scoped callback may observe or
+   return raw values only within the region opened by the API;
+3. **durable boundary:** the public signature transports `api::Value`,
+   `RuntimeValueRoot`, or another traced owner rather than raw `core::Value`;
+4. **collector-mandated primitive:** an exact, narrow allowlist such as
+   collector-exclusive `Trace` or destruction uses collector phase authority
+   because a mutator is structurally unavailable; or
+5. **violation:** the API can pass, return, project, inspect, clone, or retain a
+   raw value without matching authority.
+
+Record the inventory in the ownership ledger or a dedicated review table with
+the signature, caller families, classification, and intended disposition.
+First latch the known violations—including raw `evaluate_whnf`—then repair
+them and change the source-backed check to reject new unclassified signatures.
+The latch must detect container and alias forms rather than merely count the
+literal text `-> Value`. If a robust syntax-aware gate is disproportionate,
+use a conservative source inventory plus an exact reviewed allowlist; do not
+silently omit signatures that the scanner cannot classify.
+
+Exit: every production API transporting raw `core::Value` has matching
+mutator/access authority or a reviewed collector-only exception, all known
+violations have a disposition, and a repository check fails when a new
+unclassified raw-value signature is introduced.
+
+##### GCI11R-002D.1b — Rooted Orchestration and Regional Handoffs
+
 Make `EvalContext::evaluate_root_whnf(RuntimeValueRoot)` the ordinary
 orchestration entry. Inventory callers of the raw
 `EvalContext::evaluate_whnf(&core::Value)` compatibility facade and:
