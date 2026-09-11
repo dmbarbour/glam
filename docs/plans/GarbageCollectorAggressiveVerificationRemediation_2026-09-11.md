@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C complete; GCI11R-002D-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a complete; GCI11R-002D.1b-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -515,17 +515,27 @@ Classify each production occurrence as exactly one of:
 
 Record the inventory in the ownership ledger or a dedicated review table with
 the signature, caller families, classification, and intended disposition.
-First latch the known violations—including raw `evaluate_whnf`—then repair
-them and change the source-backed check to reject new unclassified signatures.
-The latch must detect container and alias forms rather than merely count the
-literal text `-> Value`. If a robust syntax-aware gate is disproportionate,
-use a conservative source inventory plus an exact reviewed allowlist; do not
-silently omit signatures that the scanner cannot classify.
+First latch the known violations—including raw `evaluate_whnf`—and assign
+their intended repairs to D.1b-D.2. Those repair checkpoints then change the
+source-backed check from a pre-repair baseline into a closed gate. The latch
+must detect container and alias forms rather than merely count the literal
+text `-> Value`. If a robust syntax-aware gate is disproportionate, use a
+conservative source inventory plus an exact reviewed allowlist; do not silently
+omit signatures that the scanner cannot classify.
 
-Exit: every production API transporting raw `core::Value` has matching
-mutator/access authority or a reviewed collector-only exception, all known
-violations have a disposition, and a repository check fails when a new
-unclassified raw-value signature is introduced.
+Exit for D.1a: every production signature transporting raw `core::Value` has
+a current classification and intended disposition, known violations are
+latched, and repository drift changes the check. D.1b-D.2 close those
+violations and establish the final rule that every raw API has matching
+mutator/access authority or a reviewed collector-only exception.
+
+Completion record (2026-09-11): the
+[raw core-value API audit](../reviews/GarbageCollectorRawValueApiAudit_2026-09-11.md)
+records and source-latches 586 production declarations: 69 access-qualified
+operations, 23 collector-only compatibility operations, eight regional alias
+definitions, and 486 known violations. The initial raw `evaluate_whnf`
+witness is explicitly latched. D.1a changes no production semantics; D.1b and
+D.2 own the repairs and replace the violation baseline with a closed gate.
 
 ##### GCI11R-002D.1b — Rooted Orchestration and Regional Handoffs
 

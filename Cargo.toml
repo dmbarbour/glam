@@ -29,6 +29,7 @@ sha2 = "0.10.9"
 
 [dev-dependencies]
 glam-gc = { path = "crates/glam-gc", features = ["deterministic-test-hooks"] }
+quote = "1.0"
 syn = { version = "2.0.106", features = ["full", "visit"] }
 
 [profile.release]
