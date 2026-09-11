@@ -1,9 +1,12 @@
 use super::super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use crate::core::{Key, OpaqueValue, Value as CoreValue};
 use crate::diagnostic::Severity;
+use crate::evaluation::{
+    EvalContext, EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll,
+};
 use crate::reflection::{StoreCommitResult, StoreJournal};
 
 use super::runtime_tests::{decode_test_integer, input_transaction};
@@ -59,6 +62,32 @@ fn assert_production_cycle_reclaimed(
         live_managed_slots,
         "{label}: the exact unrooted closed graph should be reclaimed"
     );
+}
+
+struct PausedManagedWorker {
+    context: EvalContext,
+    entered: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+}
+
+impl EvaluationTaskMachine for PausedManagedWorker {
+    fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: usize,
+    ) -> EvaluationMachinePoll {
+        poll_context.with_value_access(&self.context, |_| {
+            self.entered
+                .take()
+                .expect("worker fixture should enter managed access once")
+                .send(())
+                .expect("worker-entry observer should remain live");
+            self.release
+                .recv()
+                .expect("worker release should remain live");
+        });
+        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
+    }
 }
 
 #[test]
@@ -371,4 +400,105 @@ fn production_runtime_preserves_external_owners_until_explicit_retirement() {
         "the collected opaque shell should retire its external payload owner"
     );
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn collection_interleaves_with_worker_quantum_without_lost_work() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let context = assembler.eval_context();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let task = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(PausedManagedWorker {
+                context: task_context,
+                entered: Some(entered_tx),
+                release: release_rx,
+            }))
+        })
+        .expect("worker fixture should schedule");
+    entered_rx
+        .recv()
+        .expect("worker should pause while holding managed access");
+
+    let (collector_started_tx, collector_started_rx) = mpsc::channel();
+    let (collection_tx, collection_rx) = mpsc::channel();
+    let collector_runtime = runtime.clone();
+    let collector = std::thread::spawn(move || {
+        collector_started_tx
+            .send(())
+            .expect("collector-start observer should remain live");
+        let report = collector_runtime
+            .collect_managed_for_maintenance()
+            .expect("collection should resume after worker access ends");
+        collection_tx
+            .send(report)
+            .expect("collection observer should remain live");
+    });
+    collector_started_rx
+        .recv()
+        .expect("collector thread should begin");
+    assert!(
+        matches!(collection_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "a collector ordered after active managed access must not complete first"
+    );
+
+    release_tx
+        .send(())
+        .expect("managed worker should be releasable");
+    let during = collection_rx
+        .recv()
+        .expect("collector should complete after worker release");
+    collector.join().expect("collector thread should not panic");
+    runtime.pump_until_stable();
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Complete(_)
+    ));
+
+    let after = runtime
+        .collect_managed_for_maintenance()
+        .expect("post-worker serial collection should complete");
+    assert_eq!(
+        after.epoch(),
+        during.epoch() + 1,
+        "worker completion must not lose work or trigger an unrequested collection"
+    );
+}
+
+#[test]
+fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let _assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let before = runtime
+        .collect_managed_for_maintenance()
+        .expect("baseline collection should complete");
+    runtime.enable_collection_before_outer_entry_for_test();
+
+    let value = runtime.values().empty_dict();
+    assert_eq!(value.runtime_id(), runtime.id());
+    let after = runtime
+        .collect_managed_for_maintenance()
+        .expect("explicit post-entry collection should complete");
+    assert_eq!(
+        after.epoch(),
+        before.epoch() + 2,
+        "one outer value entry should force exactly one intervening collection"
+    );
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto,
+        "aggressive verification must not mutate heap policy"
+    );
 }

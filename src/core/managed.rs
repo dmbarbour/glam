@@ -467,6 +467,11 @@ impl CoreValueFactory {
         self.domain.heap.statistics()
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_collection_before_outer_entry_for_test(&self) {
+        self.domain.heap.enable_collection_before_outer_entry();
+    }
+
     /// Performs one explicit full collection for a caller which has already
     /// established a stable maintenance boundary.
     ///

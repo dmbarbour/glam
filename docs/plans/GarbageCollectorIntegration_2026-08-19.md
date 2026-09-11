@@ -6398,24 +6398,52 @@ serial phase.
 
 ### Phase I11C — Worker and Finalizer Concurrency Schedules
 
-- Force collection before, during, and after worker activity using deterministic
-  barriers, then add the aggressive debug request-before-outer-entry mode.
-- Finalize passive managed value shells, including shells whose opaque variant
-  holds only an `ExternalOwnerHandle`, while logger supervision and workers are
-  active. Active opaque payload destruction remains an external-registry
-  operation after collection. Prove managed finalization produces no
-  diagnostics, events, tasks, managed allocations, or other runtime work.
-- Issue collection requests from external runtime work while finalization is
-  active and prove coalescing avoids recursive collection or an immediate
-  second pass. Worker entry into the same heap remains governed by ordinary
-  admission and does not depend on destructor callbacks.
-- Exercise runtime drop before and after collection.
+- **I11C.1 — Worker-quantum collection ordering.** Force collection before,
+  during, and after actual worker activity with channels or barriers that prove
+  the selected ordering. A worker fixture pauses once while holding bounded
+  managed access so a synchronous collector must wait, then completes and
+  publishes its ordinary result after release. Add one heap-local aggressive
+  debug mode which requests collection immediately before every outer managed
+  entry; recursive entries remain ordinary recursive access and the mode never
+  changes the heap's immutable `NoAuto` policy.
+- **I11C.2 — Passive production finalization.** Finalize passive managed value
+  shells, including a shell whose opaque variant holds only an
+  `ExternalOwnerHandle`, while a logger-facing diagnostic ingress/service and
+  a worker quantum are active outside managed access. Active opaque payload
+  destruction remains an explicit external-registry operation after
+  collection. Prove collection publishes no diagnostic, event, task,
+  observation, or managed-allocation work.
+- **I11C.3 — Request coalescing during finalization.** Extend the existing
+  private `deterministic-test-hooks` feature with a one-shot Finalizing-phase
+  pause that holds no collector component mutex. Issue a nonblocking collection
+  request from external runtime work while the collector is paused, release
+  finalization, and prove successful completion coalesces the request without
+  recursive collection or an immediate second pass. Worker entry remains
+  governed by ordinary heap admission and does not depend on a destructor
+  callback.
+- **I11C.4 — Runtime retirement and verification.** Exercise runtime drop both
+  before any forced collection and after controlled/concurrent collection,
+  including an escaped public value which becomes inert after domain
+  retirement. Reconcile the new deterministic hook with the collector test
+  surface, run focused tests plus routine checks, and record the I11C outcome.
 
 Verification: `collection_interleaves_with_worker_quantum_without_lost_work`,
 `passive_finalization_produces_no_runtime_work`, and
 `external_request_during_finalization_is_coalesced`, followed by
 repeated worker stress, focused Miri, and sanitizer runs. The production heap
 remains `NoAuto`; only explicit tests/maintenance collect.
+
+I11C.1 completed 2026-09-11. A real one-worker runtime now pauses a scheduled
+task inside its bounded managed-access region, starts a synchronous collector
+after that fact is observed, proves the collector cannot complete first, then
+releases the task and observes both collection and the ordinary task result.
+A later explicit collection advances exactly one epoch, ruling out lost work
+or an unintended extra pass. The collector's private deterministic feature now
+also supports heap-local collection before each outer entry. It discards the
+inert prepared TLS entry before collecting, prepares again against the new
+lease epoch, and leaves recursive entry alone. Both collector and production
+runtime fixtures prove one outer entry adds exactly one pass while immutable
+policy remains `NoAuto`.
 
 ### Phase I11D — Gate G3 Certification
 

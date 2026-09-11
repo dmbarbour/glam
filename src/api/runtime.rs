@@ -544,6 +544,15 @@ impl EvaluationRuntime {
             .collect_managed_for_maintenance()
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_collection_before_outer_entry_for_test(&self) {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .enable_collection_before_outer_entry_for_test();
+    }
+
     /// Registers a runtime-local FIFO input boundary.
     ///
     /// The converter is host policy: it runs before mutation admission and
