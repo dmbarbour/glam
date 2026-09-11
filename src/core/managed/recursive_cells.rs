@@ -2935,6 +2935,9 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
         let inventory_path = manifest.join("src/core/managed/recursive_identity_inventory.rs");
+        // I9's active-owner audit names the managed cells only as source text
+        // whose field declarations must reject external lifecycle owners.
+        let active_inventory_path = manifest.join("src/core/managed/active_owner_inventory.rs");
         let owner = fs::read_to_string(&owner_path).expect("the recursive-cell source should read");
         let count = |parts: &[&str]| owner.matches(&parts.concat()).count();
 
@@ -2974,6 +2977,7 @@ mod tests {
                 if path.extension().is_none_or(|extension| extension != "rs")
                     || path == owner_path
                     || path == inventory_path
+                    || path == active_inventory_path
                 {
                     continue;
                 }

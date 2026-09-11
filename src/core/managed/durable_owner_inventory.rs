@@ -901,6 +901,306 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     Some(owner)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleDeltaDisposition {
+    /// The earlier phase changed a managed interior without changing the I4F
+    /// durable owner which already enclosed it.
+    ManagedInterior,
+    /// The earlier phase changed the representation held by an existing
+    /// durable owner and supplied focused retirement evidence.
+    ReconciledOwner,
+    /// The subsystem's I4F root and retirement contract did not change.
+    UnchangedI4fContract,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LifecycleSourceLatch {
+    path: &'static str,
+    needle: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LifecycleDeltaEntry {
+    phase: &'static str,
+    subsystem: &'static str,
+    owner: &'static str,
+    change: &'static str,
+    disposition: LifecycleDeltaDisposition,
+    behavior: &'static str,
+    owner_drop: &'static str,
+    isolated_reclamation: Option<&'static str>,
+    latches: &'static [LifecycleSourceLatch],
+}
+
+/// I9's bounded delta from the I4F durable-owner baseline.
+///
+/// These rows deliberately do not repeat `OWNER_INVENTORY`. They account for
+/// the representation changes made by I5-I8 and for the subsystem rows which
+/// those phases reviewed without changing. A newly introduced durable owner
+/// belongs in the main inventory and in its source phase, not in this table.
+const LIFECYCLE_DELTA: &[LifecycleDeltaEntry] = &[
+    LifecycleDeltaEntry {
+        phase: "I5",
+        subsystem: "core recursive identities",
+        owner: "production managed core value node",
+        change: "lazy, promise, and core-net identities became exact managed edges beneath the existing value root",
+        disposition: LifecycleDeltaDisposition::ManagedInterior,
+        behavior: "recursive_identity_source_inventory_is_complete",
+        owner_drop: "durable_recursive_owner_copies_have_proven_roles",
+        isolated_reclamation: Some("managed_lazy_source_self_cycle_is_traced_and_reclaimed"),
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/core/managed/recursive_cells.rs",
+                needle: "pub(crate) struct ManagedLazyRoot {",
+            },
+            LifecycleSourceLatch {
+                path: "src/core/managed/recursive_cells.rs",
+                needle: "pub(crate) struct ManagedPromiseRoot {",
+            },
+            LifecycleSourceLatch {
+                path: "src/core/managed/recursive_cells.rs",
+                needle: "pub(crate) struct ManagedCoreNetRoot {",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I5",
+        subsystem: "coordinator and evaluation state",
+        owner: "task, wait, session, client-demand, and producer records",
+        change: "existing parked owners retain registered recursive-family roots while terminal publication keeps the I4F runtime-root contract",
+        disposition: LifecycleDeltaDisposition::ReconciledOwner,
+        behavior: "promise_settlement_releases_task_and_local_owner_roots",
+        owner_drop: "owner_session_drop_publishes_task_abandonment_and_status",
+        isolated_reclamation: Some("external_promise_owner_has_no_managed_backedge"),
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/evaluation/tests.rs",
+                needle: "fn promise_settlement_releases_task_and_local_owner_roots()",
+            },
+            LifecycleSourceLatch {
+                path: "src/evaluation/tests.rs",
+                needle: "fn owner_session_drop_publishes_task_abandonment_and_status()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I6",
+        subsystem: "reflection store and protocol state",
+        owner: "reflection computation semantic edges and one-use activation owner",
+        change: "reflection effect and target returned to the managed trace while the external reservation retained only edge-free observation and one-use rooted activation",
+        disposition: LifecycleDeltaDisposition::ReconciledOwner,
+        behavior: "reflection_gate_observer_and_activation_orderings_are_forced",
+        owner_drop: "abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain",
+        isolated_reclamation: Some(
+            "production_reflection_gate_target_backedge_reclaims_without_an_external_root",
+        ),
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/eval/tests.rs",
+                needle: "fn reflection_gate_observer_and_activation_orderings_are_forced()",
+            },
+            LifecycleSourceLatch {
+                path: "src/core/managed/active_owner_inventory.rs",
+                needle: "fn production_reflection_gate_target_backedge_reclaims_without_an_external_root()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I7",
+        subsystem: "persistent list and dictionary payloads",
+        owner: "recursive core value and failure payloads",
+        change: "the existing non-forcing persistent visitors were audited without changing their owner or representation",
+        disposition: LifecycleDeltaDisposition::UnchangedI4fContract,
+        behavior: "persistent_representation_to_visitor_inventory_is_complete",
+        owner_drop: "durable_value_owner_inventory_is_complete",
+        isolated_reclamation: Some("persistent_adapter_cycle_reclaims_in_isolated_heap"),
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/core/managed/payload_edges/persistent.rs",
+                needle: "fn persistent_adapter_cycle_reclaims_in_isolated_heap()",
+            },
+            LifecycleSourceLatch {
+                path: "src/core/managed/recursive_cells.rs",
+                needle: "fn managed_promise_cycle_through_shared_dict_version_is_traced_and_reclaimed()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I8",
+        subsystem: "core synchronized nets",
+        owner: "CorePreparedCopySource / CoreFrontierObservation / NormalizationRequest",
+        change: "each existing temporary owner now stores one root-only ManagedCoreNetRoot and reconstructs its edge only inside matching access",
+        disposition: LifecycleDeltaDisposition::ReconciledOwner,
+        behavior: "core_net_durable_owner_inventory_is_compile_exhaustive",
+        owner_drop: "prepared_copy_source_is_an_exact_temporary_net_owner; frontier_observation_is_an_exact_temporary_net_owner; normalization_request_is_an_exact_temporary_net_owner",
+        isolated_reclamation: Some("managed_core_net_source_self_cycle_is_traced_and_reclaimed"),
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/core_net.rs",
+                needle: "fn frontier_observation_is_an_exact_temporary_net_owner()",
+            },
+            LifecycleSourceLatch {
+                path: "src/eval/net.rs",
+                needle: "fn normalization_request_is_an_exact_temporary_net_owner()",
+            },
+            LifecycleSourceLatch {
+                path: "src/core/managed/recursive_cells.rs",
+                needle: "fn durable_recursive_wrappers_do_not_hide_a_second_semantic_identity()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I5-I8",
+        subsystem: "runtime canonical and compiler caches",
+        owner: "CoreValues / runtime extension caches / GCompilerValues",
+        change: "no cache publication or retirement contract changed after I4F",
+        disposition: LifecycleDeltaDisposition::UnchangedI4fContract,
+        behavior: "compiler_cache_publishes_complete_rooted_bundle",
+        owner_drop: "runtime_cache_retires_an_admitted_owner_with_the_value_domain",
+        isolated_reclamation: None,
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/core.rs",
+                needle: "fn runtime_cache_retires_an_admitted_owner_with_the_value_domain()",
+            },
+            LifecycleSourceLatch {
+                path: "src/g_syntax/compiler_values.rs",
+                needle: "fn compiler_cache_publishes_complete_rooted_bundle()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I5-I8",
+        subsystem: "diagnostics and runtime events",
+        owner: "diagnostic bus and runtime input/output records",
+        change: "no buffered root, callback boundary, or retirement contract changed after I4F",
+        disposition: LifecycleDeltaDisposition::UnchangedI4fContract,
+        behavior: "runtime_input_roots_follow_buffer_journal_and_committed_result_owners",
+        owner_drop: "diagnostic_events_retain_emission_and_origin_roots_until_retirement",
+        isolated_reclamation: None,
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/api/tests/runtime_tests.rs",
+                needle: "fn runtime_input_roots_follow_buffer_journal_and_committed_result_owners()",
+            },
+            LifecycleSourceLatch {
+                path: "src/api/tests/diagnostic_tests.rs",
+                needle: "fn diagnostic_events_retain_emission_and_origin_roots_until_retirement()",
+            },
+        ],
+    },
+    LifecycleDeltaEntry {
+        phase: "I5-I8",
+        subsystem: "assembly, compiler, and CLI owners",
+        owner: "Assembler / CompileContext / module lowering / binary configuration",
+        change: "bounded projections and durable public roots retain the I4F contract",
+        disposition: LifecycleDeltaDisposition::UnchangedI4fContract,
+        behavior: "compiler_root_and_projection_inventory_is_complete",
+        owner_drop: "module_load_arguments_retain_definition_roots_until_handoff_retires",
+        isolated_reclamation: None,
+        latches: &[
+            LifecycleSourceLatch {
+                path: "src/g_syntax/access_inventory.rs",
+                needle: "fn compiler_root_and_projection_inventory_is_complete()",
+            },
+            LifecycleSourceLatch {
+                path: "src/compiler.rs",
+                needle: "fn module_load_arguments_retain_definition_roots_until_handoff_retires()",
+            },
+        ],
+    },
+];
+
+#[test]
+fn runtime_root_lifecycle_delta_is_reconciled() {
+    let phases = LIFECYCLE_DELTA
+        .iter()
+        .map(|entry| entry.phase)
+        .collect::<Vec<_>>();
+    for phase in ["I5", "I6", "I7", "I8"] {
+        assert!(
+            phases.contains(&phase),
+            "the lifecycle delta omits source phase {phase}"
+        );
+    }
+    for subsystem in [
+        "runtime canonical and compiler caches",
+        "coordinator and evaluation state",
+        "reflection store and protocol state",
+        "diagnostics and runtime events",
+        "assembly, compiler, and CLI owners",
+    ] {
+        assert!(
+            LIFECYCLE_DELTA
+                .iter()
+                .any(|entry| entry.subsystem == subsystem),
+            "the lifecycle delta omits subsystem {subsystem}"
+        );
+    }
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut verification_paths = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut verification_paths);
+    let verification_sources = verification_paths
+        .into_iter()
+        .filter(|path| !path.ends_with("core/managed/durable_owner_inventory.rs"))
+        .map(|path| {
+            fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} should be readable: {error}", path.display()))
+        })
+        .collect::<Vec<_>>();
+    let verification_exists = |name: &str| {
+        if name == "durable_value_owner_inventory_is_complete" {
+            return true;
+        }
+        let declaration = format!("fn {name}(");
+        verification_sources
+            .iter()
+            .any(|source| source.contains(&declaration))
+    };
+    for entry in LIFECYCLE_DELTA {
+        for (label, value) in [
+            ("phase", entry.phase),
+            ("subsystem", entry.subsystem),
+            ("owner", entry.owner),
+            ("change", entry.change),
+            ("behavior", entry.behavior),
+            ("owner drop", entry.owner_drop),
+        ] {
+            assert!(!value.is_empty(), "{} has no {label}", entry.owner);
+        }
+        if entry.disposition != LifecycleDeltaDisposition::UnchangedI4fContract {
+            assert!(
+                entry.isolated_reclamation.is_some(),
+                "changed owner {} needs focused reclamation evidence",
+                entry.owner
+            );
+        }
+        for verification in std::iter::once(entry.behavior)
+            .chain(entry.owner_drop.split("; "))
+            .chain(entry.isolated_reclamation)
+        {
+            assert!(
+                verification_exists(verification),
+                "{} names missing verification {verification}",
+                entry.owner
+            );
+        }
+        for latch in entry.latches {
+            let source = fs::read_to_string(manifest.join(latch.path))
+                .unwrap_or_else(|error| panic!("{} should be readable: {error}", latch.path));
+            assert_eq!(
+                source.matches(latch.needle).count(),
+                1,
+                "{} lifecycle evidence drifted at {}: {:?}",
+                entry.owner,
+                latch.path,
+                latch.needle
+            );
+        }
+    }
+}
+
 #[test]
 fn durable_value_owner_inventory_is_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1017,4 +1317,44 @@ fn durable_value_owner_inventory_is_complete() {
             );
         }
     }
+}
+
+#[test]
+fn runtime_root_source_inventory_is_reconciled() {
+    // I9G intentionally consumes the I4F scan rather than maintaining a
+    // second declaration baseline which could drift independently.
+    durable_value_owner_inventory_is_complete();
+
+    let recursive = include_str!("recursive_identity_inventory.rs");
+    for baseline in [
+        "fn recursive_identity_source_inventory_is_complete()",
+        "fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities()",
+    ] {
+        assert_eq!(
+            recursive.matches(baseline).count(),
+            1,
+            "the I5 recursive-identity baseline drifted at {baseline}"
+        );
+    }
+
+    let active = include_str!("active_owner_inventory.rs");
+    for baseline in [
+        "fn active_external_raii_inventory_is_reconciled()",
+        "fn managed_graph_reaches_no_active_raii_owner()",
+    ] {
+        assert_eq!(
+            active.matches(baseline).count(),
+            1,
+            "the I9F active-owner baseline drifted at {baseline}"
+        );
+    }
+
+    let access = include_str!("../../api/value/access_inventory.rs");
+    assert_eq!(
+        access
+            .matches("fn registered_runtime_root_publication_inventory_is_complete()")
+            .count(),
+        1,
+        "the public/runtime root publication baseline drifted"
+    );
 }

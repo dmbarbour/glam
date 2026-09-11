@@ -246,7 +246,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I8B | complete | final post-cutover net cycle matrix |
 | I8C | complete | net-specific compatibility retirement |
 | I8 | complete | post-cutover core-net trace, mutation, cursor, and lifecycle audit; post-I8 review passed |
-| I9 | pending | runtime-root lifecycle and retirement audits |
+| I9A-E | complete | I5-I8 durable-owner delta and conditional subsystem audits |
+| I9F | complete | exhaustive production active-RAII lifecycle audit |
+| I9G | complete | reconciled runtime-root source inventory |
+| I9 | review pending | runtime-root lifecycle and retirement audits |
 | I10 | pending | deferred closures and opaque boundaries |
 | I10B.0 | pending | opaque representation decision review gate |
 | I11 | pending | whole-production-graph forced collection |
@@ -5800,6 +5803,20 @@ remains outside the production core graph.
 
 ### Phase I9A-E — Phase-Entry Delta and Conditional Subsystem Audits
 
+Completed 2026-09-11. A source-backed delta table now maps the representation
+work from I5-I8 and each required runtime/cache, coordinator/evaluation,
+reflection, diagnostic/event, and compiler/assembly/CLI subsystem to its I4F
+owner contract. I5's recursive cells and coordinator roots, I6's reflection
+ownership, and I8's root-only net holders are the only changed rows; I7 and
+the remaining subsystem rows retain their prior contract. Every changed row
+names and latches behavior, owner-drop, and isolated reclamation evidence.
+
+The I8 delta exposed two useful missing lifetime fixtures. A frontier
+observation and a normalization request now each prove that their one
+`ManagedCoreNetRoot` retains the source net and that ordinary descriptor drop
+releases the final root. `runtime_root_lifecycle_delta_is_reconciled` closes
+the checkpoint without introducing a new owner family.
+
 - Diff the I5-I8 implementation and ownership ledger against I4F's latched
   durable-owner inventory. Classify every changed field, constructor,
   publication path, retirement path, and newly introduced companion by owning
@@ -5828,6 +5845,22 @@ the I4F source-backed inventory. Production remains `NoAuto`; this phase does
 not force collection over the complete runtime.
 
 ### Phase I9F — External Active-RAII Lifecycle Audit
+
+Completed 2026-09-11. The audit consumes the five I5E lifecycle families—
+promise resolver, promise producer root, evaluation session, client demand,
+and reflection reservation—and records the I6 one-use reflection activation
+shape as the sole post-I5 delta. An exhaustive syntax-backed scan classifies
+all 19 production `Drop` implementations with active behavior as an external
+lifecycle owner, detached retirement work, bounded claim/admission guard,
+edge-free notification companion, or runtime infrastructure cleanup. Any new
+or unclassified implementation now fails
+`active_external_raii_inventory_is_reconciled`.
+
+The companion `managed_graph_reaches_no_active_raii_owner` latch checks every
+production managed cell declaration against the active owner types and the
+managed-family contract. Existing forced-order lifecycle tests remain the
+behavioral evidence; I9 adds no duplicate concurrency fixture and does not
+turn external RAII into managed finalization.
 
 - Consume I5E/I5F.4's active-owner inventory as the baseline, including its
   completed promise-resolver, producer-root, session, client-demand, and
@@ -5860,6 +5893,12 @@ duplicating them. Add
 `managed_graph_reaches_no_active_raii_owner`. Production remains `NoAuto`.
 
 ### Phase I9G — Runtime-Root Source Inventory
+
+Completed 2026-09-11. `runtime_root_source_inventory_is_reconciled` directly
+reuses the exhaustive I4F declaration scan, then latches the I5 recursive
+identity, I9F active-owner, and public/runtime root-publication inventories as
+its three subordinate classifications. The scan found no unmatched durable
+field and no newly introduced bare value owner. Production remains `NoAuto`.
 
 - Re-run the exhaustive source search for core/public values, roots, evaluated
   values, snapshots, diagnostics, type-erased attachments, and parked machine

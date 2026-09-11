@@ -1602,6 +1602,37 @@ mod tests {
     }
 
     #[test]
+    fn frontier_observation_is_an_exact_temporary_net_owner() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the frontier-observation fixture should start collectible");
+        let observation = {
+            let source = values.instantiate_core_net(&closed_unit_template(&values));
+            let exposed = source.test_with(&values, RuntimeNet::exposed);
+            let CorePreparedCopySource { root, .. } = source.test_prepare_copy_source(&values);
+            CoreFrontierObservation {
+                root,
+                observed_topology: 0,
+                endpoint: DemandEndpoint::Cursor(exposed.node()),
+            }
+        };
+
+        let retained = values
+            .collect_managed_for_test()
+            .expect("the frontier observation should retain its semantic net");
+        assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(retained.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(observation);
+        let retired = values
+            .collect_managed_for_test()
+            .expect("dropping the frontier observation should retire its semantic net");
+        assert_eq!(retired.root_entries(), baseline.root_entries());
+        assert_eq!(retired.finalized_slots(), 1);
+    }
+
+    #[test]
     #[should_panic(expected = "a live cursor claim cannot cross the core-net facade")]
     fn core_cursor_step_rejects_a_live_claim() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());

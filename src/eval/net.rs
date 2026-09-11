@@ -1156,6 +1156,8 @@ pub(super) fn resolve_core_access_in(
 #[cfg(test)]
 mod driver_tests {
     use super::*;
+    use crate::interaction_net::RuntimeNet;
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn assert_net_driver_bounded_owner_inventory(
         request: &NormalizationRequest,
@@ -1280,6 +1282,39 @@ mod driver_tests {
         super::with_direct_evaluator(&context, |evaluator| {
             NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
         })
+    }
+
+    #[test]
+    fn normalization_request_is_an_exact_temporary_net_owner() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the normalization-request fixture should start collectible");
+        let request = {
+            let runtime = values.instantiate_core_net(&{
+                let mut builder = NetBuilder::new();
+                let exposed = builder.data(values.unit());
+                builder.finish(exposed)
+            });
+            let exposed = runtime.test_with(&values, RuntimeNet::exposed);
+            super::with_direct_evaluator(&context, |evaluator| {
+                NormalizationRequest::cursor_whnf(runtime.clone(), exposed, evaluator)
+            })
+        };
+
+        let retained = values
+            .collect_managed_for_test()
+            .expect("the normalization request should retain its semantic net");
+        assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(retained.marked_slots(), baseline.marked_slots() + 1);
+
+        drop(request);
+        let retired = values
+            .collect_managed_for_test()
+            .expect("dropping the normalization request should retire its semantic net");
+        assert_eq!(retired.root_entries(), baseline.root_entries());
+        assert_eq!(retired.finalized_slots(), 1);
     }
 
     fn claimed_core_call(callable: Value) -> (CoreRuntimeNet, Call) {
