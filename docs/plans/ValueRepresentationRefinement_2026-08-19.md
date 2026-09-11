@@ -272,6 +272,13 @@ request a collector large-object fallback.
 
 - Remove redundant `Arc` and enum wrappers.
 - Remove conversions which can no longer be reached.
+- Remove `RuntimeFailureRoot`'s parallel `Arc<EvaluationFailure>` plus direct
+  value-root representation after failures have one canonical managed/rooted
+  form.
+- Remove every remaining semantic-data-plus-parallel-roots record and every
+  `CompatibilityValueEdges` implementation. A source-backed gate must prove
+  that poll-spanning machine state uses canonical roots, specialized managed
+  roots, or edge-free phase data before moving collection may begin.
 - Re-run layout and allocation measurements and tune size classes only from
   evidence.
 - Update architecture and public API documentation.

@@ -542,14 +542,14 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         [1, 0, 0],
         DurableRoot,
         None,
-        "parked producer machine must publish the lazy terminal cache"
+        "parked producer retains its lazy owner and stores any followed semantic result only through a canonical runtime root"
     ),
     owner!(
         "src/eval/value.rs::PromiseFollower",
         [0, 1, 0],
         DurableRoot,
         None,
-        "parked follower actively observes eventual assignment"
+        "parked follower retains its promise root and reprojects the immutable assignment from a payload-free phase marker"
     ),
     owner!(
         "src/evaluation/access.rs::PendingManagedPublication",

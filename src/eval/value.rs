@@ -132,7 +132,7 @@ pub(crate) fn eval_value_in(
 
 enum LazyTaskWork {
     Produce,
-    Follow(Value),
+    Follow(crate::runtime::RuntimeValueRoot),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
@@ -174,7 +174,7 @@ impl LazyTaskMachine {
     ) -> EvaluationMachinePoll {
         match result {
             Ok(value) if is_deferred(&value) => {
-                self.work = LazyTaskWork::Follow(value);
+                self.work = LazyTaskWork::Follow(context.root_value(value));
                 EvaluationMachinePoll::Yielded
             }
             Ok(value) => self.complete(context, value),
@@ -261,7 +261,8 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             let LazyTaskWork::Follow(target) = &self.work else {
                 unreachable!("non-producing lazy work must follow a value or construct a net")
             };
-            let result = eval_value_in(context, target);
+            let target = context.project_root(target);
+            let result = eval_value_in(context, &target);
             self.finish_poll(context, result)
         })
     }
@@ -307,7 +308,7 @@ impl LazyTaskMachine {
 
 enum PromiseFollowerState {
     AwaitAssignment,
-    FollowAssignment(Value),
+    FollowAssignment,
 }
 
 struct PromiseFollower {
@@ -324,27 +325,28 @@ impl EvaluationTaskMachine for PromiseFollower {
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
         poll_context.evaluate(&durable_context, |context| {
-            let result = match &self.state {
-                PromiseFollowerState::AwaitAssignment => {
-                    match context
-                        .with_value_access(|access| access.promise_root(&self.promise).assignment())
-                    {
-                        Some(result) => result.map_err(EvaluationHalt::failure),
-                        None => {
-                            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                                dependency: Some(WorkDependency::Promise(self.promise.clone())),
-                                observed_epoch: None,
-                                error: None,
-                            });
-                        }
-                    }
+            let Some(assignment) =
+                context.with_value_access(|access| access.promise_root(&self.promise).assignment())
+            else {
+                debug_assert!(matches!(self.state, PromiseFollowerState::AwaitAssignment));
+                return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Promise(self.promise.clone())),
+                    observed_epoch: None,
+                    error: None,
+                });
+            };
+            let assignment = assignment.map_err(EvaluationHalt::failure);
+            let result = match (&self.state, assignment) {
+                (PromiseFollowerState::AwaitAssignment, result) => result,
+                (PromiseFollowerState::FollowAssignment, Ok(target)) => {
+                    eval_value_in(context, &target)
                 }
-                PromiseFollowerState::FollowAssignment(target) => eval_value_in(context, target),
+                (PromiseFollowerState::FollowAssignment, Err(error)) => Err(error),
             };
 
             match result {
                 Ok(value) if is_deferred(&value) => {
-                    self.state = PromiseFollowerState::FollowAssignment(value);
+                    self.state = PromiseFollowerState::FollowAssignment;
                     EvaluationMachinePoll::Yielded
                 }
                 Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
@@ -876,4 +878,56 @@ fn is_semantically_undefined_in(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    fn assert_poll_spanning_owner_inventory(
+        work: &LazyTaskWork,
+        lazy: &LazyTaskMachine,
+        promise_state: &PromiseFollowerState,
+        promise: &PromiseFollower,
+    ) {
+        match work {
+            LazyTaskWork::Produce => {}
+            LazyTaskWork::Follow(value) => {
+                let _: &crate::runtime::RuntimeValueRoot = value;
+            }
+            LazyTaskWork::HostCall(producer) => {
+                let _: &Arc<crate::core::HostCallProducer> = producer;
+            }
+            LazyTaskWork::NetConstruction(machine) => {
+                let _: &NetConstructionMachine = machine;
+            }
+        }
+
+        let LazyTaskMachine {
+            context,
+            lazy: lazy_root,
+            work,
+        } = lazy;
+        let _: &EvalContext = context;
+        let _: &ManagedLazyRoot = lazy_root;
+        let _: &LazyTaskWork = work;
+
+        match promise_state {
+            PromiseFollowerState::AwaitAssignment | PromiseFollowerState::FollowAssignment => {}
+        }
+        let PromiseFollower {
+            context,
+            promise: promise_root,
+            state,
+        } = promise;
+        let _: &EvalContext = context;
+        let _: &ManagedPromiseRoot = promise_root;
+        let _: &PromiseFollowerState = state;
+    }
+
+    #[test]
+    fn poll_spanning_evaluator_state_uses_canonical_owners() {
+        let _: fn(&LazyTaskWork, &LazyTaskMachine, &PromiseFollowerState, &PromiseFollower) =
+            assert_poll_spanning_owner_inventory;
+    }
 }

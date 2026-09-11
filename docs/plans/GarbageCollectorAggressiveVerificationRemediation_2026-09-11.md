@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A complete; GCI11R-002B-H planned. This plan expands
+Status: GCI11R-002A-B complete; GCI11R-002C-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -279,19 +279,26 @@ each shared fix rather than treated as independent defects.
 
 ### GCI11R-002B — Poll-Spanning Evaluator Ownership
 
+Status: complete on 2026-09-11.
+
 1. First latch the current failure for a lazy result followed across two poll
    steps.
-2. Replace bare `LazyTaskWork::Follow(Value)` with durable same-runtime
-   ownership. Install that owner during the producing evaluator step, before
-   pending publications are retired, and project it during the consuming step.
-3. Add a focused promised-assignment follow fixture which proves that the
-   retained `ManagedPromiseRoot` preserves its immutable assignment across the
-   poll boundary. Record this deliberate indirect ownership rather than adding
-   a second root unless the test or implementation audit disproves it.
+2. Replace bare `LazyTaskWork::Follow(Value)` with a canonical same-runtime
+   `RuntimeValueRoot`. Install that owner during the producing evaluator step,
+   before pending publications are retired, and project it only inside the
+   consuming evaluator step. Do not retain the original `Value` beside it.
+3. Replace `PromiseFollowerState::FollowAssignment(Value)` with a payload-free
+   phase marker. The existing `ManagedPromiseRoot` is the one durable owner;
+   every following poll reprojects its immutable assignment through matching
+   value access. Add a focused fixture proving that this indirect ownership
+   survives collection without a redundant assignment root or poll-spanning
+   bare value.
 4. Inventory all production evaluator, net-driver, reflection, and effect
    machine fields which retain `Value`, `Vec<Value>`, or a value-bearing shell
-   across `Yielded` or `Blocked`. Reconcile each with an existing parallel root
-   record or migrate it; do not infer safety merely from a short Rust lifetime.
+   across `Yielded` or `Blocked`. Durable state must use one canonical runtime
+   root, an existing specialized managed root, or edge-free phase/identity
+   data. Migrate any bare pointer-bearing value instead of adding a parallel
+   root record; do not infer safety merely from a short Rust lifetime.
 5. Update the machine/root source inventories so another poll-spanning bare
    edge is a review-visible change.
 
@@ -304,7 +311,62 @@ Verification:
 - source-latch tests for poll-spanning machine ownership.
 
 Exit: no evaluator machine relies on step-temporary publication after that
-step returns.
+step returns, and no repaired machine stores the same semantic state both as a
+bare value and as a parallel root record.
+
+#### Poll-spanning ownership and moving-GC retirement policy
+
+Parallel roots are compatibility scaffolding, not an accepted target
+representation. Across an evaluator safepoint, a root or managed owner is
+canonical and any bare semantic view is projected afresh inside the next
+mutator-qualified step. A companion root must not be added merely to preserve
+a separately retained `Value`.
+
+The later Value Representation Refinement removes the remaining representation
+scaffolding: its structural-node conversion replaces the managed wrapper which
+currently contains a monolithic compatibility `Value`, and its failure
+conversion replaces `RuntimeFailureRoot`'s `Arc<EvaluationFailure>` plus direct
+value roots with one managed/rooted failure representation. The root boundary
+may remain; the duplicated semantic representation may not.
+
+Moving collection is blocked until a source-backed retirement gate proves:
+
+- no durable machine field contains a bare pointer-bearing `Value` across a
+  yield, block, callback, or wait;
+- no owner stores semantic data plus parallel roots for that same data;
+- `CompatibilityValueEdges` has no remaining implementation; and
+- every persistent managed edge is rewritable or uses an explicitly selected
+  stable indirection, while registered root cells are the external relocation
+  points.
+
+The implementation now follows that policy. `LazyTaskWork::Follow` owns one
+canonical `RuntimeValueRoot` installed before evaluator-step temporary owners
+retire, while `PromiseFollowerState::FollowAssignment` carries no value and
+reprojects the immutable assignment from its existing `ManagedPromiseRoot` on
+every poll.
+
+The production machine audit closed as follows:
+
+| Machine family | Durable poll-spanning semantic ownership | Raw value policy |
+| --- | --- | --- |
+| lazy producer/follower | `ManagedLazyRoot` plus a canonical follow `RuntimeValueRoot` | projected only in the active evaluator step |
+| promise follower | one `ManagedPromiseRoot` plus an edge-free phase marker | immutable assignment reprojected on every poll |
+| net driver/normalizer | `ManagedCoreNetRoot`, ports, IDs, and observations | stack-bound claims and batch results are consumed in one drive |
+| net construction | `IsolatedEffectSearch` and its public rooted branch/journal values | constructor input is wrapped before the pollable machine escapes |
+| reflection/effect machine | compile-exhaustive `RuntimeValueRoot`, managed-promise-root, and rooted-failure fields | raw decoded requests and fused actions remain stack-bound |
+| coordinator/client demand/spark | existing `RuntimeValueRoot` and `RuntimeFailureRoot` terminal or queued records | projection occurs only through evaluator or host access scopes |
+
+`poll_spanning_evaluator_state_uses_canonical_owners` is the compile-exhaustive
+evaluator latch. The exhaustive durable-owner scan now records
+`LazyTaskWork` as the evaluator-machine owner and the existing reflection
+`outer_machine_root_inventory_is_complete` latch covers its complete frames.
+The focused lazy fixture failed deterministically before the repair under
+aggressive verification and passes in both modes afterward; the new promise
+fixture passes in both modes without an assignment companion root. The cached
+defined-selection regression also passes in both modes. Broader aggressive
+client-demand and task-promise filters still contain self-opening test
+constructors assigned to GCI11R-002E; they are not evidence against this
+production machine-state repair and remain required for cluster closure.
 
 ### GCI11R-002C — Rooted Closed-Evaluation Results
 

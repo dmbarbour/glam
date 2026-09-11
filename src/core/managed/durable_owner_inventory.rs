@@ -319,13 +319,24 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/reflection/machine.rs",
         "EffectTask frames, requests, continuations, fixpoints, branches, and task blocks",
-        "raw Value/default RuntimeValueRoot fields plus Arc<EvaluationFailure>",
+        "canonical RuntimeValueRoot fields, managed promise roots, and rooted failures; raw Value request views remain stack-bound",
         "parked or worker-transferred effect machine",
         "frame push, request decode, branch/fix capture, or task park",
         "frame consumption, terminal publication, cancellation, or abandonment",
         ManagedRootSurface,
         RootSurface,
         "I4F.2e.2"
+    ),
+    closed_durable!(
+        "src/eval/value.rs",
+        "LazyTaskMachine / PromiseFollower poll-spanning state",
+        "managed lazy or promise owner plus a canonical RuntimeValueRoot lazy-follow target or edge-free promise phase",
+        "yielded or dependency-blocked evaluator task",
+        "root publication within the producing evaluator step or existing promise-root ownership",
+        "lazy/promise completion, failure, cancellation, or machine retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "GCI11R-002B"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -502,9 +513,9 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I3A-I3C lifetime-bound non-Send access and root-before-publication tests"
     ),
     bounded!(
-        "src/eval/builtins; src/eval/value.rs",
+        "src/eval/builtins and stack-local helpers in src/eval/value.rs",
         "callback-free evaluator temporary representations",
-        "parsed builtin operands, pattern helpers, and current lazy/promise observations",
+        "parsed builtin operands, pattern helpers, and value views projected within the current step",
         "one callback-free evaluator quantum",
         "I3B-I3D scoped evaluator inventories and no-mutator-across-wait fixtures"
     ),
@@ -756,10 +767,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 125;
+const DECLARATION_BASELINE_COUNT: usize = 124;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([99, 73, 1, 10, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_712_709_662_929_478_885;
+    DeclarationSignals::new([97, 74, 1, 10, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_891_275_793_242_928_365;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -877,6 +888,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         )
     {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
+    } else if declaration == "src/eval/value.rs::LazyTaskWork" {
+        "LazyTaskMachine / PromiseFollower poll-spanning state"
     } else if declaration.starts_with("src/eval/builtins/")
         || declaration.starts_with("src/eval/value.rs::")
     {

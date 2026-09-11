@@ -236,6 +236,64 @@ fn poll_runtime_until(
     panic!("runtime did not produce the expected client result");
 }
 
+#[test]
+fn lazy_task_follow_retains_a_fresh_deferred_result_across_polls() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let outer = context.values().construct_runtime_value_root(|access| {
+        Value::Lazy(LazyValue::semantic_thunk_in(
+            access,
+            "poll-spanning outer lazy",
+            |step| {
+                let inner = step.construct_lazy(|access| {
+                    LazyValue::semantic_thunk_in(access, "poll-spanning inner lazy", |_| {
+                        Ok(Value::Number(42.into()))
+                    })
+                });
+                Ok(Value::Lazy(inner))
+            },
+        ))
+    });
+
+    assert_eq!(
+        context
+            .evaluate_whnf(&outer.clone_core_for_test())
+            .expect("the outer lazy should retain its fresh result until the following poll"),
+        Value::Number(42.into())
+    );
+}
+
+#[test]
+fn promise_follow_reprojects_its_rooted_assignment_across_polls() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let promise_root = context.values().with_runtime_value_access(|access| {
+        access
+            .construct_rooted_managed_promise("poll-spanning promise")
+            .expect("the managed promise should fit its allocation class")
+    });
+    let promise = context
+        .values()
+        .with_runtime_value_access(|access| PromisedValue::from_root(&promise_root, &access));
+    let assignment = context.values().construct_runtime_value_root(|access| {
+        Value::Lazy(LazyValue::semantic_thunk_in(
+            access,
+            "poll-spanning promise assignment",
+            |_| Ok(Value::Number(42.into())),
+        ))
+    });
+    set_promise(&context, &promise, assignment.clone_core_for_test())
+        .expect("the promise should accept its one assignment");
+    drop(assignment);
+
+    assert_eq!(
+        context
+            .evaluate_whnf(&Value::Promised(promise))
+            .expect("the promise root should retain and reproject its immutable assignment"),
+        Value::Number(42.into())
+    );
+}
+
 fn client_demand_publish_lock_probe(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     handle: &ClientDemandHandle,

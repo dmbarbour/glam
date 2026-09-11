@@ -167,7 +167,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
         // Production-shaped task fixtures retain lazy/promise roots and use
         // explicit matching-domain access rather than facade mutation.
-        ("src/evaluation/tests.rs", GatewayCounts::new(3, 0)),
+        ("src/evaluation/tests.rs", GatewayCounts::new(5, 0)),
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(2, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",
