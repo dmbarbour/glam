@@ -56,7 +56,11 @@ impl ReflectionInspector<'_> {
     /// immediate containers compare their currently retained structure.
     pub fn same_representation(&self, left: &Value, right: &Value) -> Result<bool, Error> {
         self.assembler.values().with_access(|values| {
-            values.with_core(left, |left| values.with_core(right, |right| left == right))?
+            values.with_core(left, |left| {
+                values.with_core(right, |right| {
+                    values.runtime_access().same_representation(left, right)
+                })
+            })?
         })
     }
 

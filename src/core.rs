@@ -2385,6 +2385,149 @@ impl RuntimeValueAccess<'_> {
             }
         }
     }
+
+    /// Compares two currently retained representations without evaluating
+    /// either value or invoking Glam's semantic equality policy.
+    ///
+    /// Immediate data and persistent containers compare structurally. Lazy,
+    /// promised, function-stage, and net edges compare by exact managed
+    /// allocation. Sealed metadata and opaque host values retain their own
+    /// hidden identity relations.
+    pub(crate) fn same_representation(&self, left: &Value, right: &Value) -> bool {
+        if std::mem::discriminant(left) != std::mem::discriminant(right) {
+            return false;
+        }
+
+        match left {
+            Value::Atom(left) => {
+                let Value::Atom(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left == right
+            }
+            Value::Number(left) => {
+                let Value::Number(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left == right
+            }
+            Value::Binary(left) => {
+                let Value::Binary(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left == right
+            }
+            Value::List(left) => {
+                let Value::List(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.same_logical_items_by(right, |left, right| {
+                    use crate::list::LogicalListItemRef;
+
+                    match (left, right) {
+                        (LogicalListItemRef::Byte(left), LogicalListItemRef::Byte(right)) => {
+                            left == right
+                        }
+                        (LogicalListItemRef::Value(left), LogicalListItemRef::Value(right)) => {
+                            self.same_representation(left, right)
+                        }
+                        (LogicalListItemRef::Thunk(left), LogicalListItemRef::Thunk(right)) => {
+                            match (left, right) {
+                                (ListThunk::Lazy(left), ListThunk::Lazy(right)) => {
+                                    left.edge.same_allocation_in(&right.edge, self)
+                                }
+                                (ListThunk::Promised(left), ListThunk::Promised(right)) => {
+                                    left.edge.same_allocation_in(&right.edge, self)
+                                }
+                                (ListThunk::Lazy(_), ListThunk::Promised(_))
+                                | (ListThunk::Promised(_), ListThunk::Lazy(_)) => false,
+                            }
+                        }
+                        (LogicalListItemRef::Byte(_), LogicalListItemRef::Value(_))
+                        | (LogicalListItemRef::Byte(_), LogicalListItemRef::Thunk(_))
+                        | (LogicalListItemRef::Value(_), LogicalListItemRef::Byte(_))
+                        | (LogicalListItemRef::Value(_), LogicalListItemRef::Thunk(_))
+                        | (LogicalListItemRef::Thunk(_), LogicalListItemRef::Byte(_))
+                        | (LogicalListItemRef::Thunk(_), LogicalListItemRef::Value(_)) => false,
+                    }
+                })
+            }
+            Value::Dict(left) => {
+                let Value::Dict(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                let mut left = left.iter();
+                let mut right = right.iter();
+                loop {
+                    match (left.next(), right.next()) {
+                        (None, None) => break true,
+                        (Some((left_key, left_value)), Some((right_key, right_value)))
+                            if left_key == right_key
+                                && self.same_representation(left_value, right_value) => {}
+                        _ => break false,
+                    }
+                }
+            }
+            Value::Builtin(left) => {
+                let Value::Builtin(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left == right
+            }
+            Value::PartialBuiltin(left) => {
+                let Value::PartialBuiltin(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.builtin == right.builtin
+                    && left.arguments.len() == right.arguments.len()
+                    && left
+                        .arguments
+                        .iter()
+                        .zip(right.arguments.iter())
+                        .all(|(left, right)| self.same_representation(left, right))
+            }
+            Value::Function(left) => {
+                let Value::Function(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.remaining_arity == right.remaining_arity
+                    && left
+                        .stage
+                        .runtime()
+                        .same_net_in(right.stage.runtime(), self)
+            }
+            Value::Net(left) => {
+                let Value::Net(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.runtime().same_net_in(right.runtime(), self)
+            }
+            Value::Lazy(left) => {
+                let Value::Lazy(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.edge.same_allocation_in(&right.edge, self)
+            }
+            Value::Promised(left) => {
+                let Value::Promised(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.edge.same_allocation_in(&right.edge, self)
+            }
+            Value::Metadata(left) => {
+                let Value::Metadata(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                Arc::ptr_eq(&left.metadata, &right.metadata)
+            }
+            Value::Opaque(left) => {
+                let Value::Opaque(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.handle.same_owner(&right.handle)
+            }
+        }
+    }
 }
 
 impl Value {
@@ -3075,6 +3218,104 @@ mod tests {
                 "Undefined"
             );
             assert_eq!(access.diagnostic_kind_name(&deferred_list), "List");
+        });
+    }
+
+    #[test]
+    fn access_qualified_representation_comparison_is_structural_and_non_demanding() {
+        let values = values();
+        let demanded = Arc::new(AtomicBool::new(false));
+        let mut builder =
+            crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
+        let data = builder.data(Value::Number(7.into()));
+        let template = builder.finish(data);
+
+        values.with_runtime_value_access(|access| {
+            let demand_signal = Arc::clone(&demanded);
+            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(
+                &access,
+                "representation comparison probe",
+                move |_| {
+                    demand_signal.store(true, Ordering::Release);
+                    Ok(Value::Number(99.into()))
+                },
+            ));
+            let lazy_alias = access.duplicate_value(&lazy);
+            let distinct_lazy = Value::Lazy(LazyValue::error_in(
+                &access,
+                "distinct representation comparison probe",
+            ));
+
+            let left = Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("items"),
+                Value::List(List::concat(
+                    List::from_bytes(Bytes::from_static(b"H")),
+                    List::concat(
+                        List::from_bytes(Bytes::from_static(b"i")),
+                        List::from_values(vec![lazy]),
+                    ),
+                )),
+            ));
+            let right = Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("items"),
+                Value::List(List::concat(
+                    List::from_bytes(Bytes::from_static(b"Hi")),
+                    List::from_values(vec![lazy_alias]),
+                )),
+            ));
+            assert!(access.same_representation(&left, &right));
+            assert!(
+                !demanded.load(Ordering::Acquire),
+                "representation comparison must not force a deferred list segment"
+            );
+
+            let different_lazy_container = Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("items"),
+                Value::List(List::concat(
+                    List::from_bytes(Bytes::from_static(b"Hi")),
+                    List::from_values(vec![distinct_lazy]),
+                )),
+            ));
+            assert!(!access.same_representation(&left, &different_lazy_container));
+            assert!(!access.same_representation(&left, &Value::binary_from_text("Hi")));
+
+            let partial = Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::Add,
+                arguments: Arc::from([Value::Number(3.into())]),
+            });
+            let partial_alias = access.duplicate_value(&partial);
+            assert!(access.same_representation(&partial, &partial_alias));
+            assert!(!access.same_representation(
+                &partial,
+                &Value::PartialBuiltin(BuiltinCall {
+                    builtin: Builtin::Subtract,
+                    arguments: Arc::from([Value::Number(3.into())]),
+                })
+            ));
+
+            let net = Value::Net(NetValue::new(
+                access
+                    .construct_managed_core_net(template.instantiate())
+                    .expect("the comparison net fixture should fit one managed slot"),
+            ));
+            let net_alias = access.duplicate_value(&net);
+            assert!(access.same_representation(&net, &net_alias));
+
+            let function = Value::Function(FunctionValue::new(
+                match access.duplicate_value(&net) {
+                    Value::Net(net) => net,
+                    _ => unreachable!("duplicating a net preserves its outer variant"),
+                },
+                1,
+            ));
+            let function_alias = access.duplicate_value(&function);
+            assert!(access.same_representation(&function, &function_alias));
+
+            let metadata = Value::metadata_carrier(Value::binary_from_text("hidden"));
+            let metadata_alias = access.duplicate_value(&metadata);
+            let distinct_metadata = Value::metadata_carrier(Value::binary_from_text("hidden"));
+            assert!(access.same_representation(&metadata, &metadata_alias));
+            assert!(!access.same_representation(&metadata, &distinct_metadata));
         });
     }
 

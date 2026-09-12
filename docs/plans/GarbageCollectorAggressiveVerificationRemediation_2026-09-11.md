@@ -803,6 +803,18 @@ on `Value: PartialEq`. This is not Glam equality: managed identities compare
 by exact allocation and unsupported semantic comparisons remain evaluator
 policy.
 
+Status: complete on 2026-09-12. `RuntimeValueAccess::same_representation`
+exhaustively separates the retained-representation relation from evaluator
+equality. Scalars and strict containers compare structurally; lazy, promise,
+net, and function-stage edges compare by exact managed allocation; sealed and
+opaque values preserve their hidden identity relations. Lists lend borrowed
+logical items to the comparison callback, ignore byte/value leaf segmentation,
+and represent a deferred tail by its exact thunk identity without forcing it.
+The public reflection inspector and evaluated-value observer now delegate to
+this regional operation. The raw inventory gained exactly one regional
+operation, retained all 486 violations, and the persistent-edge inventory did
+not change.
+
 **D.2b.1d — Diagnostic rendering.** Replace recursive `Value: Debug` use with
 an access-borrowing diagnostic view or formatter. Persistent containers must
 delegate element rendering through that same access, and formatting must not

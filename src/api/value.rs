@@ -899,7 +899,9 @@ impl EvaluatedValue {
         let values = self.observation_values()?;
         values.with_access(|access| {
             access.with_core(self.as_value(), |left| {
-                access.with_core(other, |right| left == right)
+                access.with_core(other, |right| {
+                    access.runtime_access().same_representation(left, right)
+                })
             })?
         })
     }

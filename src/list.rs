@@ -73,6 +73,68 @@ pub(crate) enum LogicalListPart<'part, V, T> {
     Thunk(&'part T),
 }
 
+/// One borrowed logical item used by representation-level list operations.
+///
+/// Unlike [`ListItem`], this view neither clones strict values nor forces a
+/// deferred segment. A thunk remains one retained representation item rather
+/// than pretending to know how many eventual list items it may produce.
+pub(crate) enum LogicalListItemRef<'part, V, T> {
+    Byte(u8),
+    Value(&'part V),
+    Thunk(&'part T),
+}
+
+enum LogicalListCursorPart<'part, V, T> {
+    Bytes(Bytes),
+    Values(SharedSlice<V>),
+    Thunk(&'part T),
+}
+
+struct LogicalListItemCursor<'part, V, T> {
+    parts: Vec<LogicalListCursorPart<'part, V, T>>,
+    part_index: usize,
+    offset: usize,
+}
+
+impl<'part, V, T> LogicalListItemCursor<'part, V, T> {
+    fn new(parts: Vec<LogicalListCursorPart<'part, V, T>>) -> Self {
+        Self {
+            parts,
+            part_index: 0,
+            offset: 0,
+        }
+    }
+
+    fn current(&self) -> Option<LogicalListItemRef<'_, V, T>> {
+        match self.parts.get(self.part_index)? {
+            LogicalListCursorPart::Bytes(bytes) => bytes
+                .get(self.offset)
+                .copied()
+                .map(LogicalListItemRef::Byte),
+            LogicalListCursorPart::Values(values) => values
+                .as_slice()
+                .get(self.offset)
+                .map(LogicalListItemRef::Value),
+            LogicalListCursorPart::Thunk(thunk) => {
+                (self.offset == 0).then_some(LogicalListItemRef::Thunk(*thunk))
+            }
+        }
+    }
+
+    fn advance(&mut self) {
+        self.offset += 1;
+        let exhausted = match &self.parts[self.part_index] {
+            LogicalListCursorPart::Bytes(bytes) => self.offset == bytes.len(),
+            LogicalListCursorPart::Values(values) => self.offset == values.len(),
+            LogicalListCursorPart::Thunk(_) => self.offset == 1,
+        };
+        if exhausted {
+            self.part_index += 1;
+            self.offset = 0;
+        }
+    }
+}
+
 impl<T> SharedSlice<T> {
     fn from_vec(values: Vec<T>) -> Self {
         let len = values.len();
@@ -556,6 +618,73 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
 
         stats
+    }
+
+    /// Compares retained logical items without cloning values or forcing
+    /// deferred segments.
+    ///
+    /// Segment boundaries are deliberately ignored: two adjacent byte or
+    /// strict-value leaves compare like the equivalent single leaf. The
+    /// caller owns comparison of borrowed values and opaque thunk identities.
+    pub(crate) fn same_logical_items_by(
+        &self,
+        other: &Self,
+        mut same_item: impl FnMut(LogicalListItemRef<'_, V, T>, LogicalListItemRef<'_, V, T>) -> bool,
+    ) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+
+        let left_parts = self.logical_cursor_parts();
+        let right_parts = other.logical_cursor_parts();
+        let mut left = LogicalListItemCursor::new(left_parts);
+        let mut right = LogicalListItemCursor::new(right_parts);
+
+        loop {
+            match (left.current(), right.current()) {
+                (None, None) => return true,
+                (Some(left_item), Some(right_item)) => {
+                    if !same_item(left_item, right_item) {
+                        return false;
+                    }
+                    left.advance();
+                    right.advance();
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn logical_cursor_parts(&self) -> Vec<LogicalListCursorPart<'_, V, T>> {
+        let mut parts = Vec::new();
+        let mut worklist = vec![self];
+
+        while let Some(list) = worklist.pop() {
+            match list.0.as_ref() {
+                ListNode::Empty => {}
+                ListNode::Bytes(bytes) => {
+                    parts.push(LogicalListCursorPart::Bytes(bytes.clone()));
+                }
+                ListNode::Values(values) => {
+                    parts.push(LogicalListCursorPart::Values(values.clone()));
+                }
+                ListNode::Concat(left, right) => {
+                    worklist.push(right);
+                    worklist.push(left);
+                }
+                ListNode::Finger(finger) => {
+                    parts.extend(finger.iter().map(|chunk| match chunk {
+                        ListChunk::Bytes(bytes) => LogicalListCursorPart::Bytes(bytes),
+                        ListChunk::Values(values) => LogicalListCursorPart::Values(values),
+                    }));
+                }
+                ListNode::Thunk(thunk) => {
+                    parts.push(LogicalListCursorPart::Thunk(thunk));
+                }
+            }
+        }
+
+        parts
     }
 
     pub fn try_for_each_segment<E>(
