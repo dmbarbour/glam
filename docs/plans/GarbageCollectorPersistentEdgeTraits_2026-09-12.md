@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0A complete; P0B-P5 planned. This is the nested implementation plan
+Status: P0A-P0B complete; P0C-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -239,7 +239,7 @@ the manifest distinguishes production from tests and ordinary `Gc<T>` from
 the `ErasedGc` exception.
 
 Completed 2026-09-12. The syntax-backed
-`persistent_edge_trait_inventory` records 568 classified occurrences:
+`persistent_edge_trait_inventory` initially recorded 568 classified occurrences:
 146 production typed-edge occurrences, 35 production erased-identity
 occurrences, 373 test typed-edge occurrences, and 14 test erased-identity
 occurrences. The manifest covers direct stored fields, explicitly typed
@@ -256,6 +256,13 @@ syntax; cross-module raw-value dependencies remain jointly owned by the
 parent D.2 occurrence and durable-owner inventories rather than guessed from
 ambiguous unqualified type names.
 
+P0B's deterministic baseline fixture intentionally raised the current
+manifest to 573 occurrences, all five additions being test-only typed-edge
+evidence. The current partition is therefore 146 production typed, 35
+production erased, 378 test typed, and 14 test erased occurrences; subsequent
+checkpoint notes update this countdown whenever their reviewed source changes
+it.
+
 ### P0B — Baseline behavior and cost
 
 Record before-transition evidence for:
@@ -270,6 +277,41 @@ Record before-transition evidence for:
 
 This is a comparison baseline, not a new performance gate. Do not optimize
 unmeasured evaluator structure during the migration.
+
+Completed 2026-09-12. The comparison baseline is deliberately a mix of
+compile-time layout assertions, deterministic operation counters, focused
+behavior tests, and informational command timings rather than a wall-clock
+pass/fail threshold:
+
+- `pointer.rs` statically proves `Gc<u64>` has one pointer's size;
+- `pointer_copy_and_identity_register_no_roots` proves today's pointer copy
+  and identity operations do not register roots;
+- `root_registry_publishes_once_per_cell_and_not_per_clone` and
+  `root_projection_preserves_identity_without_registering_another_root` prove
+  root-handle cloning and projection add no root registry entry;
+- `manual_struct_and_recursive_enum_traces_match_expected_edges`,
+  `visitor_panic_leaves_the_value_traceable_from_the_beginning`,
+  `successful_collection_report_counts_roots_traces_and_distinct_marks`,
+  `checked_nonrecursive_marking_handles_cycles_diamonds_and_duplicate_edges`,
+  and `c5d_random_graph_marks_match_an_independent_reachability_oracle` cover
+  exact tracing, retry, repeated edges, cycles, and reclamation;
+- `replacement_gateway_executes_the_reported_edge_update_once`,
+  `synthetic_observer_selects_distinct_empty_singleton_and_multi_edge_sets`,
+  and the deterministic-hook transition tests cover mutation; and
+- the release comparison command is
+  `cargo test --release -q -p glam-gc pointer_copy_and_identity_register_no_roots`.
+  Its source/codegen boundary is latched by the absence of root construction,
+  locking, allocation, or reference-count operations in `Gc::ptr_eq` and its
+  eventual explicit replacements. P5B will compare the final implementation
+  at the same boundary.
+
+Representative whole-front-end and evaluator smoke baselines use
+`cargo test -q --test sample_sources` and
+`cargo test -q --test hello_assemblies`. Their elapsed times are recorded by
+the executing environment when useful, but are not committed as portable
+performance promises. The deterministic root-registration latch is the
+primary regression detector for the costly failure mode this migration could
+accidentally introduce.
 
 ### P0C — Contract freeze
 

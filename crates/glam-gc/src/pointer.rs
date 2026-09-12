@@ -165,6 +165,21 @@ mod tests {
         assert_ne!(first, equal_value);
     }
 
+    #[test]
+    fn pointer_copy_and_identity_register_no_roots() {
+        let heap = Heap::new();
+        let (first, alias, equal_value) = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            let first = allocator.alloc(42_u64);
+            (first, first, allocator.alloc(42_u64))
+        });
+
+        assert_eq!(heap.root_registrations_for_verification(), 0);
+        assert!(first.ptr_eq(alias));
+        assert!(!first.ptr_eq(equal_value));
+        assert_eq!(heap.root_registrations_for_verification(), 0);
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn wrong_representation_fails_before_dereference() {
