@@ -973,7 +973,8 @@ reflection-launcher handoff adds exactly one replacement root. The last
 expectation is a latched migration baseline, not accepted terminal behavior:
 D.2f must reduce it to no additional registration.
 
-**D.2b.2e.2 — Mutator-introduction disposition inventory.** Upgrade the
+**D.2b.2e.2 — Mutator-introduction disposition inventory.** Status: complete
+on 2026-09-12. Upgrade the
 managed-access inventory to record every production and test-only mutator
 introduction separately, including `with_runtime_value_access`,
 `with_managed_values`, and the core domain's private direct
@@ -1000,6 +1001,25 @@ explicit occurrence rather than an excuse to weaken the gate. Existing rules
 that no mutator crosses a callback, wait, scheduler handoff, or machine poll
 remain authoritative; some outer admissions are therefore required and must
 not be optimized away merely to reduce the count.
+
+Completion record: the syntax-backed ledger records 38 production and 143
+test-only introductions across the two factory gateways and the private
+collector entry. It distinguishes the receiver and pre-call argument
+evaluation from the body of the higher-ranked callback: only another gateway
+inside that closure is lexically nested. Direct input authority is detected
+through references, tuples, and generic wrappers, while
+`impl FnOnce(RuntimeValueAccess)` correctly describes newly supplied authority
+rather than authority already held by the caller. A focused synthetic fixture
+latches both distinctions.
+
+The reviewed production disposition is six canonical gateways (including the
+two direct collector entries), eleven rooted-transport migrations, and
+twenty-one justified outer admissions. There are no production lexical nests,
+no production API which accepts matching access and then reopens the value
+domain, and no recursive exception. The two detected lexical nests are
+deliberate test fixtures and remain in the D.2E ledger. These classifications
+are migration assignments, not a claim that all eleven raw projection seams
+are already corrected.
 
 **D.2b.2e.3 — Immediate nesting repair and phase interlock.** First latch the
 current redundant lazy-cycle nested construction, prove the access-depth/root
