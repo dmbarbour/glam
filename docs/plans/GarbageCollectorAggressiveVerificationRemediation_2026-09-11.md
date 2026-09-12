@@ -614,23 +614,155 @@ D.2 rather than masquerading as the ordinary orchestration path.
 
 #### GCI11R-002D.2 — Remaining Production Owners
 
-Audit:
+Status: planned; this is a hard prerequisite for Gate G3.
 
-1. public value composition and evaluation-result publication;
-2. task, client-demand, spark, wait, failure, and event/output records;
-3. interaction-net and reflection-machine yielded/blocked state;
-4. module, definitions, compiler cache, macro, and diagnostic ownership; and
-5. reflection-store edits and query responses.
+D.2 closes both kinds of production violation which D.1a deliberately left
+open:
 
-For each failure, latch the former gap, repair it through its real durable
-owner, and update the authoritative source inventory. Split this checkpoint by
-subsystem if more than one independent production representation changes.
+1. an API can construct, project, inspect, clone, compare, format, pass, or
+   return raw `core::Value` without carrying matching regional authority; or
+2. a field, closure capture, alias, or other durable owner can retain a raw
+   value without an exact traced/rooted ownership account.
+
+Aggressive collection may expose examples of either defect, but test coverage
+is not the closure mechanism. An unused authority-free API is still a
+violation. The D.1a syntax inventory currently records 486 such production
+operations, while the durable-owner inventories cover the complementary field
+and capture surface. D.2 must reduce the operation count to zero and reconcile
+the owner inventories before GCI11R-002E is allowed to make test fixtures look
+green.
+
+##### GCI11R-002D.2a — Closure Policy and Occurrence Assignment
+
+1. Turn D.1a's family summary into an occurrence-level remediation manifest.
+   Every current violation names exactly one D.2b-D.2g owner and one intended
+   replacement shape. A count/fingerprint remains the drift latch, but is not
+   a substitute for this assignment.
+2. Join the operation inventory with the durable field, closure-capture,
+   machine-state, and external-owner inventories. Add a syntax-backed field or
+   carrier scan wherever the existing ledgers do not mechanically cover a raw
+   value reachable across an access-region boundary.
+3. Decide the raw carrier's standard-trait policy before mechanical migration.
+   `core::Value` currently exposes unqualified `Clone`, `PartialEq`, `Eq`, and
+   custom `Debug`; these cannot be called access-qualified merely because most
+   current callers happen to hold a mutator. Choose and document one coherent
+   repair, such as removing those traits in favor of explicit access methods,
+   or introducing a lifetime-branded regional view on which the operations
+   live. Do not silently allowlist ordinary representation operations as
+   collector primitives.
+4. Extend the inventory's final mode so only regional-access APIs, genuinely
+   non-escaping scoped exposure, durable boundaries, and the exact
+   collector-mandated allowlist are accepted. Because unbranded `core::Value`
+   is currently cloneable, a callback receiving one is not non-escaping merely
+   because its reference is higher-ranked.
+
+Exit: every violation is assigned, the standard-trait decision is explicit,
+and the eventual zero-violation check can distinguish a real repair from a
+renamed or newly allowlisted escape.
+
+##### GCI11R-002D.2b — Core Carrier and Structural Operations
+
+Migrate the 49 core-value, managed-cell, persistent-container, net-shell, and
+runtime-root violations, including the standard-trait surface selected in
+D.2a. Raw list/dictionary/value traversal, cloning, comparison, formatting,
+and recursive-cell projection must carry `RuntimeValueAccess`,
+`EvaluationValueAccess`, or collector-phase authority as appropriate. Prefer
+one shared regional access threaded through a structural operation; do not
+open a mutator independently for each member or edge.
+
+Verification: focused immediate/managed value controls, persistent list/dict
+walks, lazy/promise/net identity operations, ordinary and aggressive tests,
+and an updated occurrence manifest with no unassigned core-family violation.
+
+##### GCI11R-002D.2c — Evaluator Operations and Builtins
+
+Migrate the 201 evaluator-operation and builtin violations as call-tree
+families beneath `EvaluationValueAccess`. A callback-free evaluator quantum
+opens one region and passes its authority through application, operator,
+sequence, net, annotation, pattern, list, dictionary, object, numeric, and
+effect helpers. Do not repair this family by opening hundreds of nested
+mutators or by carrying a mutator through a wait, reflection gate, host call,
+or scheduler handoff.
+
+Verification: one compile-exhaustive evaluator/builtin access inventory,
+focused builtin-family tests in both modes, and a source latch which rejects a
+new authority-free raw helper in `src/eval/`.
+
+##### GCI11R-002D.2d — Evaluation Orchestration and Runtime Records
+
+Migrate the 14 remaining evaluation-orchestration violations and audit task,
+client-demand, spark, wait, failure, event/output, interaction-net, and
+yielded/blocked machine records. Orchestration remains mutator-free while it
+pumps, waits, or invokes integration: it transports roots or exact traced
+owners, then opens bounded access only inside one callback-free poll or
+projection step. Remove `evaluate_compatibility_whnf` once its final caller has
+moved to a rooted input plus access-scoped result consumption.
+
+Verification: exact owner-retirement and cross-poll tests, the existing
+machine-state inventories, no raw orchestration facade, and aggressive tests
+which force collection on both sides of every repaired handoff.
+
+##### GCI11R-002D.2e — Built-in Front End and Compiler Values
+
+Migrate the 134 `g_syntax` violations by threading a shared
+`RuntimeValueAccess` through semantic lowering, resolution, embedded-data
+handling, compiler-value composition, macro result installation, and
+diagnostic-value construction. Syntax ASTs remain ordinary Rust data; this
+checkpoint must not blur syntax expressions into semantic/runtime values.
+Closed and cached computations retain `RuntimeValueRoot` until a caller with
+matching access installs or inspects the result.
+
+Verification: compiler/macro/cache source inventories, executable `.g`
+samples, ordinary and aggressive `g_syntax` partitions, and collection at
+representative lowering, macro, and cache publication boundaries.
+
+##### GCI11R-002D.2f — Reflection Machine and Store
+
+Migrate the 48 reflection violations. Reflection-machine decoding and pure
+semantic substeps may use bounded access, while transaction state, query
+responses, blocked branches, task effects, and store journals retain roots or
+exact traced owners across commits, retries, waits, and callbacks. Reflection
+privilege permits observation unavailable to evaluation; it does not permit
+unrooted GC pointers or authority-free raw-value manipulation.
+
+Verification: reflection lifecycle/request/store inventories, retry and
+rollback tests in both modes, and forced collection before and after query
+publication and blocked-machine resumption.
+
+##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
+
+Migrate the remaining 40 public-API, compiler, source, and diagnostic
+violations. Public boundaries transport `api::Value`, `EvaluatedValue`, or
+another durable handle. Internal compiler and diagnostic transformations use
+one explicit regional access and root their output before callbacks, logging,
+imports, or returned diagnostics can outlive it. Keep reflection-only
+observations visibly separate from reproducible evaluator/value helpers.
+
+Verification: public API and compilation tests in both modes, import and
+diagnostic callback boundaries, the D.1b no-reroot counter, and source latches
+rejecting a raw public or host-callback signature.
+
+##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
+
+1. Run the syntax-backed API inventory in closure mode and require zero
+   `Violation` occurrences. The accepted collector primitive set remains an
+   exact declaration allowlist rather than a path-prefix escape hatch.
+2. Reconcile the raw operation result with the durable owner, managed-edge,
+   machine-state, callback-capture, and external-owner inventories. Every raw
+   value stored outside an access region must be the unobserved payload of one
+   exact traced/rooted owner.
+3. Run every production-shaped exact test ordinarily and aggressively before
+   migrating general fixtures in GCI11R-002E. A failure fixed only by changing
+   a test constructor is not production closure.
+4. Publish a short dated closure record listing the final accepted regional,
+   scoped, durable, and collector-only surfaces and linking the source gates.
 
 Exit: already-rooted orchestration performs no project/re-root round trip;
-every remaining raw-value API carries matching mutator authority and has an
-explicit regional handoff at every caller; and all production-shaped exact
-tests pass aggressively before general test fixtures are migrated. This
-ordering prevents a fixture helper from hiding a runtime defect.
+every production raw-value API carries matching mutator/access authority or
+exact collector-phase authority; every handoff is explicit; every durable raw
+payload has one traced owner; the violation count is zero; and all
+production-shaped exact tests pass aggressively. Gate G3 cannot pass without
+this result.
 
 ### GCI11R-002E — Test Fixture Regional Migration
 

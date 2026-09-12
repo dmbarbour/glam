@@ -380,7 +380,12 @@ Forced full collections pass the complete semantic, concurrency, and drop
 tests. Passing the gate authorizes I12 to implement collection at explicit
 runtime maintenance points; the gate does not itself enable ordinary
 collection. Automatic threshold collection remains disabled until those
-points are stable.
+points are stable. The gate also requires the syntax-backed raw
+`core::Value` API inventory to report zero authority-free operations and the
+durable-owner inventories to account for every raw payload retained outside a
+matching mutator/access region. Passing tests without that static closure is
+not Gate G3 evidence.
+
 Before routine concurrent maintenance or automatic construction, I12A.0 must
 integrate every may-collect entry with authoritative runtime readiness. The
 runtime records an operational-activity lease under its mutation-admission

@@ -125,6 +125,13 @@ and for methods whose only syntactic connection to a raw value is such a
 receiver field. D.1b-D.2 must join this API inventory with the existing durable
 owner inventory before claiming closure.
 
+The expanded D.2 plan partitions all 486 recorded violations by
+implementation family and requires a zero-violation closure mode before Gate
+G3. In particular, the derived `Clone`, `PartialEq`, and `Eq` contracts and the
+custom `Debug` surface must receive an explicit regional representation
+decision; they cannot disappear into a broad allowlist merely because their
+present callers often happen to hold access.
+
 Test-only constructors and fixtures are excluded intentionally and remain
 assigned to GCI11R-002E. The binary crate is included, but its ordinary
 `glam::Value` handles do not appear because they are already durable public

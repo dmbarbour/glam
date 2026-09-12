@@ -6536,14 +6536,20 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
 - **I11D.3 — Static closure audit.** Reconcile every unsafe site, trace edge,
   mutation gateway, managed entry, lock/wait boundary, passive finalizer, and
   active external owner against its authoritative inventory and the source
-  delta since Gate G2. Re-run every source latch and focused I11 fixture.
+  delta since Gate G2. Require GCI11R-002D.2's syntax-backed raw-value API
+  inventory to contain zero authority-free violations, including standard
+  trait operations, and reconcile that result with the durable-owner field
+  and capture inventories. Re-run every source latch and focused I11 fixture.
 - **I11D.4 — Certification.** Publish a dated Gate G3 review accounting for
   every I11 schedule, both collection modes, all dynamic-tool results, and any
   intentional nondeterministic reflection behavior. Mark I11 complete only
   when every post-I11 finding is closed.
 
-Passing G3 authorizes I12's controlled runtime maintenance and later threshold
-service review. It does not switch any heap from `NoAuto` to `Automatic`.
+GCI11R-002D.2's zero-violation raw-value closure and durable-owner
+reconciliation are hard prerequisites for I11D.3 and certification; a green
+aggressive suite alone is insufficient evidence. Passing G3 authorizes I12's
+controlled runtime maintenance and later threshold service review. It does not
+switch any heap from `NoAuto` to `Automatic`.
 Collection policy is immutable for one heap; I12B.0 may select a different
 construction policy only for runtimes created after that decision.
 
