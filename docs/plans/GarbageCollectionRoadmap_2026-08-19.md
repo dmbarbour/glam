@@ -48,12 +48,18 @@ slot size recorded in canonical object metadata, while preserving run-owner
 lookup independently of either. It does not choose Glam's tag budget, type
 alignment, or node-size policy. Compact representation is not a collector gate.
 
-A tentative post-integration
+GCI11R-002D's active nested
+[`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+plan removes implicit copying, equality, and formatting from persistent
+`Gc<T>` edges while the raw-value regional migration is already touching their
+current compatibility carriers. It adds explicit mutator-qualified duplication
+and identity without claiming lifetime branding or moving-GC readiness.
+
+The later
 [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
-plan explores move-only stored edges and copyable mutator-branded working
-views. It is a safety and future-relocation option, not a requirement of this
-roadmap, and should be reconsidered against the actual compact value design
-rather than imposed on the current compatibility representation.
+plan remains a tentative experiment in copyable mutator-branded working views.
+It should be reconsidered against the actual compact value design after the
+active move-only stored-edge boundary has settled.
 
 ## Purpose
 

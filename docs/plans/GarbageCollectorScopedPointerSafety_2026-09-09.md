@@ -1,24 +1,28 @@
 # Garbage-Collector Scoped Pointer Safety Plan — 2026-09-09
 
-Status: tentative safety-enhancement plan. This is not part of GCI5R-008, the
-initial non-moving collector integration, or its Gate G2-G4 requirements. Do
-not begin this transition until the existing integration has stabilized and a
-fresh review coordinates it with Value Representation Refinement and any
-moving-collector work.
+Status: deferred lifetime-branding safety enhancement. The active
+[`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+plan now owns removal of implicit traits from persistent `Gc<T>` during
+GCI11R-002D. This plan begins only after that transition has settled and a
+fresh review coordinates `ScopedGc` with Value Representation Refinement and
+future moving-collector work.
 
 ## Purpose
 
 Make the distinction between a persistent managed edge and a pointer currently
 authorized for use by one mutator region explicit in Rust's types.
 
-The current `Gc<T>` is a pointer-sized, `Copy` and `Clone`, non-rooting handle.
+At the time this plan was drafted, `Gc<T>` was a pointer-sized, `Copy` and
+`Clone`, non-rooting handle.
 It cannot be safely dereferenced without a matching mutator, but it can be
 copied into arbitrary Rust state without recording whether that state is a
 traced edge, a temporary working value, or an accidental escape. This is
 adequate for the initial specialized non-moving collector, but provides little
 structural resistance to stale pointers during later representation changes.
 
-The tentative direction inverts where cheap copying is available:
+The active persistent-edge plan establishes the first line below. This
+deferred plan asks whether cheap working copies should additionally move onto
+a lifetime-branded second form:
 
 ```rust
 Gc<T>                  // persistent stored edge; move-only
@@ -40,8 +44,10 @@ roots and exact tracing.
   deliberately makes the initial `Gc<T>` cheap to copy. This plan revisits
   that decision only after the initial collector is working end to end.
 - [GarbageCollectorIntegration_2026-08-19.md](GarbageCollectorIntegration_2026-08-19.md)
-  must finish with its current pointer representation. No current integration
-  checkpoint should be enlarged to prototype this model.
+  now delegates its Gate G3 persistent-edge trait cutover to
+  [GarbageCollectorPersistentEdgeTraits_2026-09-12.md](GarbageCollectorPersistentEdgeTraits_2026-09-12.md).
+  That transition deliberately stops short of this plan's lifetime-branded
+  working view.
 - [ValueRepresentationRefinement_2026-08-19.md](ValueRepresentationRefinement_2026-08-19.md)
   will substantially change where managed edges reside and how internal values
   are copied. A full scoped-pointer migration should normally follow or be
@@ -54,9 +60,9 @@ roots and exact tracing.
   This plan prevents temporary read pointers from silently acquiring a
   permanent-address contract, but does not itself implement relocation.
 
-GCI5R-008 may add a mutator-qualified `Root::as_gc` returning the current
-unbranded `Gc<T>`. That is a local API repair and an admitted-use convention,
-not lifetime enforcement. This later plan may change its result to
+GCI5R-008 added a mutator-qualified `Root::as_gc` returning an unbranded
+`Gc<T>`. That is a local API repair and an admitted-use convention, not
+lifetime enforcement. This later plan may change its result to
 `ScopedGc<'mutator, T>` without restoring cached root/edge pairs.
 
 ## Provisional Model

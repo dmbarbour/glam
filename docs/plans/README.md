@@ -21,6 +21,9 @@ when their historical value no longer justifies keeping them.
 - [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md)
   closes the regional ownership, fixture, and schedule issues exposed by the
   integration plan's repository-wide aggressive collection mode.
+- [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+  is the nested GCI11R-002D transition from implicit `Gc<T>` traits to
+  mutator-qualified persistent-edge duplication and identity.
 
 ## Recent Completed Plans
 
@@ -39,3 +42,6 @@ when their historical value no longer justifies keeping them.
   records the compact tagged-value and representation-splitting transition to
   pursue after the initial collector boundary works. It is deliberately not a
   prerequisite for the current GC plans.
+- [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
+  retains the deferred lifetime-branded `ScopedGc` experiment after the active
+  persistent-edge trait migration establishes move-only stored edges.
