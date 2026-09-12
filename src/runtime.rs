@@ -245,7 +245,7 @@ impl RuntimeValueRoot {
     /// regions. Durable storage must retain this root rather than the returned
     /// compatibility shell.
     pub(crate) fn clone_core_with(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
-        self.with_core(access, Clone::clone)
+        self.with_core(access, |value| access.duplicate_value(value))
             .expect("runtime root and managed access must share one value domain")
     }
 

@@ -371,7 +371,7 @@ impl ManagedLazyEdge {
     }
 
     #[inline(always)]
-    fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
+    pub(crate) fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
         Self(authority.duplicate_edge(&self.0))
     }
 
@@ -409,7 +409,7 @@ impl ManagedPromiseEdge {
     }
 
     #[inline(always)]
-    fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
+    pub(crate) fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
         Self(authority.duplicate_edge(&self.0))
     }
 

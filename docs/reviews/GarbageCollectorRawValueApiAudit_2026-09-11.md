@@ -7,7 +7,7 @@ remaining violation, and production repairs belong to GCI11R-002D.2b-D.2g
 
 ## Outcome
 
-The production source tree contains 586 declarations whose signature directly
+The production source tree contains 587 declarations whose signature directly
 or through a local alias carries the private `core::Value` representation. The
 new syntax-backed inventory classifies and fingerprints every declaration.
 D.1b removed the ambiguous `EvalContext::evaluate_whnf(&core::Value)` name.
@@ -55,12 +55,12 @@ The checked baseline is:
 
 | Declaration kind | Current classification | Count |
 | --- | --- | ---: |
-| function or method | regional access API | 69 |
+| function or method | regional access API | 70 |
 | function or method | collector-mandated primitive | 23 |
 | function or method | violation | 483 |
 | type alias | regional representation | 8 |
 | derived operation | violation | 3 |
-| **Total** |  | **586** |
+| **Total** |  | **587** |
 
 No current declaration qualifies as safe scoped exposure. Because raw
 `core::Value` remains cloneable and unbranded, a callback receiving it can
@@ -82,12 +82,17 @@ same mechanical audit.
 | --- | ---: | ---: | ---: | ---: | --- |
 | public API internals | 3 | 0 | 0 | 11 | Keep rooted public signatures; move private projection/construction inside an existing access or a scoped observer. |
 | compiler, diagnostics, and source support | 3 | 0 | 1 | 29 | Give each compilation/diagnostic construction region one access; root values at durable diagnostic and source boundaries. |
-| core values, managed cells, nets, and runtime roots | 28 | 23 | 6 | 49 | Keep access-qualified primitives; retire compatibility walkers with their shells; require access for raw construction, projection, comparison, and formatting. |
+| core values, managed cells, nets, and runtime roots | 29 | 23 | 6 | 49 | Keep access-qualified primitives; retire compatibility walkers with their shells; require access for raw construction, projection, comparison, and formatting. |
 | evaluator operations and builtins | 1 | 0 | 1 | 201 | Thread `EvaluationValueAccess` through each callback-free quantum and fuse helpers under that region rather than opening per-helper mutators. |
 | evaluation orchestration | 2 | 0 | 0 | 14 | Preserve mutator-free poll/wait orchestration; project or construct raw values only inside `EvaluatorStepContext::with_value_access`, then publish into traced ownership before leaving it. |
 | built-in `.g` front end | 29 | 0 | 0 | 134 | Run semantic lowering and embedded-data manipulation under a shared `RuntimeValueAccess`; keep syntax AST operations separate from semantic values. |
 | reflection machine and store | 3 | 0 | 0 | 48 | Open access only in callback-free reflection/evaluator steps; retain roots across transaction, wait, and host-callback boundaries. |
-| **Total** | **69** | **23** | **8** | **486** |  |
+| **Total** | **70** | **23** | **8** | **486** |  |
+
+D.2b.1a added the seventieth regional operation,
+`RuntimeValueAccess::duplicate_value`. It is not a repaired violation count:
+it is the explicit destination for later call-site migrations, and the 486
+authority-free operations remain latched until those callers move.
 
 The collector allowlist is intentionally narrow: the
 `core/managed/payload_edges` compatibility visitor family and

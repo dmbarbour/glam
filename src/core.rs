@@ -2236,6 +2236,47 @@ impl Value {
     }
 }
 
+impl RuntimeValueAccess<'_> {
+    /// Duplicates one raw value shell while this value domain keeps every
+    /// reachable managed edge live.
+    ///
+    /// Immutable persistent containers and shared payload arrays retain their
+    /// existing structural owner. Variants which store a managed edge directly
+    /// create the new edge only through this access-qualified gateway. This is
+    /// a representation operation, not evaluation or Glam semantic copying.
+    pub(crate) fn duplicate_value(&self, value: &Value) -> Value {
+        match value {
+            Value::Atom(value) => Value::Atom(*value),
+            Value::Number(value) => Value::Number(value.clone()),
+            Value::Binary(value) => Value::Binary(value.clone()),
+            Value::List(value) => Value::List(value.clone()),
+            Value::Dict(value) => Value::Dict(value.clone()),
+            Value::Builtin(value) => Value::Builtin(*value),
+            Value::PartialBuiltin(value) => Value::PartialBuiltin(BuiltinCall {
+                builtin: value.builtin,
+                arguments: Arc::clone(&value.arguments),
+            }),
+            Value::Function(value) => Value::Function(FunctionValue::new(
+                value.duplicate_stage_in(self),
+                value.remaining_arity,
+            )),
+            Value::Net(value) => Value::Net(value.duplicate_in(self)),
+            Value::Lazy(value) => Value::Lazy(LazyValue {
+                edge: value.edge.duplicate_in(self),
+            }),
+            Value::Promised(value) => Value::Promised(PromisedValue {
+                edge: value.edge.duplicate_in(self),
+            }),
+            Value::Metadata(value) => Value::Metadata(MetadataCarrier {
+                metadata: Arc::clone(&value.metadata),
+            }),
+            Value::Opaque(value) => Value::Opaque(OpaqueValue {
+                handle: value.handle.clone(),
+            }),
+        }
+    }
+}
+
 impl Value {
     #[cfg(test)]
     pub fn get_key_path(&self, path: &[Key]) -> Option<&Value> {
@@ -2763,6 +2804,124 @@ mod tests {
         let value = Value::Atom(Atom::from_key(&Key::binary_from_text("greeting")));
 
         assert!(matches!(value, Value::Atom(_)));
+    }
+
+    #[test]
+    fn access_qualified_value_duplication_preserves_managed_identity_without_rooting() {
+        let values = values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("canonical roots should collect before duplication");
+        let mut builder =
+            crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
+        let data = builder.data(Value::Number(7.into()));
+        let template = builder.finish(data);
+
+        values.with_runtime_value_access(|access| {
+            let lazy = Value::Lazy(LazyValue::error_in(&access, "duplicate lazy"));
+            let promise = Value::Promised(
+                access
+                    .construct_managed_promise("duplicate promise")
+                    .expect("the managed promise fixture should fit one slot"),
+            );
+            let net = Value::Net(NetValue::new(
+                access
+                    .construct_managed_core_net(template.instantiate())
+                    .expect("the managed net fixture should fit one slot"),
+            ));
+            let function = Value::Function(FunctionValue::new(
+                match access.duplicate_value(&net) {
+                    Value::Net(net) => net,
+                    _ => unreachable!("duplicating a net preserves its outer variant"),
+                },
+                1,
+            ));
+
+            let Value::Lazy(duplicate_lazy) = access.duplicate_value(&lazy) else {
+                panic!("duplicating a lazy preserves its outer variant");
+            };
+            let Value::Lazy(original_lazy) = &lazy else {
+                unreachable!();
+            };
+            assert_eq!(
+                original_lazy.access(&access).id(),
+                duplicate_lazy.access(&access).id()
+            );
+
+            let Value::Promised(duplicate_promise) = access.duplicate_value(&promise) else {
+                panic!("duplicating a promise preserves its outer variant");
+            };
+            let Value::Promised(original_promise) = &promise else {
+                unreachable!();
+            };
+            assert_eq!(
+                original_promise.access(&access).id(),
+                duplicate_promise.access(&access).id()
+            );
+
+            let Value::Net(duplicate_net) = access.duplicate_value(&net) else {
+                panic!("duplicating a net preserves its outer variant");
+            };
+            let Value::Net(original_net) = &net else {
+                unreachable!();
+            };
+            assert!(
+                original_net
+                    .runtime
+                    .same_net_in(duplicate_net.runtime(), &access)
+            );
+
+            let Value::Function(duplicate_function) = access.duplicate_value(&function) else {
+                panic!("duplicating a function preserves its outer variant");
+            };
+            let Value::Function(original_function) = &function else {
+                unreachable!();
+            };
+            assert_eq!(duplicate_function.remaining_arity(), 1);
+            assert!(
+                original_function
+                    .stage()
+                    .runtime()
+                    .same_net_in(duplicate_function.stage().runtime(), &access)
+            );
+
+            let arguments = Arc::from([Value::Number(3.into())]);
+            let partial = Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::Add,
+                arguments: Arc::clone(&arguments),
+            });
+            let Value::PartialBuiltin(duplicate_partial) = access.duplicate_value(&partial) else {
+                panic!("duplicating a partial builtin preserves its outer variant");
+            };
+            assert!(Arc::ptr_eq(&arguments, &duplicate_partial.arguments));
+
+            let metadata = Value::metadata_carrier(Value::binary_from_text("private"));
+            let Value::Metadata(duplicate_metadata) = access.duplicate_value(&metadata) else {
+                panic!("duplicating metadata preserves its sealed outer variant");
+            };
+            let Value::Metadata(original_metadata) = &metadata else {
+                unreachable!();
+            };
+            assert!(Arc::ptr_eq(
+                &original_metadata.metadata,
+                &duplicate_metadata.metadata
+            ));
+
+            let list = Value::List(List::from_values(vec![lazy]));
+            let dict =
+                Value::Dict(Dict::new_sync().insert(Key::atom_from_text("promise"), promise));
+            assert!(matches!(access.duplicate_value(&list), Value::List(_)));
+            assert!(matches!(access.duplicate_value(&dict), Value::Dict(_)));
+            assert_eq!(
+                access.duplicate_value(&Value::Number(42.into())),
+                Value::Number(42.into())
+            );
+        });
+
+        let after = values
+            .collect_managed_for_test()
+            .expect("unrooted duplication fixtures should be reclaimable");
+        assert_eq!(after.root_entries(), baseline.root_entries());
     }
 
     #[test]

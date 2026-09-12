@@ -744,6 +744,8 @@ D.2b-D.2g eliminate the carrier and call-site dependencies.
 
 ###### GCI11R-002D.2b.1 — Core Structural Access Surface
 
+Status: partitioned into D.2b.1a-D.2b.1d below.
+
 Introduce the narrow access-qualified operations required to duplicate,
 project, compare, and render `Value` and its list/dictionary/function/net
 shells. Keep Glam semantic equality distinct from representation identity and
@@ -754,6 +756,46 @@ mutators per element.
 Verification: immediate and managed leaves, nested list/dictionary values,
 functions and nets, and cycle-safe rendering/identity behavior where the
 current operation promises it.
+
+**D.2b.1a — Explicit shell duplication.** Add one
+`RuntimeValueAccess::duplicate_value` operation which duplicates the outer raw
+carrier under existing access. Scalar payloads copy or clone their ordinary
+Rust data; persistent list/dictionary nodes, builtin argument arrays, sealed
+metadata, and opaque handles share their existing immutable/RAII owner;
+function, net, lazy, and promise shells duplicate their managed edge only
+through the P1/P2 access-qualified gateway. Do not recursively copy shared
+container contents merely to make the access visible.
+
+Verification: every `Value` variant is exhaustively dispatched, immediate and
+managed shells retain the old structural result, managed identity is
+preserved, and duplication itself registers no collector root.
+
+Status: complete on 2026-09-12. `RuntimeValueAccess::duplicate_value`
+wildcard-freely dispatches every current `Value` variant. Direct lazy,
+promise, net, and function-stage edges use the P1/P2 duplication gateway;
+lists, dictionaries, builtin argument arrays, metadata, and opaque payload
+handles share their immutable or RAII structural owner rather than recursively
+copying contents. The focused fixture verifies immediate and managed shells,
+exact managed identity, shared structural payloads, and an unchanged collector
+root count. The raw API inventory gained exactly one regional operation while
+all 486 violations and the persistent-edge manifest remained unchanged.
+
+**D.2b.1b — Non-demanding inspection and key conversion.** Move outer-kind
+classification plus raw `Value`/`Key` conversion beneath explicit access.
+Keep conversion failure distinct from evaluation failure and do not demand a
+lazy member while discovering that a structure is not keyable.
+
+**D.2b.1c — Representation comparison.** Provide explicit access-qualified
+representation comparison for reflection and bootstrap protocol use. Extend
+persistent containers with borrowed comparator callbacks rather than relying
+on `Value: PartialEq`. This is not Glam equality: managed identities compare
+by exact allocation and unsupported semantic comparisons remain evaluator
+policy.
+
+**D.2b.1d — Diagnostic rendering.** Replace recursive `Value: Debug` use with
+an access-borrowing diagnostic view or formatter. Persistent containers must
+delegate element rendering through that same access, and formatting must not
+demand lazies, promises, or nets. Opaque and sealed payloads remain hidden.
 
 ###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
 
