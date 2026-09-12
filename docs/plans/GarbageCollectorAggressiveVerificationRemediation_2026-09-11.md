@@ -1395,6 +1395,17 @@ regional raw-value invariant; that does not implement the selected
 continuation model and requires an explicit policy decision rather than an
 accidental compatibility exception.
 
+Planning update, 2026-09-12: the selected direction is now the standalone
+[`Resumable WHNF Evaluation Plan`](ResumableWhnfEvaluation_2026-09-12.md).
+It treats the missing state as one reusable, fine-grained WHNF submachine
+hosted by the existing client-demand, lazy-producer, spark, net, and reflection
+machines. `LazySource` remains the immutable semantic recipe; resumable
+progress is separate, and the exact W0 inventory decides whether compact
+source/operation phases suffice or repeated nesting justifies general
+evaluation frames. D.2c.1b-D.2c.8 must perform their raw-value and control-flow
+migrations once through that plan rather than landing recursive compatibility
+wrappers for a second pass.
+
 **D.2c.1b — List, key, number, and tagged-value projections.** Migrate list
 front forcing, key conversion, tagged payload lookup, index/number extraction,
 and semantic-undefined inspection. Preserve the D.2b.3 rule that the force
@@ -1423,6 +1434,9 @@ This is partitioned as follows:
   include the reflection-annotation replay case which exposed unbounded fresh
   lazy construction. If this checkpoint instead preserves Rust-stack pumping,
   revise D.2c's regional invariant and root-traffic policy explicitly first.
+  The detailed inventory, representation gate, implementation phases, and
+  verification matrix now live in the linked Resumable WHNF Evaluation Plan;
+  this parent checkpoint remains open until its W0 phase is complete.
 - **D.2c.1d.1 — Durable lazy and promise suspension.** Extend the existing
   evaluation-halt/dependency vocabulary so a callback-free regional demand can
   return the exact rooted lazy or promise which prevented completion.  The
@@ -1448,10 +1462,21 @@ This is partitioned as follows:
   is discovered while access is active and reservation/poll/wait happens only
   after access is closed.  Repetition remains stress evidence only.
 
-The provisional order is D.2c.1d.0, then the partition approved there,
-D.2c.1d.1-.3, D.2c.1b-c, and D.2c.1d.4. The final verification checkpoint
-closes the temporary raw-value seams exposed while the regional call tree is
-being converted.
+The former provisional order was D.2c.1d.0, D.2c.1d.1-.3, D.2c.1b-c, and
+D.2c.1d.4. The focused plan now supplies the authoritative order:
+
+- its W0 phase completes D.2c.1d.0;
+- W1-W3 implement the common computation state, lazy/promise suspension, and
+  D.2c.1b-c value/source migration;
+- W4-W5 implement D.2c.1d.2 and the reflection/external boundaries;
+- W6 performs D.2c.2-D.2c.8 control-flow conversion together with those
+  checkpoints' raw-value migration; and
+- W2E, W4D, W5D, and W7 collectively implement D.2c.1d.4 rather than deferring
+  all ordering and stack verification to one late batch.
+
+W8 closes the temporary raw-value and retryable-halt seams exposed during the
+conversion. This mapping supersedes the former provisional sequence; the
+parent checkpoint names remain the authoritative GC-remediation accounting.
 
 Verification: focused `eval::value` and lazy/promise/fixpoint tests ordinarily
 and with `aggressive-gc-verification`; root-registration counters across cache
