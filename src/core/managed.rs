@@ -827,6 +827,9 @@ mod gate_g2_inventory;
 #[cfg(test)]
 mod raw_value_api_inventory;
 
+#[cfg(test)]
+mod persistent_edge_trait_inventory;
+
 mod payload_edges;
 
 #[cfg(test)]

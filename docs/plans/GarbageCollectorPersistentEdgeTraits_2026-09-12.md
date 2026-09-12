@@ -1,7 +1,7 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: planned. This is the nested implementation plan for the managed-edge
-part of GCI11R-002D.2a-D.2b in
+Status: P0A complete; P0B-P5 planned. This is the nested implementation plan
+for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
 not an independent prerequisite which may silently enlarge or bypass those
@@ -237,6 +237,24 @@ collector-private erased identity, or defect.
 Verification: an exact count and fingerprint fail on unclassified additions;
 the manifest distinguishes production from tests and ordinary `Gc<T>` from
 the `ErasedGc` exception.
+
+Completed 2026-09-12. The syntax-backed
+`persistent_edge_trait_inventory` records 568 classified occurrences:
+146 production typed-edge occurrences, 35 production erased-identity
+occurrences, 373 test typed-edge occurrences, and 14 test erased-identity
+occurrences. The manifest covers direct stored fields, explicitly typed
+carriers, fresh allocation and projection surfaces, trace/erase/identity
+calls, root and mutation boundaries, traits on the direct and same-source
+semantic carrier closure, and currently visible implicit-copy expressions.
+It scans selected operations inside macro token bodies because `syn` does not
+otherwise descend into `assert!` and similar invocations. The exact count,
+normalized occurrence fingerprint, partition counts, disposition closure,
+and collector-private source boundary are executable drift latches. The P4
+compiler-enforced trait cutover remains the exhaustive backstop for implicit
+move-after-use cases which cannot be inferred reliably from untyped Rust
+syntax; cross-module raw-value dependencies remain jointly owned by the
+parent D.2 occurrence and durable-owner inventories rather than guessed from
+ambiguous unqualified type names.
 
 ### P0B — Baseline behavior and cost
 
