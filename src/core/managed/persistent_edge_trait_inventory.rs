@@ -795,13 +795,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        608,
+        705,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_481_884_157_302_368_327,
+        11_623_188_852_615_467_400,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -846,9 +846,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 148),
-            ((SourceScope::Production, EdgeSurface::Erased), 35),
-            ((SourceScope::Test, EdgeSurface::Typed), 411),
+            ((SourceScope::Production, EdgeSurface::Typed), 146),
+            ((SourceScope::Production, EdgeSurface::Erased), 36),
+            ((SourceScope::Test, EdgeSurface::Typed), 509),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -862,9 +862,34 @@ fn persistent_edge_inventory_classifications_are_closed() {
     );
     assert!(actual.iter().any(|occurrence| {
         occurrence.declaration
-            == "crates/glam-gc/src/pointer.rs::tests::pointer_identity_is_all_gc_equality_observes::ptr_eq"
+            == "crates/glam-gc/src/pointer.rs::tests::pointer_identity_is_all_gc_equality_observes::same_allocation_in"
             && occurrence.kind == OccurrenceKind::PointerIdentity
+            && occurrence.disposition == EdgeDisposition::MutatorLocalWorkingDuplicate
     }), "macro-contained edge operations must remain visible to the inventory");
+}
+
+#[test]
+fn collector_p2a_direct_trait_dependencies_are_closed() {
+    let collector_defects = current_inventory()
+        .iter()
+        .filter(|occurrence| {
+            occurrence.declaration.starts_with("crates/glam-gc/src/")
+                && occurrence.disposition == EdgeDisposition::Defect
+        })
+        .map(|occurrence| occurrence.declaration.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        collector_defects,
+        BTreeSet::from([
+            "crates/glam-gc/src/pointer.rs::impl Clone for Gc",
+            "crates/glam-gc/src/pointer.rs::impl Copy for Gc",
+            "crates/glam-gc/src/pointer.rs::impl Debug for Gc",
+            "crates/glam-gc/src/pointer.rs::impl Eq for Gc",
+            "crates/glam-gc/src/pointer.rs::impl PartialEq for Gc",
+        ]),
+        "P2A permits only the five explicitly transitional Gc trait implementations in the collector crate"
+    );
 }
 
 #[test]

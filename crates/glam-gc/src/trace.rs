@@ -248,12 +248,21 @@ mod tests {
             let nodes = mutator.allocator::<Node>().unwrap();
             let first_leaf = leaves.alloc(Leaf { _value: 1 });
             let second_leaf = leaves.alloc(Leaf { _value: 2 });
-            let first_node = nodes.alloc(Node::Leaf(first_leaf));
-            let second_node = nodes.alloc(Node::Leaf(second_leaf));
+            let first_node = nodes.alloc(Node::Leaf(first_leaf.duplicate_in(mutator)));
+            let second_node = nodes.alloc(Node::Leaf(second_leaf.duplicate_in(mutator)));
 
             let branch = Node::Branch {
-                children: [first_node, second_node],
-                ornaments: (Some(first_leaf), [first_leaf, second_leaf]),
+                children: [
+                    first_node.duplicate_in(mutator),
+                    second_node.duplicate_in(mutator),
+                ],
+                ornaments: (
+                    Some(first_leaf.duplicate_in(mutator)),
+                    [
+                        first_leaf.duplicate_in(mutator),
+                        second_leaf.duplicate_in(mutator),
+                    ],
+                ),
             };
             assert_eq!(
                 collect_edges(&branch),
@@ -267,15 +276,15 @@ mod tests {
             );
 
             let record = RepresentativeStruct {
-                root: first_node,
-                fallback: Some(second_node),
+                root: first_node.duplicate_in(mutator),
+                fallback: Some(second_node.duplicate_in(mutator)),
             };
             assert_eq!(
                 collect_edges(&record),
                 vec![first_node.erase(), second_node.erase()]
             );
 
-            let leaf_variant = Node::Leaf(first_leaf);
+            let leaf_variant = Node::Leaf(first_leaf.duplicate_in(mutator));
             assert_eq!(collect_edges(&leaf_variant), vec![first_leaf.erase()]);
         });
     }
@@ -287,10 +296,13 @@ mod tests {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<Node>().unwrap();
             let leaf = leaves.alloc(Leaf { _value: 1 });
-            let node = nodes.alloc(Node::Leaf(leaf));
+            let node = nodes.alloc(Node::Leaf(leaf.duplicate_in(mutator)));
             let branch = Node::Branch {
-                children: [node, node],
-                ornaments: (Some(leaf), [leaf, leaf]),
+                children: [node.duplicate_in(mutator), node.duplicate_in(mutator)],
+                ornaments: (
+                    Some(leaf.duplicate_in(mutator)),
+                    [leaf.duplicate_in(mutator), leaf.duplicate_in(mutator)],
+                ),
             };
 
             let panic = catch_unwind(AssertUnwindSafe(|| {

@@ -23,10 +23,10 @@ pub(crate) struct RootCell {
 }
 
 impl<T: Trace> Root<T> {
-    pub(crate) fn candidate(heap: &Arc<HeapInner>, value: Gc<T>) -> (Self, Weak<RootCell>) {
+    pub(crate) fn candidate(heap: &Arc<HeapInner>, value: ErasedGc) -> (Self, Weak<RootCell>) {
         let cell = Arc::new(RootCell {
             heap: Arc::downgrade(heap),
-            value: value.erase(),
+            value,
         });
         let registration = Arc::downgrade(&cell);
         (
@@ -156,13 +156,13 @@ mod tests {
         let (value, root) = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(42_u64);
-            (value, mutator.root(value))
+            (value.duplicate_in(mutator), mutator.root(value))
         });
         let alias = root.clone();
 
         heap.with_mutator(|mutator| {
-            assert!(root.as_gc(mutator).ptr_eq(value));
-            assert!(alias.as_gc(mutator).ptr_eq(value));
+            assert!(root.as_gc(mutator).same_allocation_in(&value, mutator));
+            assert!(alias.as_gc(mutator).same_allocation_in(&value, mutator));
             assert_eq!(*root.get(mutator), 42);
             assert_eq!(*alias.get(mutator), 42);
         });
@@ -175,7 +175,12 @@ mod tests {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(11);
             let second = allocator.alloc(11);
-            (first, mutator.root(first), second, mutator.root(second))
+            (
+                first.duplicate_in(mutator),
+                mutator.root(first),
+                second.duplicate_in(mutator),
+                mutator.root(second),
+            )
         });
         assert_eq!(heap.root_registrations_for_verification(), 2);
         let first_alias = first_root.clone();
@@ -183,10 +188,18 @@ mod tests {
 
         heap.with_mutator(|mutator| {
             let projected = first_root.as_gc(mutator);
-            assert!(projected.ptr_eq(first));
-            assert!(first_alias.as_gc(mutator).ptr_eq(projected));
-            assert!(second_root.as_gc(mutator).ptr_eq(second));
-            assert!(!projected.ptr_eq(second_root.as_gc(mutator)));
+            assert!(projected.same_allocation_in(&first, mutator));
+            assert!(
+                first_alias
+                    .as_gc(mutator)
+                    .same_allocation_in(&projected, mutator)
+            );
+            assert!(
+                second_root
+                    .as_gc(mutator)
+                    .same_allocation_in(&second, mutator)
+            );
+            assert!(!projected.same_allocation_in(&second_root.as_gc(mutator), mutator));
         });
         assert_eq!(heap.root_registrations_for_verification(), 2);
 
@@ -227,7 +240,7 @@ mod tests {
                 heap.with_mutator(|mutator| {
                     start.wait();
                     for _ in 0..1_024 {
-                        drop(mutator.root(value));
+                        drop(mutator.root(value.duplicate_in(mutator)));
                     }
                     finish.wait();
                 });

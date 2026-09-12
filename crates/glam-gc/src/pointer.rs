@@ -212,30 +212,31 @@ mod tests {
     #[test]
     fn pointer_identity_is_all_gc_equality_observes() {
         let heap = Heap::new();
-        let (first, alias, equal_value) = heap.with_mutator(|mutator| {
+        heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
-            (first, first, allocator.alloc(42_u64))
-        });
+            let alias = first.duplicate_in(mutator);
+            let equal_value = allocator.alloc(42_u64);
 
-        assert_eq!(first, alias);
-        assert!(first.ptr_eq(alias));
-        assert_ne!(first, equal_value);
+            assert!(first.same_allocation_in(&alias, mutator));
+            assert!(!first.same_allocation_in(&equal_value, mutator));
+        });
     }
 
     #[test]
-    fn pointer_copy_and_identity_register_no_roots() {
+    fn pointer_duplication_and_identity_register_no_roots() {
         let heap = Heap::new();
-        let (first, alias, equal_value) = heap.with_mutator(|mutator| {
+        heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
-            (first, first, allocator.alloc(42_u64))
-        });
+            let alias = first.duplicate_in(mutator);
+            let equal_value = allocator.alloc(42_u64);
 
-        assert_eq!(heap.root_registrations_for_verification(), 0);
-        assert!(first.ptr_eq(alias));
-        assert!(!first.ptr_eq(equal_value));
-        assert_eq!(heap.root_registrations_for_verification(), 0);
+            assert_eq!(heap.root_registrations_for_verification(), 0);
+            assert!(first.same_allocation_in(&alias, mutator));
+            assert!(!first.same_allocation_in(&equal_value, mutator));
+            assert_eq!(heap.root_registrations_for_verification(), 0);
+        });
     }
 
     #[test]
@@ -313,7 +314,7 @@ mod tests {
         let observer = Heap::new();
         let value = owner.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-            (value, mutator.root(value))
+            (value.duplicate_in(mutator), mutator.root(value))
         });
 
         let duplicate_panic = catch_unwind(AssertUnwindSafe(|| {

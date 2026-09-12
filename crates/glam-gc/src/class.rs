@@ -569,7 +569,9 @@ mod tests {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let holders = mutator.allocator::<Holder>().unwrap();
             let edge = leaves.alloc(Leaf { _value: 1 });
-            let holder = holders.alloc(Holder { edge });
+            let holder = holders.alloc(Holder {
+                edge: edge.duplicate_in(mutator),
+            });
             let mut observed = Vec::new();
             let mut collect = |edge| observed.push(edge);
             let mut visitor = Visitor::new(&mut collect);

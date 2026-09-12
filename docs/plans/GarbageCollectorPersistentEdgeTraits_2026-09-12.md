@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P1 complete; P2-P5 planned. This is the nested implementation plan
+Status: P0-P2A complete; P2B-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -419,6 +419,31 @@ may continue copying `ErasedGc`; no ordinary typed edge may use that exception.
 
 Run focused collector tests after each family: roots, mutation, graph tracing,
 finalization, thread caches, deterministic hooks, and Miri fixtures.
+
+Completed 2026-09-12. Collector production code and fixtures now remain valid
+when all five transitional `Gc<T>` standard-trait implementations are
+simultaneously disabled. The compile-and-test closure probe covered every
+`glam-gc` target with all features: observations borrow typed edges, graph and
+root fixtures use `duplicate_in` at intentional ownership forks, identity
+checks use `same_allocation_in`, and moves from arrays, vectors, closures, and
+root handoffs are explicit. The ordinary build retains the five trait
+implementations until the coordinated P4 cutover so downstream Glam carriers
+remain buildable during P2B-P3.
+
+Focused strict-provenance Miri runs cover the pointer, root, mutation, and
+trace modules plus representative cyclic marking, finalization, and stale
+thread-cache fixtures. The general collector check also exposed a stale exact
+unsafe-site ledger left by the earlier P1 explicit pointer operations; this
+checkpoint reconciles that inventory without adding an unsafe site or changing
+an unsafe contract.
+
+The durable inventory now asserts that those five declarations are the only
+remaining collector-local defects. Explicit operations increase the manifest
+to 705 occurrences (146 production typed, 36 production erased, 509 test
+typed, and 14 test erased), fingerprint
+`11_623_188_852_615_467_400`. The erased increase is the root-registration
+handoff copying one already-validated collector-private identity rather than
+re-consuming its typed edge.
 
 ### P2B — Glam managed identity families
 

@@ -131,7 +131,7 @@ mod tests {
         let heap = Heap::new();
         let (value, root) = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-            let root = mutator.root(value);
+            let root = mutator.root(value.duplicate_in(mutator));
             (value, root)
         });
         let worker_heap = heap.clone();

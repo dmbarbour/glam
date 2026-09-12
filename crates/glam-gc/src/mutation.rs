@@ -219,11 +219,10 @@ mod tests {
     // complete synchronized snapshot.
     unsafe impl Trace for MutableNode {
         fn trace(&self, visitor: &mut Visitor<'_>) {
-            let edge = *self
-                .edge
+            self.edge
                 .lock()
-                .expect("test edge mutex should not be poisoned");
-            edge.trace(visitor);
+                .expect("test edge mutex should not be poisoned")
+                .trace(visitor);
         }
     }
 
@@ -236,7 +235,7 @@ mod tests {
             let old = leaves.alloc(Leaf { _value: 1 });
             let new = leaves.alloc(Leaf { _value: 2 });
             let owner = nodes.alloc(MutableNode {
-                edge: Mutex::new(Some(old)),
+                edge: Mutex::new(Some(old.duplicate_in(mutator))),
             });
             // SAFETY: `owner` was allocated in this live arena heap with
             // representation `MutableNode`.
@@ -252,17 +251,20 @@ mod tests {
                     *owner_value
                         .edge
                         .lock()
-                        .expect("test edge mutex should not be poisoned") = Some(new);
+                        .expect("test edge mutex should not be poisoned") =
+                        Some(new.duplicate_in(mutator));
                 });
             }
 
             assert_eq!(replacements, 1);
-            assert_eq!(
-                *owner_value
-                    .edge
-                    .lock()
-                    .expect("test edge mutex should not be poisoned"),
-                Some(new)
+            let installed = owner_value
+                .edge
+                .lock()
+                .expect("test edge mutex should not be poisoned");
+            assert!(
+                installed
+                    .as_ref()
+                    .is_some_and(|edge| edge.same_allocation_in(&new, mutator))
             );
         });
     }
@@ -279,7 +281,7 @@ mod tests {
             let old = leaves.alloc(Leaf { _value: 1 });
             let new = leaves.alloc(Leaf { _value: 2 });
             let owner = nodes.alloc(MutableNode {
-                edge: Mutex::new(Some(old)),
+                edge: Mutex::new(Some(old.duplicate_in(mutator))),
             });
             // SAFETY: `owner` is live in this exact heap. Its locked option is
             // its sole outgoing edge before and after the coupled update.
@@ -296,7 +298,7 @@ mod tests {
                     |edge, visitor| edge.trace(visitor),
                     |edge| {
                         transitions.fetch_add(1, Ordering::Relaxed);
-                        *edge = Some(new);
+                        *edge = Some(new.duplicate_in(mutator));
                     },
                 );
             }
@@ -317,7 +319,7 @@ mod tests {
             let old = leaves.alloc(Leaf { _value: 1 });
             let new = leaves.alloc(Leaf { _value: 2 });
             let owner = nodes.alloc(MutableNode {
-                edge: Mutex::new(Some(old)),
+                edge: Mutex::new(Some(old.duplicate_in(mutator))),
             });
             // SAFETY: `owner` is live in this heap and the two visitors
             // describe the exact old and new singleton edges. The closure
@@ -328,7 +330,8 @@ mod tests {
                     |_| panic!("STW must not walk leaving edges"),
                     |_| panic!("STW must not walk adding edges"),
                     || {
-                        *owner.get_unchecked(mutator).edge.lock().unwrap() = Some(new);
+                        *owner.get_unchecked(mutator).edge.lock().unwrap() =
+                            Some(new.duplicate_in(mutator));
                     },
                 );
             }
@@ -347,8 +350,11 @@ mod tests {
             let neither = mutator.observe_edge_transition_for_test(
                 false,
                 false,
-                |visitor| [first, second].trace(visitor),
-                |visitor| Some(third).trace(visitor),
+                |visitor| {
+                    visitor.visit(&first);
+                    visitor.visit(&second);
+                },
+                |visitor| visitor.visit(&third),
             );
             assert!(neither.leaving.is_empty());
             assert!(neither.adding.is_empty());
@@ -356,8 +362,11 @@ mod tests {
             let satb = mutator.observe_edge_transition_for_test(
                 true,
                 false,
-                |visitor| [first, second].trace(visitor),
-                |visitor| Some(third).trace(visitor),
+                |visitor| {
+                    visitor.visit(&first);
+                    visitor.visit(&second);
+                },
+                |visitor| visitor.visit(&third),
             );
             assert_eq!(satb.leaving, [first.erase(), second.erase()]);
             assert!(satb.adding.is_empty());
@@ -366,7 +375,7 @@ mod tests {
                 true,
                 true,
                 |_visitor| (),
-                |visitor| Some(third).trace(visitor),
+                |visitor| visitor.visit(&third),
             );
             assert!(both.leaving.is_empty());
             assert_eq!(both.adding, [third.erase()]);
@@ -383,12 +392,16 @@ mod tests {
                 false,
                 true,
                 |_visitor| (),
-                |visitor| proposed.trace(visitor),
+                |visitor| visitor.visit(&proposed),
             );
-            let publication = Err::<(), _>(proposed);
+            let publication = Err::<(), _>(proposed.duplicate_in(mutator));
 
             assert_eq!(observed.adding, [proposed.erase()]);
-            assert_eq!(publication, Err(proposed));
+            assert!(
+                publication
+                    .as_ref()
+                    .is_err_and(|edge| edge.same_allocation_in(&proposed, mutator))
+            );
         });
     }
 
