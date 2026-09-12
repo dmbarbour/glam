@@ -552,7 +552,8 @@ fn produce_lazy_source_in(
             unreachable!("net construction must retain its pollable effect machine")
         }
         LazySource::NetComputation(net) => {
-            let runtime = net.runtime().clone();
+            let runtime =
+                context.with_value_access(|access| net.runtime().duplicate_in(access.values()));
             let exposed = context
                 .with_value_access(|access| access.net(&runtime).with(|runtime| runtime.exposed()));
             extract_net_data(context, runtime, exposed, "lazy net computation")

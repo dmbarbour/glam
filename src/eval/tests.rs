@@ -5731,7 +5731,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
         builder.wire(argument, value);
         result
     });
-    let runtime = applied.runtime().clone();
+    let runtime = applied.runtime().duplicate_for_test(context.values());
 
     let computation = Value::Lazy(LazyValue::from_net_computation(
         &crate::core::test_value_factory(),
@@ -5776,7 +5776,7 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
         builder.wire(argument, value);
         result
     });
-    let runtime = applied.runtime().clone();
+    let runtime = applied.runtime().duplicate_for_test(context.values());
     let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
 
     let blocked = eval_value(&context, &computation)
@@ -5818,7 +5818,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
         builder.wire(input, argument);
         result
     });
-    let runtime = applied.runtime().clone();
+    let runtime = applied.runtime().duplicate_for_test(context.values());
     let pair = runtime
         .test_with(&crate::core::test_value_factory(), |net| {
             net.active_pairs().next()

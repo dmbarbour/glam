@@ -149,12 +149,15 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // GCI5R-008's test-only prepared-source bridge reopens the matching
         // runtime solely to project a root-owned source for generic fixtures.
         // P2B moves exact net identity observation behind the same bounded
-        // access authority as topology inspection.
-        ("src/core_net.rs", GatewayCounts::new(14, 0)),
+        // access authority as topology inspection. P2C adds one explicit
+        // test-only duplicate gateway and roots a net before a worker handoff.
+        ("src/core_net.rs", GatewayCounts::new(16, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
         // P2B compares registered net roots under the same explicit access
-        // authority used by production normalization batches.
-        ("src/eval/net.rs", GatewayCounts::new(1, 0)),
+        // authority used by production normalization batches. P2C adds
+        // explicit test-only duplicate/root handoffs for cursor-driver and
+        // concurrent normalization fixtures.
+        ("src/eval/net.rs", GatewayCounts::new(6, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks

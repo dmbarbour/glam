@@ -447,7 +447,7 @@ impl ManagedCoreNetEdge {
     }
 
     #[inline(always)]
-    fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
+    pub(crate) fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
         Self(authority.duplicate_edge(&self.0))
     }
 
@@ -924,6 +924,11 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
 }
 
 impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, '_> {
+    #[inline(always)]
+    fn duplicate_runtime_source(&self, source: &CoreRuntimeNet) -> CoreRuntimeNet {
+        source.duplicate_in(self.authority)
+    }
+
     #[inline(always)]
     fn transition_edges<Result>(
         &self,
@@ -2850,7 +2855,9 @@ mod tests {
             let net = crate::core_net::CoreRuntimeNet::from_managed_edge(edge);
             net.access(&access).fail_claimed_call(
                 call,
-                EvaluationHalt::from_value(Value::Net(NetValue::new(net.clone()))),
+                EvaluationHalt::from_value(Value::Net(NetValue::new(
+                    net.duplicate_for_test(&values),
+                ))),
             );
             root
         });
@@ -2903,7 +2910,9 @@ mod tests {
                 promise_root
                     .access(&access)
                     .expect("the rooted promise should be accessible")
-                    .publish(Ok(Value::Net(NetValue::new(net.clone()))))
+                    .publish(Ok(Value::Net(NetValue::new(
+                        net.duplicate_for_test(&values),
+                    ))))
                     .expect("the fresh promise should accept its operator-work cycle");
                 if claim {
                     assert!(matches!(
@@ -3536,6 +3545,48 @@ mod tests {
                 !declaration.contains(forbidden),
                 "durable {required} wrapper also caches {forbidden}"
             );
+        }
+    }
+
+    #[test]
+    fn core_net_direct_consumer_duplication_is_access_qualified() {
+        let recursive = include_str!("recursive_cells.rs");
+        let core_net = include_str!("../../core_net.rs");
+        let runtime = include_str!("../../interaction_net/runtime.rs");
+        let cursor = include_str!("../../interaction_net/runtime/cursor.rs");
+
+        let gateway = source_declaration(runtime, "trait RuntimeNetMutationGateway");
+        assert!(gateway.contains("fn duplicate_runtime_source"));
+        let managed_gateway = source_declaration(
+            recursive,
+            "impl RuntimeNetMutationGateway<CoreSpecialization>",
+        );
+        assert!(managed_gateway.contains("source.duplicate_in(self.authority)"));
+
+        let claim = source_declaration(cursor, "fn cursor_claim(");
+        assert!(claim.contains("gateway.duplicate_runtime_source"));
+        assert!(!claim.contains("source.clone()"));
+        let claim_guard = source_declaration(runtime, "struct CursorClaimGuard");
+        assert!(claim_guard.contains("claim: Option<CursorClaim<S>>"));
+        assert!(!runtime.contains("#[derive(Clone)]\nstruct CursorClaim"));
+
+        let facade = source_declaration(core_net, "impl CoreRuntimeNet {");
+        assert!(facade.contains("pub(crate) fn duplicate_in("));
+        assert!(facade.contains("self.edge.duplicate_in(access)"));
+
+        for source in [
+            include_str!("../../eval/net.rs"),
+            include_str!("../../eval/application.rs"),
+            include_str!("../../eval/operator.rs"),
+            include_str!("../../eval/value.rs"),
+            include_str!("../../g_syntax/net_lowering.rs"),
+        ] {
+            for forbidden in ["runtime().clone()", "stage().clone()", "_owner_access"] {
+                assert!(
+                    !source.contains(forbidden),
+                    "core-net consumer regained unqualified duplication through {forbidden}"
+                );
+            }
         }
     }
 }

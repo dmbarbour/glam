@@ -40,11 +40,12 @@ pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt>
 }
 
 pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
+    let values = crate::core::test_value_factory();
     let code = lower_test_function_code(0, expr);
     assert_eq!(code.capture_count(), 0, "test computation must be closed");
     Value::Lazy(LazyValue::from_net_computation(
-        &crate::core::test_value_factory(),
-        NetValue::new(code.runtime().clone()),
+        &values,
+        NetValue::new(code.runtime().duplicate_for_test(&values)),
     ))
 }
 
@@ -66,7 +67,7 @@ pub(super) fn closed_function_value_in(
     let code = lower_test_function_code_in(values, arity, body);
     assert_eq!(code.capture_count(), 0, "test function must be closed");
     Value::Function(FunctionValue::new(
-        NetValue::new(code.runtime().clone()),
+        NetValue::new(code.runtime().duplicate_for_test(values)),
         arity,
     ))
 }
@@ -147,7 +148,7 @@ impl FixtureNetLowerer<'_> {
                 if captures.is_empty() {
                     self.data_into(
                         Value::Function(FunctionValue::new(
-                            NetValue::new(code.runtime().clone()),
+                            NetValue::new(code.runtime().duplicate_for_test(self.values)),
                             code.arity(),
                         )),
                         target,
@@ -236,7 +237,7 @@ impl FixtureNetLowerer<'_> {
             self.data_into(
                 Value::Lazy(LazyValue::from_net_computation(
                     self.values,
-                    NetValue::new(code.runtime().clone()),
+                    NetValue::new(code.runtime().duplicate_for_test(self.values)),
                 )),
                 target,
             );

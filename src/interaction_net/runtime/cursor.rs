@@ -299,6 +299,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn cursor_claim(
         &self,
         cursor: NodeId,
+        gateway: &impl RuntimeNetMutationGateway<S>,
     ) -> Option<CursorClaim<S>> {
         let owner = self.cursor_claim_owner(cursor)?;
         if !self.cursor_claim_is_in_flight(cursor) {
@@ -307,7 +308,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
             return None;
         };
-        let source = self.copies.get(&copy)?.source.clone();
+        let source = gateway.duplicate_runtime_source(&self.copies.get(&copy)?.source);
         Some(CursorClaim {
             cursor,
             owner,

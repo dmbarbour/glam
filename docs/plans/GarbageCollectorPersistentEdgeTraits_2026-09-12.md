@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2B complete; P2C-P5 planned. This is the nested implementation plan
+Status: P0-P2C complete; P2D-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -494,6 +494,43 @@ Migrate core-net normalization, cursor/frontier work, edge transition owners,
 and any worker-local managed pointer worklists. Prefer stable semantic IDs for
 scheduler comparisons. A raw managed edge must remain inside its value-access
 quantum and cannot become scheduler state.
+
+Completed 2026-09-12. `CoreRuntimeNet`, `NetValue`, `FunctionCode`, and
+`FunctionValue` now expose narrow value-access-qualified duplication rather
+than making direct evaluator and syntax-lowering consumers invoke their
+temporary `Clone` interlock. Normalization-request construction borrows its
+source net and immediately publishes the existing root-only work descriptor;
+it no longer creates a redundant working edge. Net attachment likewise
+removed a second raw `owner` edge whose short access check occurred after the
+source had already moved into the constructed graph and therefore supplied no
+liveness.
+
+Cursor claims were the remaining generic hidden copy in mutation code. The
+runtime-net mutation gateway now owns runtime-source duplication: the managed
+core gateway duplicates through its existing `RuntimeValueAccess`, while the
+ordinary generic test specialization retains normal owner cloning. A
+`CursorClaim` is move-only, and completion moves its source-bearing claim into
+the edge transition instead of cloning it a second time. This retains the
+established lock choreography: duplication happens while the target lock and
+managed access are both live, source inspection remains outside the target
+lock, and publication returns through the same gateway.
+
+The worker-state audit found that production normalization requests,
+frontier observations, prepared copy sources, and driver work items already
+store `ManagedCoreNetRoot`, stable node/pair IDs, or both. They required no new
+raw-edge worklist. Two concurrency fixtures which had copied a bare net into
+worker closures now hand off registered roots and reconstruct the temporary
+facade only inside matching access. Other test-only intentional aliases use an
+explicit access-qualified helper.
+
+A compiler closure probe with `CoreRuntimeNet: Clone` disabled now reports
+only the expected parent interlocks: `NetSpecialization::RuntimeSource`,
+`NetValue`, and `FunctionCode`. Source-backed verification latches gateway
+duplication, move-only cursor claims, the explicit facade operation, and the
+absence of the former direct evaluator/syntax-lowering clone spellings. The
+inventory now contains 718 occurrences (151 production typed, 36 production
+erased, 517 test typed, and 14 test erased), fingerprint
+`7_957_985_005_486_702_284`.
 
 ### P2D — Additive closure review
 

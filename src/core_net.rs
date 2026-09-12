@@ -181,6 +181,15 @@ impl CoreRuntimeNet {
         Self { edge }
     }
 
+    /// Duplicates this semantic net edge under matching value-domain access.
+    ///
+    /// The returned facade remains non-rooting and must be installed beneath
+    /// a traced owner before the surrounding access quantum ends.
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self::from_managed_edge(self.edge.duplicate_in(access))
+    }
+
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         self.edge == other.edge
     }
@@ -218,6 +227,12 @@ impl CoreRuntimeNet {
         operation: impl FnOnce(CoreRuntimeNetAccess<'_, '_>) -> R,
     ) -> R {
         values.with_runtime_value_access(|access| operation(self.access(&access)))
+    }
+
+    /// Test-only spelling for an intentional second non-rooting edge.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
     #[cfg(test)]
@@ -383,6 +398,11 @@ impl CoreRuntimeNet {
 }
 
 impl CoreRuntimeNetAccess<'_, '_> {
+    #[cfg(test)]
+    pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
+        self.runtime.cell().active_normalization_batch()
+    }
+
     pub(crate) fn values(&self) -> &RuntimeValueAccess<'_> {
         self.values
     }
@@ -499,7 +519,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         source
             .runtime
             .cell()
-            .inspect_source_frontier(source.owner.clone(), anchor)
+            .inspect_source_frontier(source.owner.duplicate_in(self.values), anchor)
     }
 
     fn step_cursor_if_current(
@@ -1357,8 +1377,8 @@ mod tests {
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(payload);
         let source = values.instantiate_core_net(&builder.finish(exposed));
-        let (target, _, cursor) =
-            CoreRuntimeNet::test_pair_owned_copy_layer(&values, source.clone());
+        let source_copy = source.duplicate_for_test(&values);
+        let (target, _, cursor) = CoreRuntimeNet::test_pair_owned_copy_layer(&values, source_copy);
         let pair = target.test_with(&values, |runtime| {
             runtime
                 .active_pairs()
@@ -1706,7 +1726,7 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&values);
         let net = values.instantiate_core_net(&template);
-        let alias = net.clone();
+        let alias = net.duplicate_for_test(&values);
 
         values.with_runtime_value_access(|values| {
             let access = net.access(&values);
@@ -1786,9 +1806,11 @@ mod tests {
         let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let leader_values = values.clone();
-        let leader_net = net.clone();
+        let net_root = values.with_runtime_value_access(|access| net.root_in(&access));
+        let leader_root = net_root.clone();
         let leader = std::thread::spawn(move || {
             leader_values.with_runtime_value_access(|values| {
+                let leader_net = CoreRuntimeNet::from_root(&leader_root, &values);
                 let access = leader_net.access(&values);
                 access
                     .with_normalization_batch(|_| {
@@ -1808,10 +1830,11 @@ mod tests {
         let followers = (0..FOLLOWERS)
             .map(|_| {
                 let values = values.clone();
-                let net = net.clone();
+                let net_root = net_root.clone();
                 let registered_tx = registered_tx.clone();
                 std::thread::spawn(move || {
                     let contention = values.with_runtime_value_access(|values| {
+                        let net = CoreRuntimeNet::from_root(&net_root, &values);
                         let access = net.access(&values);
                         access
                             .with_normalization_batch(|_| ())

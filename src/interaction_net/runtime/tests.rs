@@ -467,7 +467,7 @@ where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
 {
     let claim = target
-        .cursor_claim(cursor)
+        .cursor_claim(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
         .expect("cursor reduction should leave an inspectable claim");
     let frontier = claim.source.inspect_source_frontier(claim.remote);
     target.finish_cursor_claim(claim, frontier)
@@ -2516,7 +2516,7 @@ fn source_change_between_cursor_inspection_publication_and_wait_is_not_lost() {
         panic!("target should claim its remote cursor");
     };
     let claim = target
-        .cursor_claim(cursor)
+        .cursor_claim(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
         .expect("claimed cursor should remain inspectable");
     let frontier = source.inspect_source_frontier(claim.remote);
     let observation = frontier
@@ -3446,7 +3446,9 @@ fn converging_frontier_waits_for_a_claimed_peer() {
         else {
             panic!("each converging cursor should be independently claimable");
         };
-        let claim = caller.cursor_claim(cursor).unwrap();
+        let claim = caller
+            .cursor_claim(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+            .unwrap();
         let frontier = claim.source.inspect_source_frontier(claim.remote);
         claims.push((claim, frontier));
     }

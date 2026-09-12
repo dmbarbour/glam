@@ -119,7 +119,11 @@ mod tests {
         let first = number(1);
         let second = number(2);
         let function_runtime = closed_data_net(&values, number(0));
-        let code = Arc::new(FunctionCode::new(function_runtime.clone(), 1, 3));
+        let code = Arc::new(FunctionCode::new(
+            function_runtime.duplicate_for_test(&values),
+            1,
+            3,
+        ));
         let supplied: Arc<[Value]> = Arc::from([first.clone(), second.clone()]);
         let one_supplied: Arc<[Value]> = Arc::from([first.clone()]);
         let operators = [
@@ -252,7 +256,9 @@ mod tests {
             );
         });
 
-        let owner = public_values.wrap(Value::Net(NetValue::new(runtime.clone())));
+        let owner = public_values.wrap(Value::Net(NetValue::new(
+            runtime.duplicate_for_test(&values),
+        )));
         let before = runtime.test_with_revisions(&values, |net| {
             assert!(net.stuck_reason(pair).is_some());
         });

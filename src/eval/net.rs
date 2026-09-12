@@ -17,7 +17,6 @@ pub(super) fn attach_net_many(
     arguments: Vec<Value>,
 ) -> NetValue {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
-    let owner = function.runtime().clone();
     let mut net = NetBuilder::new();
     let spine = net.bind_spine(arguments.len());
     let function = net.data(Value::Net(function));
@@ -27,9 +26,6 @@ pub(super) fn attach_net_many(
         net.wire(argument_port, argument);
     }
     let template = net.finish(spine.result);
-    context.with_value_access(|access| {
-        let _owner_access = access.net(&owner);
-    });
     NetValue::new(context.construct_core_net(template.instantiate()))
 }
 
@@ -39,7 +35,7 @@ pub(super) fn extract_net_data(
     interface: Port,
     operation: &str,
 ) -> Result<Value, EvaluationHalt> {
-    let request = NormalizationRequest::cursor_whnf(runtime.clone(), interface, context);
+    let request = NormalizationRequest::cursor_whnf(&runtime, interface, context);
     match request.drive_in(context)? {
         NetInterfaceOutcome::Data => {
             let data = with_core_net_access(context, &runtime, |runtime| {
@@ -65,7 +61,8 @@ pub(super) fn evaluate_function_call(
     function: &FunctionValue,
     arguments: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    let net = attach_net_many(context, function.stage().clone(), arguments.to_vec());
+    let stage = context.with_value_access(|access| function.duplicate_stage_in(access.values()));
+    let net = attach_net_many(context, stage, arguments.to_vec());
     let runtime = net.into_runtime();
     let exposed = with_core_net_access(context, &runtime, |runtime| {
         runtime.with(|runtime| runtime.exposed())
@@ -616,7 +613,7 @@ fn assert_semantic_step_is_unbatched(_runtime: &CoreRuntimeNet) {}
 
 impl NormalizationRequest {
     fn cursor_whnf(
-        runtime: CoreRuntimeNet,
+        runtime: &CoreRuntimeNet,
         root_interface: Port,
         context: &EvaluatorStepContext<'_>,
     ) -> Self {
@@ -1283,7 +1280,7 @@ mod driver_tests {
         crate::core::test_value_factory().instantiate_core_net(&template)
     }
 
-    fn normalization_request(runtime: CoreRuntimeNet, interface: Port) -> NormalizationRequest {
+    fn normalization_request(runtime: &CoreRuntimeNet, interface: Port) -> NormalizationRequest {
         let context = test_context();
         super::with_direct_evaluator(&context, |evaluator| {
             NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
@@ -1305,7 +1302,7 @@ mod driver_tests {
             });
             let exposed = runtime.test_with(&values, RuntimeNet::exposed);
             super::with_direct_evaluator(&context, |evaluator| {
-                NormalizationRequest::cursor_whnf(runtime.clone(), exposed, evaluator)
+                NormalizationRequest::cursor_whnf(&runtime, exposed, evaluator)
             })
         };
 
@@ -1435,13 +1432,13 @@ mod driver_tests {
         );
         let (root, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
             &crate::core::test_value_factory(),
-            middle.clone(),
+            middle.duplicate_for_test(&crate::core::test_value_factory()),
         );
 
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &normalization_request(root.clone(), root_interface),
+                &normalization_request(&root, root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -1468,13 +1465,13 @@ mod driver_tests {
             );
         let (root, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
             &crate::core::test_value_factory(),
-            middle.clone(),
+            middle.duplicate_for_test(&crate::core::test_value_factory()),
         );
 
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &normalization_request(root.clone(), root_interface),
+                &normalization_request(&root, root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -1507,7 +1504,7 @@ mod driver_tests {
         assert!(matches!(
             drive_net_work(
                 &test_context(),
-                &normalization_request(source.clone(), root_interface),
+                &normalization_request(&source, root_interface),
             )
             .unwrap(),
             NetDriverOutcome::Root(InterfaceDemand::StableCursor(_))
@@ -1547,7 +1544,7 @@ mod driver_tests {
         }
 
         assert_eq!(
-            normalization_request(source.clone(), root_interface)
+            normalization_request(&source, root_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
@@ -1578,7 +1575,7 @@ mod driver_tests {
             net.active_pairs().collect::<Vec<_>>()
         });
         assert_eq!(
-            normalization_request(disconnected.clone(), disconnected_interface)
+            normalization_request(&disconnected, disconnected_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
@@ -1604,7 +1601,7 @@ mod driver_tests {
             net.active_pairs().collect::<Vec<_>>()
         });
         assert_eq!(
-            normalization_request(branched.clone(), branched_interface)
+            normalization_request(&branched, branched_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
@@ -1638,7 +1635,7 @@ mod driver_tests {
             pairs[0]
         });
         assert_eq!(
-            normalization_request(runtime.clone(), interface)
+            normalization_request(&runtime, interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
@@ -1679,7 +1676,7 @@ mod driver_tests {
                 .pair_is_claimed(pair))
         );
         assert_eq!(
-            normalization_request(claimed.clone(), interface)
+            normalization_request(&claimed, interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
@@ -1698,7 +1695,7 @@ mod driver_tests {
                 source,
             );
         assert_eq!(
-            normalization_request(claimed_cursor.clone(), cursor_interface)
+            normalization_request(&claimed_cursor, cursor_interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
@@ -1727,7 +1724,7 @@ mod driver_tests {
             })
         ));
         assert_eq!(
-            normalization_request(stuck.clone(), interface)
+            normalization_request(&stuck, interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::NormalForm
@@ -1756,7 +1753,7 @@ mod driver_tests {
             target
                 .test_claim_pairless_cursor_obligation(&crate::core::test_value_factory(), cursor)
         );
-        let request = normalization_request(target.clone(), interface);
+        let request = normalization_request(&target, interface);
         let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded cursor must report contention"),
@@ -1767,7 +1764,7 @@ mod driver_tests {
         ));
         contention.wait_for_disturbance();
         assert_eq!(
-            normalization_request(target, interface)
+            normalization_request(&target, interface)
                 .drive(&test_context())
                 .unwrap(),
             NetInterfaceOutcome::Data
@@ -1781,12 +1778,15 @@ mod driver_tests {
         let runtime = instantiate(builder.finish(data));
         let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
-        let leader_runtime = runtime.clone();
+        let values = crate::core::test_value_factory();
+        let leader_root = values.with_runtime_value_access(|access| runtime.root_in(&access));
         let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let leader = std::thread::spawn(move || {
             let values = crate::core::test_value_factory();
-            leader_runtime.with_test_access(&values, |access| {
+            values.with_runtime_value_access(|values| {
+                let leader_runtime = CoreRuntimeNet::from_root(&leader_root, &values);
+                let access = leader_runtime.access(&values);
                 access
                     .with_normalization_batch(|_| {
                         leader_ready_tx.send(()).unwrap();
@@ -1801,7 +1801,7 @@ mod driver_tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the normalization owner must publish acquisition");
 
-        let request = normalization_request(runtime.clone(), interface);
+        let request = normalization_request(&runtime, interface);
         let (registered_tx, registered_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let follower = std::thread::spawn(move || {
@@ -1855,7 +1855,7 @@ mod driver_tests {
         let runtime = instantiate(builder.finish(result));
         let interface = runtime.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
-        let parked = normalization_request(runtime.clone(), interface)
+        let parked = normalization_request(&runtime, interface)
             .drive(&context)
             .expect_err("an unresolved callable promise must park the driver");
         let wait = parked
@@ -1902,7 +1902,7 @@ mod driver_tests {
             panic!("bind-data demand should be a call")
         };
         let call = Call { pair, bind, data };
-        let request = normalization_request(runtime.clone(), interface);
+        let request = normalization_request(&runtime, interface);
         let contention = match drive_net_work(&test_context(), &request).unwrap() {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded pair must report contention"),
@@ -2155,8 +2155,8 @@ mod driver_tests {
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let source_data = source.data(context.values().unit());
         let source = instantiate(source.finish(source_data));
-        let (copy_runtime, copy_call) =
-            claimed_core_call(Value::Net(NetValue::new(source.clone())));
+        let source_copy = source.duplicate_for_test(context.values());
+        let (copy_runtime, copy_call) = claimed_core_call(Value::Net(NetValue::new(source_copy)));
         assert!(progress_exact_core_call(&context, &copy_runtime, copy_call).unwrap());
         assert!(
             copy_runtime.test_with(&crate::core::test_value_factory(), |net| net
@@ -2529,7 +2529,7 @@ mod driver_tests {
 
         let (target, interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
             &crate::core::test_value_factory(),
-            source.clone(),
+            source.duplicate_for_test(&crate::core::test_value_factory()),
         );
         let cursor = match target
             .test_poll_interface_demand(&crate::core::test_value_factory(), interface)
@@ -2555,7 +2555,7 @@ mod driver_tests {
                 ..
             })
         ));
-        let failure = normalization_request(target, interface)
+        let failure = normalization_request(&target, interface)
             .drive(&test_context())
             .expect_err("nested terminal failure must propagate through the driver");
         assert!(failure.to_string().contains("nested driver failure"));
@@ -2578,7 +2578,7 @@ mod driver_tests {
             );
         }
 
-        let request = normalization_request(source.clone(), root_interface);
+        let request = normalization_request(&source, root_interface);
         assert_eq!(
             request.drive(&test_context()).unwrap(),
             NetInterfaceOutcome::Data
@@ -2602,22 +2602,24 @@ mod driver_tests {
         let mut source = instantiate(leaf.finish(data));
         let mut root_interface =
             source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
-        let mut runtimes = vec![source.clone()];
+        let values = crate::core::test_value_factory();
+        let mut runtimes = vec![values.with_runtime_value_access(|access| source.root_in(&access))];
         for _ in 0..4 {
-            (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
-                &crate::core::test_value_factory(),
-                source,
-            );
-            runtimes.push(source.clone());
+            (source, root_interface) =
+                crate::core_net::CoreRuntimeNet::test_copy_layer(&values, source);
+            runtimes.push(values.with_runtime_value_access(|access| source.root_in(&access)));
         }
 
-        normalization_request(source, root_interface)
+        normalization_request(&source, root_interface)
             .drive(&test_context())
             .unwrap();
-        assert!(runtimes.iter().all(|runtime| {
-            runtime
-                .active_normalization_batch(&crate::core::test_value_factory())
-                .is_none()
+        assert!(runtimes.iter().all(|root| {
+            values.with_runtime_value_access(|access| {
+                CoreRuntimeNet::from_root(root, &access)
+                    .access(&access)
+                    .active_normalization_batch()
+                    .is_none()
+            })
         }));
     }
 }

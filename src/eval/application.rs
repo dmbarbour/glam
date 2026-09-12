@@ -102,7 +102,9 @@ fn apply_function_values_in(
     let remaining = function.remaining_arity();
     if arguments.len() < remaining {
         let supplied = arguments.len();
-        let stage = attach_function_stage(context, function.stage().clone(), arguments);
+        let stage =
+            context.with_value_access(|access| function.duplicate_stage_in(access.values()));
+        let stage = attach_function_stage(context, stage, arguments);
         return Ok(Value::Function(FunctionValue::new(
             stage,
             remaining - supplied,
@@ -168,9 +170,12 @@ pub(super) fn instantiate_function(
         return Err(EvaluationHalt::new("function capture arity mismatch"));
     }
     let stage = if captures.is_empty() {
-        NetValue::new(code.runtime().clone())
+        context
+            .with_value_access(|access| NetValue::new(code.duplicate_runtime_in(access.values())))
     } else {
-        attach_function_stage(context, NetValue::new(code.runtime().clone()), captures)
+        let stage = context
+            .with_value_access(|access| NetValue::new(code.duplicate_runtime_in(access.values())));
+        attach_function_stage(context, stage, captures)
     };
     Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }

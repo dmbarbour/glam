@@ -554,7 +554,7 @@ pub(super) fn closed_compatibility_variants(
     active_drops: &Arc<AtomicUsize>,
 ) -> Vec<Value> {
     let runtime = closed_net(values);
-    let function = FunctionValue::new(NetValue::new(runtime.clone()), 1);
+    let function = FunctionValue::new(NetValue::new(runtime.duplicate_for_test(values)), 1);
     let host_probe = ExternalDropProbe(Arc::clone(active_drops));
     let opaque_probe = Arc::new(ExternalDropProbe(Arc::clone(active_drops)));
 

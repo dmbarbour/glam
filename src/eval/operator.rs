@@ -164,7 +164,10 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            let stage = attach_net_many(context, NetValue::new(code.runtime().clone()), captures);
+            let stage = context.with_value_access(|access| {
+                NetValue::new(code.duplicate_runtime_in(access.values()))
+            });
+            let stage = attach_net_many(context, stage, captures);
             Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
                 |access| LazyValue::from_net_computation_in(access, stage),
             ))))

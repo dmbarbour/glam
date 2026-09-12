@@ -33,7 +33,7 @@ pub(super) fn lower_resolved_expr_in(
             );
             Value::Lazy(crate::core::LazyValue::from_net_computation_in(
                 access,
-                NetValue::new(code.runtime().clone()),
+                NetValue::new(code.duplicate_runtime_in(access)),
             ))
         }
     }
@@ -202,7 +202,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         if captures.is_empty() {
             self.data_into(
                 Value::Function(FunctionValue::new(
-                    NetValue::new(code.runtime().clone()),
+                    NetValue::new(code.duplicate_runtime_in(self.values)),
                     code.arity(),
                 )),
                 target,
@@ -299,7 +299,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                     self.data_into(
                         Value::Lazy(crate::core::LazyValue::from_net_computation_in(
                             self.values,
-                            NetValue::new(code.runtime().clone()),
+                            NetValue::new(code.duplicate_runtime_in(self.values)),
                         )),
                         target,
                     );

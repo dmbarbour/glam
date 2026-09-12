@@ -1325,6 +1325,12 @@ impl NetValue {
         &self.runtime
     }
 
+    /// Duplicates this non-rooting semantic edge inside matching value access.
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self::new(self.runtime.duplicate_in(access))
+    }
+
     pub fn into_runtime(self) -> CoreRuntimeNet {
         self.runtime
     }
@@ -1348,6 +1354,12 @@ impl FunctionCode {
 
     pub(crate) fn runtime(&self) -> &CoreRuntimeNet {
         &self.runtime
+    }
+
+    /// Duplicates the code net inside matching value access.
+    #[inline(always)]
+    pub(crate) fn duplicate_runtime_in(&self, access: &RuntimeValueAccess<'_>) -> CoreRuntimeNet {
+        self.runtime.duplicate_in(access)
     }
 
     pub fn arity(&self) -> usize {
@@ -1379,6 +1391,12 @@ impl FunctionValue {
 
     pub(crate) fn stage(&self) -> &NetValue {
         &self.stage
+    }
+
+    /// Duplicates the current application stage inside matching value access.
+    #[inline(always)]
+    pub(crate) fn duplicate_stage_in(&self, access: &RuntimeValueAccess<'_>) -> NetValue {
+        self.stage.duplicate_in(access)
     }
 
     pub fn remaining_arity(&self) -> usize {

@@ -522,6 +522,15 @@ pub(crate) struct NormalizationBatchGuard<'cell, S: NetSpecialization> {
 /// specializations use this seam to keep collector edge accounting inside the
 /// same net mutex which authorizes the topology or payload edit.
 pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization> {
+    /// Duplicates a runtime-source edge while the specialization's mutation
+    /// authority is active.
+    ///
+    /// Cursor claims carry this source outside the target-net lock for one
+    /// source-frontier inspection. Managed specializations qualify that
+    /// temporary edge through their value-access region; the generic direct
+    /// specialization retains ordinary owner cloning.
+    fn duplicate_runtime_source(&self, source: &S::RuntimeSource) -> S::RuntimeSource;
+
     /// Performs an edge-free topology or coordination transition.
     ///
     /// Callers must use `transition_edges` when the update installs or removes
@@ -710,6 +719,11 @@ impl RuntimeNetEdgeTransition {
 struct DirectRuntimeNetMutationGateway;
 
 impl<S: NetSpecialization> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway {
+    #[inline(always)]
+    fn duplicate_runtime_source(&self, source: &S::RuntimeSource) -> S::RuntimeSource {
+        source.clone()
+    }
+
     #[inline(always)]
     fn transition_edges<Result>(
         &self,
@@ -1236,7 +1250,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                         cursor_claim = Some(
                             state
                                 .runtime
-                                .cursor_claim(*cursor)
+                                .cursor_claim(*cursor, gateway)
                                 .expect("cursor reduction must retain its claimed transition"),
                         );
                     }
@@ -1337,7 +1351,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                     assert_eq!(progress, CursorProgress::Claimed);
                     let claim = state
                         .runtime
-                        .cursor_claim(cursor)
+                        .cursor_claim(cursor, gateway)
                         .expect("claimed cursor step must retain its transition");
                     self.publish_mutation(&mut state.batches);
                     CursorClaimGuard::new(self, claim, gateway)
@@ -1377,7 +1391,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         Gateway: RuntimeNetMutationGateway<S>,
     {
-        let claim = self.with(|runtime| runtime.cursor_claim(cursor))?;
+        let claim = self.with(|runtime| runtime.cursor_claim(cursor, gateway))?;
         Some(CursorClaimGuard::new(self, claim, gateway).advance_with(inspect_source))
     }
 }
@@ -1485,7 +1499,8 @@ where
         &self,
         cursor: NodeId,
     ) -> Option<CursorClaimGuard<'_, S, DirectRuntimeNetMutationGateway>> {
-        let claim = self.with(|runtime| runtime.cursor_claim(cursor))?;
+        let claim = self
+            .with(|runtime| runtime.cursor_claim(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY))?;
         Some(CursorClaimGuard::new(
             self.cell(),
             claim,
@@ -1650,7 +1665,6 @@ struct CopyState<S: NetSpecialization> {
     fan_sites: HashMap<FanSite, FanSite>,
 }
 
-#[derive(Clone)]
 struct CursorClaim<S: NetSpecialization> {
     cursor: NodeId,
     owner: CursorClaimOwner,
@@ -1711,13 +1725,12 @@ where
     }
 
     fn finish(mut self, disposition: CursorDisposition<S>) -> Option<CursorProgress> {
-        let result = match disposition {
+        match disposition {
             CursorDisposition::Advance(frontier) => {
                 let claim = self
                     .claim
-                    .as_ref()
-                    .expect("an unfinished cursor guard must retain its claim")
-                    .clone();
+                    .take()
+                    .expect("an unfinished cursor guard must retain its claim");
                 Some(self.target.with_input_edge_mut_via(
                     self.gateway,
                     (claim, frontier),
@@ -1729,12 +1742,11 @@ where
             }
             CursorDisposition::Release => {
                 let restored = self.restore_fallback();
+                self.claim = None;
                 debug_assert!(restored, "released cursor claim must remain current");
                 None
             }
-        };
-        self.claim = None;
-        result
+        }
     }
 
     fn restore_fallback(&self) -> bool {
