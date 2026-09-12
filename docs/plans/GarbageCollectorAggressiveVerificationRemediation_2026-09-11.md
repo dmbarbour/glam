@@ -838,7 +838,9 @@ recursive-payload classification.
 
 ###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
 
-Status: complete on 2026-09-12 through D.2b.2a-D.2b.2d below.
+Status: implementation complete on 2026-09-12 through D.2b.2a-D.2b.2d
+below; the cross-phase accounting follow-up D.2b.2e remains planned before
+D.2c.
 
 Move the six managed-cell operations and three runtime-root projections to the
 new surface. Root/public clones continue to share registered root cells;
@@ -893,6 +895,110 @@ promise-resolver tests pass. The aggressive scheduler promise-wakeup fixtures
 still use the test-only unrooted `PromisedValue::new` compatibility helper;
 their fixture migration remains deliberately assigned to GCI11R-002E.
 
+###### GCI11R-002D.2b.2e — Root Traffic and Mutator Introduction Accounting
+
+Status: planned. Complete this source-audit checkpoint before beginning the
+broad D.2c-D.2g call-tree migrations.
+
+D.2b.2a-D.2b.2d established the right construction primitives, but their
+current inventories answer only part of the migration question. The
+raw-value inventory assigns authority-free *signatures* to broad phases. The
+root-publication and managed-admission inventories count syntax by source
+file. None presently distinguishes a necessary outer boundary from a caller
+which already has regional authority, nor does it reliably expose a nested
+mutator entry hidden inside an otherwise access-qualified function. For
+example, lazy-cycle terminalization currently calls
+`construct_runtime_value_root` from inside an existing
+`with_runtime_value_access` closure. That site is counted but is not assigned
+as a redundant hierarchical admission.
+
+Partition this work into the following independently latched audits and one
+small repair checkpoint.
+
+**D.2b.2e.1 — Runtime-root construction disposition inventory.** Upgrade the
+existing registered-root publication inventory from per-file text counts to
+an exact, syntax-backed occurrence ledger. Record the containing declaration,
+source location or stable syntax fingerprint, construction surface, phase
+owner, and intended terminal disposition for every:
+
+- legacy `RuntimeValueRoot::new` construction;
+- `construct_runtime_value_root` and `try_construct_runtime_value_root`
+  factory-scoped construction;
+- `RuntimeValueAccess::root_runtime_value` publication; and
+- equivalent helper which registers a new runtime value root without spelling
+  one of those calls directly.
+
+Separate production and test-only occurrences instead of allowing a
+`#[cfg(test)]` call co-located in a production file to look like a production
+boundary. Classify each production occurrence as exactly one of:
+
+1. **outer construction boundary:** no access is available, and the value is
+   constructed or safely projected from a still-live durable owner inside the
+   higher-ranked closure;
+2. **regional publication:** the containing operation already has matching
+   access and must use `access.root_runtime_value` without opening another
+   region;
+3. **rooted transport migration:** an orchestration API presently receives a
+   raw value only to root it and should instead receive/reuse
+   `RuntimeValueRoot` from its producer;
+4. **canonical constructor implementation:** the one reviewed implementation
+   which opens the higher-ranked region and delegates to access-qualified
+   publication;
+5. **temporary compatibility or test fixture:** assign it to D.2E with an
+   exact removal/migration condition; or
+6. **defect:** no durable owner proves the captured raw graph live until the
+   newly opened region begins.
+
+Root clones which share one registered root cell are not new root traffic and
+must remain distinguishable from registrations. Add representative
+root-registration counter tests around evaluator completion, promise
+publication, compiler/cache installation, and reflection handoff. These are
+traffic invariants, not microbenchmarks: an existing root should cross a
+boundary unchanged, and a same-region publication should add only the root
+required by its final durable owner.
+
+**D.2b.2e.2 — Mutator-introduction disposition inventory.** Upgrade the
+managed-access inventory to record every production and test-only mutator
+introduction separately, including `with_runtime_value_access`,
+`with_managed_values`, and the core domain's private direct
+`Heap::with_mutator` gateways. Record the containing declaration, whether its
+signature/receiver already carries `RuntimeValueAccess` or
+`EvaluationValueAccess`, whether it is lexically nested inside another access
+closure, and its D.2c-D.2g or D.2E owner.
+
+Classify each introduction as an outer callback-free admission, the canonical
+factory gateway, a deliberate recursive exception, a pending regional reuse,
+a pending rooted-transport redesign, or a test-only compatibility site. The
+source gate must reject an unassigned introduction and, absent an exact
+reviewed exception, reject:
+
+- a factory access opening lexically nested inside an existing access closure;
+- a direct access opening in a function which already accepts a matching
+  access carrier; and
+- a helper on an access-carrying receiver which discards that authority and
+  reopens the same heap.
+
+This is a conservative source/call-site ledger, not whole-program call-graph
+proof. Indirect hierarchy discovered while migrating a caller becomes a new
+explicit occurrence rather than an excuse to weaken the gate. Existing rules
+that no mutator crosses a callback, wait, scheduler handoff, or machine poll
+remain authoritative; some outer admissions are therefore required and must
+not be optimized away merely to reduce the count.
+
+**D.2b.2e.3 — Immediate nesting repair and phase interlock.** First latch the
+current redundant lazy-cycle nested construction, prove the access-depth/root
+registration mismatch, then replace it with publication through the access
+already held. Repair any other equally direct lexical nesting found by the
+inventory only when its ownership is unambiguous; assign architectural API
+changes to their owning D.2c-D.2g checkpoint instead.
+
+Every later D.2 phase updates both ledgers as part of its exit. A migrated
+entry must finish as a justified outer admission, access-qualified
+publication, rooted transport, or removed fixture—not merely disappear from a
+file-level count. D.2h closure requires no pending/defect disposition, no
+unreviewed hierarchical introduction, and root-registration counter evidence
+for each retained high-traffic boundary.
+
 ###### GCI11R-002D.2b.3 — Persistent Containers and Net Shells
 
 Replace implicit recursive `Clone`, equality, and `Debug` dependencies in the
@@ -928,7 +1034,9 @@ or scheduler handoff.
 
 Verification: one compile-exhaustive evaluator/builtin access inventory,
 focused builtin-family tests in both modes, and a source latch which rejects a
-new authority-free raw helper in `src/eval/`.
+new authority-free raw helper in `src/eval/`. Resolve every D.2b.2e root or
+mutator-introduction entry assigned to D.2c and preserve one outer admission
+per callback-free evaluator quantum.
 
 ##### GCI11R-002D.2d — Evaluation Orchestration and Runtime Records
 
@@ -942,7 +1050,9 @@ moved to a rooted input plus access-scoped result consumption.
 
 Verification: exact owner-retirement and cross-poll tests, the existing
 machine-state inventories, no raw orchestration facade, and aggressive tests
-which force collection on both sides of every repaired handoff.
+which force collection on both sides of every repaired handoff. Resolve every
+D.2b.2e entry assigned to D.2d; orchestration which already owns a root must
+transport it rather than project and register a replacement.
 
 ##### GCI11R-002D.2e — Built-in Front End and Compiler Values
 
@@ -956,7 +1066,9 @@ matching access installs or inspects the result.
 
 Verification: compiler/macro/cache source inventories, executable `.g`
 samples, ordinary and aggressive `g_syntax` partitions, and collection at
-representative lowering, macro, and cache publication boundaries.
+representative lowering, macro, and cache publication boundaries. Resolve the
+D.2e root/admission ledger entries while retaining genuinely outer compiler
+and macro boundaries.
 
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
@@ -969,7 +1081,9 @@ unrooted GC pointers or authority-free raw-value manipulation.
 
 Verification: reflection lifecycle/request/store inventories, retry and
 rollback tests in both modes, and forced collection before and after query
-publication and blocked-machine resumption.
+publication and blocked-machine resumption. Resolve all D.2f construction and
+admission entries, distinguishing pure regional reflection work from rooted
+transaction/wait handoff.
 
 ##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
 
@@ -982,7 +1096,9 @@ observations visibly separate from reproducible evaluator/value helpers.
 
 Verification: public API and compilation tests in both modes, import and
 diagnostic callback boundaries, the D.1b no-reroot counter, and source latches
-rejecting a raw public or host-callback signature.
+rejecting a raw public or host-callback signature. Resolve all D.2g entries in
+the root-traffic and mutator-introduction ledgers; public handles should reuse
+their existing root cells rather than cause hidden re-registration.
 
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 
@@ -998,6 +1114,10 @@ rejecting a raw public or host-callback signature.
    a test constructor is not production closure.
 4. Publish a short dated closure record listing the final accepted regional,
    scoped, durable, and collector-only surfaces and linking the source gates.
+5. Put the D.2b.2e root-traffic and mutator-introduction inventories into
+   closure mode: no pending/defect classification, no unreviewed nested access
+   introduction, and no root registration whose final owner could have reused
+   an existing root or the caller's active access.
 
 Exit: already-rooted orchestration performs no project/re-root round trip;
 every production raw-value API carries matching mutator/access authority or
@@ -1025,13 +1145,22 @@ this result.
 6. Retain self-opening family helpers only in explicitly inventoried isolated
    tests where aggressive production-runtime entry is not the subject. Add a
    source latch preventing their return to general runtime fixtures.
+7. Resolve every test-only or temporary-compatibility entry carried forward
+   by the D.2b.2e root-traffic and mutator-introduction ledgers. Retained
+   isolated helpers must have an exact fixture-only classification; general
+   runtime fixtures must neither register replacement roots for already-rooted
+   values nor reopen a mutator region inside matching active access.
 
 Verification:
 
 - `access_and_annotation_construction_do_not_demand_inputs` in both modes;
 - API, evaluation, coordinator, and reflection-store test partitions in both
   modes; and
-- a forced collection at each representative former constructor/root gap.
+- a forced collection at each representative former constructor/root gap;
+- root-registration counters proving migrated fixtures do not introduce
+  replacement roots; and
+- closure-mode source latches rejecting an unassigned test-only construction
+  or nested mutator introduction.
 
 Exit: general runtime tests follow the same regional publication contract as
 production code.
