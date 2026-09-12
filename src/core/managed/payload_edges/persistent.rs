@@ -325,7 +325,7 @@ mod tests {
                 let list_owner = scope.get_traced_edge(list_node);
                 scope
                     .mutator
-                    .with_edge_replacement(list_node, None, Some(dict_node), || {
+                    .with_edge_replacement(&list_node, None, Some(&dict_node), || {
                         *list_owner
                             .payload
                             .lock()
@@ -339,7 +339,7 @@ mod tests {
                 let dict_owner = scope.get_traced_edge(dict_node);
                 scope
                     .mutator
-                    .with_edge_replacement(dict_node, None, Some(list_node), || {
+                    .with_edge_replacement(&dict_node, None, Some(&list_node), || {
                         *dict_owner
                             .payload
                             .lock()

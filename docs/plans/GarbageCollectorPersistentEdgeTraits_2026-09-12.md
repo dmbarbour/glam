@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0 and P1A-P1B complete; P1C-P5 planned. This is the nested implementation plan
+Status: P0-P1 complete; P2-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -391,6 +391,20 @@ reused by new code.
 - Prove root projection creates no registration, root cloning creates no
   registration, and a mutation transition reports each selected side exactly
   once under forced orderings.
+
+Completed 2026-09-12. Root construction remains a consuming ownership
+transfer. All three collector mutation gateways and Glam's two managed
+transition wrappers now borrow their owner; the optional replacement helper
+also borrows both leaving and entering edges and reports each directly through
+the borrowed visitor API. Existing production and fixture callers were
+migrated without changing their write chronology. Root registration counters
+now explicitly remain at two across both root cloning and repeated projection.
+The deterministic pre/write/post probe forces one transition and observes one
+edge on each selected side, while the synthetic selector fixtures retain exact
+empty/singleton/multi-edge identities. Correcting the inventory to recognize
+the actual `with_edge_replacement` spelling yields 608 occurrences: 148
+production typed, 35 production erased, 411 test typed, and 14 test erased;
+fingerprint `7_481_884_157_302_368_327`.
 
 Exit: every required operation has an explicit API and can be adopted without
 yet breaking downstream trait-derived code.

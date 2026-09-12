@@ -701,7 +701,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         // exactly one terminal winner before removing the old source graph.
         unsafe {
             self.authority.with_managed_edge_transition(
-                self.owner.0,
+                &self.owner.0,
                 |visitor| trace_lazy_source_cell(self.cell, visitor),
                 |visitor| {
                     trace_lazy_result(
@@ -820,7 +820,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         // closure performs the representation's one-write publication.
         unsafe {
             self.authority.with_managed_edge_transition(
-                self.owner.0,
+                &self.owner.0,
                 |_visitor| (),
                 |visitor| {
                     trace_promise_assignment(
@@ -899,7 +899,7 @@ impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, 
         // operate on the borrowed state rather than reacquiring it.
         unsafe {
             self.authority.with_managed_edge_state_transition(
-                self.owner.0,
+                &self.owner.0,
                 runtime,
                 |runtime, visitor| {
                     edges.visit_leaving(runtime, &mut |payload| {
@@ -1134,7 +1134,7 @@ mod tests {
             access
                 .scope
                 .mutator
-                .with_edge_replacement(owner.0, None, Some(target), || {
+                .with_edge_replacement(&owner.0, None, Some(&target), || {
                     *stored = Some(source);
                 });
         }
@@ -2385,7 +2385,7 @@ mod tests {
                 access
                     .scope
                     .mutator
-                    .with_edge_replacement(edge.0, None, Some(edge.0), || {
+                    .with_edge_replacement(&edge.0, None, Some(&edge.0), || {
                         *stored = Some(source);
                     });
             }
@@ -2461,7 +2461,7 @@ mod tests {
                 access
                     .scope
                     .mutator
-                    .with_edge_replacement(edge, None, Some(edge), || {
+                    .with_edge_replacement(&edge, None, Some(&edge), || {
                         cell.runtime.with_mut(|runtime| {
                             runtime.begin_copy(PreparedCopySource::new(
                                 crate::core_net::CoreRuntimeNet::from_managed_edge(managed_edge),

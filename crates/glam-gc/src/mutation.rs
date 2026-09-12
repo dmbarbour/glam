@@ -20,7 +20,7 @@ impl Mutator<'_> {
     #[inline(always)]
     pub unsafe fn with_edge_state_transition<Owner, State, Leaving, Adding, Result>(
         &self,
-        owner: Gc<Owner>,
+        owner: &Gc<Owner>,
         state: &mut State,
         leaving: Leaving,
         adding: Adding,
@@ -69,7 +69,7 @@ impl Mutator<'_> {
     #[inline(always)]
     pub unsafe fn with_edge_transition<Owner, Leaving, Adding, Result>(
         &self,
-        owner: Gc<Owner>,
+        owner: &Gc<Owner>,
         leaving: Leaving,
         adding: Adding,
         transition: impl FnOnce() -> Result,
@@ -106,19 +106,27 @@ impl Mutator<'_> {
     #[inline(always)]
     pub unsafe fn with_edge_replacement<Owner: Trace, Edge: Trace, Result>(
         &self,
-        owner: Gc<Owner>,
-        old: Option<Gc<Edge>>,
-        new: Option<Gc<Edge>>,
+        owner: &Gc<Owner>,
+        old: Option<&Gc<Edge>>,
+        new: Option<&Gc<Edge>>,
         replace: impl FnOnce() -> Result,
     ) -> Result {
         // SAFETY: the caller supplies the owner and exact optional edge before
-        // and after the replacement. `Option<Gc<Edge>>`'s `Trace`
-        // implementation reports precisely its present singleton edge.
+        // and after the replacement. Each optional borrowed edge is reported
+        // precisely once when its side is selected.
         unsafe {
             self.with_edge_transition(
                 owner,
-                |visitor| old.trace(visitor),
-                |visitor| new.trace(visitor),
+                |visitor| {
+                    if let Some(old) = old {
+                        visitor.visit(old);
+                    }
+                },
+                |visitor| {
+                    if let Some(new) = new {
+                        visitor.visit(new);
+                    }
+                },
                 replace,
             )
         }
@@ -187,6 +195,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[cfg(feature = "deterministic-test-hooks")]
+    use std::sync::atomic::AtomicUsize;
+
+    #[cfg(feature = "deterministic-test-hooks")]
     use crate::EdgeTransitionObservation;
     use crate::{Gc, Heap, Trace, Visitor};
 
@@ -236,7 +247,7 @@ mod tests {
             // contains `old` before the closure and `new` after its single
             // replacement.
             unsafe {
-                mutator.with_edge_replacement(owner, Some(old), Some(new), || {
+                mutator.with_edge_replacement(&owner, Some(&old), Some(&new), || {
                     replacements += 1;
                     *owner_value
                         .edge
@@ -261,6 +272,7 @@ mod tests {
     fn state_transition_observes_the_locked_pre_and_post_write_graphs() {
         let heap = Heap::new();
         let probe = heap.install_edge_transition_probe(EdgeTransitionObservation::Both);
+        let transitions = AtomicUsize::new(0);
         heap.with_mutator(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<MutableNode>().unwrap();
@@ -278,15 +290,19 @@ mod tests {
                     .lock()
                     .expect("test edge mutex should not be poisoned");
                 mutator.with_edge_state_transition(
-                    owner,
+                    &owner,
                     &mut *edge,
                     |edge, visitor| edge.trace(visitor),
                     |edge, visitor| edge.trace(visitor),
-                    |edge| *edge = Some(new),
+                    |edge| {
+                        transitions.fetch_add(1, Ordering::Relaxed);
+                        *edge = Some(new);
+                    },
                 );
             }
         });
 
+        assert_eq!(transitions.load(Ordering::Relaxed), 1);
         assert_eq!(probe.records().len(), 1);
         assert_eq!(probe.records()[0].leaving_edges(), 1);
         assert_eq!(probe.records()[0].adding_edges(), 1);
@@ -308,7 +324,7 @@ mod tests {
             // performs that replacement once.
             unsafe {
                 mutator.with_edge_transition(
-                    owner,
+                    &owner,
                     |_| panic!("STW must not walk leaving edges"),
                     |_| panic!("STW must not walk adding edges"),
                     || {
@@ -396,7 +412,7 @@ mod tests {
                 // SAFETY: this deliberately violates the owner-heap
                 // precondition to verify rejection before the closure runs.
                 unsafe {
-                    mutator.with_edge_replacement::<_, Leaf, _>(owner, None, None, || {
+                    mutator.with_edge_replacement::<_, Leaf, _>(&owner, None, None, || {
                         ran.store(true, Ordering::Relaxed);
                     });
                 }

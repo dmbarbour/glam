@@ -795,13 +795,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        597,
+        608,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        15_394_073_464_869_506_103,
+        7_481_884_157_302_368_327,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -846,9 +846,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 146),
+            ((SourceScope::Production, EdgeSurface::Typed), 148),
             ((SourceScope::Production, EdgeSurface::Erased), 35),
-            ((SourceScope::Test, EdgeSurface::Typed), 402),
+            ((SourceScope::Test, EdgeSurface::Typed), 411),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -1080,7 +1080,10 @@ impl<'ast> Visit<'ast> for OccurrenceVisitor<'_> {
                     OccurrenceKind::RootProjection,
                     EdgeDisposition::RegisteredRootProjection,
                 )),
-                "with_edge_transition" | "with_edge_state_transition" | "replace_edge" => Some((
+                "with_edge_transition"
+                | "with_edge_state_transition"
+                | "with_edge_replacement"
+                | "replace_edge" => Some((
                     EdgeSurface::Typed,
                     OccurrenceKind::MutationInput,
                     EdgeDisposition::MutationInput,
@@ -1189,6 +1192,11 @@ impl<'ast> Visit<'ast> for OccurrenceVisitor<'_> {
                 ),
                 (
                     "with_edge_state_transition",
+                    OccurrenceKind::MutationInput,
+                    EdgeDisposition::MutationInput,
+                ),
+                (
+                    "with_edge_replacement",
                     OccurrenceKind::MutationInput,
                     EdgeDisposition::MutationInput,
                 ),

@@ -656,7 +656,7 @@ impl RuntimeValueAccess<'_> {
     /// publication contract for that owner.
     pub(crate) unsafe fn with_managed_edge_transition<Owner, Leaving, Adding, Result>(
         &self,
-        owner: Gc<Owner>,
+        owner: &Gc<Owner>,
         leaving: Leaving,
         adding: Adding,
         transition: impl FnOnce() -> Result,
@@ -694,7 +694,7 @@ impl RuntimeValueAccess<'_> {
     /// contract for that owner.
     pub(crate) unsafe fn with_managed_edge_state_transition<Owner, State, Leaving, Adding, Result>(
         &self,
-        owner: Gc<Owner>,
+        owner: &Gc<Owner>,
         state: &mut State,
         leaving: Leaving,
         adding: Adding,
@@ -1104,7 +1104,7 @@ mod tests {
             // single mutex-protected representation update.
             unsafe {
                 access.with_managed_edge_transition(
-                    owner,
+                    &owner,
                     |visitor| old.trace(visitor),
                     |visitor| [first, second].trace(visitor),
                     || {
@@ -1146,7 +1146,7 @@ mod tests {
                 // precondition to prove rejection before the closure runs.
                 unsafe {
                     access.with_managed_edge_transition(
-                        owner,
+                        &owner,
                         |_visitor| (),
                         |_visitor| (),
                         || {

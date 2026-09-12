@@ -1298,6 +1298,10 @@ edges and the final closure performs the actual storage mutation. The
 collector selects which visitors its active policy needs; the current
 stop-the-world policy selects neither. `with_edge_replacement` is the exact
 optional-single-edge convenience form and delegates to that contract.
+Owner, leaving, and adding `Gc<T>` handles are all borrowed: reporting a
+transition neither transfers nor duplicates a persistent typed edge. A
+selected visitor copies only the edge's private erased identity into
+collector-owned observation state.
 
 `with_edge_state_transition` covers a larger synchronized representation whose
 outgoing graph is most naturally derived from the state itself. It receives a

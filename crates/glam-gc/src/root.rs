@@ -177,7 +177,9 @@ mod tests {
             let second = allocator.alloc(11);
             (first, mutator.root(first), second, mutator.root(second))
         });
+        assert_eq!(heap.root_registrations_for_verification(), 2);
         let first_alias = first_root.clone();
+        assert_eq!(heap.root_registrations_for_verification(), 2);
 
         heap.with_mutator(|mutator| {
             let projected = first_root.as_gc(mutator);
@@ -186,6 +188,7 @@ mod tests {
             assert!(second_root.as_gc(mutator).ptr_eq(second));
             assert!(!projected.ptr_eq(second_root.as_gc(mutator)));
         });
+        assert_eq!(heap.root_registrations_for_verification(), 2);
 
         let report = heap.collect_full().unwrap();
         assert_eq!(report.root_entries(), 2);

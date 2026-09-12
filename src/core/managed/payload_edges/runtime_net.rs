@@ -361,7 +361,7 @@ mod tests {
                 let owner = scope.get_traced_edge(node);
                 scope
                     .mutator
-                    .with_edge_replacement(node, None, Some(node), || {
+                    .with_edge_replacement(&node, None, Some(&node), || {
                         assert!(
                             owner
                                 .runtime

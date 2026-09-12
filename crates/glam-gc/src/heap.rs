@@ -4553,7 +4553,7 @@ mod tests {
         // The closure appends the one reported edge and leaves the node valid
         // if vector growth panics before publication.
         unsafe {
-            mutator.with_edge_replacement(owner, None, Some(target), || {
+            mutator.with_edge_replacement(&owner, None, Some(&target), || {
                 owner
                     .get_unchecked(mutator)
                     .edges
