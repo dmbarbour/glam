@@ -795,13 +795,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        573,
+        597,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_896_752_868_316_667_993,
+        15_394_073_464_869_506_103,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -848,7 +848,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 146),
             ((SourceScope::Production, EdgeSurface::Erased), 35),
-            ((SourceScope::Test, EdgeSurface::Typed), 378),
+            ((SourceScope::Test, EdgeSurface::Typed), 402),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -1060,6 +1060,16 @@ impl<'ast> Visit<'ast> for OccurrenceVisitor<'_> {
                     OccurrenceKind::PointerIdentity,
                     EdgeDisposition::Defect,
                 )),
+                "duplicate_in" => Some((
+                    EdgeSurface::Typed,
+                    OccurrenceKind::TypedCarrier,
+                    EdgeDisposition::MutatorLocalWorkingDuplicate,
+                )),
+                "same_allocation_in" => Some((
+                    EdgeSurface::Typed,
+                    OccurrenceKind::PointerIdentity,
+                    EdgeDisposition::MutatorLocalWorkingDuplicate,
+                )),
                 "root" => Some((
                     EdgeSurface::Typed,
                     OccurrenceKind::RootCreation,
@@ -1161,6 +1171,16 @@ impl<'ast> Visit<'ast> for OccurrenceVisitor<'_> {
                     "project_root",
                     OccurrenceKind::RootProjection,
                     EdgeDisposition::RegisteredRootProjection,
+                ),
+                (
+                    "duplicate_in",
+                    OccurrenceKind::TypedCarrier,
+                    EdgeDisposition::MutatorLocalWorkingDuplicate,
+                ),
+                (
+                    "same_allocation_in",
+                    OccurrenceKind::PointerIdentity,
+                    EdgeDisposition::MutatorLocalWorkingDuplicate,
                 ),
                 (
                     "with_edge_transition",

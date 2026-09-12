@@ -74,7 +74,40 @@ impl<T: Trace> Gc<T> {
         Self { pointer }
     }
 
-    /// Returns whether two handles identify the same managed allocation.
+    /// Duplicates this persistent edge under matching mutator authority.
+    ///
+    /// This is a non-rooting pointer operation. The returned edge must be
+    /// installed beneath a traced owner or transferred into a registered root
+    /// before its independent liveness proof ends. Debug builds validate heap
+    /// ownership and the canonical `T` representation before copying it.
+    #[must_use = "a duplicated edge must be installed beneath a traced owner or registered root"]
+    #[inline(always)]
+    pub fn duplicate_in(&self, mutator: &Mutator<'_>) -> Self {
+        mutator.debug_assert_access(self.pointer);
+
+        // SAFETY: this copies an allocator-validated address only after the
+        // matching admitted mutator has re-established the available heap and
+        // representation proof. It does not extend allocation liveness.
+        unsafe { Self::from_raw(self.pointer) }
+    }
+
+    /// Returns whether two handles identify the same managed allocation under
+    /// matching mutator authority.
+    ///
+    /// Debug builds validate both handles against the mutator's heap and
+    /// canonical `T` representation before comparing their addresses.
+    #[must_use]
+    #[inline(always)]
+    pub fn same_allocation_in(&self, other: &Self, mutator: &Mutator<'_>) -> bool {
+        mutator.debug_assert_access(self.pointer);
+        mutator.debug_assert_access(other.pointer);
+        self.pointer == other.pointer
+    }
+
+    /// Transitional unqualified address comparison.
+    ///
+    /// New code uses [`Gc::same_allocation_in`]. This compatibility operation
+    /// remains only until the P4 standard-trait cutover.
     #[must_use]
     pub fn ptr_eq(self, other: Self) -> bool {
         self.pointer == other.pointer
@@ -147,7 +180,7 @@ unsafe impl<T: Trace> Sync for Gc<T> {}
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use crate::Heap;
+    use crate::{Heap, Trace, Visitor};
 
     use super::Gc;
 
@@ -203,6 +236,104 @@ mod tests {
         assert!(first.ptr_eq(alias));
         assert!(!first.ptr_eq(equal_value));
         assert_eq!(heap.root_registrations_for_verification(), 0);
+    }
+
+    #[test]
+    fn explicit_identity_distinguishes_equal_payload_allocations() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            let first = allocator.alloc(42_u64);
+            let alias = first.duplicate_in(mutator);
+            let equal_value = allocator.alloc(42_u64);
+
+            assert!(first.same_allocation_in(&alias, mutator));
+            assert!(!first.same_allocation_in(&equal_value, mutator));
+        });
+    }
+
+    #[test]
+    fn explicit_duplicate_can_transfer_into_a_registered_root() {
+        let heap = Heap::new();
+        let (value, root) = heap.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+            let rooted = mutator.root(value.duplicate_in(mutator));
+            (value, rooted)
+        });
+
+        assert_eq!(heap.root_registrations_for_verification(), 1);
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.marked_slots(), 1);
+        heap.with_mutator(|mutator| {
+            assert!(value.same_allocation_in(&root.as_gc(mutator), mutator));
+            assert_eq!(*root.get(mutator), 42);
+        });
+    }
+
+    struct Holder {
+        edge: Gc<u64>,
+    }
+
+    // SAFETY: `edge` is the holder's sole managed edge and is reported once.
+    unsafe impl Trace for Holder {
+        fn trace(&self, visitor: &mut Visitor<'_>) {
+            visitor.visit(&self.edge);
+        }
+    }
+
+    #[test]
+    fn explicit_duplicate_can_install_below_a_traced_owner() {
+        let heap = Heap::new();
+        let (target, owner) = heap.with_mutator(|mutator| {
+            let target = mutator.allocator::<u64>().unwrap().alloc(73_u64);
+            let owner = mutator.allocator::<Holder>().unwrap().alloc(Holder {
+                edge: target.duplicate_in(mutator),
+            });
+            (target, mutator.root(owner))
+        });
+
+        assert_eq!(heap.root_registrations_for_verification(), 1);
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.marked_slots(), 2);
+        heap.with_mutator(|mutator| {
+            let installed = &owner.get(mutator).edge;
+            assert!(target.same_allocation_in(installed, mutator));
+            // SAFETY: the rooted holder traces `installed`, and the matching
+            // mutator excludes collection during this read.
+            assert_eq!(unsafe { *installed.get_unchecked(mutator) }, 73);
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn explicit_operations_reject_a_wrong_heap() {
+        let owner = Heap::new();
+        let observer = Heap::new();
+        let value = owner.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+            (value, mutator.root(value))
+        });
+
+        let duplicate_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = observer.with_mutator(|mutator| value.0.duplicate_in(mutator));
+        }));
+        assert!(duplicate_panic.is_err());
+
+        let identity_panic = catch_unwind(AssertUnwindSafe(|| {
+            observer.with_mutator(|mutator| value.0.same_allocation_in(&value.0, mutator));
+        }));
+        assert!(identity_panic.is_err());
+
+        // SAFETY: this deliberately violates the typed-pointer construction
+        // contract so the explicit operation can prove it checks canonical
+        // representation before copying the address.
+        let reinterpreted = unsafe { Gc::<u32>::from_raw(value.0.erase().as_ptr().cast()) };
+        let representation_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = owner.with_mutator(|mutator| reinterpreted.duplicate_in(mutator));
+        }));
+        assert!(representation_panic.is_err());
     }
 
     #[cfg(debug_assertions)]

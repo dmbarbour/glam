@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0 and P1A complete; P1B-P5 planned. This is the nested implementation plan
+Status: P0 and P1A-P1B complete; P1C-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -365,6 +365,21 @@ classification.
 - Add focused tests for same allocation, distinct allocation with equal Rust
   payload, wrong-heap debug rejection, duplication followed by rooting, and
   duplication followed by installation under a traced owner.
+
+Completed 2026-09-12. `Gc::duplicate_in` and
+`Gc::same_allocation_in` are the selected authority-qualified spellings. Both
+borrow their operands, require a mutator, and reuse canonical heap/type
+validation in debug builds; their optimized path is an always-inlined pointer
+copy or comparison. Focused fixtures distinguish equal payloads from equal
+allocations, reject wrong heaps and representations, and carry duplicates into
+both a registered root and a traced holder across collection. Root-registration
+counts remain unchanged until the explicit root transfer. The inventory now
+classifies the new operations as mutator-local working uses rather than
+defects: 597 total occurrences (146 production typed, 35 production erased,
+402 test typed, and 14 test erased), fingerprint
+`15_394_073_464_869_506_103`. The unqualified `ptr_eq` and standard traits
+remain counted compatibility defects for P2-P4 rather than being silently
+reused by new code.
 
 ### P1C — Borrowed rooting and mutation surfaces
 

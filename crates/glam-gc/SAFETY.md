@@ -302,6 +302,14 @@ and every unsafe function, implementation, and block are checked into
   chunk set, validates run/slot/class topology, and compares the resolved
   canonical metadata pointer. It intentionally diagnoses ownership, shape, and
   representation rather than concurrently changing allocation liveness.
+- `Gc::duplicate_in` and `Gc::same_allocation_in` require that same admitted
+  matching mutator and perform the indexed ownership/representation check in
+  debug builds. The former copies only the typed address and creates neither a
+  root nor another liveness claim; the latter compares only the two addresses.
+  In optimized builds `Mutator::debug_assert_access` is empty, so both remain
+  allocation-, lock-, reference-count-, and root-registration-free pointer
+  operations. Their returned edge or boolean carries no authority beyond the
+  mutator region which justified the operation.
 - Converting a pointer to `usize` is used only for indexed ownership and exact
   slot geometry. A managed pointer is rederived only from the original owning
   chunk pointer after successful numeric validation.
