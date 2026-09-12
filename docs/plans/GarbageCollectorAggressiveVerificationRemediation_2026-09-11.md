@@ -1218,7 +1218,7 @@ remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
-Status: implementation in progress; D.2c.0a complete on 2026-09-12.
+Status: implementation in progress; D.2c.0a-D.2c.0b complete on 2026-09-12.
 
 Migrate the 201 evaluator-operation and builtin violations as call-tree
 families beneath `EvaluationValueAccess`. A callback-free evaluator quantum
@@ -1309,12 +1309,24 @@ but must update this manifest explicitly. Synthetic boundary fixtures prove
 that neither evaluator context is confused with active access and that a
 context-free raw operation begins as regional work.
 
-**D.2c.0b — Access and suspension gates.** Teach the raw-value scanner to
-recognize `EvaluationValueAccess` as regional authority. Explicitly reject
+**D.2c.0b — Access and suspension gates.** Status: complete on 2026-09-12.
+Ensure the raw-value scanner recognizes `EvaluationValueAccess` as regional
+authority. Explicitly reject
 using `EvaluatorStepContext`, `EvalContext`, or an internal
 `with_value_access` call as a signature-level substitute. Add source latches
 which reject a regional function that opens another mutator and a suspendable
 function that accepts or returns an unrooted raw value.
+
+Completion record: the scanner's existing canonical access set already named
+both `RuntimeValueAccess` and `EvaluationValueAccess`; this checkpoint added
+direct positive fixtures for both and negative fixtures for
+`EvaluatorStepContext` and `EvalContext`. Recursive carrier discovery admits a
+struct containing `EvaluationValueAccess` but rejects a structurally similar
+step-context carrier. The D.2c manifest continues to expose all 153
+context-bearing raw APIs as pending coordinator work rather than reclassifying
+them. The independent mutator-introduction ledger already rejects any
+production API which receives either active access carrier and then reopens
+the runtime gateway, so no duplicate source scanner was added here.
 
 Exit: every D.2c occurrence has a stable owner and execution shape; adding an
 unclassified `src/eval` raw-value API fails locally; and subsequent

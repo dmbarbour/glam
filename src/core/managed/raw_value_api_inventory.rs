@@ -1507,7 +1507,10 @@ fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
     let canonical_core_names = raw_names.clone();
     let cross_file_alias_names =
         BTreeSet::from(["CompileDiagnosticEmitter".to_owned(), "Value".to_owned()]);
-    let access_names = BTreeSet::from(["RuntimeValueAccess".to_owned()]);
+    let access_names = BTreeSet::from([
+        "RuntimeValueAccess".to_owned(),
+        "EvaluationValueAccess".to_owned(),
+    ]);
 
     let wrapped: Type =
         syn::parse_str("Option<Result<Vec<Arc<[Value]>>, Box<dyn Fn(&Value) -> Value>>>")
@@ -1569,4 +1572,54 @@ fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
         0,
         "the durable public facade must not be mistaken for raw core::Value"
     );
+
+    for admitted in [
+        "&RuntimeValueAccess<'_>",
+        "Option<&EvaluationValueAccess<'_>>",
+    ] {
+        let value_type: Type = syn::parse_str(admitted).expect("access fixture should parse");
+        assert_ne!(
+            type_signals(
+                &value_type,
+                &raw_names,
+                &canonical_core_names,
+                &cross_file_alias_names,
+                &access_names,
+            )
+            .value_accesses,
+            0,
+            "{admitted} must qualify a raw-value signature as regional"
+        );
+    }
+    for rejected in ["&EvaluatorStepContext<'_>", "&EvalContext"] {
+        let value_type: Type = syn::parse_str(rejected).expect("context fixture should parse");
+        assert_eq!(
+            type_signals(
+                &value_type,
+                &raw_names,
+                &canonical_core_names,
+                &cross_file_alias_names,
+                &access_names,
+            )
+            .value_accesses,
+            0,
+            "{rejected} coordinates access but must not impersonate an active region"
+        );
+    }
+
+    let access_carriers = syn::parse_file(
+        r#"
+        struct Regional<'scope> {
+            access: &'scope EvaluationValueAccess<'scope>,
+        }
+        struct Step<'scope> {
+            context: &'scope EvaluatorStepContext<'scope>,
+        }
+        "#,
+    )
+    .expect("access-carrier fixtures should parse");
+    let mut discovered = access_names.clone();
+    while discover_access_carriers(&access_carriers.items, &mut discovered) {}
+    assert!(discovered.contains("Regional"));
+    assert!(!discovered.contains("Step"));
 }
