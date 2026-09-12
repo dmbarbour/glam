@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::protocol::{
@@ -10,6 +12,8 @@ use super::protocol::{
 use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, VolumeId};
 use crate::api::Value as PublicValue;
+#[cfg(test)]
+use crate::core::LazyId;
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
     LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
@@ -128,6 +132,7 @@ struct EffectPhaseProbe {
     phase: AtomicUsize,
     request_roots: AtomicUsize,
     fused_requests: AtomicUsize,
+    application_lazies: Mutex<Vec<LazyId>>,
 }
 
 #[cfg(test)]
@@ -166,6 +171,24 @@ impl EffectPhaseProbe {
 
     fn fused_requests(&self) -> usize {
         self.fused_requests.load(Ordering::Acquire)
+    }
+
+    fn record_application_lazy(&self, context: &EvaluatorStepContext<'_>, request: &Value) {
+        let Value::Lazy(lazy) = request else {
+            return;
+        };
+        let id = context.with_value_access(|access| lazy.access(access.values()).id());
+        self.application_lazies
+            .lock()
+            .expect("effect application-lazy probe was poisoned")
+            .push(id);
+    }
+
+    fn application_lazies(&self) -> Vec<LazyId> {
+        self.application_lazies
+            .lock()
+            .expect("effect application-lazy probe was poisoned")
+            .clone()
     }
 }
 
@@ -2222,6 +2245,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("function")))?;
         let request = apply_in(context, function, vec![context.project_root(&self.api)])
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
+        #[cfg(test)]
+        if let Some(probe) = &self.phase_probe {
+            probe.record_application_lazy(context, &request);
+        }
+        #[cfg(test)]
+        context.context().arm_deferred_pump_pause();
         let request = evaluate_in(context, request)
             .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
         parse_request_values_in(context, request, &self.tags, &self.specialized_requests)

@@ -3463,6 +3463,102 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
 }
 
 #[test]
+fn coarse_reflection_work_replays_a_forced_application_lazy_after_resumption() {
+    let (assembler, effect) =
+        compile_effect(".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        }))
+        .expect("fresh replay fixture should accept a reflection launcher");
+
+    let probe = Arc::new(EffectPhaseProbe::default());
+    let task_probe = probe.clone();
+    let (pause_sender, pause_receiver) = std::sync::mpsc::channel();
+    let effect = effect.clone_core_for_test();
+    let task = context
+        .schedule_task(move |task_context| {
+            let task_context = task_context.with_deferred_pump_pause(pause_sender);
+            EffectTask::new_in_context(effect, TestEffects, host, task_context)
+                .map(|task| {
+                    Box::new(ValueEffectTask(
+                        task.with_phase_probe(task_probe).forcing_unfused(),
+                    )) as Box<dyn EvaluationTaskMachine>
+                })
+                .map_err(|error| Arc::from(error.to_string()))
+        })
+        .expect("replay fixture should schedule");
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 1),
+        crate::evaluation::EvaluationPumpOutcome::BudgetExhausted,
+        "one parent poll must stop at the forced application-lazy boundary"
+    );
+    let application_wait = pause_receiver
+        .recv()
+        .expect("the forced boundary must report its exact application-lazy wait");
+    let first_attempt = probe.application_lazies();
+    assert_eq!(
+        first_attempt.len(),
+        1,
+        "the parent must construct exactly one application lazy before suspension"
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert_eq!(builds.load(Ordering::Acquire), 0);
+    assert_eq!(
+        probe.phase(),
+        0,
+        "request parsing must remain after the forced application boundary"
+    );
+
+    assert_eq!(
+        context.pump_wait(&application_wait, 4096),
+        crate::evaluation::EvaluationPumpOutcome::TargetReady,
+        "the exact producer must complete before the parent resumes"
+    );
+    assert!(matches!(
+        context.poll_wait(&application_wait),
+        EvaluationWaitPoll::Complete(_)
+    ));
+
+    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        panic!("the resumed reflection task should complete")
+    };
+    let application_lazies = probe.application_lazies();
+    assert!(
+        application_lazies.len() >= 2,
+        "coarse reflection work must visibly replay the application after resumption"
+    );
+    assert_ne!(
+        application_lazies[0], application_lazies[1],
+        "the current replay constructs a fresh application lazy instead of consuming the first"
+    );
+    assert_eq!(
+        builds.load(Ordering::Acquire),
+        1,
+        "replaying request decoding must not duplicate the nested reflection task"
+    );
+    assert_eq!(
+        probe.phase(),
+        EffectMachinePhase::ContinuationDelivered as usize,
+        "request parsing and interpretation must complete only after resumption"
+    );
+    assert_eq!(
+        assembler
+            .to_binary(&PublicValue::from_runtime_root(*value))
+            .unwrap(),
+        b"ready".as_slice()
+    );
+}
+
+#[test]
 fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let (assembler, function) = compile_effect("\\value -> .eval value");
     let session = EvalContext::isolated(assembler.core_values());

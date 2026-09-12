@@ -1436,7 +1436,9 @@ This is partitioned as follows:
   revise D.2c's regional invariant and root-traffic policy explicitly first.
   The detailed inventory, representation gate, implementation phases, and
   verification matrix now live in the linked Resumable WHNF Evaluation Plan;
-  this parent checkpoint remains open until its W0 phase is complete.
+  this parent checkpoint completed with W0 on 2026-09-12. The exact census
+  selected a shared explicit work stack rather than proliferating
+  source-specific phase enums; W1 begins the additive implementation.
 - **D.2c.1d.1 — Durable lazy and promise suspension.** Extend the existing
   evaluation-halt/dependency vocabulary so a callback-free regional demand can
   return the exact rooted lazy or promise which prevented completion.  The

@@ -506,6 +506,10 @@ fn await_deferred_task(
     if !matches!(&poll, EvaluationWaitPoll::Pending(_)) {
         return deferred_wait_result(context, &wait, kind, poll);
     }
+    #[cfg(test)]
+    if context.context().pause_deferred_pump(&wait) {
+        return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
+    }
     if context.context().runs_scheduled_task() {
         return match context.context().pump_wait(&wait, 256) {
             EvaluationPumpOutcome::TargetReady => {

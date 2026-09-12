@@ -565,6 +565,15 @@ pub(crate) struct EvalContext {
     originating_task: Option<EvaluationTaskId>,
     #[cfg(test)]
     claimed_task_wait_probe: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(test)]
+    deferred_pump_pause: Option<Arc<DeferredPumpPause>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct DeferredPumpPause {
+    state: AtomicU8,
+    observed: std::sync::mpsc::Sender<EvaluationWaitToken>,
 }
 
 /// Direct client ownership for an isolated demand context.
@@ -619,6 +628,8 @@ impl EvalContext {
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -634,6 +645,8 @@ impl EvalContext {
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -652,6 +665,8 @@ impl EvalContext {
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -669,6 +684,8 @@ impl EvalContext {
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -700,6 +717,8 @@ impl EvalContext {
             originating_task: Some(id),
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -722,6 +741,8 @@ impl EvalContext {
             originating_task,
             #[cfg(test)]
             claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
         }
     }
 
@@ -1021,6 +1042,53 @@ impl EvalContext {
         self
     }
 
+    /// Forces exactly one scheduled deferred demand to return its dependency
+    /// before cooperative pumping can complete the producer.
+    ///
+    /// W0A uses this deterministic seam to characterize the coarse reflection
+    /// replay which the resumable-WHNF transition must remove. The shared arm
+    /// bit follows clones of one machine context, but deferred producer
+    /// contexts do not inherit the hook.
+    #[cfg(test)]
+    pub(crate) fn with_deferred_pump_pause(
+        mut self,
+        observed: std::sync::mpsc::Sender<EvaluationWaitToken>,
+    ) -> Self {
+        self.deferred_pump_pause = Some(Arc::new(DeferredPumpPause {
+            state: AtomicU8::new(0),
+            observed,
+        }));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_deferred_pump_pause(&self) {
+        if let Some(probe) = &self.deferred_pump_pause {
+            let _ = probe
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_deferred_pump(&self, wait: &EvaluationWaitToken) -> bool {
+        let Some(probe) = &self.deferred_pump_pause else {
+            return false;
+        };
+        if probe
+            .state
+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        probe
+            .observed
+            .send(wait.clone())
+            .expect("deferred-pump probe receiver must remain live");
+        true
+    }
+
     /// Waits for one scheduler change only while the target has a producer
     /// claimed by another thread.
     ///
@@ -1174,6 +1242,7 @@ impl EvalContext {
             waits_for_claimed_tasks: false,
             originating_task: None,
             claimed_task_wait_probe: None,
+            deferred_pump_pause: None,
         };
         let task = context.task_id()?;
         Ok(Self {

@@ -33,6 +33,8 @@ mod sequence;
 #[cfg(test)]
 mod test_support;
 mod value;
+#[cfg(test)]
+mod whnf_inventory;
 
 #[cfg(test)]
 pub(crate) use application::apply_values;

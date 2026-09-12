@@ -1,9 +1,9 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: planned. This is the focused implementation plan selected by
+Status: W0 complete on 2026-09-12; W1-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-Implementation has not begun.
+Production trampoline implementation has not begun.
 
 ## Purpose
 
@@ -145,18 +145,41 @@ implementation must not replace that source with partially executed variants
 or construct a new semantic lazy merely to hold evaluator control state.
 
 Resumable source work retains the source's stable lazy owner plus separate
-progress. The smallest useful representation may be source-specific phases:
+progress. W0B found only two true tail demands among 305 relevant control-flow
+occurrences, versus 157 demand-then-inspect sites and 95 more application,
+collection, key, and path shapes. Source-specific phases alone would therefore
+duplicate the same child-resumption protocol across most evaluator modules.
+
+The selected representation is a shared explicit work stack:
 
 ```rust
-WhnfWork::Source {
-    lazy: ManagedLazyRoot,
-    phase: SourcePhase,
+struct RegionalWhnfWork {
+    focus: Value,
+    frames: Vec<RegionalWhnfFrame>,
+}
+
+enum RegionalWhnfStep {
+    Delegate(Value),
+    Continue(RegionalWhnfWork),
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
+    Failed(Arc<EvaluationFailure>),
 }
 ```
 
-If the exact inventory shows repeated nested “evaluate child, then resume
-parent” structure, factor that progress into a compact frame stack. A
-`Vec<EvalFrame>` is an implementation option, not a selected premise.
+`Delegate` remains a direct focus replacement and does not push a frame.
+Repeated nested work uses shared frames for demand-and-inspect, ordered
+operands, collection walks, application, key conversion, access paths, and
+diagnostic context. Orchestration handoff is a boundary result rather than an
+evaluator frame. A source or operation may still own a small phase enum when
+it has genuinely unique state, but it resumes child WHNF through the common
+stack rather than reproducing another evaluator.
+
+Regional frames contain raw values only while one managed-access region is
+active. Their durable counterparts contain matching-runtime roots only for
+the focus and frame fields which cross a yield, suspension, or callback. W1
+may use a plain `Vec` initially; inline capacity and root-frame compression are
+profiling work, not correctness prerequisites.
 
 ### Durable state is rooted only at real boundaries
 
@@ -369,13 +392,16 @@ tools, not a reason to land an oversized change.
 
 #### W0A — Deterministic replay witness
 
+Status: complete on 2026-09-12.
+
 Add a test-only boundary probe which forces request decoding to yield after
 the freshly constructed effect-application lazy has acquired durable producer
 ownership but before that producer completes. Complete the producer, resume
 the parent, and observe the current replay from coarse `MachineWork` before
 landing the fix.
 
-The repaired test must assert:
+W0A records the current inverse identity/count assertion. When W5D repairs
+the same fixture, it must assert:
 
 - the same lazy identity is consumed after resumption;
 - the effect application is constructed once;
@@ -385,7 +411,19 @@ The repaired test must assert:
 
 Do not replace the forced ordering with repeated worker runs.
 
+Completion record: a one-shot test boundary now arms only after reflection
+request decoding constructs its effect-application lazy. The test receives
+that exact wait through a channel, gives the parent one poll, independently
+completes the producer, and then resumes the parent. It characterizes the
+current defect as two distinct application-lazy identities while proving the
+nested `anno {refl:(.r ())} "ready"` task launches once and the final value is
+still `"ready"`. This is intentionally a passing baseline of the broken
+coarse-replay behavior; W5D reverses its identity/count assertions when the
+production trampoline is installed.
+
 #### W0B — Exact suspension and recursion census
+
+Status: complete on 2026-09-12.
 
 Build a source-backed manifest of every production call beneath `src/eval`
 and every reflection/protocol adapter which can:
@@ -410,7 +448,46 @@ Verification: exact declaration fingerprints and per-family counts fail on an
 unclassified addition or move. Deliberately misclassify one tail demand and
 one nested post-demand operation, prove failure, then restore them.
 
+Completion record: [`src/eval/whnf_inventory.rs`](../../src/eval/whnf_inventory.rs)
+parses the production evaluator plus the narrow reflection and coordinator
+adapters with `syn`. Every matching call or loop records its declaration,
+ordinal, signal, outer owner, result disposition, stable semantic owner,
+dependency kind, remaining-work shape, and context behavior. The exact
+baseline is 305 occurrences with fingerprint
+`0xbfae81b963836039` (`13_812_119_740_430_377_017`). The signal totals are:
+
+| Signal family | Count |
+| --- | ---: |
+| value/lazy/promise demand | 110 |
+| value application and source production | 29 |
+| reflection-local evaluation | 17 |
+| retryable halt and dependency translation | 16 |
+| coordinator/reflection/host/net boundary | 47 |
+| structural recursion | 24 |
+| conservatively inventoried loops | 62 |
+
+The reviewed resumption shapes are:
+
+| Remaining-work shape | Count |
+| --- | ---: |
+| tail demand | 2 |
+| demand then inspect | 157 |
+| ordered operands | 4 |
+| collection walk | 45 |
+| application | 11 |
+| key conversion | 23 |
+| access path | 12 |
+| diagnostic context | 1 |
+| orchestration handoff | 50 |
+
+The census deliberately includes loops conservatively: W6/W7 may prove a
+particular balanced or statically bounded loop exempt, but new unreviewed work
+cannot silently disappear from the inventory. Its classification validator is
+also tested with forced tail-to-nested and nested-to-tail substitutions.
+
 #### W0C — Progress representation decision
+
+Status: complete on 2026-09-12.
 
 Use the census to select the smallest complete representation:
 
@@ -425,6 +502,38 @@ Use the census to select the smallest complete representation:
 Record the selected work variants, their durable roots, work-unit accounting,
 size observations, and unwind behavior in this plan before production
 conversion. Include a compile-exhaustive fixture over the selected variants.
+
+Decision record: use one shared regional work stack with a separate durable
+checkpoint form. Its selected vocabulary is `Delegate`, demand-and-inspect,
+ordered operands, collection walk, application, key conversion, access path,
+diagnostic context, and orchestration handoff. The test inventory contains an
+exhaustive match over those nine variants so additions require an explicit
+decision update.
+
+The durable root policy is exact rather than uniform: the current focus has
+one root; a frame roots only captured `Value` fields needed after its child
+returns; indexes, enum tags, keys, counts, and immutable operation descriptors
+remain immediate. Application and collection frames initially root each
+retained semantic value independently. A later root-frame facility may pack
+those roots without changing the work algebra.
+
+Every focus transition, frame push/pop, child result delivery, and collection
+element consumes at least one deterministic work unit. A `Delegate` consumes
+one unit but performs no allocation or root registration. Boundary checkpoint
+packing is charged to the transition which discovers it; W7 may tune weights,
+but no user-sized loop may hide behind one unit.
+
+The x86-64 bootstrap currently observes `Value = 64` bytes,
+`RuntimeValueRoot = 32` bytes, and `Vec<Value> = 24` bytes. These are planning
+observations, not ABI or regression latches. They favor keeping regional raw
+values out of roots during uninterrupted work and deferring inline-frame or
+packed-root optimization until profiling.
+
+Unwind retains the prior durable checkpoint until a replacement is fully
+rooted and installed. A panic during regional work discards only transient raw
+state while the owner still has its prior checkpoint; the owning machine then
+terminalizes or poisons according to its existing boundary policy. No empty
+or half-published checkpoint is observable.
 
 Exit: the failing ordering is reproducible, every relevant caller has one
 owner, and the state shape is selected from evidence rather than assumed.
