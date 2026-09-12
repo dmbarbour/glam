@@ -495,6 +495,11 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
+    pub(crate) fn managed_root_registrations_for_test(&self) -> u64 {
+        self.domain.heap.root_registrations_for_verification()
+    }
+
+    #[cfg(test)]
     pub(crate) fn completed_collection_epoch_for_test(&self) -> u64 {
         self.domain
             .heap

@@ -257,7 +257,7 @@ fn lazy_task_follow_retains_a_fresh_deferred_result_across_polls() {
 
     assert_eq!(
         context
-            .evaluate_whnf(&outer.clone_core_for_test())
+            .evaluate_compatibility_whnf(&outer.clone_core_for_test())
             .expect("the outer lazy should retain its fresh result until the following poll"),
         Value::Number(42.into())
     );
@@ -288,7 +288,7 @@ fn promise_follow_reprojects_its_rooted_assignment_across_polls() {
 
     assert_eq!(
         context
-            .evaluate_whnf(&Value::Promised(promise))
+            .evaluate_compatibility_whnf(&Value::Promised(promise))
             .expect("the promise root should retain and reproject its immutable assignment"),
         Value::Number(42.into())
     );
@@ -696,7 +696,7 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
     let promised = Value::Promised(promise.clone());
 
     let halt = context
-        .evaluate_whnf(&promised)
+        .evaluate_compatibility_whnf(&promised)
         .expect_err("an unassigned host promise must remain retryable");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
@@ -710,7 +710,7 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
         .expect("host promise should remain assignable after stable abandonment");
     assert_eq!(
         context
-            .evaluate_whnf(&promised)
+            .evaluate_compatibility_whnf(&promised)
             .expect("resolved promise should complete synchronously"),
         expected
     );
@@ -755,7 +755,7 @@ fn synchronous_client_demand_waits_for_worker_owned_runtime_progress() {
     let (completed, client_completed) = mpsc::channel();
     let client = std::thread::spawn(move || {
         completed
-            .send(consumer.evaluate_whnf(&Value::Promised(promise)))
+            .send(consumer.evaluate_compatibility_whnf(&Value::Promised(promise)))
             .expect("client result receiver should remain live");
     });
     assert!(

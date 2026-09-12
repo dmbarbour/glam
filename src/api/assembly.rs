@@ -1458,8 +1458,7 @@ impl Assembler {
             .publish(&self.core_values(), Ok(module_value.clone()))
             .expect("CompileContext.final_defs future must be unassigned");
         self.eval_context()
-            .evaluate_whnf(&module_value)
-            .map(|value| RuntimeValueRoot::new(&self.core_values(), value))
+            .evaluate_root_whnf(definitions.clone())
             .map_err(|error| self.evaluation_error(error))
     }
 

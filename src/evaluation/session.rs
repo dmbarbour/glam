@@ -830,7 +830,15 @@ impl EvalContext {
         ))
     }
 
-    pub(crate) fn evaluate_whnf(
+    /// Temporary raw-value compatibility facade for callers not yet migrated
+    /// to regional handoff APIs.
+    ///
+    /// New orchestration must retain a [`RuntimeValueRoot`] and call
+    /// [`Self::evaluate_root_whnf`]. This method necessarily registers one
+    /// input root, opens no mutator while pumping, then projects the completed
+    /// root only for its raw return. GCI11R-002D.2 owns its remaining callers
+    /// and eventual removal.
+    pub(crate) fn evaluate_compatibility_whnf(
         &self,
         value: &Value,
     ) -> Result<Value, crate::core::EvaluationHalt> {

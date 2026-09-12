@@ -908,6 +908,48 @@ fn evaluated_values_preserve_whnf_identity_and_scalar_views() {
 }
 
 #[test]
+fn evaluator_preserves_public_input_ownership_for_whnf_completion() {
+    let assembler = Assembler::new();
+    let runtime = assembler.evaluation_runtime();
+    let original = assembler.values().empty_dict();
+    let registrations_before = assembler
+        .values()
+        .core
+        .managed_root_registrations_for_test();
+    let before = runtime
+        .collect_managed_for_maintenance()
+        .expect("the public input root should survive collection");
+
+    let evaluated = assembler
+        .evaluator()
+        .eval(&original)
+        .expect("an immediate dictionary should already be in WHNF");
+
+    assert_eq!(
+        assembler
+            .values()
+            .core
+            .managed_root_registrations_for_test(),
+        registrations_before + 1,
+        "evaluation should register only its completed client-demand value"
+    );
+    let after = runtime
+        .collect_managed_for_maintenance()
+        .expect("the shared completion root should survive collection");
+    assert_eq!(after.root_entries(), before.root_entries() + 1);
+    assert_eq!(after.marked_slots(), before.marked_slots() + 1);
+
+    let completion = evaluated.into_value();
+    let completion_alias = completion.clone();
+    let registrations_after_alias = assembler
+        .values()
+        .core
+        .managed_root_registrations_for_test();
+    assert_eq!(registrations_after_alias, registrations_before + 1);
+    drop(completion_alias);
+}
+
+#[test]
 fn effect_tokens_are_domain_scoped_unforgeable_and_revoked_with_the_domain() {
     let runtime = EvaluationRuntime::new(0).unwrap();
     let values = runtime.values();

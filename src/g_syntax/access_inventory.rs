@@ -59,8 +59,8 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [12, 0, 1, 0],
-        "rooted input setup, recursive loader results, and module result through drain"
+        [11, 0, 1, 0],
+        "rooted input setup, recursive loader results, and existing module root through drain"
     ),
     entry!(
         "src/compiler.rs",

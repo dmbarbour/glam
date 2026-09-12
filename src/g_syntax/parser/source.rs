@@ -565,7 +565,7 @@ fn force_macro_lookup_value(
 ) -> Result<Value, String> {
     execution
         .lookup_context()
-        .evaluate_whnf(&value)
+        .evaluate_compatibility_whnf(&value)
         .map_err(|error| error.to_string())
 }
 

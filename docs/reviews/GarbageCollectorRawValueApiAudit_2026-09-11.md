@@ -2,16 +2,18 @@
 
 Date: 2026-09-11  
 Checkpoint: GCI11R-002D.1a  
-Status: complete; production repairs remain in GCI11R-002D.1b-D.2
+Status: complete; D.1b narrowed the orchestration seam, and remaining
+production repairs belong to GCI11R-002D.2
 
 ## Outcome
 
 The production source tree contains 586 declarations whose signature directly
 or through a local alias carries the private `core::Value` representation. The
-new syntax-backed inventory classifies and fingerprints every declaration. It
-also latches the original witness,
-`EvalContext::evaluate_whnf(&core::Value)`, as a violation until D.1b removes
-or narrows that facade.
+new syntax-backed inventory classifies and fingerprints every declaration.
+D.1b removed the ambiguous `EvalContext::evaluate_whnf(&core::Value)` name.
+Its remaining unmigrated callers are deliberately isolated behind
+`evaluate_compatibility_whnf` and remain latched as a violation assigned to
+D.2.
 
 This is an audit checkpoint, not a claim that the regional-value invariant is
 already satisfied. The inventory deliberately records the current 486
@@ -95,10 +97,11 @@ source file does not acquire collector status automatically.
 
 ## Highest-value repair seams
 
-1. D.1b should remove the raw `EvalContext::evaluate_whnf` orchestration path.
-   Existing `api::Value` and `RuntimeValueRoot` callers should reuse their
-   registered root; completed client demand should remain rooted instead of
-   being projected and wrapped again.
+1. D.1b removed the ordinary raw `EvalContext::evaluate_whnf` orchestration
+   path. Existing `api::Value` and `RuntimeValueRoot` callers now reuse their
+   registered root, and completed public client demand remains rooted instead
+   of being projected and wrapped again. D.2 owns the explicitly named raw
+   compatibility callers.
 2. Evaluator and builtin helpers should be migrated as families beneath
    `EvaluationValueAccess`. Adding an access independently to every leaf would
    preserve correctness but create needless mutator churn.

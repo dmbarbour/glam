@@ -229,7 +229,7 @@ fn force_result(
 ) -> Result<Value, Box<MacroFailure>> {
     execution
         .macro_context()
-        .evaluate_whnf(&value)
+        .evaluate_compatibility_whnf(&value)
         .map_err(|error| {
             let detail = if error.blocked_on().is_some() {
                 "macro result is waiting on a lazy producer unavailable to the macro demand session"

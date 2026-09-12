@@ -52,10 +52,10 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        2,
+        1,
         0,
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
-        "I3E.2 bounded compiler regions; I4F.1 durable roots"
+        "I3E.2 bounded compiler regions; I4F.1 durable roots; GCI11R-002D.1b rooted module completion"
     ),
     entry!(
         "src/api/value.rs",
@@ -234,6 +234,20 @@ fn registered_runtime_root_publication_inventory_is_complete() {
     }
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn public_whnf_orchestration_reuses_registered_input_and_completion_roots() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let evaluator = fs::read_to_string(manifest.join("src/api/evaluator.rs"))
+        .expect("the public evaluator source should be readable");
+    let assembly = fs::read_to_string(manifest.join("src/api/assembly.rs"))
+        .expect("the assembly source should be readable");
+
+    assert!(evaluator.contains(".evaluate_root_whnf(value.0.clone())"));
+    assert!(evaluator.contains("Value::from_runtime_root(value)"));
+    assert!(!evaluator.contains("values.clone_core(value)?"));
+    assert!(assembly.contains(".evaluate_root_whnf(definitions.clone())"));
 }
 
 #[test]

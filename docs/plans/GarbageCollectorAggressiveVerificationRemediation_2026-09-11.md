@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a complete; GCI11R-002D.1b-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.1b complete; GCI11R-002D.2-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -539,6 +539,8 @@ D.2 own the repairs and replace the violation baseline with a closed gate.
 
 ##### GCI11R-002D.1b — Rooted Orchestration and Regional Handoffs
 
+Status: complete on 2026-09-12.
+
 Make `EvalContext::evaluate_root_whnf(RuntimeValueRoot)` the ordinary
 orchestration entry. Inventory callers of the raw
 `EvalContext::evaluate_whnf(&core::Value)` compatibility facade and:
@@ -597,6 +599,18 @@ aggressive-verification defect. This checkpoint must nevertheless leave the
 handoff seam explicit, permit raw returns only within matching access
 authority, prohibit unaccompanied raw-value APIs, and never hold a mutator
 across orchestration.
+
+Completion record (2026-09-12): public `ValueEvaluator` and reflection
+inspection now pass the existing registered public root into
+`evaluate_root_whnf`; module sealing similarly demands its existing
+definitions root after publishing the final-definition promise. A monotonic
+collector verification counter proves an immediate managed public input adds
+only the one unavoidable client-demand completion root: there is no temporary
+replacement input root, and cloning the returned public value adds no root
+registration. The ambiguous raw `evaluate_whnf` name was removed. Remaining
+raw diagnostic/front-end compatibility callers are explicitly named
+`evaluate_compatibility_whnf`, source-latched as violations, and assigned to
+D.2 rather than masquerading as the ordinary orchestration path.
 
 #### GCI11R-002D.2 — Remaining Production Owners
 

@@ -510,6 +510,18 @@ impl Heap {
         self.inner.allocated_slots_for_verification()
     }
 
+    /// Returns the cumulative number of distinct root cells registered by
+    /// this heap for deterministic ownership-boundary verification.
+    ///
+    /// Cloning a root does not change this count. Retiring one does not reduce
+    /// it; the monotonic total makes transient project-and-reroot traffic
+    /// observable even after the temporary root has been dropped.
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
+    #[doc(hidden)]
+    pub fn root_registrations_for_verification(&self) -> u64 {
+        self.inner.root_registrations.load(Ordering::Relaxed)
+    }
+
     /// Returns the latest completed collection epoch for deterministic
     /// schedule assertions.
     #[cfg(feature = "deterministic-test-hooks")]
@@ -574,6 +586,8 @@ pub(crate) struct HeapInner {
     synchronous_collection_wait_probe: Mutex<Option<Arc<SynchronousCollectionWaitProbeState>>>,
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
     collect_before_outer_entry: AtomicBool,
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
+    root_registrations: AtomicU64,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -642,6 +656,8 @@ impl HeapInner {
             synchronous_collection_wait_probe: Mutex::new(None),
             #[cfg(any(test, feature = "deterministic-test-hooks"))]
             collect_before_outer_entry: AtomicBool::new(false),
+            #[cfg(any(test, feature = "deterministic-test-hooks"))]
+            root_registrations: AtomicU64::new(0),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -3486,6 +3502,11 @@ impl HeapInner {
             .try_reserve(1)
             .expect("root registry capacity exhausted");
         state.roots.push(registration);
+        #[cfg(any(test, feature = "deterministic-test-hooks"))]
+        self.root_registrations
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)
+            .expect("root registration count exhausted");
         root
     }
 
@@ -9540,12 +9561,16 @@ mod tests {
     fn root_registry_publishes_once_per_cell_and_not_per_clone() {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
+        assert_eq!(heap.root_registrations_for_verification(), 0);
         let first = heap.with_mutator(|mutator| mutator.root(value));
+        assert_eq!(heap.root_registrations_for_verification(), 1);
         let first_clone = first.clone();
+        assert_eq!(heap.root_registrations_for_verification(), 1);
 
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
 
         let second = heap.with_mutator(|mutator| mutator.root(value));
+        assert_eq!(heap.root_registrations_for_verification(), 2);
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
         drop((first, first_clone, second));

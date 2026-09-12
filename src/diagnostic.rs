@@ -332,7 +332,7 @@ pub(crate) fn prepend_contexts_with(
     let context = crate::evaluation::EvalContext::isolated(values.clone());
     let existing = match &message {
         Value::Dict(message) => match message.get(&*keys::MSG) {
-            Some(interface) => match context.evaluate_whnf(interface)? {
+            Some(interface) => match context.evaluate_compatibility_whnf(interface)? {
                 Value::Dict(interface) => match interface.get(&*keys::CONTEXT) {
                     Some(Value::List(contexts)) => contexts.clone(),
                     Some(context) => List::from_values(vec![context.clone()]),
@@ -373,11 +373,11 @@ fn diagnostic_object(
     message: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let message = context.evaluate_whnf(&message)?;
+    let message = context.evaluate_compatibility_whnf(&message)?;
     let has_defined_spec = match &message {
         Value::Dict(message) => match message.get(&*keys::SPEC) {
             Some(spec) => {
-                let spec = context.evaluate_whnf(spec)?;
+                let spec = context.evaluate_compatibility_whnf(spec)?;
                 !matches!(spec, Value::Dict(spec) if spec.is_empty())
             }
             None => false,
@@ -422,29 +422,29 @@ pub(crate) fn conventional_summary_with(
     message: &Value,
 ) -> (Option<usize>, Option<Arc<str>>) {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let Ok(Value::Dict(message)) = context.evaluate_whnf(message) else {
+    let Ok(Value::Dict(message)) = context.evaluate_compatibility_whnf(message) else {
         return (None, None);
     };
     let Some(interface) = message.get(&*keys::MSG) else {
         return (None, None);
     };
-    let Ok(Value::Dict(interface)) = context.evaluate_whnf(interface) else {
+    let Ok(Value::Dict(interface)) = context.evaluate_compatibility_whnf(interface) else {
         return (None, None);
     };
     let text = interface.get(&*keys::TEXT).and_then(|value| {
-        let Value::Binary(bytes) = context.evaluate_whnf(value).ok()? else {
+        let Value::Binary(bytes) = context.evaluate_compatibility_whnf(value).ok()? else {
             return None;
         };
         Some(Arc::from(String::from_utf8_lossy(&bytes).as_ref()))
     });
     let line = interface
         .get(&*keys::LOCATION)
-        .and_then(|value| context.evaluate_whnf(value).ok())
+        .and_then(|value| context.evaluate_compatibility_whnf(value).ok())
         .and_then(|value| match value {
             Value::Dict(location) => location.get(&*keys::LINE).cloned(),
             _ => None,
         })
-        .and_then(|value| context.evaluate_whnf(&value).ok())
+        .and_then(|value| context.evaluate_compatibility_whnf(&value).ok())
         .and_then(|value| match value {
             Value::Number(number) => number.to_i64_if_integer(),
             _ => None,

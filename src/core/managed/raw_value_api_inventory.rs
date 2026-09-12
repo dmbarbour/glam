@@ -918,7 +918,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        18_266_947_520_597_469_200,
+        17_191_099_127_706_350_678,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -945,13 +945,20 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         "raw core-value APIs require a reviewed access/disposition classification"
     );
 
-    let raw_evaluate_whnf = actual
+    assert!(actual.iter().all(|occurrence| {
+        occurrence.declaration != "src/evaluation/session.rs::EvalContext::evaluate_whnf"
+    }));
+    let compatibility_evaluate_whnf = actual
         .iter()
         .find(|occurrence| {
-            occurrence.declaration == "src/evaluation/session.rs::EvalContext::evaluate_whnf"
+            occurrence.declaration
+                == "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf"
         })
-        .expect("the initial raw evaluate_whnf witness should remain latched until D.1b");
-    assert_eq!(raw_evaluate_whnf.disposition(), ApiDisposition::Violation);
+        .expect("the narrowed raw WHNF compatibility facade remains assigned to D.2");
+    assert_eq!(
+        compatibility_evaluate_whnf.disposition(),
+        ApiDisposition::Violation
+    );
 
     assert!(actual.iter().any(|occurrence| {
         occurrence.declaration == "src/api/assembly.rs::Assembler::compile_diagnostic_emitter"

@@ -27,11 +27,22 @@ impl ValueEvaluator<'_> {
     /// Demands `value` to outer weak-head normal form.
     pub fn eval(&self, value: &Value) -> Result<EvaluatedValue, Error> {
         let values = self.assembler.values();
-        let value = values.clone_core(value)?;
+        values.require(value)?;
         self.assembler
             .eval_context()
-            .evaluate_whnf(&value)
-            .map(|value| EvaluatedValue::from_whnf(&values, values.wrap(value)))
+            .evaluate_root_whnf(value.0.clone())
+            .map(|value| EvaluatedValue::from_whnf(&values, Value::from_runtime_root(value)))
+            .map_err(|error| self.assembler.evaluation_error(error))
+    }
+}
+
+impl ReflectionInspector<'_> {
+    fn evaluate_root(&self, value: &Value) -> Result<crate::runtime::RuntimeValueRoot, Error> {
+        let values = self.assembler.values();
+        values.require(value)?;
+        self.assembler
+            .eval_context()
+            .evaluate_root_whnf(value.0.clone())
             .map_err(|error| self.assembler.evaluation_error(error))
     }
 }
@@ -63,58 +74,61 @@ impl ReflectionInspector<'_> {
     /// remains an evaluation error rather than a metadata mismatch.
     pub fn associated_metadata(&self, value: &Value) -> Result<Option<Value>, Error> {
         let values = self.assembler.values();
-        let value = values.clone_core(value)?;
-        let value = self
-            .assembler
-            .eval_context()
-            .evaluate_whnf(&value)
-            .map_err(|error| self.assembler.evaluation_error(error))?;
-        Ok(value.associated_metadata().map(|value| values.wrap(value)))
+        let value = self.evaluate_root(value)?;
+        values.with_access(|access| {
+            value
+                .with_core(access.runtime_access(), |value| {
+                    value.associated_metadata().map(|value| access.wrap(value))
+                })
+                .ok_or_else(|| Error::new("evaluated value belongs to another value domain"))
+        })
     }
 
     /// Returns dictionary entries in canonical key order without evaluating
     /// their values. Keys are reified as ordinary keyable [`Value`]s.
     pub fn dictionary_items(&self, value: &Value) -> Result<Vec<(Value, Value)>, Error> {
         let values = self.assembler.values();
-        let value = values.clone_core(value)?;
-        let value = self
-            .assembler
-            .eval_context()
-            .evaluate_whnf(&value)
-            .map_err(|error| self.assembler.evaluation_error(error))?;
-        let CoreValue::Dict(dict) = value else {
-            return Err(Error::new(format!(
-                "reflection dictionary inspection requires a dictionary, received {}",
-                value.diagnostic_kind_name()
-            )));
-        };
-        Ok(dict
-            .iter()
-            .map(|(key, value)| {
-                (
-                    values.wrap(key.to_value_with(values.core())),
-                    values.wrap(value.clone()),
-                )
-            })
-            .collect())
+        let value = self.evaluate_root(value)?;
+        values.with_access(|access| {
+            value
+                .with_core(access.runtime_access(), |value| {
+                    let CoreValue::Dict(dict) = value else {
+                        return Err(Error::new(format!(
+                            "reflection dictionary inspection requires a dictionary, received {}",
+                            value.diagnostic_kind_name()
+                        )));
+                    };
+                    Ok(dict
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                access.wrap(key.to_value_with(access.core())),
+                                access.wrap(value.clone()),
+                            )
+                        })
+                        .collect())
+                })
+                .ok_or_else(|| Error::new("evaluated value belongs to another value domain"))?
+        })
     }
 
     /// Returns the key value that gives an atom its identity.
     pub fn atom_key(&self, value: &Value) -> Result<Value, Error> {
         let values = self.assembler.values();
-        let value = values.clone_core(value)?;
-        let value = self
-            .assembler
-            .eval_context()
-            .evaluate_whnf(&value)
-            .map_err(|error| self.assembler.evaluation_error(error))?;
-        let CoreValue::Atom(atom) = value else {
-            return Err(Error::new(format!(
-                "reflection atom inspection requires an atom, received {}",
-                value.diagnostic_kind_name()
-            )));
-        };
-        Ok(values.wrap(atom.key().to_value_with(values.core())))
+        let value = self.evaluate_root(value)?;
+        values.with_access(|access| {
+            value
+                .with_core(access.runtime_access(), |value| {
+                    let CoreValue::Atom(atom) = value else {
+                        return Err(Error::new(format!(
+                            "reflection atom inspection requires an atom, received {}",
+                            value.diagnostic_kind_name()
+                        )));
+                    };
+                    Ok(access.wrap(atom.key().to_value_with(access.core())))
+                })
+                .ok_or_else(|| Error::new("evaluated value belongs to another value domain"))?
+        })
     }
 }
 

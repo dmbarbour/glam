@@ -693,7 +693,7 @@ impl Values {
 }
 
 impl ScopedValues<'_> {
-    fn core(&self) -> &CoreValueFactory {
+    pub(super) fn core(&self) -> &CoreValueFactory {
         self.owner.core()
     }
 

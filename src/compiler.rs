@@ -583,7 +583,7 @@ mod tests {
         }));
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         let error = eval_context
-            .evaluate_whnf(&context.import_module(
+            .evaluate_compatibility_whnf(&context.import_module(
                 "../outside.g",
                 None,
                 Value::Dict(Dict::new_sync()),
@@ -649,7 +649,7 @@ mod tests {
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         eval_context
-            .evaluate_whnf(&context.import_binary("message.txt"))
+            .evaluate_compatibility_whnf(&context.import_binary("message.txt"))
             .expect("binary import should load");
 
         let received = received
@@ -696,7 +696,7 @@ mod tests {
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         eval_context
-            .evaluate_whnf(&context.import_module(
+            .evaluate_compatibility_whnf(&context.import_module(
                 "child.g",
                 Some("nested.child"),
                 Value::Number(1.into()),
@@ -737,7 +737,7 @@ mod tests {
         let eval_context = crate::evaluation::EvalContext::isolated(values);
 
         let loaded = eval_context
-            .evaluate_whnf(&context.import_module(
+            .evaluate_compatibility_whnf(&context.import_module(
                 "child.g",
                 None,
                 Value::Number(1.into()),
