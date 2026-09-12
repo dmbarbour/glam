@@ -147,8 +147,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // identity without registering a root. D.2b.1b adds one sibling
         // region proving key conversion rejects a deferred list segment
         // without evaluating it. D.2b.1c adds one comparison region covering
-        // structural containers and exact managed identity.
-        ("src/core.rs", GatewayCounts::new(35, 5)),
+        // structural containers and exact managed identity. D.2b.1d adds one
+        // non-demanding recursive diagnostic-rendering region.
+        ("src/core.rs", GatewayCounts::new(36, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

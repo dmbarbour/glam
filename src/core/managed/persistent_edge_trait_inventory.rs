@@ -87,6 +87,7 @@ enum EdgeDisposition {
     TracedPersistentEdge,
     RegisteredRootProjection,
     MutatorLocalWorkingDuplicate,
+    AccessQualifiedObservation,
     MutationInput,
     CollectorPrivateErasedIdentity,
     Defect,
@@ -99,6 +100,7 @@ impl EdgeDisposition {
             Self::TracedPersistentEdge => "traced-persistent-edge",
             Self::RegisteredRootProjection => "registered-root-projection",
             Self::MutatorLocalWorkingDuplicate => "mutator-local-working-duplicate",
+            Self::AccessQualifiedObservation => "access-qualified-observation",
             Self::MutationInput => "mutation-input",
             Self::CollectorPrivateErasedIdentity => "collector-private-erased-identity",
             Self::Defect => "defect",
@@ -630,6 +632,18 @@ fn domain_for(relative: &Path) -> &'static str {
     }
 }
 
+fn is_access_qualified_diagnostic_trait(declaration: &str, implemented_trait: &str) -> bool {
+    implemented_trait == "Debug"
+        && matches!(
+            declaration,
+            "src/core.rs::impl Debug for DiagnosticValueDebug"
+                | "src/core.rs::impl Debug for DiagnosticValueSliceDebug"
+                | "src/core.rs::impl Debug for DiagnosticListDebug"
+                | "src/core.rs::impl Debug for DiagnosticDictDebug"
+                | "src/core.rs::impl Debug for DiagnosticListThunkDebug"
+        )
+}
+
 fn collect_occurrences(manifest: &Path) -> Vec<EdgeOccurrence> {
     let mut sources = Vec::new();
     for directory in [
@@ -717,13 +731,21 @@ fn collect_occurrences(manifest: &Path) -> Vec<EdgeOccurrence> {
                 && definition.name == implementation.target
                 && managed.contains(&definition.declaration)
         }) {
+            let disposition = if is_access_qualified_diagnostic_trait(
+                &implementation.declaration,
+                &implementation.implemented_trait,
+            ) {
+                EdgeDisposition::AccessQualifiedObservation
+            } else {
+                EdgeDisposition::Defect
+            };
             occurrences.push(EdgeOccurrence {
                 declaration: implementation.declaration,
                 shape: implementation.implemented_trait,
                 scope: implementation.scope,
                 surface: EdgeSurface::Typed,
                 kind: OccurrenceKind::TraitDependency,
-                disposition: EdgeDisposition::Defect,
+                disposition,
             });
         }
     }
@@ -795,13 +817,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        718,
+        723,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_957_985_005_486_702_284,
+        17_828_285_906_058_263_292,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -846,7 +868,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 151),
+            ((SourceScope::Production, EdgeSurface::Typed), 156),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 517),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
@@ -927,6 +949,33 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
             (RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b, 13),
             (RemainingDefectOwner::D2bCoreCarrierMigration, 55),
         ])
+    );
+}
+
+#[test]
+fn access_qualified_diagnostic_traits_have_an_exact_closed_set() {
+    let observations = current_inventory()
+        .iter()
+        .filter(|occurrence| occurrence.disposition == EdgeDisposition::AccessQualifiedObservation)
+        .map(|occurrence| (occurrence.declaration.as_str(), occurrence.shape.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        observations,
+        BTreeSet::from([
+            ("src/core.rs::impl Debug for DiagnosticValueDebug", "Debug",),
+            (
+                "src/core.rs::impl Debug for DiagnosticValueSliceDebug",
+                "Debug",
+            ),
+            ("src/core.rs::impl Debug for DiagnosticListDebug", "Debug",),
+            ("src/core.rs::impl Debug for DiagnosticDictDebug", "Debug",),
+            (
+                "src/core.rs::impl Debug for DiagnosticListThunkDebug",
+                "Debug",
+            ),
+        ]),
+        "only the access-borrowing D.2b.1d adapters may format a managed value carrier"
     );
 }
 
@@ -1074,6 +1123,7 @@ fn persistent_edge_inventory_records_every_selected_disposition() {
             EdgeDisposition::TracedPersistentEdge,
             EdgeDisposition::RegisteredRootProjection,
             EdgeDisposition::MutatorLocalWorkingDuplicate,
+            EdgeDisposition::AccessQualifiedObservation,
             EdgeDisposition::MutationInput,
             EdgeDisposition::CollectorPrivateErasedIdentity,
             EdgeDisposition::Defect,

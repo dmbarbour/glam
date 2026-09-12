@@ -2236,6 +2236,147 @@ impl Value {
     }
 }
 
+/// Access-borrowing diagnostic view of one raw semantic value.
+///
+/// The wrapper deliberately implements only `Debug`: it is transitional
+/// representation tooling for internal diagnostics, not a Glam renderer or a
+/// stable embedding format.
+pub(crate) struct DiagnosticValueDebug<'access, 'scope> {
+    access: &'access RuntimeValueAccess<'scope>,
+    value: &'access Value,
+}
+
+struct DiagnosticValueSliceDebug<'access, 'scope> {
+    access: &'access RuntimeValueAccess<'scope>,
+    values: &'access [Value],
+}
+
+struct DiagnosticListDebug<'access, 'scope> {
+    access: &'access RuntimeValueAccess<'scope>,
+    list: &'access List,
+}
+
+struct DiagnosticDictDebug<'access, 'scope> {
+    access: &'access RuntimeValueAccess<'scope>,
+    dict: &'access Dict,
+}
+
+struct DiagnosticListThunkDebug<'access>(&'access ListThunk);
+
+struct DiagnosticByteSegmentDebug<'access>(&'access [u8]);
+
+impl fmt::Debug for DiagnosticValueDebug<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.value {
+            Value::Atom(value) => formatter.debug_tuple("Atom").field(value).finish(),
+            Value::Number(value) => formatter.debug_tuple("Number").field(value).finish(),
+            Value::Binary(value) => formatter.debug_tuple("Binary").field(value).finish(),
+            Value::List(value) => formatter
+                .debug_tuple("List")
+                .field(&DiagnosticListDebug {
+                    access: self.access,
+                    list: value,
+                })
+                .finish(),
+            Value::Dict(value) => formatter
+                .debug_tuple("Dict")
+                .field(&DiagnosticDictDebug {
+                    access: self.access,
+                    dict: value,
+                })
+                .finish(),
+            Value::Builtin(value) => formatter.debug_tuple("Builtin").field(value).finish(),
+            Value::PartialBuiltin(value) => formatter
+                .debug_struct("PartialBuiltin")
+                .field("builtin", &value.builtin)
+                .field(
+                    "arguments",
+                    &DiagnosticValueSliceDebug {
+                        access: self.access,
+                        values: &value.arguments,
+                    },
+                )
+                .finish(),
+            Value::Function(value) => formatter
+                .debug_struct("Function")
+                .field("remaining_arity", &value.remaining_arity)
+                .finish_non_exhaustive(),
+            Value::Net(_) => formatter.write_str("Net(..)"),
+            Value::Lazy(_) => formatter.write_str("Lazy(..)"),
+            Value::Promised(_) => formatter.write_str("Promised(..)"),
+            Value::Metadata(_) => formatter.write_str("Sealed(..)"),
+            Value::Opaque(_) => formatter.write_str("Opaque(..)"),
+        }
+    }
+}
+
+impl fmt::Debug for DiagnosticValueSliceDebug<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = formatter.debug_list();
+        for value in self.values {
+            list.entry(&DiagnosticValueDebug {
+                access: self.access,
+                value,
+            });
+        }
+        list.finish()
+    }
+}
+
+impl fmt::Debug for DiagnosticListDebug<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = formatter.debug_list();
+        self.list.visit_logical_parts(&mut |part| match part {
+            crate::list::LogicalListPart::Bytes(bytes) => {
+                list.entry(&DiagnosticByteSegmentDebug(bytes));
+            }
+            crate::list::LogicalListPart::Values(values) => {
+                for value in values {
+                    list.entry(&DiagnosticValueDebug {
+                        access: self.access,
+                        value,
+                    });
+                }
+            }
+            crate::list::LogicalListPart::Thunk(thunk) => {
+                list.entry(&DiagnosticListThunkDebug(thunk));
+            }
+        });
+        list.finish()
+    }
+}
+
+impl fmt::Debug for DiagnosticDictDebug<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = formatter.debug_map();
+        for (key, value) in self.dict.iter() {
+            map.entry(
+                key,
+                &DiagnosticValueDebug {
+                    access: self.access,
+                    value,
+                },
+            );
+        }
+        map.finish()
+    }
+}
+
+impl fmt::Debug for DiagnosticListThunkDebug<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            ListThunk::Lazy(_) => formatter.write_str("Lazy(..)"),
+            ListThunk::Promised(_) => formatter.write_str("Promised(..)"),
+        }
+    }
+}
+
+impl fmt::Debug for DiagnosticByteSegmentDebug<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("Bytes").field(&self.0).finish()
+    }
+}
+
 impl RuntimeValueAccess<'_> {
     /// Duplicates one raw value shell while this value domain keeps every
     /// reachable managed edge live.
@@ -2526,6 +2667,22 @@ impl RuntimeValueAccess<'_> {
                 };
                 left.handle.same_owner(&right.handle)
             }
+        }
+    }
+
+    /// Borrows one non-demanding diagnostic representation under this value
+    /// domain's active access region.
+    #[allow(
+        dead_code,
+        reason = "D.2b.1d establishes the regional formatter before D.2c-D.2g migrate callers"
+    )]
+    pub(crate) fn diagnostic_debug<'access>(
+        &'access self,
+        value: &'access Value,
+    ) -> DiagnosticValueDebug<'access, 'access> {
+        DiagnosticValueDebug {
+            access: self,
+            value,
         }
     }
 }
@@ -3316,6 +3473,108 @@ mod tests {
             let distinct_metadata = Value::metadata_carrier(Value::binary_from_text("hidden"));
             assert!(access.same_representation(&metadata, &metadata_alias));
             assert!(!access.same_representation(&metadata, &distinct_metadata));
+        });
+    }
+
+    #[test]
+    fn access_qualified_diagnostic_debug_is_recursive_hidden_and_non_demanding() {
+        let values = values();
+        let demanded = Arc::new(AtomicBool::new(false));
+        let mut builder =
+            crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
+        let data = builder.data(Value::Number(7.into()));
+        let template = builder.finish(data);
+
+        values.with_runtime_value_access(|access| {
+            let demand_signal = Arc::clone(&demanded);
+            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(
+                &access,
+                "private lazy diagnostic label",
+                move |_| {
+                    demand_signal.store(true, Ordering::Release);
+                    Ok(Value::binary_from_text("forced lazy payload"))
+                },
+            ));
+            let promise = Value::Promised(
+                access
+                    .construct_managed_promise("private promise diagnostic label")
+                    .expect("the diagnostic promise fixture should fit one managed slot"),
+            );
+            let net = Value::Net(NetValue::new(
+                access
+                    .construct_managed_core_net(template.instantiate())
+                    .expect("the diagnostic net fixture should fit one managed slot"),
+            ));
+            let function = Value::Function(FunctionValue::new(
+                match access.duplicate_value(&net) {
+                    Value::Net(net) => net,
+                    _ => unreachable!("duplicating a net preserves its outer variant"),
+                },
+                1,
+            ));
+            let metadata = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
+            let opaque = Value::Opaque(OpaqueValue::new(&values, Arc::new(0xfeed_u64)));
+            let partial = Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::Add,
+                arguments: Arc::from([Value::Number(3.into())]),
+            });
+            let container = Value::Dict(
+                Dict::new_sync()
+                    .insert(
+                        Key::atom_from_text("list"),
+                        Value::List(List::concat(
+                            List::from_bytes(Bytes::from_static(b"Hi")),
+                            List::concat(
+                                List::from_values(vec![lazy, promise]),
+                                List::from_thunk(ListThunk::Lazy(LazyValue::error_in(
+                                    &access,
+                                    "private list-tail diagnostic label",
+                                ))),
+                            ),
+                        )),
+                    )
+                    .insert(Key::atom_from_text("partial"), partial)
+                    .insert(Key::atom_from_text("function"), function)
+                    .insert(Key::atom_from_text("net"), net)
+                    .insert(Key::atom_from_text("metadata"), metadata)
+                    .insert(Key::atom_from_text("opaque"), opaque),
+            );
+
+            let rendered = format!("{:#?}", access.diagnostic_debug(&container));
+            for visible in [
+                "Dict",
+                "List",
+                "Bytes",
+                "Lazy(..)",
+                "Promised(..)",
+                "PartialBuiltin",
+                "Function",
+                "Net(..)",
+                "Sealed(..)",
+                "Opaque(..)",
+            ] {
+                assert!(
+                    rendered.contains(visible),
+                    "diagnostic rendering should retain the {visible} outer shape: {rendered}"
+                );
+            }
+            for hidden in [
+                "private lazy diagnostic label",
+                "private promise diagnostic label",
+                "private list-tail diagnostic label",
+                "forced lazy payload",
+                "hidden metadata",
+                "65261",
+            ] {
+                assert!(
+                    !rendered.contains(hidden),
+                    "diagnostic rendering exposed hidden payload {hidden}: {rendered}"
+                );
+            }
+            assert!(
+                !demanded.load(Ordering::Acquire),
+                "diagnostic rendering must not force deferred values"
+            );
         });
     }
 

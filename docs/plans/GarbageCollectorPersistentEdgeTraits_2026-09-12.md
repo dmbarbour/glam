@@ -589,6 +589,14 @@ Exit: no production `Clone`, equality, or formatting implementation requires
 an implicit `Gc<T>` copy or comparison, and no test-only dependency blocks the
 small final cutover.
 
+Progress, 2026-09-12: parent D.2b.1d added five private diagnostic `Debug`
+adapters which can only be constructed beneath a borrowed
+`RuntimeValueAccess`. The inventory assigns these the distinct
+`access-qualified-observation` disposition instead of expanding the defect
+allowlist. It now contains 723 occurrences (156 production typed, 36
+production erased, 517 test typed, and 14 test erased), fingerprint
+`17_828_285_906_058_263_292`; the 73 P4/parent cutover defects are unchanged.
+
 ## Phase P4 — Trait Removal Cutover
 
 ### P4A — Remove implicit duplication

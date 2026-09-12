@@ -744,7 +744,7 @@ D.2b-D.2g eliminate the carrier and call-site dependencies.
 
 ###### GCI11R-002D.2b.1 — Core Structural Access Surface
 
-Status: partitioned into D.2b.1a-D.2b.1d below.
+Status: complete on 2026-09-12 through D.2b.1a-D.2b.1d below.
 
 Introduce the narrow access-qualified operations required to duplicate,
 project, compare, and render `Value` and its list/dictionary/function/net
@@ -819,6 +819,22 @@ not change.
 an access-borrowing diagnostic view or formatter. Persistent containers must
 delegate element rendering through that same access, and formatting must not
 demand lazies, promises, or nets. Opaque and sealed payloads remain hidden.
+
+Status: complete on 2026-09-12. `RuntimeValueAccess::diagnostic_debug` returns
+a regional `Debug` view whose exhaustive value dispatch never falls back to
+raw `Value: Debug`. Dedicated list, dictionary, and builtin-argument adapters
+borrow nested values through the same access region. Byte segments remain
+compact, while lazy values, promises, list thunks, nets, sealed metadata, and
+opaque host values render only hidden outer labels and are never demanded.
+The focused fixture covers nested containers and every hidden category under
+ordinary and aggressive collection. The raw inventory gained exactly one
+regional operation and retained all 486 violations. The persistent-edge
+inventory now records the five exact adapter `Debug` implementations as
+access-qualified observations rather than standard-trait defects; its 73
+pre-existing cutover defects remain unchanged. The durable-owner source scan
+assigns the two adapters which directly borrow `Value` storage to one exact
+bounded-local diagnostic-view owner; they do not inherit the broad durable
+recursive-payload classification.
 
 ###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
 

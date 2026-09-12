@@ -513,6 +513,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I3A-I3C lifetime-bound non-Send access and root-before-publication tests"
     ),
     bounded!(
+        "src/core.rs",
+        "access-qualified diagnostic value views",
+        "borrowed RuntimeValueAccess plus one borrowed Value or Value slice",
+        "one synchronous diagnostic formatting call",
+        "GCI11R-002D.2b.1d exact adapter inventory and non-demanding recursive formatter test"
+    ),
+    bounded!(
         "src/eval/builtins and stack-local helpers in src/eval/value.rs",
         "callback-free evaluator temporary representations",
         "parsed builtin operands, pattern helpers, and value views projected within the current step",
@@ -767,10 +774,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 124;
+const DECLARATION_BASELINE_COUNT: usize = 126;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([97, 74, 1, 10, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_891_275_793_242_928_365;
+    DeclarationSignals::new([99, 74, 1, 10, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_774_578_114_893_914_297;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -872,6 +879,11 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "HostCallProducer / HostCallRootBundle"
     } else if declaration == "src/core.rs::OpaqueValue" {
         "admitted opaque token families"
+    } else if matches!(
+        declaration,
+        "src/core.rs::DiagnosticValueDebug" | "src/core.rs::DiagnosticValueSliceDebug"
+    ) {
+        "access-qualified diagnostic value views"
     } else if declaration.starts_with("src/core/evaluation_halt.rs::")
         || declaration.starts_with("src/core.rs::")
             && !matches!(
@@ -930,6 +942,25 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         return None;
     };
     Some(owner)
+}
+
+#[test]
+fn access_qualified_diagnostic_owner_assignment_is_exact() {
+    let expected = "access-qualified diagnostic value views";
+    for declaration in [
+        "src/core.rs::DiagnosticValueDebug",
+        "src/core.rs::DiagnosticValueSliceDebug",
+    ] {
+        assert_eq!(owner_for_declaration(declaration), Some(expected));
+    }
+    for declaration in [
+        "src/core.rs::DiagnosticListDebug",
+        "src/core.rs::DiagnosticDictDebug",
+        "src/core.rs::DiagnosticListThunkDebug",
+        "src/core.rs::Value",
+    ] {
+        assert_ne!(owner_for_declaration(declaration), Some(expected));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
