@@ -39,6 +39,35 @@ enum ApiDisposition {
     Violation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum RemediationOwner {
+    D2bCoreCarriers,
+    D2cEvaluator,
+    D2dOrchestration,
+    D2eFrontend,
+    D2fReflection,
+    D2gPublicCompilerDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ReplacementShape {
+    CoreStructuralOperation,
+    ManagedCellAccess,
+    RuntimeRootProjection,
+    EvaluatorQuantum,
+    RootedOrchestration,
+    FrontendRegion,
+    ReflectionRegionOrRoot,
+    PublicDurableBoundary,
+    CompilerDiagnosticRegion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RemediationAssignment {
+    owner: RemediationOwner,
+    replacement: ReplacementShape,
+}
+
 impl ApiDisposition {
     const fn label(self) -> &'static str {
         match self {
@@ -101,6 +130,73 @@ impl ApiOccurrence {
             self.access,
             self.disposition().label(),
         )
+    }
+
+    fn remediation_assignment(&self) -> Option<RemediationAssignment> {
+        if self.disposition() != ApiDisposition::Violation {
+            return None;
+        }
+
+        let path = self
+            .declaration
+            .split("::")
+            .next()
+            .expect("an inventory declaration should begin with a source path");
+        let assignment = if path == "src/core.rs" || path == "src/core_net.rs" {
+            RemediationAssignment {
+                owner: RemediationOwner::D2bCoreCarriers,
+                replacement: ReplacementShape::CoreStructuralOperation,
+            }
+        } else if path.starts_with("src/core/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2bCoreCarriers,
+                replacement: ReplacementShape::ManagedCellAccess,
+            }
+        } else if path == "src/runtime.rs" {
+            RemediationAssignment {
+                owner: RemediationOwner::D2bCoreCarriers,
+                replacement: ReplacementShape::RuntimeRootProjection,
+            }
+        } else if path == "src/eval.rs" || path.starts_with("src/eval/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2cEvaluator,
+                replacement: ReplacementShape::EvaluatorQuantum,
+            }
+        } else if path == "src/evaluation.rs" || path.starts_with("src/evaluation/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2dOrchestration,
+                replacement: ReplacementShape::RootedOrchestration,
+            }
+        } else if path == "src/g_syntax.rs" || path.starts_with("src/g_syntax/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2eFrontend,
+                replacement: ReplacementShape::FrontendRegion,
+            }
+        } else if path == "src/reflection.rs" || path.starts_with("src/reflection/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2fReflection,
+                replacement: ReplacementShape::ReflectionRegionOrRoot,
+            }
+        } else if path == "src/api.rs" || path.starts_with("src/api/") {
+            RemediationAssignment {
+                owner: RemediationOwner::D2gPublicCompilerDiagnostics,
+                replacement: ReplacementShape::PublicDurableBoundary,
+            }
+        } else if matches!(
+            path,
+            "src/compiler.rs" | "src/diagnostic.rs" | "src/source.rs"
+        ) {
+            RemediationAssignment {
+                owner: RemediationOwner::D2gPublicCompilerDiagnostics,
+                replacement: ReplacementShape::CompilerDiagnosticRegion,
+            }
+        } else {
+            panic!(
+                "{} has no reviewed GCI11R-002D.2 remediation owner",
+                self.declaration
+            );
+        };
+        Some(assignment)
     }
 }
 
@@ -899,6 +995,20 @@ fn occurrence_file_summary(occurrences: &[ApiOccurrence]) -> BTreeMap<String, (u
         })
 }
 
+fn remediation_summary(
+    occurrences: &[ApiOccurrence],
+) -> BTreeMap<(RemediationOwner, ReplacementShape), usize> {
+    occurrences
+        .iter()
+        .filter_map(ApiOccurrence::remediation_assignment)
+        .fold(BTreeMap::new(), |mut counts, assignment| {
+            *counts
+                .entry((assignment.owner, assignment.replacement))
+                .or_default() += 1;
+            counts
+        })
+}
+
 #[test]
 fn raw_core_value_api_inventory_is_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -982,6 +1092,91 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
             || occurrence.declaration
                 == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
     }));
+}
+
+#[test]
+fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let actual = collect_occurrences(manifest);
+    let expected = BTreeMap::from([
+        (
+            (
+                RemediationOwner::D2bCoreCarriers,
+                ReplacementShape::CoreStructuralOperation,
+            ),
+            40,
+        ),
+        (
+            (
+                RemediationOwner::D2bCoreCarriers,
+                ReplacementShape::ManagedCellAccess,
+            ),
+            6,
+        ),
+        (
+            (
+                RemediationOwner::D2bCoreCarriers,
+                ReplacementShape::RuntimeRootProjection,
+            ),
+            3,
+        ),
+        (
+            (
+                RemediationOwner::D2cEvaluator,
+                ReplacementShape::EvaluatorQuantum,
+            ),
+            201,
+        ),
+        (
+            (
+                RemediationOwner::D2dOrchestration,
+                ReplacementShape::RootedOrchestration,
+            ),
+            14,
+        ),
+        (
+            (
+                RemediationOwner::D2eFrontend,
+                ReplacementShape::FrontendRegion,
+            ),
+            134,
+        ),
+        (
+            (
+                RemediationOwner::D2fReflection,
+                ReplacementShape::ReflectionRegionOrRoot,
+            ),
+            48,
+        ),
+        (
+            (
+                RemediationOwner::D2gPublicCompilerDiagnostics,
+                ReplacementShape::PublicDurableBoundary,
+            ),
+            11,
+        ),
+        (
+            (
+                RemediationOwner::D2gPublicCompilerDiagnostics,
+                ReplacementShape::CompilerDiagnosticRegion,
+            ),
+            29,
+        ),
+    ]);
+
+    assert_eq!(
+        remediation_summary(&actual),
+        expected,
+        "each raw-value violation needs exactly one checkpoint owner and replacement shape"
+    );
+    assert_eq!(
+        actual
+            .iter()
+            .filter(|occurrence| occurrence.disposition() == ApiDisposition::Violation)
+            .count(),
+        expected.values().sum(),
+        "the remediation manifest must account for every violation"
+    );
 }
 
 #[test]

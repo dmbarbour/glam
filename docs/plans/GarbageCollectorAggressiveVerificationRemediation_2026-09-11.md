@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.1b complete; GCI11R-002D.2-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2a complete; GCI11R-002D.2b-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -634,6 +634,8 @@ green.
 
 ##### GCI11R-002D.2a — Closure Policy and Occurrence Assignment
 
+Status: complete on 2026-09-12.
+
 1. Turn D.1a's family summary into an occurrence-level remediation manifest.
    Every current violation names exactly one D.2b-D.2g owner and one intended
    replacement shape. A count/fingerprint remains the drift latch, but is not
@@ -660,6 +662,19 @@ Exit: every violation is assigned, the standard-trait decision is explicit,
 and the eventual zero-violation check can distinguish a real repair from a
 renamed or newly allowlisted escape.
 
+Completion record (2026-09-12): the syntax-backed raw-value inventory assigns
+all 486 violations to exactly one D.2b-D.2g owner and one replacement shape.
+The executable partition is 49 core carriers, 201 evaluator operations, 14
+orchestration operations, 134 front-end operations, 48 reflection operations,
+and 40 public/compiler/diagnostic operations. Within D.2b it distinguishes 40
+core structural operations, six managed-cell operations, and three
+runtime-root projections; within D.2g it distinguishes eleven durable public
+boundaries from 29 compiler/diagnostic regional transformations. The existing
+count and normalized signature fingerprint latch movement or replacement of
+an occurrence. Durable-owner, containment, active-owner, recursive-identity,
+and persistent-edge ledgers remain independently source-latched and are
+reconciled at D.2h rather than collapsed into an imprecise combined count.
+
 Standard-trait decision, 2026-09-12: remove unqualified `Clone`, `PartialEq`,
 `Eq`, and recursive `Debug` from raw `core::Value`. Glam semantic equality,
 reflection representation comparison, and diagnostic formatting become
@@ -678,6 +693,9 @@ cutover, and verification are owned by the nested
 plan. D.2a is not complete until its occurrence assignment is also complete.
 
 ##### GCI11R-002D.2b — Core Carrier and Structural Operations
+
+Status: planned as the checkpoints below. This is the parent implementation of
+the nested persistent-edge plan's P3 interlock.
 
 Migrate the 49 core-value, managed-cell, persistent-container, net-shell, and
 runtime-root violations, including the standard-trait surface selected in
@@ -698,6 +716,78 @@ compatibility dependencies recorded by its P3 interlock; its P4 trait cutover
 may occur only after those dependencies reach zero. Include the nested
 checkpoint number in commits which perform its work rather than treating the
 link as an unrecorded side transition.
+
+###### GCI11R-002D.2b.0 — Carrier Topology and Cutover Latches
+
+Status: complete on 2026-09-12.
+
+Use D.2a's exact 40/6/3 partition and the persistent-edge plan's compiler
+probes to record the carrier dependency topology before changing production
+semantics. Separate declarations that *define* structural operations from
+downstream calls owned by D.2c-D.2g. Additive access-qualified operations may
+land here, but raw traits remain temporarily available until every dependent
+family has migrated.
+
+Exit: every D.2b declaration has an exact replacement family; the raw API and
+persistent-edge inventories fail on drift; and no later phase can mistake
+temporary trait availability for an accepted final boundary.
+
+Completion record (2026-09-12): D.2a's executable manifest establishes the
+40/6/3 declaration topology, while persistent-edge P2D assigns its 55
+core-carrier trait/equality syntax occurrences to this parent migration. The
+P2D compiler probes show that removing the edge traits is blocked only by the
+`LazyValue`, `PromisedValue`, `CoreRuntimeNet`, `NetSpecialization`,
+`NetValue`, and `FunctionCode` carrier closure. No collector worklist,
+mutation descriptor, or direct managed-edge consumer remains in that closure.
+The traits stay available solely as counted transition scaffolding until
+D.2b-D.2g eliminate the carrier and call-site dependencies.
+
+###### GCI11R-002D.2b.1 — Core Structural Access Surface
+
+Introduce the narrow access-qualified operations required to duplicate,
+project, compare, and render `Value` and its list/dictionary/function/net
+shells. Keep Glam semantic equality distinct from representation identity and
+diagnostic rendering. Thread one borrowed `RuntimeValueAccess` through each
+recursive walk. Do not add a blanket compatibility trait or open nested
+mutators per element.
+
+Verification: immediate and managed leaves, nested list/dictionary values,
+functions and nets, and cycle-safe rendering/identity behavior where the
+current operation promises it.
+
+###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
+
+Move the six managed-cell operations and three runtime-root projections to the
+new surface. Root/public clones continue to share registered root cells;
+projection of a raw value remains bounded by matching access. A managed cell
+duplicates its persistent edge only through the P1/P2 gateway.
+
+Verification: same/wrong-runtime controls, root-registration counters, and
+aggressive collection before and after each projection or managed-cell
+operation.
+
+###### GCI11R-002D.2b.3 — Persistent Containers and Net Shells
+
+Replace implicit recursive `Clone`, equality, and `Debug` dependencies in the
+raw list/dictionary and function/net carrier graph with the D.2b.1 operations.
+This checkpoint changes operations, not the persistent-container
+representation; compact/managed spines remain separately planned.
+
+Verification: persistent sharing remains intact, duplication adds no roots,
+and list/dictionary/net fixtures pass in ordinary and aggressive modes.
+
+###### GCI11R-002D.2b.4 — Parent Interlock Closure
+
+Update both occurrence inventories after each migrated declaration. This
+checkpoint does not remove `Value` or `Gc<T>` traits while D.2c-D.2g still use
+them. Instead it proves that all remaining persistent-edge compatibility
+dependencies are owned by those downstream checkpoints and hands the final
+zero-dependency state to nested P4.
+
+Exit: the D.2b 40/6/3 violation partition is zero, no structural declaration
+regains an authority-free operation, and the nested P3 manifest names only
+downstream D.2c-D.2g dependencies (or is ready for P4 if those have already
+closed).
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 

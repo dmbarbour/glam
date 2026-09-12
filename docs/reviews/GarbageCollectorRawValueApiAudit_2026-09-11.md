@@ -2,8 +2,8 @@
 
 Date: 2026-09-11  
 Checkpoint: GCI11R-002D.1a  
-Status: complete; D.1b narrowed the orchestration seam, and remaining
-production repairs belong to GCI11R-002D.2
+Status: complete; D.1b narrowed the orchestration seam, D.2a assigns every
+remaining violation, and production repairs belong to GCI11R-002D.2b-D.2g
 
 ## Outcome
 
@@ -131,6 +131,33 @@ G3. In particular, the derived `Clone`, `PartialEq`, and `Eq` contracts and the
 custom `Debug` surface must receive an explicit regional representation
 decision; they cannot disappear into a broad allowlist merely because their
 present callers often happen to hold access.
+
+## D.2a occurrence assignment
+
+Completed 2026-09-12. The source-backed inventory now assigns each of the 486
+violations to exactly one D.2b-D.2g checkpoint and one intended replacement
+shape. The checked partition is:
+
+| Owner | Replacement shape | Count |
+| --- | --- | ---: |
+| D.2b | access-qualified core structural operation | 40 |
+| D.2b | managed-cell access | 6 |
+| D.2b | bounded runtime-root projection | 3 |
+| D.2c | one shared evaluator quantum | 201 |
+| D.2d | rooted orchestration plus bounded projection | 14 |
+| D.2e | one shared front-end region | 134 |
+| D.2f | reflection region or durable root | 48 |
+| D.2g | durable public boundary | 11 |
+| D.2g | compiler/diagnostic region | 29 |
+| **Total** |  | **486** |
+
+The assignment is deliberately path-exact at family boundaries and is paired
+with the existing occurrence count and signature fingerprint. A new or moved
+declaration therefore cannot silently acquire an owner merely because its
+spelling resembles an existing operation. The durable-owner, containment,
+active-owner, recursive-identity, and persistent-edge inventories remain the
+complementary storage/capture side of the closure; D.2h reconciles all of
+those independently latched ledgers after the operation count reaches zero.
 
 Test-only constructors and fixtures are excluded intentionally and remain
 assigned to GCI11R-002E. The binary crate is included, but its ordinary
