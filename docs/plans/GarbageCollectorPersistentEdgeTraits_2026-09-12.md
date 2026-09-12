@@ -573,7 +573,8 @@ traits; only inventoried compatibility carriers prevent final removal.
 This phase is completed through the parent remediation rather than duplicated
 here:
 
-- D.2b removes raw carrier and persistent-container trait dependencies;
+- D.2b establishes the raw-carrier operations, removes standalone container
+  trait dependencies, and freezes the remaining compatibility closure;
 - D.2c removes evaluator and builtin dependencies;
 - D.2d removes orchestration dependencies;
 - D.2e removes front-end/compiler dependencies;
@@ -609,6 +610,16 @@ dependencies. The retained `FunctionCode: Debug + Eq + PartialEq` traits are
 required by `CoreOperator`; retained `ListThunk: Debug` is required by the
 legacy raw-`Value` list formatter. The remaining declarations are assigned to
 the parent D.2b.4 and D.2c-D.2g migrations before P4 removes the traits.
+
+Progress, 2026-09-12, after parent D.2b.4: the parent interlock is now an
+explicit additive handoff. The managed-cell and runtime-root portions of the
+original D.2b raw-value partition are zero, while an exact manifest latches
+the 40 raw core compatibility declarations which cannot disappear until
+D.2c-D.2g migrate their callers. Correspondingly, this plan treats the 51
+carrier-trait defects as a parent raw-value compatibility cutover rather than
+unfinished D.2b implementation. Their exact declaration/operation manifest
+is unchanged; downstream phases reduce it and P4 performs final trait
+removal.
 
 ## Phase P4 — Trait Removal Cutover
 

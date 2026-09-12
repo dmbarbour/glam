@@ -893,8 +893,8 @@ fn persistent_edge_inventory_classifications_are_closed() {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum RemainingDefectOwner {
     P4CollectorTraitCutover,
-    P4ManagedFacadeCutoverAfterD2b,
-    D2bCoreCarrierMigration,
+    P4ManagedFacadeCutoverAfterParent,
+    ParentRawValueCompatibilityCutover,
 }
 
 fn remaining_defect_owner(occurrence: &EdgeOccurrence) -> Option<RemainingDefectOwner> {
@@ -906,13 +906,13 @@ fn remaining_defect_owner(occurrence: &EdgeOccurrence) -> Option<RemainingDefect
             Some(RemainingDefectOwner::P4CollectorTraitCutover)
         }
         declaration if declaration.starts_with("src/core/managed/recursive_cells.rs::") => {
-            Some(RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b)
+            Some(RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent)
         }
         declaration
             if declaration.starts_with("src/core.rs::")
                 || declaration.starts_with("src/core_net.rs::") =>
         {
-            Some(RemainingDefectOwner::D2bCoreCarrierMigration)
+            Some(RemainingDefectOwner::ParentRawValueCompatibilityCutover)
         }
         _ => None,
     }
@@ -946,19 +946,19 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         owners,
         BTreeMap::from([
             (RemainingDefectOwner::P4CollectorTraitCutover, 5),
-            (RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b, 13),
-            (RemainingDefectOwner::D2bCoreCarrierMigration, 51),
+            (RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent, 13),
+            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 51),
         ])
     );
 }
 
 #[test]
-fn d2b_container_and_shell_trait_interlocks_are_exact() {
+fn parent_raw_value_compatibility_interlocks_are_exact() {
     let actual = current_inventory()
         .iter()
         .filter(|occurrence| {
             remaining_defect_owner(occurrence)
-                == Some(RemainingDefectOwner::D2bCoreCarrierMigration)
+                == Some(RemainingDefectOwner::ParentRawValueCompatibilityCutover)
         })
         .fold(
             BTreeMap::<String, BTreeSet<String>>::new(),
@@ -1042,7 +1042,7 @@ fn d2b_container_and_shell_trait_interlocks_are_exact() {
 
     assert_eq!(
         actual, expected,
-        "D.2b.3d permits only the exact carrier traits required by downstream D.2c-D.2g compatibility callers"
+        "D.2b.4 permits only the exact carrier traits required until downstream D.2c-D.2g compatibility callers migrate"
     );
 }
 

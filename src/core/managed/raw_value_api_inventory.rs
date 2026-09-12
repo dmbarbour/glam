@@ -41,7 +41,7 @@ enum ApiDisposition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum RemediationOwner {
-    D2bCoreCarriers,
+    D2bCoreCompatibility,
     D2cEvaluator,
     D2dOrchestration,
     D2eFrontend,
@@ -144,17 +144,17 @@ impl ApiOccurrence {
             .expect("an inventory declaration should begin with a source path");
         let assignment = if path == "src/core.rs" || path == "src/core_net.rs" {
             RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCarriers,
+                owner: RemediationOwner::D2bCoreCompatibility,
                 replacement: ReplacementShape::CoreStructuralOperation,
             }
         } else if path.starts_with("src/core/") {
             RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCarriers,
+                owner: RemediationOwner::D2bCoreCompatibility,
                 replacement: ReplacementShape::ManagedCellAccess,
             }
         } else if path == "src/runtime.rs" {
             RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCarriers,
+                owner: RemediationOwner::D2bCoreCompatibility,
                 replacement: ReplacementShape::RuntimeRootProjection,
             }
         } else if path == "src/eval.rs" || path.starts_with("src/eval/") {
@@ -1101,7 +1101,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
     let expected = BTreeMap::from([
         (
             (
-                RemediationOwner::D2bCoreCarriers,
+                RemediationOwner::D2bCoreCompatibility,
                 ReplacementShape::CoreStructuralOperation,
             ),
             40,
@@ -1162,6 +1162,72 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
             .count(),
         expected.values().sum(),
         "the remediation manifest must account for every violation"
+    );
+}
+
+#[test]
+fn d2b_core_compatibility_declarations_are_exact() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let actual = collect_occurrences(manifest)
+        .into_iter()
+        .filter(|occurrence| {
+            occurrence
+                .remediation_assignment()
+                .is_some_and(|assignment| {
+                    assignment.owner == RemediationOwner::D2bCoreCompatibility
+                })
+        })
+        .map(|occurrence| occurrence.declaration)
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "src/core.rs::CoreValueFactory::atom",
+        "src/core.rs::CoreValueFactory::clone_cached_root",
+        "src/core.rs::CoreValueFactory::error",
+        "src/core.rs::CoreValueFactory::info",
+        "src/core.rs::CoreValueFactory::initial_metadata",
+        "src/core.rs::CoreValueFactory::key_value",
+        "src/core.rs::CoreValueFactory::object_reflection_guard",
+        "src/core.rs::CoreValueFactory::tuple",
+        "src/core.rs::CoreValueFactory::unit",
+        "src/core.rs::CoreValueFactory::warn",
+        "src/core.rs::EvaluatedValue::into_value",
+        "src/core.rs::EvaluatedValue::try_from",
+        "src/core.rs::EvaluationFailure::contexts",
+        "src/core.rs::EvaluationFailure::emission",
+        "src/core.rs::EvaluationFailure::emission_value",
+        "src/core.rs::EvaluationFailure::visit_direct_values",
+        "src/core.rs::EvaluationFailure::with_context",
+        "src/core.rs::HostCallProducer::captures",
+        "src/core.rs::HostCallRootBundle::from_captures",
+        "src/core.rs::Key::from_value",
+        "src/core.rs::Key::to_value_with",
+        "src/core.rs::LazyApplication::arguments",
+        "src/core.rs::LazyApplication::function",
+        "src/core.rs::MetadataCarrier::associated_metadata",
+        "src/core.rs::MetadataCarrier::new",
+        "src/core.rs::ReflectionComputation::gate",
+        "src/core.rs::ReflectionComputation::new",
+        "src/core.rs::ReflectionComputation::return_value",
+        "src/core.rs::ReflectionComputation::target",
+        "src/core.rs::SemanticComputation::evaluate",
+        "src/core.rs::Value::associated_metadata",
+        "src/core.rs::Value::diagnostic_kind_name",
+        "src/core.rs::Value::fmt",
+        "src/core.rs::Value::metadata_carrier",
+        "src/core.rs::Value::singleton_list",
+        "src/core.rs::derive Clone",
+        "src/core.rs::derive Eq",
+        "src/core.rs::derive PartialEq",
+        "src/core.rs::immediate_failure_text",
+        "src/core.rs::list_to_key_items",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "D.2b.4 permits only the exact compatibility declarations handed to D.2c-D.2g and P4"
     );
 }
 

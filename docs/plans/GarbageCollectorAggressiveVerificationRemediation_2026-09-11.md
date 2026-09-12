@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2a complete; GCI11R-002D.2b-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2b complete; GCI11R-002D.2c-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -694,8 +694,9 @@ plan. D.2a is not complete until its occurrence assignment is also complete.
 
 ##### GCI11R-002D.2b — Core Carrier and Structural Operations
 
-Status: planned as the checkpoints below. This is the parent implementation of
-the nested persistent-edge plan's P3 interlock.
+Status: additive carrier work complete on 2026-09-12. The exact compatibility
+declarations retained for downstream D.2c-D.2g callers are removed by those
+phases and the nested persistent-edge plan's P4 cutover.
 
 Migrate the 49 core-value, managed-cell, persistent-container, net-shell, and
 runtime-root violations, including the standard-trait surface selected in
@@ -704,6 +705,12 @@ and recursive-cell projection must carry `RuntimeValueAccess`,
 `EvaluationValueAccess`, or collector-phase authority as appropriate. Prefer
 one shared regional access threaded through a structural operation; do not
 open a mutator independently for each member or edge.
+
+For declarations selected by downstream code, this phase establishes and
+latches the access-qualified replacement without removing the compatibility
+entry point prematurely. D.2c-D.2g migrate those callers and retire the entry
+points; nested P4 then removes the traits. Managed-cell and runtime-root
+operations with no such downstream declaration interlock close here.
 
 Verification: focused immediate/managed value controls, persistent list/dict
 walks, lazy/promise/net identity operations, ordinary and aggressive tests,
@@ -1174,16 +1181,40 @@ D.2c-D.2g migrations rather than hidden by this closure checkpoint.
 
 ###### GCI11R-002D.2b.4 — Parent Interlock Closure
 
+Status: complete on 2026-09-12.
+
 Update both occurrence inventories after each migrated declaration. This
 checkpoint does not remove `Value` or `Gc<T>` traits while D.2c-D.2g still use
 them. Instead it proves that all remaining persistent-edge compatibility
 dependencies are owned by those downstream checkpoints and hands the final
-zero-dependency state to nested P4.
+zero-dependency condition to nested P4.
 
-Exit: the D.2b 40/6/3 violation partition is zero, no structural declaration
-regains an authority-free operation, and the nested P3 manifest names only
-downstream D.2c-D.2g dependencies (or is ready for P4 if those have already
-closed).
+Exit: the managed-cell and runtime-root portions of D.2b's original 40/6/3
+violation partition are zero; the 40 core declarations retained solely for
+downstream compatibility have an exact source-backed manifest and an
+access-qualified replacement family; no structural declaration regains an
+unreviewed authority-free operation; and nested P3 names only the carrier
+traits retained until D.2c-D.2g and P4 close. Requiring all 40 compatibility
+declarations to disappear here would contradict this checkpoint's additive
+staging and collapse the downstream phases into D.2b.
+
+Completion record: the raw-value inventory contains no violation assigned to
+the former six managed-cell operations or three runtime-root projections. Its
+40 remaining core declarations are now latched by exact declaration name in
+addition to the existing normalized-signature fingerprint. They comprise ten
+canonical-value factory projections, two evaluated-value shell operations,
+five failure-shell operations, two host-call boundary operations, two key
+conversions, two lazy-application projections, two metadata-carrier
+operations, four reflection-computation operations, one semantic-computation
+operation, eight raw-`Value` operations/traits, and two structural helpers.
+Changing that set now fails the D.2b-specific manifest rather than merely
+changing a repository-wide count.
+
+The persistent-edge owner vocabulary now describes its 51 carrier traits as
+the parent raw-value compatibility cutover, rather than incorrectly implying
+that D.2b can remove them before their callers migrate. The exact 51-entry
+manifest remains unchanged. D.2c-D.2g must update both inventories as they
+remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
