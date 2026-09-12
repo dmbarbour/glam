@@ -25,6 +25,7 @@ mod executor;
 mod observation;
 mod pump;
 mod session;
+mod whnf;
 pub(crate) use access::{EvaluationPollContext, EvaluatorStepContext};
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,

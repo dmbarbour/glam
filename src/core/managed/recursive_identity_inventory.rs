@@ -552,6 +552,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "parked follower retains its promise root and reprojects the immutable assignment from a payload-free phase marker"
     ),
     owner!(
+        "src/eval/whnf.rs::WhnfDependency",
+        [0, 1, 0],
+        DurableRoot,
+        None,
+        "a suspended WHNF computation retains the exact promise dependency across polls"
+    ),
+    owner!(
         "src/evaluation/access.rs::PendingManagedPublication",
         [1, 1, 1],
         DurableRoot,
@@ -758,7 +765,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 19, 9],
+        [13, 20, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

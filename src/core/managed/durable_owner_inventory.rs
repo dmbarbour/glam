@@ -339,6 +339,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "GCI11R-002B"
     ),
     closed_durable!(
+        "src/eval/whnf.rs",
+        "resumable WHNF durable checkpoints and dependencies",
+        "rooted focus, retained frame values, dependency promises, and rooted terminal outcomes",
+        "one resumable WHNF computation across poll, yield, or dependency boundaries",
+        "complete durable checkpoint construction before managed access closes",
+        "checkpoint replacement, terminal result handoff, cancellation, or owner retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W1A"
+    ),
+    closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
         "public Value and Diagnostic roots plus delegated pending-task, task-handle, and query-handle lifecycle owners",
@@ -520,11 +531,11 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "GCI11R-002D.2b.1d exact adapter inventory and non-demanding recursive formatter test"
     ),
     bounded!(
-        "src/eval/builtins and stack-local helpers in src/eval/value.rs",
+        "src/eval/builtins and stack-local helpers in src/eval/value.rs and src/eval/whnf.rs",
         "callback-free evaluator temporary representations",
-        "parsed builtin operands, pattern helpers, and value views projected within the current step",
+        "parsed builtin operands, pattern helpers, regional WHNF work/frames, and value views projected within the current step",
         "one callback-free evaluator quantum",
-        "I3B-I3D scoped evaluator inventories and no-mutator-across-wait fixtures"
+        "I3B-I3D scoped evaluator inventories plus W1A durable-state source checks"
     ),
     bounded!(
         "src/g_syntax and src/compiler.rs",
@@ -774,10 +785,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 126;
+const DECLARATION_BASELINE_COUNT: usize = 132;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([99, 74, 1, 10, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_774_578_114_893_914_297;
+    DeclarationSignals::new([103, 77, 1, 11, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_891_586_757_734_617_647;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -902,7 +913,15 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
     } else if declaration == "src/eval/value.rs::LazyTaskWork" {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
-    } else if declaration.starts_with("src/eval/builtins/")
+    } else if matches!(
+        declaration,
+        "src/eval/whnf.rs::DurableWhnfFrame"
+            | "src/eval/whnf.rs::DurableWhnfState"
+            | "src/eval/whnf.rs::WhnfPoll"
+    ) {
+        "resumable WHNF durable checkpoints and dependencies"
+    } else if declaration.starts_with("src/eval/whnf.rs::")
+        || declaration.starts_with("src/eval/builtins/")
         || declaration.starts_with("src/eval/value.rs::")
     {
         "callback-free evaluator temporary representations"

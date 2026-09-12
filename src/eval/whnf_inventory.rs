@@ -522,6 +522,7 @@ fn is_in_scope(relative: &Path) -> bool {
                 | "src/reflection/requests.rs"
                 | "src/evaluation/session.rs"
                 | "src/evaluation/pump.rs"
+                | "src/evaluation/whnf.rs"
         )
     )
 }
@@ -535,6 +536,7 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
         manifest.join("src/reflection/requests.rs"),
         manifest.join("src/evaluation/session.rs"),
         manifest.join("src/evaluation/pump.rs"),
+        manifest.join("src/evaluation/whnf.rs"),
     ]);
     sources.sort();
     sources.dedup();

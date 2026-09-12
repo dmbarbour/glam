@@ -1,9 +1,10 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0 complete on 2026-09-12; W1-W8 planned. This is the focused implementation plan selected by
+Status: W0 and W1A complete on 2026-09-12; W1B-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-Production trampoline implementation has not begun.
+Production trampoline cutover has not begun; W1A installs only its
+crate-private protocol vocabulary and evaluation-boundary adapter.
 
 ## Purpose
 
@@ -542,6 +543,8 @@ owner, and the state shape is selected from evidence rather than assumed.
 
 #### W1A — Protocol and module boundary
 
+Status: complete on 2026-09-12.
+
 Add the crate-private `WhnfComputation`, regional work/step, durable checkpoint,
 dependency/boundary, and poll result types without changing production entry
 points. Place semantic reduction with `eval`; keep coordinator translation in
@@ -551,6 +554,29 @@ the existing evaluation boundary. Do not make `WhnfComputation` a `Value`,
 Compile-time/source checks must reject raw values and active access in durable
 state. Size checks should observe rather than freeze representation unless a
 specific regression threshold is justified.
+
+Completion record: [`src/eval/whnf.rs`](../../src/eval/whnf.rs) now owns the
+additive crate-private protocol. `WhnfComputation` retains a durable rooted
+checkpoint; `RegionalWhnfWork` and `RegionalWhnfStep` describe callback-free
+work beneath managed access; `WhnfPoll` exposes completion, dependency,
+budget-yield, and rooted-failure outcomes. The seven caller-frame kinds are
+kept distinct from tail `Delegate` and orchestration `Boundary` transitions,
+so neither transition requires a synthetic stack frame.
+
+[`src/evaluation/whnf.rs`](../../src/evaluation/whnf.rs) is the sole W1A
+adapter from semantic `WhnfDependency` to coordinator `WorkDependency`.
+Source-backed checks keep the protocol crate-private, absent from `Value`,
+`LazySource`, `EvaluationTaskMachine`, and current production entry points,
+and reject raw `Value` or active-access fields in durable state. The W0B
+census scope now includes this evaluation-boundary module.
+
+The x86-64 bootstrap observes `WhnfComputation = 56` bytes,
+`DurableWhnfState = 56`, `DurableWhnfFrame = 40`,
+`RegionalWhnfWork = 88`, `RegionalWhnfFrame = 40`,
+`WhnfDependency = 40`, and `WhnfPoll = 48`. These are recorded observations,
+not ABI assertions or regression thresholds. W1A intentionally implements no
+polling or regional reduction; W1B first exercises that protocol with its
+synthetic algebra before W1C adds checkpoint projection.
 
 #### W1B — Synthetic delegation and resumption
 
