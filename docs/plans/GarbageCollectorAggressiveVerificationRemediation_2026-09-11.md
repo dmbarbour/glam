@@ -915,7 +915,8 @@ as a redundant hierarchical admission.
 Partition this work into the following independently latched audits and one
 small repair checkpoint.
 
-**D.2b.2e.1 — Runtime-root construction disposition inventory.** Upgrade the
+**D.2b.2e.1 — Runtime-root construction disposition inventory.** Status:
+complete on 2026-09-12. Upgrade the
 existing registered-root publication inventory from per-file text counts to
 an exact, syntax-backed occurrence ledger. Record the containing declaration,
 source location or stable syntax fingerprint, construction surface, phase
@@ -956,6 +957,21 @@ publication, compiler/cache installation, and reflection handoff. These are
 traffic invariants, not microbenchmarks: an existing root should cross a
 boundary unchanged, and a same-region publication should add only the root
 required by its final durable owner.
+
+Completion record: the syntax-backed ledger distinguishes 44 production
+occurrences from 62 test-only occurrences, names the containing declaration
+and exact within-declaration ordinal, and assigns every production occurrence
+to a D.2 owner and terminal disposition. It identifies the nested
+`poison_lazy_cycle` construction as the one immediate defect and separately
+records the reflection launcher's raw effect projection/re-registration for
+D.2f rooted-transport migration; the freshly constructed initial reflection
+state at the same `Branch::new` call site remains a regional publication.
+Focused root-registration counters now prove that public evaluator completion
+adds only its result root, promise success/failure reuse admitted roots,
+reopening an installed compiler cache adds no roots, and the current raw
+reflection-launcher handoff adds exactly one replacement root. The last
+expectation is a latched migration baseline, not accepted terminal behavior:
+D.2f must reduce it to no additional registration.
 
 **D.2b.2e.2 — Mutator-introduction disposition inventory.** Upgrade the
 managed-access inventory to record every production and test-only mutator

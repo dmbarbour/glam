@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use quote::ToTokens;
+use syn::visit::{self, Visit};
+use syn::{Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemImpl, ItemMod};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RootPublicationCounts {
     compatibility_root_new: usize,
@@ -228,6 +232,448 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
 ];
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RootPublicationSurface {
+    CompatibilityNew,
+    ScopedFactory,
+    AccessPublication,
+}
+
+impl RootPublicationSurface {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CompatibilityNew => "compatibility-new",
+            Self::ScopedFactory => "scoped-factory",
+            Self::AccessPublication => "access-publication",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RootPublicationOccurrence {
+    declaration: String,
+    surface: RootPublicationSurface,
+    ordinal: usize,
+    test_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootPublicationOwner {
+    D2bCoreCarriers,
+    D2cEvaluator,
+    D2dOrchestration,
+    D2eFrontend,
+    D2fReflection,
+    D2gPublicCompilerDiagnostics,
+    D2eTestFixtures,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootPublicationDisposition {
+    OuterConstructionBoundary,
+    RegionalPublication,
+    RootedTransportMigration,
+    CanonicalConstructor,
+    TemporaryTestFixture,
+    Defect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RootPublicationReview {
+    owner: RootPublicationOwner,
+    disposition: RootPublicationDisposition,
+}
+
+impl RootPublicationOccurrence {
+    fn record(&self) -> String {
+        format!(
+            "{}#{}|surface={}|scope={}",
+            self.declaration,
+            self.ordinal,
+            self.surface.label(),
+            if self.test_only { "test" } else { "production" },
+        )
+    }
+
+    fn review(&self) -> RootPublicationReview {
+        if self.test_only {
+            return RootPublicationReview {
+                owner: RootPublicationOwner::D2eTestFixtures,
+                disposition: RootPublicationDisposition::TemporaryTestFixture,
+            };
+        }
+
+        let owner = if self.declaration.starts_with("src/core.rs::")
+            || self.declaration.starts_with("src/core_net.rs::")
+            || self.declaration.starts_with("src/runtime.rs::")
+        {
+            RootPublicationOwner::D2bCoreCarriers
+        } else if self.declaration.starts_with("src/eval/") {
+            RootPublicationOwner::D2cEvaluator
+        } else if self.declaration.starts_with("src/evaluation/") {
+            RootPublicationOwner::D2dOrchestration
+        } else if self.declaration.starts_with("src/g_syntax") {
+            RootPublicationOwner::D2eFrontend
+        } else if self.declaration.starts_with("src/reflection/") {
+            RootPublicationOwner::D2fReflection
+        } else if self.declaration.starts_with("src/api/")
+            || self.declaration.starts_with("src/compiler.rs::")
+            || self.declaration.starts_with("src/diagnostic.rs::")
+            || self.declaration.starts_with("src/source.rs::")
+        {
+            RootPublicationOwner::D2gPublicCompilerDiagnostics
+        } else {
+            panic!(
+                "{} has no GCI11R-002D.2 root-publication owner",
+                self.declaration
+            );
+        };
+
+        let disposition = if self.declaration == "src/reflection/machine.rs::impl Branch < S >::new"
+            && self.ordinal == 1
+        {
+            // The effect arrives from reflection activation as a registered
+            // root today, but the launcher interface projects it to a raw
+            // value before Branch registers a replacement. D.2f owns the
+            // rooted transport cutover. The second occurrence is the freshly
+            // constructed initial state and remains a regional publication.
+            RootPublicationDisposition::RootedTransportMigration
+        } else {
+            match self.declaration.as_str() {
+                "src/core.rs::impl CoreValueFactory::construct_runtime_value_root"
+                | "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root" => {
+                    RootPublicationDisposition::CanonicalConstructor
+                }
+                "src/evaluation/pump.rs::poison_lazy_cycle" => RootPublicationDisposition::Defect,
+                "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark"
+                | "src/evaluation/coordinator/task.rs::promise_assignment_terminal"
+                | "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf"
+                | "src/evaluation/session.rs::impl EvalContext::reserve_reflection_activation"
+                | "src/evaluation/session.rs::impl EvalContext::reserve_reflection_task"
+                | "src/reflection/machine.rs::impl Branch < S >::set_effect"
+                | "src/reflection/machine.rs::impl Branch < S >::set_state"
+                | "src/reflection/machine.rs::impl Branch < S >::root_value"
+                | "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new" => {
+                    RootPublicationDisposition::RootedTransportMigration
+                }
+                "src/api/assembly.rs::impl Assembler::load_local_binary"
+                | "src/g_syntax/compiler_values.rs::evaluate_closed"
+                | "src/g_syntax/compiler_values.rs::run_pure_match_resolved"
+                | "src/g_syntax/macro_expansion/effects.rs::hidden_effect"
+                | "src/reflection/machine.rs::alternative_returns_root"
+                | "src/reflection/machine.rs::effect_api"
+                | "src/reflection/machine.rs::volume_effects"
+                | "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect" => {
+                    RootPublicationDisposition::OuterConstructionBoundary
+                }
+                "src/api/value.rs::impl ScopedValues < '_ >::wrap"
+                | "src/compiler.rs::impl CompileContext::new"
+                | "src/compiler.rs::impl CompileContext::with_compilation_trace"
+                | "src/core.rs::impl CoreValues::new"
+                | "src/core.rs::impl HostCallRootBundle::from_captures"
+                | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
+                | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
+                | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
+                | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
+                | "src/g_syntax.rs::impl Diagnostic::with_emission"
+                | "src/g_syntax/compiler_values.rs::root_value"
+                | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration"
+                | "src/reflection/machine.rs::impl Branch < S >::new"
+                | "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation"
+                | "src/reflection/machine.rs::impl EffectTask < S >::interpret_prepared_drive"
+                | "src/reflection/machine.rs::lazy_value_path_root"
+                | "src/reflection/store.rs::apply_edit"
+                | "src/reflection/store.rs::apply_value_at_path"
+                | "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation"
+                | "src/reflection/store.rs::impl StoreSnapshot::poll_query"
+                | "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values" => {
+                    RootPublicationDisposition::RegionalPublication
+                }
+                _ => panic!(
+                    "{} has no exact GCI11R-002D.2 root-publication disposition",
+                    self.declaration
+                ),
+            }
+        };
+        RootPublicationReview { owner, disposition }
+    }
+}
+
+fn is_test_only(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("test")
+            || (attribute.path().is_ident("cfg")
+                && attribute
+                    .meta
+                    .require_list()
+                    .is_ok_and(|list| list.tokens.to_string() == "test"))
+    })
+}
+
+struct RootPublicationVisitor {
+    path: String,
+    scopes: Vec<String>,
+    test_scopes: Vec<bool>,
+    ordinals: BTreeMap<(String, RootPublicationSurface), usize>,
+    occurrences: Vec<RootPublicationOccurrence>,
+}
+
+impl RootPublicationVisitor {
+    fn new(path: String, test_only: bool) -> Self {
+        Self {
+            path,
+            scopes: Vec::new(),
+            test_scopes: vec![test_only],
+            ordinals: BTreeMap::new(),
+            occurrences: Vec::new(),
+        }
+    }
+
+    fn in_test_scope(&self) -> bool {
+        self.test_scopes.last().copied().unwrap_or(false)
+    }
+
+    fn with_scope(
+        &mut self,
+        scope: String,
+        attributes: &[Attribute],
+        visit: impl FnOnce(&mut Self),
+    ) {
+        self.scopes.push(scope);
+        self.test_scopes
+            .push(self.in_test_scope() || is_test_only(attributes));
+        visit(self);
+        self.test_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn declaration(&self) -> String {
+        if self.scopes.is_empty() {
+            self.path.clone()
+        } else {
+            format!("{}::{}", self.path, self.scopes.join("::"))
+        }
+    }
+
+    fn record(&mut self, surface: RootPublicationSurface) {
+        let declaration = self.declaration();
+        let ordinal = self
+            .ordinals
+            .entry((declaration.clone(), surface))
+            .or_default();
+        *ordinal += 1;
+        self.occurrences.push(RootPublicationOccurrence {
+            declaration,
+            surface,
+            ordinal: *ordinal,
+            test_only: self.in_test_scope(),
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for RootPublicationVisitor {
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        self.with_scope(node.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_item_mod(visitor, node);
+        });
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        let scope = format!("impl {}", node.self_ty.to_token_stream());
+        self.with_scope(scope, &node.attrs, |visitor| {
+            visit::visit_item_impl(visitor, node);
+        });
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.with_scope(node.sig.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_item_fn(visitor, node);
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        self.with_scope(node.sig.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_impl_item_fn(visitor, node);
+        });
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let syn::Expr::Path(function) = node.func.as_ref() {
+            let segments = function
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if segments.ends_with(&["RuntimeValueRoot".to_owned(), "new".to_owned()]) {
+                self.record(RootPublicationSurface::CompatibilityNew);
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        match node.method.to_string().as_str() {
+            "construct_runtime_value_root" | "try_construct_runtime_value_root" => {
+                self.record(RootPublicationSurface::ScopedFactory);
+            }
+            "root_runtime_value" => {
+                self.record(RootPublicationSurface::AccessPublication);
+            }
+            _ => {}
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn is_test_source(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|component| component.as_os_str() == "tests")
+        || relative.file_name().is_some_and(|name| {
+            name == "tests.rs"
+                || name == "test_support.rs"
+                || name.to_string_lossy().ends_with("_inventory.rs")
+        })
+}
+
+fn collect_root_publication_occurrences(manifest: &Path) -> Vec<RootPublicationOccurrence> {
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+    let inventory_path = Path::new("src/api/value/access_inventory.rs");
+    let mut occurrences = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(manifest)
+            .expect("a discovered source should belong to this package");
+        if relative == inventory_path || relative.starts_with("src/bin") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
+        let syntax = syn::parse_file(&source).expect("an inventoried source should parse");
+        let mut visitor = RootPublicationVisitor::new(
+            relative
+                .to_str()
+                .expect("repository paths should be UTF-8")
+                .replace('\\', "/"),
+            is_test_source(relative),
+        );
+        visitor.visit_file(&syntax);
+        occurrences.extend(visitor.occurrences);
+    }
+    occurrences.sort();
+    occurrences
+}
+
+const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
+    "src/api/assembly.rs::impl Assembler::load_local_binary#1|surface=scoped-factory|scope=production",
+    "src/api/value.rs::impl ScopedValues < '_ >::wrap#1|surface=access-publication|scope=production",
+    "src/compiler.rs::impl CompileContext::new#1|surface=scoped-factory|scope=production",
+    "src/compiler.rs::impl CompileContext::new#2|surface=scoped-factory|scope=production",
+    "src/compiler.rs::impl CompileContext::new#3|surface=scoped-factory|scope=production",
+    "src/compiler.rs::impl CompileContext::with_compilation_trace#1|surface=scoped-factory|scope=production",
+    "src/compiler.rs::impl CompileContext::with_prior_defs#1|surface=scoped-factory|scope=test",
+    "src/compiler.rs::tests::binary_import_forwards_hidden_source_provenance#1|surface=compatibility-new|scope=test",
+    "src/compiler.rs::tests::module_import_qualifies_only_the_relative_child_namespace#1|surface=compatibility-new|scope=test",
+    "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#1|surface=compatibility-new|scope=test",
+    "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#2|surface=compatibility-new|scope=test",
+    "src/core.rs::impl CoreValueFactory::construct_runtime_value_root#1|surface=scoped-factory|scope=production",
+    "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=access-publication|scope=production",
+    "src/core.rs::impl CoreValues::new#1|surface=access-publication|scope=production",
+    "src/core.rs::impl HostCallRootBundle::from_captures#1|surface=access-publication|scope=production",
+    "src/core.rs::tests::runtime_cache_rejects_a_root_from_another_runtime_before_publication#1|surface=compatibility-new|scope=test",
+    "src/core.rs::tests::runtime_cache_retires_an_admitted_owner_with_the_value_domain#1|surface=compatibility-new|scope=test",
+    "src/core/managed/active_owner_inventory.rs::arbitrary_host_callback_root_backedge_is_conservative_external_ownership#1|surface=compatibility-new|scope=test",
+    "src/core/managed/containment_inventory.rs::managed_drop_during_domain_teardown_is_passive#1|surface=scoped-factory|scope=test",
+    "src/core/managed/recursive_cells.rs::tests::early_regional_return_leaves_partial_managed_graph_collectible#1|surface=scoped-factory|scope=test",
+    "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
+    "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
+    "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
+    "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted#1|surface=access-publication|scope=production",
+    "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call#1|surface=access-publication|scope=production",
+    "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
+    "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
+    "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=production",
+    "src/evaluation/coordinator/task.rs::promise_assignment_terminal#1|surface=scoped-factory|scope=production",
+    "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#2|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::deferred_insertion_is_immediately_dormant_and_promotable#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::exact_and_broad_task_wakes_share_one_block_epoch#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#2|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::permanent_exit_wait_retains_only_its_summary_and_obligations#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
+    "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=scoped-factory|scope=production",
+    "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
+    "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
+    "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=production",
+    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_activation#1|surface=scoped-factory|scope=production",
+    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_task#1|surface=scoped-factory|scope=production",
+    "src/evaluation/tests.rs::abandoning_one_client_demand_preserves_another_exact_consumer#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::all_poll_routes_use_scheduler_context#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_can_follow_a_lazy_producer_owned_by_another_session#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_completes_whnf_into_its_result_cell#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_exactly_restarts_after_promise_assignment#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_operation_and_result_roots_follow_owner_lifecycle#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_operation_and_result_roots_follow_owner_lifecycle#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_owner_close_and_forced_kill_answer_once#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_owner_close_and_forced_kill_answer_once#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_result_cell_releases_after_terminal_handle_drop#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#3|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#4|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::client_failure_root_survives_work_and_owner_session_retirement#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::exit_readiness_snapshot_root_survives_after_settlement_report_drop#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::exit_wait_does_not_publish_task_status_or_failure#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::forced_deadlock_settlement_preserves_exits_and_kills_other_participants#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
+    "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
+    "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::ready_settlement_publishes_exited_once_and_retains_exit_errors#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::runtime_deadlock_retains_typed_task_and_client_dependencies#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::terminal_wait_dispositions_retain_only_their_documented_runtime_roots#1|surface=compatibility-new|scope=test",
+    "src/g_syntax.rs::impl Diagnostic::with_emission#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/compiler_values.rs::evaluate_closed#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/compiler_values.rs::root_value#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/compiler_values.rs::run_pure_match_resolved#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/macro_expansion/effects.rs::hidden_effect#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/macro_expansion/tests.rs::environment_root#1|surface=compatibility-new|scope=test",
+    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=access-publication|scope=production",
+    "src/reflection/machine.rs::alternative_returns_root#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::new#2|surface=access-publication|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::root_value#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::set_effect#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::set_state#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::interpret_prepared_drive#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::lazy_value_path_root#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine/tests.rs::captured_control_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
+    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
+    "src/reflection/machine/tests.rs::fixpoint_frames_retain_the_shared_function_root_until_retirement#1|surface=compatibility-new|scope=test",
+    "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::apply_edit#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::apply_value_at_path#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::impl StoreSnapshot::poll_query#1|surface=scoped-factory|scope=production",
+    "src/reflection/store/tests.rs::query_state_is_transactional_and_retired_after_the_last_handle#1|surface=scoped-factory|scope=test",
+    "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values#1|surface=access-publication|scope=production",
+    "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=access-publication|scope=test",
+];
+
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
@@ -305,6 +751,57 @@ fn registered_runtime_root_publication_inventory_is_complete() {
     }
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn every_runtime_root_publication_has_an_exact_disposition() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let occurrences = collect_root_publication_occurrences(manifest);
+    let actual = occurrences
+        .iter()
+        .map(RootPublicationOccurrence::record)
+        .collect::<Vec<_>>();
+    let expected = EXPECTED_ROOT_PUBLICATION_OCCURRENCES
+        .iter()
+        .map(|record| (*record).to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual, expected, "runtime-root publication ledger drifted");
+
+    let reviews = occurrences
+        .iter()
+        .map(RootPublicationOccurrence::review)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reviews
+            .iter()
+            .filter(|review| review.disposition == RootPublicationDisposition::Defect)
+            .count(),
+        1,
+        "the latched nested lazy-cycle root construction is the only immediate defect"
+    );
+    assert_eq!(
+        reviews
+            .iter()
+            .filter(|review| review.disposition == RootPublicationDisposition::CanonicalConstructor)
+            .count(),
+        2,
+        "only the two CoreValueFactory implementation calls are canonical constructors"
+    );
+    assert!(
+        occurrences
+            .iter()
+            .zip(&reviews)
+            .all(|(occurrence, review)| {
+                (occurrence.test_only
+                    && review.owner == RootPublicationOwner::D2eTestFixtures
+                    && review.disposition == RootPublicationDisposition::TemporaryTestFixture)
+                    || (!occurrence.test_only
+                        && review.owner != RootPublicationOwner::D2eTestFixtures
+                        && review.disposition != RootPublicationDisposition::TemporaryTestFixture)
+            }),
+        "production and test-only root-publication dispositions must remain distinct"
+    );
 }
 
 #[test]

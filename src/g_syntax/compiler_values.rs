@@ -1034,7 +1034,20 @@ mod tests {
     #[test]
     fn compiler_cache_publishes_complete_rooted_bundle() {
         let values = fresh_test_values();
+        let registrations_before = values.managed_root_registrations_for_test();
         let compiler = cache(&values);
+        let registrations_after_build = values.managed_root_registrations_for_test();
+        assert!(
+            registrations_after_build > registrations_before,
+            "initial compiler cache construction should publish its durable roots"
+        );
+        let cached = cache(&values);
+        assert!(Arc::ptr_eq(&compiler, &cached));
+        assert_eq!(
+            values.managed_root_registrations_for_test(),
+            registrations_after_build,
+            "reusing the installed compiler cache must not register replacement roots"
+        );
         let roots = [
             &compiler.math.value,
             &compiler.math.definitions,

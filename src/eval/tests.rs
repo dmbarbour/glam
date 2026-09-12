@@ -5165,6 +5165,7 @@ fn reflection_handoff_transfers_effect_root_after_source_owner_retirement() {
         .task(&context)
         .expect("the first observer should reserve the reflection task");
     assert!(reservation.has_activation_permit());
+    let registrations_after_reservation = values.managed_root_registrations_for_test();
     let handle = reservation.handle().clone();
     drop(computation);
     drop(publication);
@@ -5208,6 +5209,14 @@ fn reflection_handoff_transfers_effect_root_after_source_owner_retirement() {
     let queued = values
         .collect_managed_for_test()
         .expect("the installed task machine must own the transferred effect");
+    // The launcher still receives a projected raw value and must register a
+    // replacement root. GCI11R-002D.2f converts this seam to rooted transport;
+    // this assertion then deliberately changes from `+ 1` to no increase.
+    assert_eq!(
+        values.managed_root_registrations_for_test(),
+        registrations_after_reservation + 1,
+        "the current raw launcher handoff should register exactly one replacement effect root"
+    );
     assert_eq!(queued.root_entries(), baseline.root_entries() + 1);
     assert_eq!(queued.marked_slots(), baseline.marked_slots() + 2);
     assert_eq!(
