@@ -785,6 +785,17 @@ classification plus raw `Value`/`Key` conversion beneath explicit access.
 Keep conversion failure distinct from evaluation failure and do not demand a
 lazy member while discovering that a structure is not keyable.
 
+Status: complete on 2026-09-12. `RuntimeValueAccess` now owns outer diagnostic
+kind inspection, recursive value-to-key conversion, and key reification.
+Logical list traversal exposes borrowed byte segments as well as strict value
+segments and deferred thunks; encountering a thunk makes key conversion return
+`None` without invoking a forcing path.
+Strict mixed byte/value containers round-trip through `Key`, while empty
+dictionary fields retain their established elision rule. The old unqualified
+methods remain counted compatibility shims until D.2c-D.2g migrate their
+callers. The raw inventory gained exactly three regional operations, retained
+all 486 violations, and the persistent-edge inventory did not change.
+
 **D.2b.1c — Representation comparison.** Provide explicit access-qualified
 representation comparison for reflection and bootstrap protocol use. Extend
 persistent containers with borrowed comparator callbacks rather than relying

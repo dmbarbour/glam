@@ -68,7 +68,7 @@ pub(crate) struct LogicalListVisitStats {
 
 /// One non-structural part discovered by [`List::visit_logical_parts`].
 pub(crate) enum LogicalListPart<'part, V, T> {
-    Bytes,
+    Bytes(&'part [u8]),
     Values(&'part [V]),
     Thunk(&'part T),
 }
@@ -517,9 +517,9 @@ impl<V: Clone, T: Clone> List<V, T> {
             stats.node_visits += 1;
             match list.0.as_ref() {
                 ListNode::Empty => {}
-                ListNode::Bytes(_) => {
+                ListNode::Bytes(bytes) => {
                     stats.byte_segments += 1;
-                    visit(LogicalListPart::Bytes);
+                    visit(LogicalListPart::Bytes(bytes.as_ref()));
                 }
                 ListNode::Values(values) => {
                     stats.shared_value_slices += 1;
@@ -536,9 +536,9 @@ impl<V: Clone, T: Clone> List<V, T> {
                     for chunk in finger.iter() {
                         stats.chunk_visits += 1;
                         match chunk {
-                            ListChunk::Bytes(_) => {
+                            ListChunk::Bytes(bytes) => {
                                 stats.byte_segments += 1;
-                                visit(LogicalListPart::Bytes);
+                                visit(LogicalListPart::Bytes(bytes.as_ref()));
                             }
                             ListChunk::Values(values) => {
                                 stats.shared_value_slices += 1;

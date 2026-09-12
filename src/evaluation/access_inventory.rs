@@ -144,8 +144,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // Closed runtime-cache candidates keep one outer access region until
         // their declared runtime roots have been installed. D.2b.1a adds one
         // focused region proving raw shell duplication preserves managed
-        // identity without registering a root.
-        ("src/core.rs", GatewayCounts::new(33, 5)),
+        // identity without registering a root. D.2b.1b adds one sibling
+        // region proving key conversion rejects a deferred list segment
+        // without evaluating it.
+        ("src/core.rs", GatewayCounts::new(34, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

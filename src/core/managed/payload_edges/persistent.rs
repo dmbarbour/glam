@@ -80,7 +80,7 @@ pub(crate) fn visit_list_edges(
 ) -> PersistentEdgeVisitStats {
     let mut stats = PersistentEdgeVisitStats::default();
     stats.list = list.visit_logical_parts(&mut |part| match part {
-        LogicalListPart::Bytes => {}
+        LogicalListPart::Bytes(_) => {}
         LogicalListPart::Values(values) => {
             stats.semantic_edges += values.len();
             for value in values {
@@ -273,7 +273,7 @@ mod tests {
                 PersistentFixturePayload::Empty => {}
                 PersistentFixturePayload::List(list) => {
                     list.visit_logical_parts(&mut |part| match part {
-                        LogicalListPart::Bytes => {}
+                        LogicalListPart::Bytes(_) => {}
                         LogicalListPart::Values(values) => {
                             for edge in values {
                                 visitor.visit(edge);

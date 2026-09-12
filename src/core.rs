@@ -2275,6 +2275,116 @@ impl RuntimeValueAccess<'_> {
             }),
         }
     }
+
+    /// Names the outer diagnostic category without demanding the value or any
+    /// member of a persistent container.
+    #[allow(
+        dead_code,
+        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
+    )]
+    pub(crate) fn diagnostic_kind_name(&self, value: &Value) -> &'static str {
+        match value {
+            Value::Atom(atom) if atom.key() == &*keys::UNIT => "Unit",
+            Value::Atom(_) => "Atom",
+            Value::Number(_) => "Number",
+            Value::Binary(_) => "Binary",
+            Value::List(_) => "List",
+            Value::Dict(dict) if dict.is_empty() => "Undefined",
+            Value::Dict(_) => "Dict",
+            Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) => "Function",
+            Value::Net(_) => "Net",
+            Value::Lazy(_) | Value::Promised(_) => "Lazy",
+            Value::Metadata(_) => "Sealed",
+            Value::Opaque(_) => "Opaque",
+        }
+    }
+
+    /// Converts currently available keyable data without evaluating a value.
+    ///
+    /// A deferred list segment, lazy value, promise, function, net, sealed
+    /// carrier, or opaque value returns `None`. In particular, this traversal
+    /// never invokes the list forcing callback merely to discover a mismatch.
+    #[allow(
+        dead_code,
+        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
+    )]
+    pub(crate) fn key_from_value(&self, value: &Value) -> Option<Key> {
+        match value {
+            Value::Atom(atom) => Some(Key::Atom(*atom)),
+            Value::Number(number) => Some(Key::Number(number.clone())),
+            Value::Binary(bytes) => Some(Key::Binary(bytes.clone())),
+            Value::List(list) => {
+                let mut items = Vec::new();
+                let mut keyable = true;
+                list.visit_logical_parts(&mut |part| {
+                    if !keyable {
+                        return;
+                    }
+                    match part {
+                        crate::list::LogicalListPart::Bytes(bytes) => items
+                            .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte)))),
+                        crate::list::LogicalListPart::Values(values) => {
+                            for value in values {
+                                let Some(value) = self.key_from_value(value) else {
+                                    keyable = false;
+                                    return;
+                                };
+                                items.push(value);
+                            }
+                        }
+                        crate::list::LogicalListPart::Thunk(_) => keyable = false,
+                    }
+                });
+                keyable.then(|| Key::List(Arc::from(items)))
+            }
+            Value::Dict(dict) => Some(Key::Dict(Arc::from(
+                dict.iter()
+                    .map(|(key, value)| {
+                        let value = self.key_from_value(value)?;
+                        if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
+                            return Some(None);
+                        }
+                        Some(Some((key.clone(), value)))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>(),
+            ))),
+            Value::Builtin(_)
+            | Value::PartialBuiltin(_)
+            | Value::Function(_)
+            | Value::Net(_)
+            | Value::Lazy(_)
+            | Value::Promised(_)
+            | Value::Metadata(_)
+            | Value::Opaque(_) => None,
+        }
+    }
+
+    /// Reifies one key as ordinary raw data inside this access region.
+    #[allow(
+        dead_code,
+        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
+    )]
+    pub(crate) fn value_from_key(&self, key: &Key) -> Value {
+        match key {
+            Key::Atom(atom) => Value::Atom(*atom),
+            Key::Number(number) => Value::Number(number.clone()),
+            Key::Binary(bytes) => Value::Binary(bytes.clone()),
+            Key::AbstractGlobalPath(parts) => {
+                Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::clone(parts))))
+            }
+            Key::List(items) => Value::List(List::from_values(
+                items.iter().map(|item| self.value_from_key(item)).collect(),
+            )),
+            Key::Dict(entries) => {
+                Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
+                    dict.insert(key.clone(), self.value_from_key(value))
+                }))
+            }
+        }
+    }
 }
 
 impl Value {
@@ -2922,6 +3032,50 @@ mod tests {
             .collect_managed_for_test()
             .expect("unrooted duplication fixtures should be reclaimable");
         assert_eq!(after.root_entries(), baseline.root_entries());
+    }
+
+    #[test]
+    fn access_qualified_key_conversion_is_non_demanding_and_round_trips_strict_data() {
+        let values = values();
+        let demanded = Arc::new(AtomicBool::new(false));
+
+        values.with_runtime_value_access(|access| {
+            let demand_signal = Arc::clone(&demanded);
+            let lazy = LazyValue::semantic_thunk_in(&access, "key conversion probe", move |_| {
+                demand_signal.store(true, Ordering::Release);
+                Ok(Value::Number(99.into()))
+            });
+            let deferred_list = Value::List(List::from_thunk(ListThunk::Lazy(lazy)));
+
+            assert_eq!(access.key_from_value(&deferred_list), None);
+            assert!(
+                !demanded.load(Ordering::Acquire),
+                "key conversion must reject a deferred segment without forcing it"
+            );
+
+            let strict = Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("items"),
+                Value::List(List::concat(
+                    List::from_bytes(Bytes::from_static(b"Hi")),
+                    List::from_values(vec![Value::Number(7.into())]),
+                )),
+            ));
+            let key = access
+                .key_from_value(&strict)
+                .expect("strict scalar containers should remain keyable");
+            let reified = access.value_from_key(&key);
+            assert_eq!(access.key_from_value(&reified), Some(key));
+
+            assert_eq!(
+                access.diagnostic_kind_name(&Value::Atom(Atom::from_key(&keys::UNIT))),
+                "Unit"
+            );
+            assert_eq!(
+                access.diagnostic_kind_name(&Value::Dict(Dict::new_sync())),
+                "Undefined"
+            );
+            assert_eq!(access.diagnostic_kind_name(&deferred_list), "List");
+        });
     }
 
     #[test]
