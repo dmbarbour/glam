@@ -199,6 +199,16 @@ edge-only semantic facade, including when stored as a cross-net source;
 projection always require an explicit matching `RuntimeValueAccess` rather
 than retaining weak value-domain re-entry on either representation.
 
+The underlying collector pointers are likewise non-rooting regional edges.
+Their present ordinary copy/equality traits are a counted compatibility
+surface during the
+[persistent-edge trait migration](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md),
+not an ownership mechanism. The selected boundary makes persistent edge
+duplication and allocation identity explicit matching-access operations while
+retaining ordinary cloning only for registered roots and public rooted value
+handles. Glam's managed facades must not recreate an unqualified pointer-copy
+or address-comparison surface when that collector cutover completes.
+
 Deferred external host calls separate traceable semantics from opaque host
 behavior. `HostCallProducer` keeps every recursive Glam capture as an ordinary
 managed edge; immediately before invocation those captures become a typed

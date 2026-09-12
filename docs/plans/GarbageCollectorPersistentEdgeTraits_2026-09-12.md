@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0A-P0B complete; P0C-P5 planned. This is the nested implementation plan
+Status: P0 complete; P1-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -323,6 +323,16 @@ cutover.
 Exit: every occurrence is classified, the exempt erased identity is exact,
 and later phases can reduce a known manifest rather than discover the scope
 through compiler errors.
+
+Completed 2026-09-12. `glam-gc/SAFETY.md` now distinguishes the selected
+move-only persistent-edge contract from the five standard traits which remain
+temporarily implemented. It records exact traced/root ownership, the private
+`ErasedGc` exception, and the required release cost. Glam's evaluation
+architecture records the same boundary for its managed facades. The
+`persistent_edge_standard_trait_cutover_is_explicitly_pending` source latch
+names each forbidden final trait and proves it remains one deliberate P4
+obligation; P4 replaces that positive pending latch with compile-time negative
+contracts. P0 closes with the 573-occurrence manifest recorded by P0B.
 
 ## Phase P1 — Additive Collector API
 

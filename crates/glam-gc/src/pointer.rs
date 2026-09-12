@@ -151,6 +151,31 @@ mod tests {
 
     use super::Gc;
 
+    const PENDING_STANDARD_TRAIT_CUTOVER: &[&str] = &[
+        "impl<T: Trace> Copy for Gc<T>",
+        "impl<T: Trace> Clone for Gc<T>",
+        "impl<T: Trace> PartialEq for Gc<T>",
+        "impl<T: Trace> Eq for Gc<T>",
+        "impl<T: Trace> fmt::Debug for Gc<T>",
+    ];
+
+    #[test]
+    fn persistent_edge_standard_trait_cutover_is_explicitly_pending() {
+        let source = include_str!("pointer.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("pointer module must keep one test boundary")
+            .0;
+
+        for pending in PENDING_STANDARD_TRAIT_CUTOVER {
+            assert_eq!(
+                production.matches(pending).count(),
+                1,
+                "the transitional `{pending}` surface changed; complete or update the P4 cutover latch"
+            );
+        }
+    }
+
     #[test]
     fn pointer_identity_is_all_gc_equality_observes() {
         let heap = Heap::new();

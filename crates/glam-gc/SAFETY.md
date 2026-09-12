@@ -268,9 +268,21 @@ and every unsafe function, implementation, and block are checked into
 
 - `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
   assertion latches its one-pointer width. It carries no heap, domain, class,
-  allocation-record, or debug field and is not a root. It supports pointer-
-  identity equality but deliberately does not implement `Hash`, because an
-  address hash could not remain stable across later moving collection.
+  allocation-record, or debug field and is not a root. Its current `Copy`,
+  `Clone`, pointer-identity equality, and `Debug` implementations are a
+  counted migration surface, not the final ownership contract. The selected
+  contract removes all five ordinary traits and replaces duplication and
+  same-allocation comparison with explicit matching-mutator operations.
+  Optimized non-moving builds must still reduce those operations to one
+  pointer copy or comparison without allocation, locking, reference counting,
+  or root registration. `Hash` is already absent because an address hash could
+  not remain stable across later moving collection.
+- A persistent typed edge belongs either below a representation which reports
+  it through `Trace` or in a registered root. A temporary duplicate may exist
+  while its matching mutator remains admitted, but must be installed beneath
+  one of those exact owners before its independent liveness proof ends.
+  Collector-private `ErasedGc` is the sole copyable address identity exception;
+  it never grants access and remains private to collector work and metadata.
 - `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
   thread-cache handle contains thread-local `Rc<RefCell<_>>` state, making the
   token neither `Send` nor `Sync`; the lifetime prevents it from outliving that
@@ -619,7 +631,7 @@ the separate liveness and exactly-once obligations at each call site.
 ### `Send` and `Sync` for `Gc<T>`
 
 `NonNull<T>` does not grant these auto traits. The unsafe implementations are
-restricted to `T: Trace`, which itself requires `Send + Sync`. Copying or
+restricted to `T: Trace`, which itself requires `Send + Sync`. Moving or
 sharing `Gc<T>` does not grant access: dereference still requires a non-`Send`,
 non-`Sync`, heap-qualified mutator. `T: Sync` permits the resulting shared
 reference on another thread; `T: Send` permits eventual collector-thread
@@ -1207,8 +1219,11 @@ opaque-value escape hatch.
 
 ### Visitor erasure boundary
 
-`Visitor::visit` converts `Gc<T>` to a private pointer-only `ErasedGc` and
-synchronously invokes its collector-owned receiver. Erasure preserves the
+`Visitor::visit` currently converts `Gc<T>` to a private pointer-only
+`ErasedGc` and synchronously invokes its collector-owned receiver. The
+persistent-edge migration changes this input to `&Gc<T>` so tracing never
+consumes or implicitly copies the stored typed edge; only the visitor copies
+its address into collector-private work state. Erasure preserves the
 managed address but neither constructs a reference nor adds or guesses heap or
 type metadata. C5B's typed-run lookup recovers and validates those facts before
 the edge can be marked or dereferenced. The receiver may panic; no visitor or
@@ -1316,6 +1331,10 @@ mutation closure runs.
   allocation is rejected by const evaluation, `Gc<T>` has no `Deref` path, and
   address identity does not implement `Hash`.
 - Unconditional const assertions enforce the `Gc<T>` pointer-width contract.
+  `persistent_edge_standard_trait_cutover_is_explicitly_pending` also latches
+  the five transitional standard-trait implementations by exact source shape;
+  it is deliberately a pending P4 assertion, not evidence that the final
+  negative trait contract has passed.
   Unit tests cover pointer identity, cross-thread handle transfer, nested
   separate heaps, debug rejection of wrong heap and representation, exact
   recursive edge sequences with duplicate pointers, full retracing after an
