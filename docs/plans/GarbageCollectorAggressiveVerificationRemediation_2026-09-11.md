@@ -1218,6 +1218,8 @@ remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
+Status: partitioned on 2026-09-12; implementation has not started.
+
 Migrate the 201 evaluator-operation and builtin violations as call-tree
 families beneath `EvaluationValueAccess`. A callback-free evaluator quantum
 opens one region and passes its authority through application, operator,
@@ -1231,6 +1233,291 @@ focused builtin-family tests in both modes, and a source latch which rejects a
 new authority-free raw helper in `src/eval/`. Resolve every D.2b.2e root or
 mutator-introduction entry assigned to D.2c and preserve one outer admission
 per callback-free evaluator quantum.
+
+Partition decision, 2026-09-12: migrate by execution role and call tree, not
+merely by source file. A file can contain all three relevant execution shapes:
+
+1. A **regional operation** receives `EvaluationValueAccess` and may inspect,
+   duplicate, or return raw values only within that active region. It cannot
+   wait, invoke a host callback, or publish scheduler work.
+2. A **suspendable step coordinator** receives `EvaluatorStepContext`, but that
+   context is not treated as active value access. Durable inputs and outputs
+   cross the boundary as roots, exact managed owners, or machine records; the
+   coordinator opens short regional operations between waits and callbacks.
+3. An **immediate-data helper** transports `Key`, `Number`, `Bytes`, stable
+   IDs, or another representation proven not to contain managed edges. It
+   should stop transporting `Value` rather than accept a ceremonial access
+   parameter.
+
+`EvaluatorStepContext` therefore must not be added to the raw-value scanner's
+access-name allowlist. `EvaluationValueAccess` is the access-qualified carrier.
+Likewise, merely calling `context.with_value_access` somewhere inside a broad
+raw-value API does not qualify the API: its raw inputs must already be
+protected, and no raw result may escape after the callback returns.
+
+The current 201-operation baseline has two independent partitions which every
+checkpoint must preserve:
+
+| Call-tree family | Operations |
+| --- | ---: |
+| Value demand, failures, and deferred sources | 29 |
+| Application and sequence helpers | 12 |
+| Core operators and runtime-net evaluation | 20 |
+| Dispatch, scalar, comparison, and strategy builtins | 25 |
+| Dictionary, list, and pattern builtins | 43 |
+| Annotation, effect, and list-effect builtins | 42 |
+| Object construction and linearization | 22 |
+| Interaction-net builtins and construction callbacks | 8 |
+
+By signature shape, 146 currently receive `EvaluatorStepContext`, seven
+receive durable `EvalContext`, and 48 are context-free. These are census facts,
+not accepted dispositions. In particular, the first group still lacks active
+access and the last group may need either regional authority or a narrower
+immediate-data signature.
+
+This work is divided as follows. A checkpoint may update compile-required
+callers outside its named source family, but it must not silently reassign
+their inventory ownership or carry a mutator across that caller's
+orchestration boundary.
+
+###### GCI11R-002D.2c.0 — Evaluator Boundary Manifest
+
+**D.2c.0a — Exact occurrence assignment.** Extend the raw-value inventory so
+each of the 201 operations has one exact D.2c subcheckpoint and one of the
+three execution shapes above. Latch both the 29/12/20/25/43/42/22/8 family
+partition and the 146/7/48 signature baseline by declaration rather than only
+by aggregate count. A moved or renamed operation must identify its receiving
+checkpoint.
+
+Verification: deliberately misclassify one regional leaf and one suspendable
+coordinator to prove the manifest rejects both errors, then restore the exact
+assignment. Reconcile this manifest with `src/eval/access_inventory.rs`
+rather than creating a competing list of evaluator contexts.
+
+**D.2c.0b — Access and suspension gates.** Teach the raw-value scanner to
+recognize `EvaluationValueAccess` as regional authority. Explicitly reject
+using `EvaluatorStepContext`, `EvalContext`, or an internal
+`with_value_access` call as a signature-level substitute. Add source latches
+which reject a regional function that opens another mutator and a suspendable
+function that accepts or returns an unrooted raw value.
+
+Exit: every D.2c occurrence has a stable owner and execution shape; adding an
+unclassified `src/eval` raw-value API fails locally; and subsequent
+checkpoints can reduce their own exact partition without rebasing unrelated
+families.
+
+###### GCI11R-002D.2c.1 — Value Demand and Deferred Sources
+
+Migrate the 29 operations in `src/eval/value.rs` first because every later
+builtin family depends on their evaluation, failure, and collection helpers.
+This is not one checkpoint: the file mixes pure construction with suspension
+and durable machine state.
+
+**D.2c.1a — Diagnostic and immediate shell helpers.** Move failure-diagnostic
+construction, evaluation context frames, fallback diagnostic assembly,
+deferred-kind tests, undefined tests, and split-result construction beneath
+one borrowed access. Helpers which need only keys, atoms, numbers, or bytes
+instead take those narrower types. Do not format through raw `Value: Debug`.
+
+**D.2c.1b — List, key, number, and tagged-value projections.** Migrate list
+front forcing, key conversion, tagged payload lookup, index/number extraction,
+and semantic-undefined inspection. Preserve the D.2b.3 rule that the force
+callback completes before the access-qualified element duplication callback;
+no mutator spans lazy-list demand.
+
+**D.2c.1c — Lazy, promise, and fixpoint regional work.** Move cached-state
+inspection, source snapshotting, assignment projection, computed-fixpoint
+construction, and successful/failed cache publication into short regional
+operations. Reuse the machine's existing managed root or pending publication;
+do not project and register a replacement root.
+
+**D.2c.1d — Wait and reflection boundaries.** Refactor lazy-task completion,
+promise following, deferred waits, and reflection-task evaluation so every
+wait/reservation/callback occurs after regional access has ended. A resumed
+step reopens access and reprojects from the durable owner. Latch both sides of
+each ordering with barriers or probes; repeated runs are not evidence.
+
+Verification: focused `eval::value` and lazy/promise/fixpoint tests ordinarily
+and with `aggressive-gc-verification`; root-registration counters across cache
+hits, blocked polls, and resumptions; the poll-spanning owner inventory; and
+the no-mutator-across-wait/callback source gates.
+
+###### GCI11R-002D.2c.2 — Application and Sequences
+
+**D.2c.2a — Application.** Migrate the eight application operations as one
+call tree: dictionary application, function staging/instantiation, builtin
+application, effect wrapping, and non-callable diagnostics. Recursive demand
+returns to the step coordinator; argument aggregation and final graph
+construction occur in a single regional leaf. Preserve partial application
+and shared function-stage work.
+
+**D.2c.2b — Sequences.** Migrate the four sequence operations together. Key
+paths become immediate `Key` data; value-list extraction and append preserve
+lazy tails and use explicit element duplication. A sequence helper must not
+force a list while retaining access from the caller.
+
+Verification: application/partial-application, dictionary application,
+effect construction, append, key-path, and lazy-list fixtures in both modes;
+no new function-stage or list-member roots.
+
+###### GCI11R-002D.2c.3 — Core Operators and Runtime Nets
+
+**D.2c.3a — Operator descriptors.** Migrate the nine context-free operator
+constructors. Descriptor payloads containing values are built inside access
+and installed immediately into the managed net; where a descriptor needs only
+keys, arity, or stable node IDs, narrow its signature instead. Do not add a
+durable unrooted staging descriptor.
+
+**D.2c.3b — Operator execution.** Migrate the three operator application and
+effect-construction operations. One active net/value region covers an
+individual callback-free reduction, then ends before the driver may park,
+hand off a cursor claim, or report a dependency.
+
+**D.2c.3c — Net claims, attachment, and extraction.** Migrate the eight
+`src/eval/net.rs` operations, including the raw claim projections. Claims stay
+move-only; callable/operator payloads are inspected beneath matching access;
+and cursor disturbance waits retain the existing special structural
+coordination without turning into a general mutator-spanning wait. Preserve
+batched disturbance publication and shared-net normalization.
+
+Verification: operator/function-call fixtures, net data extraction, cursor
+handoff and contention barrier tests, and cursor WHNF tests in both modes.
+Root and access ledgers must show no new net facade root and no nested
+admission.
+
+###### GCI11R-002D.2c.4 — Dispatch, Scalars, and Strategies
+
+**D.2c.4a — Dispatcher, arity, assertions, and conditionals.** Migrate the
+central builtin dispatcher and exact-arity extraction together with assertion
+and conditional dispatch. The dispatcher threads an existing regional leaf
+where the selected operation is callback-free; it returns to the step
+coordinator before any selected operation may demand or suspend.
+
+**D.2c.4b — Numeric and comparison operations.** Migrate the fourteen numeric
+and comparison operations. Numeric/order helpers should accept `Number`,
+`Key`, or other immediate semantic data after evaluated operands have been
+projected. Recursive list/dictionary equality uses one access-qualified walk
+and must remain distinct from representation identity.
+
+**D.2c.4c — Strategy and provenance boundaries.** Migrate the six strategy and
+provenance operations. `seq` and `spark` end access before scheduling or
+waiting; provenance reflection follows the reflection boundary from D.2c.1d.
+Remove the corresponding durable `EvalContext` shims once their admitted
+callers use `EvaluatorStepContext` plus durable roots.
+
+Verification: builtin arity/error, assertion, conditional, numeric,
+comparison, `seq`, `spark`, and provenance tests in both modes, including
+structured failure context and spark admission controls.
+
+###### GCI11R-002D.2c.5 — Collection and Pattern Builtins
+
+**D.2c.5a — Dictionaries.** Migrate the twelve dictionary operations: basic
+selection/update/union, recursive merge, duplicate handling, and key-path
+construction. Thread one access through each persistent transformation and
+duplicate only values actually retained in the result.
+
+**D.2c.5b — Lists.** Migrate the twelve list operations: indexing, end access,
+split/slice, concatenation, mapping, length, and text lines. Use D.2b.3's
+callback-based persistent-list extraction and prove forcing always happens
+outside the access used to duplicate the resulting element.
+
+**D.2c.5c — Patterns.** Migrate the nineteen pattern operations as one semantic
+family. Literal/path comparison, dictionary take, list uncons/unsnoc, and
+success/failure effect construction share the collection gateways from
+D.2c.5a-b. Preserve mismatch as `.fail`, not an evaluation error, and preserve
+optional-dictionary-key semantics.
+
+Verification: focused dict/list/pattern tests and syntax-backed pattern
+samples in both modes; persistent sharing and root-registration counters; and
+explicit refutable remainder, computed path, and missing-key controls.
+
+###### GCI11R-002D.2c.6 — Annotation and Effect Builtins
+
+**D.2c.6a — Pure annotations.** Migrate annotation recognition, assertion and
+value payload parsing, metadata input/output construction, and array/deque/
+binary annotations that complete without reflection or strategy effects.
+Sealed metadata inspection remains reflection-only.
+
+**D.2c.6b — Reflection and strategy annotations.** Migrate deferred reflection,
+`meta_refl`, `seq`, and `spark` branches separately from the pure annotation
+leaf. Construct and publish the managed deferred result under access, end the
+region, then reserve or schedule external work.
+
+**D.2c.6c — General effects.** Migrate the seven effect dispatch/fixpoint/map
+operations. Effect construction may be regional; interpreting an effect or
+invoking an API returns to the step coordinator. Preserve ordinary freer
+effect structure rather than treating it as a host callback.
+
+**D.2c.6d — List effects.** Migrate the seventeen list-effect operations,
+including lazy semantic computations, `alt`, `cut`, fix, map, and deferred
+tails. Semantic captures are installed into their exact traced owner before
+access ends; no callback closure may hide raw values.
+
+Verification: annotation, metadata, effect, and list-effect suites in both
+modes; reflection reservation ordering; metadata trace fixtures; and
+alt/cut/backtracking tests proving abandoned branches publish no committed
+history.
+
+###### GCI11R-002D.2c.7 — Objects and Linearization
+
+**D.2c.7a — Object construction and override.** Migrate object specification
+construction, application, extension, instance creation, definition override,
+and spec projection beneath explicit access. Persistent dictionaries retain
+sharing and only installed values are duplicated.
+
+**D.2c.7b — C3 and identity validation.** Migrate dependency discovery,
+application order, C3 merge, object-name extraction, remembered-spec maps, and
+referential-equality validation. Evaluation of a dependency ends access before
+demand; the resumed comparison uses the exact managed identity operation.
+
+Verification: object/abstract-object/extend samples, duplicate-name and C3
+diagnostics, relative dependency overrides, and referential-spec identity
+tests in both modes.
+
+###### GCI11R-002D.2c.8 — Interaction-Net Builtins
+
+**D.2c.8a — Regional graph construction.** Migrate the pure interaction-net
+and arity builtin dispatch plus graph/port result construction. A completed
+graph is installed beneath its managed outer node before access ends.
+
+**D.2c.8b — Construction request boundary.** Migrate the callback-driven net
+construction operations. Request callbacks receive rooted/public arguments,
+perform no work under a mutator, and re-enter evaluation through the admitted
+request context. Remove the remaining durable construction compatibility shim
+when its caller is migrated.
+
+Verification: direct-style net construction, function binding and partial
+application, construction-port family, malformed request, and callback
+re-entry tests in both modes.
+
+###### GCI11R-002D.2c.9 — Evaluator Closure and Handoff
+
+**D.2c.9a — Compatibility retirement.** Remove the seven durable-context
+signatures and the central direct-evaluator compatibility gate when no
+production caller remains. Remove or narrow every context-free raw-value
+helper. A test-only facade may remain only with an exact fixture disposition;
+it cannot reopen production admission.
+
+**D.2c.9b — Inventory reconciliation.** Reduce D.2c's exact raw-value partition
+to zero. Put `src/eval/access_inventory.rs`, the D.2b.2e root-traffic and
+mutator-introduction ledgers, poll-spanning owner records, and relevant
+durable/active-owner inventories into closure mode. Update D.2b's 40-entry
+compatibility manifest and persistent-edge P3 whenever the last evaluator
+consumer permits removing a core declaration; declarations still used by
+D.2d-D.2g remain explicitly assigned there.
+
+**D.2c.9c — Full verification.** Run every family suite ordinarily and with
+`aggressive-gc-verification`, then the complete required workspace checks.
+Publish counts for removed raw APIs, retained downstream compatibility
+declarations, mutator admissions, and root registrations. No race fix may rely
+on repetition; ordering-sensitive claims require a barrier, probe, or model
+test which forces both schedules.
+
+Exit: `src/eval` has no authority-free API which accepts or returns raw
+`core::Value`; callback-free work uses a passed `EvaluationValueAccess`;
+suspendable work uses durable owners and opens bounded access islands; no
+mutator spans a wait, reflection gate, scheduler operation, or host callback;
+and the inventories hand only D.2d-D.2g dependencies forward.
 
 ##### GCI11R-002D.2d — Evaluation Orchestration and Runtime Records
 
