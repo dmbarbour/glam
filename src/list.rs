@@ -228,13 +228,18 @@ impl<V> ListChunk<V> {
         }
     }
 
-    fn item_at(&self, index: usize) -> Option<ListItem<V>>
-    where
-        V: Clone,
-    {
+    fn item_at_by<U>(
+        &self,
+        index: usize,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+    ) -> Option<ListItem<U>> {
         match self {
             Self::Bytes(bytes) => bytes.get(index).copied().map(ListItem::Byte),
-            Self::Values(values) => values.as_slice().get(index).cloned().map(ListItem::Value),
+            Self::Values(values) => values
+                .as_slice()
+                .get(index)
+                .map(duplicate_value)
+                .map(ListItem::Value),
         }
     }
 
@@ -258,7 +263,7 @@ impl<V> Measured for ListChunk<V> {
     }
 }
 
-impl<V: Clone + PartialEq, T: Clone> PartialEq for List<V, T> {
+impl<V: Clone + PartialEq, T> PartialEq for List<V, T> {
     fn eq(&self, other: &Self) -> bool {
         if Arc::ptr_eq(&self.0, &other.0) {
             return true;
@@ -270,9 +275,9 @@ impl<V: Clone + PartialEq, T: Clone> PartialEq for List<V, T> {
     }
 }
 
-impl<V: Clone + Eq, T: Clone> Eq for List<V, T> {}
+impl<V: Clone + Eq, T> Eq for List<V, T> {}
 
-impl<V: Clone, T: Clone> List<V, T> {
+impl<V, T> List<V, T> {
     pub fn empty() -> Self {
         Self(Arc::new(ListNode::Empty))
     }
@@ -422,21 +427,58 @@ impl<V: Clone, T: Clone> List<V, T> {
 
     /// Returns the zero-based item at `index`, forcing only lazy chunks which
     /// must be crossed to reach it.
+    #[cfg(test)]
     pub fn try_at<E>(
         &self,
         index: usize,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<ListItem<V>>, E> {
-        Ok(match self.lookup_at_with(index, force_thunk)? {
-            ListLookup::Found(item) => Some(item),
-            ListLookup::Exhausted(_) => None,
-        })
+    ) -> Result<Option<ListItem<V>>, E>
+    where
+        V: Clone,
+    {
+        self.try_at_by(index, &mut Clone::clone, force_thunk)
     }
 
+    /// Returns the zero-based item at `index`, using the caller's operation to
+    /// duplicate a strict value leaf.
+    ///
+    /// Structural list shells and byte items require no element duplication.
+    /// The callback is invoked only after any required thunk has been forced,
+    /// so a caller may keep forcing and managed-value access in disjoint
+    /// scopes.
+    pub fn try_at_by<E, U>(
+        &self,
+        index: usize,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<Option<ListItem<U>>, E> {
+        Ok(
+            match self.lookup_at_with_by(index, duplicate_value, force_thunk)? {
+                ListLookup::Found(item) => Some(item),
+                ListLookup::Exhausted(_) => None,
+            },
+        )
+    }
+
+    #[cfg(test)]
     pub fn try_pop_front<E>(
         &self,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<(ListItem<V>, Self)>, E> {
+    ) -> Result<Option<(ListItem<V>, Self)>, E>
+    where
+        V: Clone,
+    {
+        self.try_pop_front_by(&mut Clone::clone, force_thunk)
+    }
+
+    /// Removes the first item, using the caller's operation to duplicate a
+    /// strict value leaf while all returned list shells continue sharing their
+    /// original persistent structure.
+    pub fn try_pop_front_by<E, U>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<Option<(ListItem<U>, Self)>, E> {
         match self.0.as_ref() {
             ListNode::Empty => Ok(None),
             ListNode::Bytes(bytes) => Ok(bytes.first().map(|byte| {
@@ -450,22 +492,24 @@ impl<V: Clone, T: Clone> List<V, T> {
                     return Ok(None);
                 };
                 Ok(Some((
-                    ListItem::Value(first.clone()),
+                    ListItem::Value(duplicate_value(first)),
                     Self::from_value_slice(values.slice(1, values.len())),
                 )))
             }
             ListNode::Concat(left, right) => {
-                if let Some((first, left_tail)) = left.try_pop_front(force_thunk)? {
+                if let Some((first, left_tail)) =
+                    left.try_pop_front_by(duplicate_value, force_thunk)?
+                {
                     Ok(Some((first, Self::concat(left_tail, right.clone()))))
                 } else {
-                    right.try_pop_front(force_thunk)
+                    right.try_pop_front_by(duplicate_value, force_thunk)
                 }
             }
             ListNode::Finger(finger) => {
                 let Some((chunk, mut rest)) = finger.view_left() else {
                     return Ok(None);
                 };
-                let Some(value) = chunk.item_at(0) else {
+                let Some(value) = chunk.item_at_by(0, duplicate_value) else {
                     unreachable!("finger trees do not store empty chunks");
                 };
                 if let Some(chunk_tail) = chunk.slice(1, chunk.len()) {
@@ -473,16 +517,32 @@ impl<V: Clone, T: Clone> List<V, T> {
                 }
                 Ok(Some((value, Self::from_finger(rest))))
             }
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_front(force_thunk),
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.try_pop_front_by(duplicate_value, force_thunk)
+            }
         }
     }
 
     /// Removes the final item while forcing only lazy chunks which must be
     /// crossed from the right edge to find it.
+    #[cfg(test)]
     pub fn try_pop_back<E>(
         &self,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<(Self, ListItem<V>)>, E> {
+    ) -> Result<Option<(Self, ListItem<V>)>, E>
+    where
+        V: Clone,
+    {
+        self.try_pop_back_by(&mut Clone::clone, force_thunk)
+    }
+
+    /// Removes the final item, using the caller's operation to duplicate a
+    /// strict value leaf while preserving persistent sharing in the prefix.
+    pub fn try_pop_back_by<E, U>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
+    ) -> Result<Option<(Self, ListItem<U>)>, E> {
         match self.0.as_ref() {
             ListNode::Empty => Ok(None),
             ListNode::Bytes(bytes) => Ok(bytes.last().map(|byte| {
@@ -497,21 +557,23 @@ impl<V: Clone, T: Clone> List<V, T> {
                 };
                 Ok(Some((
                     Self::from_value_slice(values.slice(0, values.len() - 1)),
-                    ListItem::Value(last.clone()),
+                    ListItem::Value(duplicate_value(last)),
                 )))
             }
             ListNode::Concat(left, right) => {
-                if let Some((right_init, last)) = right.try_pop_back(force_thunk)? {
+                if let Some((right_init, last)) =
+                    right.try_pop_back_by(duplicate_value, force_thunk)?
+                {
                     Ok(Some((Self::concat(left.clone(), right_init), last)))
                 } else {
-                    left.try_pop_back(force_thunk)
+                    left.try_pop_back_by(duplicate_value, force_thunk)
                 }
             }
             ListNode::Finger(finger) => {
                 let Some((chunk, mut rest)) = finger.view_right() else {
                     return Ok(None);
                 };
-                let Some(value) = chunk.item_at(chunk.len() - 1) else {
+                let Some(value) = chunk.item_at_by(chunk.len() - 1, duplicate_value) else {
                     unreachable!("finger trees do not store empty chunks");
                 };
                 if let Some(chunk_init) = chunk.slice(0, chunk.len() - 1) {
@@ -519,15 +581,18 @@ impl<V: Clone, T: Clone> List<V, T> {
                 }
                 Ok(Some((Self::from_finger(rest), value)))
             }
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.try_pop_back(force_thunk),
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.try_pop_back_by(duplicate_value, force_thunk)
+            }
         }
     }
 
-    fn lookup_at_with<E>(
+    fn lookup_at_with_by<E, U>(
         &self,
         index: usize,
+        duplicate_value: &mut impl FnMut(&V) -> U,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<ListLookup<V>, E> {
+    ) -> Result<ListLookup<U>, E> {
         Ok(match self.0.as_ref() {
             ListNode::Empty => ListLookup::Exhausted(0),
             ListNode::Bytes(bytes) => bytes
@@ -538,20 +603,26 @@ impl<V: Clone, T: Clone> List<V, T> {
             ListNode::Values(values) => values
                 .as_slice()
                 .get(index)
-                .cloned()
+                .map(duplicate_value)
                 .map(|value| ListLookup::Found(ListItem::Value(value)))
                 .unwrap_or_else(|| ListLookup::Exhausted(values.len())),
-            ListNode::Concat(left, right) => match left.lookup_at_with(index, force_thunk)? {
-                found @ ListLookup::Found(_) => found,
-                ListLookup::Exhausted(left_len) => {
-                    match right.lookup_at_with(index - left_len, force_thunk)? {
-                        found @ ListLookup::Found(_) => found,
-                        ListLookup::Exhausted(right_len) => {
-                            ListLookup::Exhausted(left_len + right_len)
+            ListNode::Concat(left, right) => {
+                match left.lookup_at_with_by(index, duplicate_value, force_thunk)? {
+                    found @ ListLookup::Found(_) => found,
+                    ListLookup::Exhausted(left_len) => {
+                        match right.lookup_at_with_by(
+                            index - left_len,
+                            duplicate_value,
+                            force_thunk,
+                        )? {
+                            found @ ListLookup::Found(_) => found,
+                            ListLookup::Exhausted(right_len) => {
+                                ListLookup::Exhausted(left_len + right_len)
+                            }
                         }
                     }
                 }
-            },
+            }
             ListNode::Finger(finger) => {
                 let len = finger.measure().0;
                 if index >= len {
@@ -561,13 +632,15 @@ impl<V: Clone, T: Clone> List<V, T> {
                     let Some((chunk, _)) = right.view_left() else {
                         unreachable!("an in-bounds finger-tree index leaves a right chunk");
                     };
-                    let Some(item) = chunk.item_at(0) else {
+                    let Some(item) = chunk.item_at_by(0, duplicate_value) else {
                         unreachable!("finger trees do not store empty chunks");
                     };
                     ListLookup::Found(item)
                 }
             }
-            ListNode::Thunk(thunk) => force_thunk(thunk)?.lookup_at_with(index, force_thunk)?,
+            ListNode::Thunk(thunk) => {
+                force_thunk(thunk)?.lookup_at_with_by(index, duplicate_value, force_thunk)?
+            }
         })
     }
 
@@ -1047,7 +1120,10 @@ impl<V: Clone, T: Clone> List<V, T> {
         }
     }
 
-    fn items_for_eq(&self) -> Vec<ListItem<V>> {
+    fn items_for_eq(&self) -> Vec<ListItem<V>>
+    where
+        V: Clone,
+    {
         let items = std::cell::RefCell::new(Vec::new());
         self.for_each_segment(
             &mut |bytes| {
@@ -1074,18 +1150,56 @@ mod tests {
 
     type TestList = List<u32, &'static str>;
 
-    struct NonClone;
+    struct NonClone(u32);
+
+    struct NonCloneThunk;
 
     #[test]
     fn cloning_a_list_shell_does_not_require_cloneable_contents() {
         let list: List<NonClone, NonClone> =
             List(Arc::new(ListNode::Values(SharedSlice::from_vec(vec![
-                NonClone,
+                NonClone(1),
             ]))));
 
         let duplicate = list.clone();
 
         assert!(Arc::ptr_eq(&list.0, &duplicate.0));
+    }
+
+    #[test]
+    fn element_producing_operations_accept_explicit_nonclone_duplication() {
+        let list = List::<NonClone, NonCloneThunk>::concat(
+            List::from_values(vec![NonClone(1), NonClone(2)]),
+            List::from_thunk(NonCloneThunk),
+        );
+        let mut duplicate = |value: &NonClone| value.0;
+        let mut force = |_: &NonCloneThunk| {
+            Ok::<_, ()>(List::<NonClone, NonCloneThunk>::from_values(vec![
+                NonClone(3),
+            ]))
+        };
+
+        assert_eq!(
+            list.try_at_by(2, &mut duplicate, &mut force).unwrap(),
+            Some(ListItem::Value(3))
+        );
+        let (head, tail) = list
+            .try_pop_front_by(&mut duplicate, &mut force)
+            .unwrap()
+            .unwrap();
+        assert_eq!(head, ListItem::Value(1));
+        let (init, last) = tail
+            .try_pop_back_by(&mut duplicate, &mut force)
+            .unwrap()
+            .unwrap();
+        assert_eq!(last, ListItem::Value(3));
+        assert_eq!(init.known_len(), Some(1));
+
+        let balanced =
+            List::<NonClone, NonCloneThunk>::from_values(vec![NonClone(4), NonClone(5)]).balanced();
+        let (left, right) = balanced.try_split_at(1, &mut force).unwrap().unwrap();
+        assert_eq!(left.known_len(), Some(1));
+        assert_eq!(right.known_len(), Some(1));
     }
 
     #[test]

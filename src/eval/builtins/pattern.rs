@@ -79,7 +79,12 @@ fn pattern_list_try_uncons(
             )
         }),
         Value::List(list) => list
-            .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
+            .try_pop_front_by(
+                &mut |value| {
+                    context.with_value_access(|access| access.values().duplicate_value(value))
+                },
+                &mut |thunk| force_list_thunk_in(context, thunk),
+            )?
             .map(|(head, tail)| (list_item_value(head), Value::List(tail))),
         _ => None,
     };
@@ -104,7 +109,12 @@ fn pattern_list_try_unsnoc(
             )
         }),
         Value::List(list) => list
-            .try_pop_back(&mut |thunk| force_list_thunk_in(context, thunk))?
+            .try_pop_back_by(
+                &mut |value| {
+                    context.with_value_access(|access| access.values().duplicate_value(value))
+                },
+                &mut |thunk| force_list_thunk_in(context, thunk),
+            )?
             .map(|(init, last)| (Value::List(init), list_item_value(last))),
         _ => None,
     };
@@ -124,7 +134,9 @@ fn pattern_list_is_empty(
     let empty = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.is_empty(),
         Value::List(list) => list
-            .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
+            .try_pop_front_by(&mut |_| (), &mut |thunk| {
+                force_list_thunk_in(context, thunk)
+            })?
             .is_none(),
         _ => false,
     };
@@ -370,7 +382,10 @@ fn binary_equals_list(
 ) -> Result<bool, EvaluationHalt> {
     let mut index = 0;
     loop {
-        let item = value.try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?;
+        let item = value.try_pop_front_by(
+            &mut |value| context.with_value_access(|access| access.values().duplicate_value(value)),
+            &mut |thunk| force_list_thunk_in(context, thunk),
+        )?;
         let Some((item, tail)) = item else {
             return Ok(index == expected.len());
         };

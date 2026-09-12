@@ -43,8 +43,10 @@ pub(super) fn eval_effect_map_run_builtin(
             "effect map internal results must be a list",
         ));
     };
-    let Some((item, remaining)) =
-        items.try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
+    let Some((item, remaining)) = items.try_pop_front_by(
+        &mut |value| context.with_value_access(|access| access.values().duplicate_value(value)),
+        &mut |thunk| force_list_thunk_in(context, thunk),
+    )?
     else {
         return apply_effect_api(context, api, &keys::R, vec![Value::List(results)]);
     };

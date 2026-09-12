@@ -764,7 +764,10 @@ pub(crate) fn pop_list_front_in(
     list: &List,
 ) -> Result<Option<(Value, List)>, EvaluationHalt> {
     Ok(list
-        .try_pop_front(&mut |thunk| force_list_thunk_in(context, thunk))?
+        .try_pop_front_by(
+            &mut |value| context.with_value_access(|access| access.values().duplicate_value(value)),
+            &mut |thunk| force_list_thunk_in(context, thunk),
+        )?
         .map(|(item, tail)| {
             let value = match item {
                 ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),

@@ -186,9 +186,11 @@ pub(super) fn eval_list_at_builtin(
     let index = eval_index_number_in(context, index, "list at", "list_index")?;
     let item = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.get(index).copied().map(ListItem::Byte),
-        Value::List(list) => {
-            list.try_at(index, &mut |thunk| force_list_thunk_in(context, thunk))?
-        }
+        Value::List(list) => list.try_at_by(
+            index,
+            &mut |value| context.with_value_access(|access| access.values().duplicate_value(value)),
+            &mut |thunk| force_list_thunk_in(context, thunk),
+        )?,
         _ => {
             return Err(EvaluationHalt::new(
                 "list at builtin requires a list or binary value",

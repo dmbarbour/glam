@@ -1083,7 +1083,8 @@ now also proves list spine identity and RPDS dictionary root identity while
 its existing collector counter proves that neither duplicate registers a
 root. Both operation inventories remained unchanged.
 
-**D.2b.3b — Element-producing persistent operations.** Separate list
+**D.2b.3b — Element-producing persistent operations.** Status: complete on
+2026-09-12. Separate list
 structure-only operations from operations which return another `V` or `T`.
 The latter accept borrowed duplication callbacks so core callers can thread
 one `RuntimeValueAccess::duplicate_value` operation through traversal. Retain
@@ -1091,6 +1092,24 @@ ordinary `Clone` convenience only for genuinely external generic list users;
 the `List<Value, ListThunk>` paths must use the explicit regional operation.
 Verify lookup, split, front/back removal, balancing, shared leaves, and lazy
 tails without adding registered roots.
+
+Completion record: all structure-only list construction, concatenation,
+splitting, balancing, traversal, and shared-spine operations now work without
+`V: Clone` or `T: Clone`. `try_at_by`, `try_pop_front_by`, and
+`try_pop_back_by` take a borrowed strict-value duplication operation and may
+return a different output type; forcing remains a separate callback and
+finishes before duplication of a value found behind that thunk. The former
+implicit-clone entry points are test-only because this private generic module
+has no production caller which can justify authority-free element copying.
+
+Every production `List<Value, ListThunk>` extraction now supplies
+`RuntimeValueAccess::duplicate_value` through a short evaluator access region.
+The empty-list predicate supplies a no-op projection and therefore no longer
+duplicates an element merely to discard it. A non-`Clone` value/thunk fixture
+covers indexed lookup, both end removals, a forced tail, balancing, and
+splitting; the D.2b.3a managed fixture continues to prove persistent
+duplication adds no registered roots. Both operation inventories remain
+closed at their prior counts.
 
 **D.2b.3c — Function and net shells.** Replace internal duplication,
 representation comparison, and diagnostic formatting of `NetValue`,
