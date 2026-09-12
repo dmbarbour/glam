@@ -926,7 +926,7 @@ impl LazyValue {
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedLazyRoot {
-        access.root_managed_lazy(self.edge)
+        access.root_managed_lazy(&self.edge)
     }
 
     #[cfg(test)]
@@ -1006,7 +1006,7 @@ impl PromisedValue {
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedPromiseRoot {
-        access.root_managed_promise(self.edge)
+        access.root_managed_promise(&self.edge)
     }
 
     #[cfg(test)]

@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2A complete; P2B-P5 planned. This is the nested implementation plan
+Status: P0-P2B complete; P2C-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -458,6 +458,35 @@ Add equivalent narrow gateways to `RuntimeValueAccess` and migrate:
 The edge facades may temporarily retain trait implementations only when a
 parent D.2 carrier still requires them. Every implementation is recorded as a
 counted transitional occurrence, never an allowlisted final surface.
+
+Completed 2026-09-12. `RuntimeValueAccess` now provides the sole Glam-side
+managed-edge duplication and same-allocation gateways, preserving the active
+mutator as the authority without exposing `glam_gc::Mutator` beyond the value
+domain. Lazy, promise, and core-net access views borrow their source edge and
+take one explicit access-qualified duplicate for their bounded transition
+owner. Trace reporting borrows the edge, and registered-root construction
+borrows then explicitly duplicates it before the consuming root transfer.
+The corresponding facade root paths and focused self/cross-family cycle
+fixtures use the same protocol.
+
+Core-net normalization and frontier checks now use access-qualified identity;
+the root work-order fixture opens one explicit value-access region for both
+comparisons. A compiler closure probe with all three managed-edge trait
+families disabled found only the expected parent-carrier trait errors plus
+three test-only move-after-use sites; those sites now duplicate explicitly.
+Consequently all three edge facades dropped `Copy`, while lazy and promise
+edges also dropped their unused `Debug` implementations. Their remaining
+`Clone`, `PartialEq`, and `Eq` implementations, plus core-net edge `Debug`, are
+latched exactly alongside the `LazyValue`, `PromisedValue`, `CoreRuntimeNet`,
+and `EvaluationHalt` interlocks which parent D.2 must migrate. No direct
+managed-cell operation requires implicit copying.
+
+The durable inventory now contains 713 occurrences (147 production typed, 36
+production erased, 516 test typed, and 14 test erased), fingerprint
+`4_184_986_688_920_846_838`. New observations record explicit
+duplication/identity evidence and root/access handoffs; the removal of all
+three edge `Copy` occurrences is independently enforced by the P2B closure
+latch.
 
 ### P2C — Net, mutation, and worker-local consumers
 

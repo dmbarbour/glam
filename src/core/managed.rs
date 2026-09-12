@@ -641,6 +641,24 @@ impl RuntimeValueAccess<'_> {
         self.scope.project_root(root)
     }
 
+    /// Duplicates one already-live interior edge under this value domain's
+    /// active mutator authority.
+    ///
+    /// Managed representation code uses this instead of inheriting ordinary
+    /// `Copy`/`Clone` semantics from `Gc<T>`. The edge must already be kept
+    /// live by a registered root or an enclosing traced owner.
+    #[inline(always)]
+    pub(crate) fn duplicate_edge<T: ManagedFamily>(&self, value: &Gc<T>) -> Gc<T> {
+        value.duplicate_in(self.scope.mutator)
+    }
+
+    /// Compares two already-live interior edges under this value domain's
+    /// active mutator authority.
+    #[inline(always)]
+    pub(crate) fn same_edge<T: ManagedFamily>(&self, left: &Gc<T>, right: &Gc<T>) -> bool {
+        left.same_allocation_in(right, self.scope.mutator)
+    }
+
     /// Performs one post-publication transition of a managed owner's outgoing
     /// semantic edges.
     ///
@@ -791,7 +809,7 @@ impl CoreValueAllocationScope<'_> {
     /// traced edge reached through an already rooted managed owner. Unlike a
     /// root, `Gc<T>` does not carry independently checkable release-build
     /// provenance.
-    pub(super) unsafe fn get_traced_edge<T: ManagedFamily>(&self, value: Gc<T>) -> &T {
+    pub(super) unsafe fn get_traced_edge<T: ManagedFamily>(&self, value: &Gc<T>) -> &T {
         // SAFETY: the caller supplies the exact same-heap traced-edge proof;
         // this scope's mutator excludes collection for the returned borrow.
         unsafe { value.get_unchecked(self.mutator) }

@@ -795,13 +795,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        705,
+        713,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        11_623_188_852_615_467_400,
+        4_184_986_688_920_846_838,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -846,9 +846,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 146),
+            ((SourceScope::Production, EdgeSurface::Typed), 147),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 509),
+            ((SourceScope::Test, EdgeSurface::Typed), 516),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -889,6 +889,88 @@ fn collector_p2a_direct_trait_dependencies_are_closed() {
             "crates/glam-gc/src/pointer.rs::impl PartialEq for Gc",
         ]),
         "P2A permits only the five explicitly transitional Gc trait implementations in the collector crate"
+    );
+}
+
+#[test]
+fn glam_p2b_managed_identity_trait_dependencies_are_closed() {
+    let is_direct_family = |declaration: &str| {
+        matches!(
+            declaration,
+            "src/core.rs::LazyValue"
+                | "src/core.rs::PromisedValue"
+                | "src/core.rs::impl Debug for LazyValue"
+                | "src/core.rs::impl Debug for PromisedValue"
+                | "src/core.rs::impl Eq for LazyValue"
+                | "src/core.rs::impl Eq for PromisedValue"
+                | "src/core.rs::impl PartialEq for LazyValue"
+                | "src/core.rs::impl PartialEq for PromisedValue"
+                | "src/core_net.rs::CoreRuntimeNet"
+                | "src/core_net.rs::impl Debug for CoreRuntimeNet"
+                | "src/core_net.rs::impl Eq for CoreRuntimeNet"
+                | "src/core_net.rs::impl PartialEq for CoreRuntimeNet"
+                | "src/core/managed/recursive_cells.rs::ManagedLazyEdge"
+                | "src/core/managed/recursive_cells.rs::ManagedPromiseEdge"
+                | "src/core/managed/recursive_cells.rs::ManagedCoreNetEdge"
+                | "src/core/managed/recursive_cells.rs::impl Debug for ManagedLazyEdge"
+                | "src/core/managed/recursive_cells.rs::impl Debug for ManagedPromiseEdge"
+                | "src/core/managed/recursive_cells.rs::impl Debug for ManagedCoreNetEdge"
+                | "src/core/managed/recursive_cells.rs::impl Eq for ManagedLazyEdge"
+                | "src/core/managed/recursive_cells.rs::impl Eq for ManagedPromiseEdge"
+                | "src/core/managed/recursive_cells.rs::impl Eq for ManagedCoreNetEdge"
+                | "src/core/managed/recursive_cells.rs::impl PartialEq for ManagedLazyEdge"
+                | "src/core/managed/recursive_cells.rs::impl PartialEq for ManagedPromiseEdge"
+                | "src/core/managed/recursive_cells.rs::impl PartialEq for ManagedCoreNetEdge"
+        )
+    };
+    let direct_managed_traits = current_inventory()
+        .iter()
+        .filter(|occurrence| {
+            occurrence.kind == OccurrenceKind::TraitDependency
+                && occurrence.disposition == EdgeDisposition::Defect
+                && is_direct_family(&occurrence.declaration)
+        })
+        .map(|occurrence| (occurrence.declaration.clone(), occurrence.shape.clone()))
+        .collect::<BTreeSet<_>>();
+
+    let mut expected = BTreeSet::new();
+    for edge in [
+        "ManagedLazyEdge",
+        "ManagedPromiseEdge",
+        "ManagedCoreNetEdge",
+    ] {
+        expected.insert((
+            format!("src/core/managed/recursive_cells.rs::{edge}"),
+            "Clone".to_owned(),
+        ));
+        for implemented in ["Eq", "PartialEq"] {
+            expected.insert((
+                format!("src/core/managed/recursive_cells.rs::impl {implemented} for {edge}"),
+                implemented.to_owned(),
+            ));
+        }
+    }
+    expected.insert((
+        "src/core/managed/recursive_cells.rs::impl Debug for ManagedCoreNetEdge".to_owned(),
+        "Debug".to_owned(),
+    ));
+    for (source, carrier) in [
+        ("src/core.rs", "LazyValue"),
+        ("src/core.rs", "PromisedValue"),
+        ("src/core_net.rs", "CoreRuntimeNet"),
+    ] {
+        expected.insert((format!("{source}::{carrier}"), "Clone".to_owned()));
+        for implemented in ["Debug", "Eq", "PartialEq"] {
+            expected.insert((
+                format!("{source}::impl {implemented} for {carrier}"),
+                implemented.to_owned(),
+            ));
+        }
+    }
+
+    assert_eq!(
+        direct_managed_traits, expected,
+        "P2B permits only parent-carrier trait interlocks on the three managed identity families"
     );
 }
 

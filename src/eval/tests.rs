@@ -693,7 +693,14 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
     ) else {
         panic!("closed functions should evaluate to shared function stages");
     };
-    assert!(first.stage().runtime().ptr_eq(second.stage().runtime()));
+    crate::core::test_value_factory().with_runtime_value_access(|access| {
+        assert!(
+            first
+                .stage()
+                .runtime()
+                .same_net_in(second.stage().runtime(), &access)
+        );
+    });
 }
 
 #[test]
@@ -709,12 +716,14 @@ fn curried_function_partial_application_retains_a_shared_stage() {
     let Value::Function(cloned_stage) = cloned_stage else {
         unreachable!()
     };
-    assert!(
-        first_stage
-            .stage()
-            .runtime()
-            .ptr_eq(cloned_stage.stage().runtime())
-    );
+    crate::core::test_value_factory().with_runtime_value_access(|access| {
+        assert!(
+            first_stage
+                .stage()
+                .runtime()
+                .same_net_in(cloned_stage.stage().runtime(), &access,)
+        );
+    });
 
     let result = apply_test_values(partially_applied, [n(22), n(33)]);
     assert_eq!(eval_value(&test_context(), &result).unwrap(), n(11));

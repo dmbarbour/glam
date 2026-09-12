@@ -148,12 +148,18 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching
         // runtime solely to project a root-owned source for generic fixtures.
-        ("src/core_net.rs", GatewayCounts::new(13, 0)),
+        // P2B moves exact net identity observation behind the same bounded
+        // access authority as topology inspection.
+        ("src/core_net.rs", GatewayCounts::new(14, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
+        // P2B compares registered net roots under the same explicit access
+        // authority used by production normalization batches.
+        ("src/eval/net.rs", GatewayCounts::new(1, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
-        // one bounded access region.
-        ("src/eval/tests.rs", GatewayCounts::new(0, 1)),
+        // one bounded access region. P2B's two shared-function-stage checks
+        // compare managed-net identity under matching access.
+        ("src/eval/tests.rs", GatewayCounts::new(2, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         // Promise terminalization projects a managed assignment through the
         // producer root while the coordinator mutation remains admitted.

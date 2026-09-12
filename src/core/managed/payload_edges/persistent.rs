@@ -322,7 +322,7 @@ mod tests {
             // SAFETY: both pointers are live in this scope's exact heap. Each
             // closure performs one initially-empty to one-edge replacement.
             unsafe {
-                let list_owner = scope.get_traced_edge(list_node);
+                let list_owner = scope.get_traced_edge(&list_node);
                 scope
                     .mutator
                     .with_edge_replacement(&list_node, None, Some(&dict_node), || {
@@ -336,7 +336,7 @@ mod tests {
                             ));
                     });
 
-                let dict_owner = scope.get_traced_edge(dict_node);
+                let dict_owner = scope.get_traced_edge(&dict_node);
                 scope
                     .mutator
                     .with_edge_replacement(&dict_node, None, Some(&list_node), || {

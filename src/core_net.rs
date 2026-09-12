@@ -185,6 +185,11 @@ impl CoreRuntimeNet {
         self.edge == other.edge
     }
 
+    /// Compares exact managed-net identity under matching value access.
+    pub(crate) fn same_net_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.edge.same_allocation_in(&other.edge, access)
+    }
+
     /// Derives bounded net access from matching value-domain authority.
     pub(crate) fn access<'access, 'scope>(
         &'access self,
@@ -199,7 +204,7 @@ impl CoreRuntimeNet {
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> ManagedCoreNetRoot {
-        access.root_managed_core_net(self.edge)
+        access.root_managed_core_net(&self.edge)
     }
 
     pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
@@ -844,7 +849,8 @@ impl CoreFrontierObservation {
         pair: ActivePairKey,
     ) -> CoreActivePairStep {
         assert!(
-            self.source(access.values).ptr_eq(access.owner),
+            self.source(access.values)
+                .same_net_in(access.owner, access.values),
             "frontier observation requires access to its source net"
         );
         access.step_active_pair_if_current(pair, Some(self.observed_topology))
@@ -856,7 +862,8 @@ impl CoreFrontierObservation {
         cursor: NodeId,
     ) -> CoreCursorStep {
         assert!(
-            self.source(access.values).ptr_eq(access.owner),
+            self.source(access.values)
+                .same_net_in(access.owner, access.values),
             "frontier observation requires access to its source net"
         );
         access.step_cursor_if_current(cursor, Some(self.observed_topology))
@@ -1707,7 +1714,9 @@ mod tests {
             assert!(access.with(|runtime| runtime.interface_data(exposed).is_some()));
         });
 
-        assert!(net.ptr_eq(&alias));
+        values.with_runtime_value_access(|access| {
+            assert!(net.same_net_in(&alias, &access));
+        });
     }
 
     #[test]

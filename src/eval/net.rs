@@ -305,7 +305,10 @@ fn drive_net_batch(
     access: &CoreRuntimeNetAccess<'_, '_>,
 ) -> Result<NetBatchOutcome, EvaluationHalt> {
     loop {
-        debug_assert!(work.runtime(access.values()).ptr_eq(batch_runtime));
+        debug_assert!(
+            work.runtime(access.values())
+                .same_net_in(batch_runtime, access.values())
+        );
         if let Some(outcome) = drive_net_work_item(driver, work, access)? {
             return Ok(outcome);
         }
@@ -316,7 +319,10 @@ fn drive_net_batch(
             );
             return Ok(NetBatchOutcome::Driver(NetDriverOutcome::Progressed));
         };
-        if !next.runtime(access.values()).ptr_eq(batch_runtime) {
+        if !next
+            .runtime(access.values())
+            .same_net_in(batch_runtime, access.values())
+        {
             driver.worklist.push(next);
             return Ok(NetBatchOutcome::Continue);
         }
@@ -1371,48 +1377,51 @@ mod driver_tests {
 
     #[test]
     fn cursor_dependency_work_orders_child_before_parent_retry() {
+        let values = crate::core::test_value_factory();
         let mut builder = NetBuilder::<CoreSpecialization>::new();
-        let data = builder.data(crate::core::test_value_factory().unit());
+        let data = builder.data(values.unit());
         let runtime = instantiate(builder.finish(data));
-        let cursor = runtime.test_with(&crate::core::test_value_factory(), |net| {
+        let cursor = runtime.test_with(&values, |net| {
             net.interface_neighbor(net.exposed())
                 .expect("closed data net must expose its data node")
                 .node()
         });
 
         let mut worklist = NetDriverWorklist::default();
-        let root = crate::core::test_value_factory().root_core_net(&runtime);
+        let root = values.root_core_net(&runtime);
         let expected_root = root.clone();
         worklist.follow_cursor_dependency(root, cursor, CursorDependency::LocalCursor(cursor));
 
-        match worklist.pop().expect("child work must be present") {
-            NetDriverWork::Cursor {
-                root: child_root,
-                cursor: child,
-            } => {
-                assert!(child_root.same_root(&expected_root));
-                assert_eq!(child, cursor);
+        values.with_runtime_value_access(|access| {
+            match worklist.pop().expect("child work must be present") {
+                NetDriverWork::Cursor {
+                    root: child_root,
+                    cursor: child,
+                } => {
+                    assert!(child_root.same_root_in(&expected_root, &access));
+                    assert_eq!(child, cursor);
+                }
+                _ => panic!("cursor dependency must schedule its child first"),
             }
-            _ => panic!("cursor dependency must schedule its child first"),
-        }
-        match worklist.pop().expect("parent resumption must be present") {
-            NetDriverWork::ResumeCursorDependency {
-                root: parent_root,
-                cursor: parent,
-                expected_dependency,
-                disposition,
-            } => {
-                assert!(parent_root.same_root(&expected_root));
-                assert_eq!(parent, cursor);
-                assert!(matches!(
+            match worklist.pop().expect("parent resumption must be present") {
+                NetDriverWork::ResumeCursorDependency {
+                    root: parent_root,
+                    cursor: parent,
                     expected_dependency,
-                    CursorDependency::LocalCursor(actual) if actual == cursor
-                ));
-                assert_eq!(disposition, CursorDependencyDisposition::Progressed);
+                    disposition,
+                } => {
+                    assert!(parent_root.same_root_in(&expected_root, &access));
+                    assert_eq!(parent, cursor);
+                    assert!(matches!(
+                        expected_dependency,
+                        CursorDependency::LocalCursor(actual) if actual == cursor
+                    ));
+                    assert_eq!(disposition, CursorDependencyDisposition::Progressed);
+                }
+                _ => panic!("cursor dependency must retain a parent retry"),
             }
-            _ => panic!("cursor dependency must retain a parent retry"),
-        }
-        assert!(worklist.pop().is_none());
+            assert!(worklist.pop().is_none());
+        });
     }
 
     #[test]

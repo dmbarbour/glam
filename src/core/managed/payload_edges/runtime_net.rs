@@ -358,7 +358,7 @@ mod tests {
             // SAFETY: `node` is the live owner and target in this matching
             // heap. Its runtime changes from absent to exactly one self edge.
             unsafe {
-                let owner = scope.get_traced_edge(node);
+                let owner = scope.get_traced_edge(&node);
                 scope
                     .mutator
                     .with_edge_replacement(&node, None, Some(&node), || {
