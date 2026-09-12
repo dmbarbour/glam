@@ -597,6 +597,19 @@ allowlist. It now contains 723 occurrences (156 production typed, 36
 production erased, 517 test typed, and 14 test erased), fingerprint
 `17_828_285_906_058_263_292`; the 73 P4/parent cutover defects are unchanged.
 
+Progress, 2026-09-12, after parent D.2b.3: container extraction and carrier
+shell operations are access-qualified, and compiler closure probes permitted
+removal of `FunctionCode: Clone` plus `ListThunk: Clone + Eq + PartialEq`.
+The inventory now contains 719 occurrences (152 production typed, 36
+production erased, 517 test typed, and 14 test erased), fingerprint
+`7_303_529_085_534_761_908`. Its 69 remaining defects are five collector P4
+declarations, 13 managed-facade P4 declarations, and 51 parent/core carrier
+dependencies. An exact source-backed manifest now names all 51 parent/core
+dependencies. The retained `FunctionCode: Debug + Eq + PartialEq` traits are
+required by `CoreOperator`; retained `ListThunk: Debug` is required by the
+legacy raw-`Value` list formatter. The remaining declarations are assigned to
+the parent D.2b.4 and D.2c-D.2g migrations before P4 removes the traits.
+
 ## Phase P4 — Trait Removal Cutover
 
 ### P4A — Remove implicit duplication

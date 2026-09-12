@@ -1352,7 +1352,7 @@ impl NetValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FunctionCode {
     runtime: CoreRuntimeNet,
     arity: usize,
@@ -2121,7 +2121,7 @@ pub type Dict = RedBlackTreeMapSync<Key, Value>;
 /// Lists preserve the distinction between computed lazy chunks and named
 /// assignment holes without depending on evaluator state. Only evaluator-owned
 /// list operations decide when to force either kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ListThunk {
     Lazy(LazyValue),
     Promised(PromisedValue),

@@ -1049,6 +1049,8 @@ unreachable successful-race fallback.
 
 ###### GCI11R-002D.2b.3 — Persistent Containers and Net Shells
 
+Status: complete on 2026-09-12.
+
 Replace implicit recursive `Clone`, equality, and `Debug` dependencies in the
 raw list/dictionary and function/net carrier graph with the D.2b.1 operations.
 This checkpoint changes operations, not the persistent-container
@@ -1144,11 +1146,31 @@ aliases, and three transitional derived traits. Its 477 violation set is
 unchanged. The persistent-edge inventory retains the same 73 exact P4/parent
 interlocks; no new implicit trait consumer was admitted.
 
-**D.2b.3d — Container/shell closure.** Re-run the raw-value and persistent-edge
-inventories plus compiler closure probes. Update nested P3 with the exact
+**D.2b.3d — Container/shell closure.** Status: complete on 2026-09-12. Re-run
+the raw-value and persistent-edge inventories plus compiler closure probes.
+Update nested P3 with the exact
 remaining downstream compatibility dependencies. This is a closure and
 handoff checkpoint, not permission to remove `Value` or `Gc<T>` traits before
 their coordinated P4 cutover.
+
+Completion record: compiler probes removed the four shell traits that no
+longer had a consumer: `FunctionCode: Clone` and `ListThunk: Clone + Eq +
+PartialEq`. Negative probes keep `FunctionCode: Debug + Eq + PartialEq`
+because `CoreOperator` still derives those traits, and keep `ListThunk: Debug`
+because the legacy raw-`Value` formatter still formats list structure through
+the generic list adapter. Those are downstream D.2c-D.2g interlocks, not
+container requirements.
+
+The persistent-edge inventory now contains 719 occurrences: 152 production
+typed, 36 production erased, 517 test typed, and 14 test erased. Its 69 exact
+cutover defects comprise five collector declarations, 13 managed-facade
+declarations, and 51 parent/core carrier dependencies. A source-backed exact
+manifest names every one of the 51 carrier dependencies by declaration and
+operation, so removing a dependency requires updating the expected contract
+and introducing a new implicit trait consumer fails locally. The raw-value
+inventory remains at 589 declarations and 477 violations: D.2b's remaining
+compatibility APIs are deliberately handed to D.2b.4 and the downstream
+D.2c-D.2g migrations rather than hidden by this closure checkpoint.
 
 ###### GCI11R-002D.2b.4 — Parent Interlock Closure
 

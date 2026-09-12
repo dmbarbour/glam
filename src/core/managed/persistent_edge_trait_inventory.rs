@@ -817,13 +817,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        723,
+        719,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        10_565_937_531_246_708_560,
+        7_303_529_085_534_761_908,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -868,7 +868,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 156),
+            ((SourceScope::Production, EdgeSurface::Typed), 152),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 517),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
@@ -924,7 +924,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         .iter()
         .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
         .collect::<Vec<_>>();
-    assert_eq!(defects.len(), 73);
+    assert_eq!(defects.len(), 69);
     assert!(defects.iter().all(|occurrence| matches!(
         occurrence.kind,
         OccurrenceKind::TraitDependency | OccurrenceKind::PointerIdentity
@@ -947,8 +947,102 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         BTreeMap::from([
             (RemainingDefectOwner::P4CollectorTraitCutover, 5),
             (RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b, 13),
-            (RemainingDefectOwner::D2bCoreCarrierMigration, 55),
+            (RemainingDefectOwner::D2bCoreCarrierMigration, 51),
         ])
+    );
+}
+
+#[test]
+fn d2b_container_and_shell_trait_interlocks_are_exact() {
+    let actual = current_inventory()
+        .iter()
+        .filter(|occurrence| {
+            remaining_defect_owner(occurrence)
+                == Some(RemainingDefectOwner::D2bCoreCarrierMigration)
+        })
+        .fold(
+            BTreeMap::<String, BTreeSet<String>>::new(),
+            |mut map, occurrence| {
+                map.entry(occurrence.declaration.clone())
+                    .or_default()
+                    .insert(format!("{}:{}", occurrence.kind.label(), occurrence.shape));
+                map
+            },
+        );
+
+    let traits = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("trait-dependency:{name}"))
+            .collect::<BTreeSet<_>>()
+    };
+    let mut expected = BTreeMap::new();
+    for declaration in [
+        "src/core.rs::BuiltinCall",
+        "src/core.rs::EvaluatedValue",
+        "src/core.rs::EvaluationFailure",
+        "src/core.rs::EvaluationFailureKind",
+        "src/core.rs::FunctionCode",
+        "src/core.rs::FunctionValue",
+        "src/core.rs::ListThunk",
+        "src/core.rs::NetValue",
+    ] {
+        let names = if declaration.ends_with("FunctionCode") {
+            &["Debug", "Eq", "PartialEq"][..]
+        } else if declaration.ends_with("ListThunk") {
+            &["Debug"][..]
+        } else {
+            &["Clone", "Debug", "Eq", "PartialEq"][..]
+        };
+        expected.insert(declaration.to_owned(), traits(names));
+    }
+    for declaration in [
+        "src/core.rs::LazyValue",
+        "src/core.rs::MetadataCarrier",
+        "src/core.rs::PromisedValue",
+    ] {
+        expected.insert(declaration.to_owned(), traits(&["Clone"]));
+        for name in ["Debug", "Eq", "PartialEq"] {
+            expected.insert(
+                format!(
+                    "src/core.rs::impl {name} for {}",
+                    declaration.rsplit("::").next().unwrap()
+                ),
+                traits(&[name]),
+            );
+        }
+    }
+    expected.insert(
+        "src/core.rs::Value".to_owned(),
+        traits(&["Clone", "Eq", "PartialEq"]),
+    );
+    expected.insert(
+        "src/core.rs::impl Debug for Value".to_owned(),
+        traits(&["Debug"]),
+    );
+    expected.insert(
+        "src/core.rs::FixpointComputation".to_owned(),
+        traits(&["Clone"]),
+    );
+    expected.insert("src/core.rs::LazySource".to_owned(), traits(&["Clone"]));
+    expected.insert(
+        "src/core_net.rs::CoreRuntimeNet".to_owned(),
+        traits(&["Clone"]),
+    );
+    for name in ["Debug", "Eq", "PartialEq"] {
+        expected.insert(
+            format!("src/core_net.rs::impl {name} for CoreRuntimeNet"),
+            traits(&[name]),
+        );
+    }
+    expected.insert(
+        "src/core_net.rs::eq::ptr_eq".to_owned(),
+        BTreeSet::from(["pointer-identity:self . ptr_eq (other)".to_owned()]),
+    );
+
+    assert_eq!(
+        actual, expected,
+        "D.2b.3d permits only the exact carrier traits required by downstream D.2c-D.2g compatibility callers"
     );
 }
 
