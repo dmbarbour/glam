@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2C complete; P2D-P5 planned. This is the nested implementation plan
+Status: P0-P2 complete; P3-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -534,9 +534,36 @@ erased, 517 test typed, and 14 test erased), fingerprint
 
 ### P2D — Additive closure review
 
-Audit the remaining manifest. Every surviving implicit trait use must be a
-transitive dependency assigned to one parent D.2b-D.2g occurrence. Any direct
-collector or managed-edge use left over reopens P2A-P2C.
+Audit the remaining manifest. Every surviving implicit trait use must be
+either one of the exact P4 cutover declarations or a transitive dependency
+assigned to one parent D.2b-D.2g occurrence. Any other direct collector or
+managed-edge use left over reopens P2A-P2C.
+
+Completed 2026-09-12. The additive inventory has 73 defect-classified
+occurrences, all of which are standard-trait declarations or the pointer
+comparisons implementing a temporary equality trait. Their exact ownership is:
+
+- five `Gc<T>` standard-trait implementations removed by P4;
+- thirteen managed-edge trait/equality shims removed by P4 after D.2b removes
+  their parent carrier interlocks; and
+- fifty-five raw core-carrier and `CoreRuntimeNet` trait/equality occurrences
+  owned by D.2b.
+
+The source-backed owner assignment rejects a defect in any other file or of
+any other occurrence kind, thereby reopening P2A-P2C if a direct edge use is
+introduced. This declaration inventory deliberately does not pretend to
+classify downstream raw-`Value` callers: D.2c-D.2g own those call-site
+families through D.2a's separate occurrence-level raw-value manifest, while
+D.2b owns removal of the trait-bearing carrier declarations themselves.
+
+Two compiler probes corroborate the assignment. Disabling all managed-edge
+traits leaves errors only in `LazyValue`, `PromisedValue`, and
+`CoreRuntimeNet`; disabling `CoreRuntimeNet: Clone` after P2C leaves only the
+generic `NetSpecialization::RuntimeSource` constraint and the `NetValue` and
+`FunctionCode` carrier derives. The existing collector probe continues to
+leave only the five explicitly latched `Gc<T>` declarations. No worklist,
+mutation owner, normalization descriptor, or direct managed-cell operation
+requires an implicit typed-edge trait.
 
 Exit: collector and direct managed-edge code no longer needs `Gc<T>` standard
 traits; only inventoried compatibility carriers prevent final removal.

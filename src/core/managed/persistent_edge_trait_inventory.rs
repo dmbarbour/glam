@@ -868,6 +868,68 @@ fn persistent_edge_inventory_classifications_are_closed() {
     }), "macro-contained edge operations must remain visible to the inventory");
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum RemainingDefectOwner {
+    P4CollectorTraitCutover,
+    P4ManagedFacadeCutoverAfterD2b,
+    D2bCoreCarrierMigration,
+}
+
+fn remaining_defect_owner(occurrence: &EdgeOccurrence) -> Option<RemainingDefectOwner> {
+    if occurrence.disposition != EdgeDisposition::Defect {
+        return None;
+    }
+    match occurrence.declaration.as_str() {
+        declaration if declaration.starts_with("crates/glam-gc/src/pointer.rs::") => {
+            Some(RemainingDefectOwner::P4CollectorTraitCutover)
+        }
+        declaration if declaration.starts_with("src/core/managed/recursive_cells.rs::") => {
+            Some(RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b)
+        }
+        declaration
+            if declaration.starts_with("src/core.rs::")
+                || declaration.starts_with("src/core_net.rs::") =>
+        {
+            Some(RemainingDefectOwner::D2bCoreCarrierMigration)
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
+    let defects = current_inventory()
+        .iter()
+        .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
+        .collect::<Vec<_>>();
+    assert_eq!(defects.len(), 73);
+    assert!(defects.iter().all(|occurrence| matches!(
+        occurrence.kind,
+        OccurrenceKind::TraitDependency | OccurrenceKind::PointerIdentity
+    )));
+
+    let owners = defects
+        .iter()
+        .fold(BTreeMap::new(), |mut owners, occurrence| {
+            let owner = remaining_defect_owner(occurrence).unwrap_or_else(|| {
+                panic!(
+                    "direct or unassigned persistent-edge defect reopened P2A-P2C: {}",
+                    occurrence.record()
+                )
+            });
+            *owners.entry(owner).or_default() += 1;
+            owners
+        });
+    assert_eq!(
+        owners,
+        BTreeMap::from([
+            (RemainingDefectOwner::P4CollectorTraitCutover, 5),
+            (RemainingDefectOwner::P4ManagedFacadeCutoverAfterD2b, 13),
+            (RemainingDefectOwner::D2bCoreCarrierMigration, 55),
+        ])
+    );
+}
+
 #[test]
 fn collector_p2a_direct_trait_dependencies_are_closed() {
     let collector_defects = current_inventory()

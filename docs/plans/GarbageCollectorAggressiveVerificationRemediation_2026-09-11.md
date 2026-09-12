@@ -691,11 +691,13 @@ Verification: focused immediate/managed value controls, persistent list/dict
 walks, lazy/promise/net identity operations, ordinary and aggressive tests,
 and an updated occurrence manifest with no unassigned core-family violation.
 
-Begin this checkpoint with P0-P2 of the nested persistent-edge trait plan.
-D.2b-D.2g then remove the transitive compatibility dependencies recorded by
-its P3 interlock; its P4 trait cutover may occur only after those dependencies
-reach zero. Include the nested checkpoint number in commits which perform its
-work rather than treating the link as an unrecorded side transition.
+P0-P2 of the nested persistent-edge trait plan completed on 2026-09-12. Its
+closure inventory leaves only the exact P4 declarations and the fifty-five
+core-carrier occurrences assigned here. D.2b-D.2g now remove the transitive
+compatibility dependencies recorded by its P3 interlock; its P4 trait cutover
+may occur only after those dependencies reach zero. Include the nested
+checkpoint number in commits which perform its work rather than treating the
+link as an unrecorded side transition.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
