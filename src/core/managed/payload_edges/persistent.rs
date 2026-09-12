@@ -276,14 +276,14 @@ mod tests {
                         LogicalListPart::Bytes => {}
                         LogicalListPart::Values(values) => {
                             for edge in values {
-                                visitor.visit(*edge);
+                                visitor.visit(edge);
                             }
                         }
-                        LogicalListPart::Thunk(edge) => visitor.visit(*edge),
+                        LogicalListPart::Thunk(edge) => visitor.visit(edge),
                     });
                 }
                 PersistentFixturePayload::Dict(dict) => {
-                    visit_map_entries(dict, &mut |_, edge| visitor.visit(*edge));
+                    visit_map_entries(dict, &mut |_, edge| visitor.visit(edge));
                 }
             }
         }

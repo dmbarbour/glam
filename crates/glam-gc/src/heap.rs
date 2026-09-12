@@ -4455,9 +4455,9 @@ mod tests {
         fn visit(&self, visitor: &mut Visitor<'_>) {
             match self {
                 Self::Empty => {}
-                Self::One(edge) => visitor.visit(*edge),
+                Self::One(edge) => visitor.visit(edge),
                 Self::Many(edges) => {
-                    for edge in edges.iter().copied() {
+                    for edge in edges {
                         visitor.visit(edge);
                     }
                 }
@@ -4577,7 +4577,7 @@ mod tests {
     unsafe impl Trace for PanickingTraceNode {
         fn trace(&self, visitor: &mut Visitor<'_>) {
             self.traces.fetch_add(1, Ordering::Relaxed);
-            for (index, edge) in self.edges.iter().copied().enumerate() {
+            for (index, edge) in self.edges.iter().enumerate() {
                 if self.armed.load(Ordering::Acquire) && self.panic_after_edges == Some(index) {
                     panic!("injected trace panic after {index} reported edges");
                 }
@@ -4606,7 +4606,7 @@ mod tests {
     unsafe impl Trace for InvalidEdgeHolder {
         fn trace(&self, visitor: &mut Visitor<'_>) {
             self.traces.fetch_add(1, Ordering::Relaxed);
-            visitor.visit(self.edge);
+            visitor.visit(&self.edge);
         }
     }
 

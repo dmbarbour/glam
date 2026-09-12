@@ -1,6 +1,6 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0 complete; P1-P5 planned. This is the nested implementation plan
+Status: P0 and P1A complete; P1B-P5 planned. This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -345,6 +345,16 @@ contracts. P0 closes with the 573-occurrence manifest recorded by P0B.
   worklist helpers without removing the old standard traits yet.
 - Verify trace panic/retry, repeated-edge reporting, cycles, roots, and deep
   non-recursive worklists retain the same completed mark bitmap.
+
+Completed 2026-09-12. `Visitor::visit`, `Gc::erase`, and debug ownership
+validation now borrow typed edges. Collector graph fixtures and Glam's managed
+payload/identity tracers report references directly, including repeated
+edges, persistent lists/dicts, and logical runtime-net payloads. The existing
+panic/retry and checked non-recursive cycle fixtures pass unchanged. The
+inventory partition remains 573 occurrences, with its normalized fingerprint
+updated to `7_896_752_868_316_667_993`; the unchanged category counts confirm
+that this checkpoint changed consumption mechanics rather than ownership
+classification.
 
 ### P1B — Explicit duplication and identity
 

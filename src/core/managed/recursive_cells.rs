@@ -379,7 +379,7 @@ impl RuntimeValueAccess<'_> {
 
 impl ManagedLazyEdge {
     pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
-        visitor.visit(self.0);
+        visitor.visit(&self.0);
     }
 
     pub(crate) fn access<'access, 'scope>(
@@ -399,7 +399,7 @@ impl ManagedLazyEdge {
 
 impl ManagedPromiseEdge {
     pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
-        visitor.visit(self.0);
+        visitor.visit(&self.0);
     }
 
     pub(crate) fn access<'access, 'scope>(
@@ -419,7 +419,7 @@ impl ManagedPromiseEdge {
 
 impl ManagedCoreNetEdge {
     pub(crate) fn trace(self, visitor: &mut Visitor<'_>) {
-        visitor.visit(self.0);
+        visitor.visit(&self.0);
     }
 
     pub(crate) fn access<'access, 'scope>(

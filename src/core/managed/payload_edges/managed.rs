@@ -112,7 +112,7 @@ mod tests {
         fn visit_stop(&self, value: &Value, visitor: &mut Visitor<'_>) -> bool {
             if value == &self.marker {
                 self.marker_visits.fetch_add(1, Ordering::Relaxed);
-                visitor.visit(self.leaf);
+                visitor.visit(&self.leaf);
                 return true;
             }
             if matches!(
@@ -120,7 +120,7 @@ mod tests {
                 Value::Lazy(_) | Value::Promised(_) | Value::Function(_) | Value::Net(_)
             ) {
                 self.identity_visits.fetch_add(1, Ordering::Relaxed);
-                visitor.visit(self.leaf);
+                visitor.visit(&self.leaf);
                 return true;
             }
             false

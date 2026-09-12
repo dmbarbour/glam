@@ -314,7 +314,7 @@ mod tests {
                 .as_ref()
                 .expect("a published managed net fixture must retain its runtime");
             runtime.visit_logical_payloads(&mut |payload| match payload {
-                RuntimeNetPayload::Data(edge) => visitor.visit(*edge),
+                RuntimeNetPayload::Data(edge) => visitor.visit(edge),
                 RuntimeNetPayload::Operator(()) => {}
                 RuntimeNetPayload::Source(_) => {
                     unreachable!("the closed fixture creates no logical copies")

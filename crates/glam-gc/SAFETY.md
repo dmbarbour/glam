@@ -1219,9 +1219,9 @@ opaque-value escape hatch.
 
 ### Visitor erasure boundary
 
-`Visitor::visit` currently converts `Gc<T>` to a private pointer-only
-`ErasedGc` and synchronously invokes its collector-owned receiver. The
-persistent-edge migration changes this input to `&Gc<T>` so tracing never
+`Visitor::visit` borrows `&Gc<T>`, converts its address to a private
+pointer-only `ErasedGc`, and synchronously invokes its collector-owned
+receiver. Tracing therefore never
 consumes or implicitly copies the stored typed edge; only the visitor copies
 its address into collector-private work state. Erasure preserves the
 managed address but neither constructs a reference nor adds or guesses heap or

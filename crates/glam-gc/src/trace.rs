@@ -103,8 +103,9 @@ impl<'visit> Visitor<'visit> {
         Self { visit }
     }
 
-    /// Reports one managed edge.
-    pub fn visit<T: Trace>(&mut self, edge: Gc<T>) {
+    /// Reports one managed edge without consuming or duplicating its typed
+    /// persistent handle.
+    pub fn visit<T: Trace>(&mut self, edge: &Gc<T>) {
         (self.visit)(edge.erase());
     }
 }
@@ -136,7 +137,7 @@ unsafe impl Sync for ErasedGc {}
 // SAFETY: `Gc<T>` contains exactly one managed edge, which is reported once.
 unsafe impl<T: Trace> Trace for Gc<T> {
     fn trace(&self, visitor: &mut Visitor<'_>) {
-        visitor.visit(*self);
+        visitor.visit(self);
     }
 }
 
