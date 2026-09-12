@@ -838,9 +838,8 @@ recursive-payload classification.
 
 ###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
 
-Status: implementation complete on 2026-09-12 through D.2b.2a-D.2b.2d
-below; the cross-phase accounting follow-up D.2b.2e remains planned before
-D.2c.
+Status: complete on 2026-09-12 through D.2b.2a-D.2b.2e below, including the
+cross-phase accounting inventories and immediate nested-construction repair.
 
 Move the six managed-cell operations and three runtime-root projections to the
 new surface. Root/public clones continue to share registered root cells;
@@ -897,8 +896,8 @@ their fixture migration remains deliberately assigned to GCI11R-002E.
 
 ###### GCI11R-002D.2b.2e — Root Traffic and Mutator Introduction Accounting
 
-Status: planned. Complete this source-audit checkpoint before beginning the
-broad D.2c-D.2g call-tree migrations.
+Status: complete on 2026-09-12. Its two ledgers remain live cross-phase gates
+through the broad D.2c-D.2g call-tree migrations.
 
 D.2b.2a-D.2b.2d established the right construction primitives, but their
 current inventories answer only part of the migration question. The
@@ -1021,7 +1020,8 @@ deliberate test fixtures and remain in the D.2E ledger. These classifications
 are migration assignments, not a claim that all eleven raw projection seams
 are already corrected.
 
-**D.2b.2e.3 — Immediate nesting repair and phase interlock.** First latch the
+**D.2b.2e.3 — Immediate nesting repair and phase interlock.** Status: complete
+on 2026-09-12. First latch the
 current redundant lazy-cycle nested construction, prove the access-depth/root
 registration mismatch, then replace it with publication through the access
 already held. Repair any other equally direct lexical nesting found by the
@@ -1034,6 +1034,18 @@ publication, rooted transport, or removed fixture—not merely disappear from a
 file-level count. D.2h closure requires no pending/defect disposition, no
 unreviewed hierarchical introduction, and root-registration counter evidence
 for each retained high-traffic boundary.
+
+Completion record: a failing-first syntax-backed check isolated
+`poison_lazy_cycle` as the only factory root construction nested inside an
+active runtime-access callback. The exceptional successful terminal now calls
+`access.root_runtime_value` directly, so it registers its required result root
+without opening a second mutator region. The exact root ledger now classifies
+that occurrence as a regional publication and reports zero immediate defects.
+The mutator-introduction ledger independently reports no lexically nested
+production gateway and no production API which directly receives matching
+access before reopening the domain. Focused strict one- and two-node lazy-cycle
+tests preserve terminal semantics; the structural latch covers the otherwise
+unreachable successful-race fallback.
 
 ###### GCI11R-002D.2b.3 — Persistent Containers and Net Shells
 

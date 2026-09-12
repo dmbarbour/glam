@@ -153,10 +153,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/pump.rs",
         0,
-        1,
         0,
-        "centralized client/spark evaluation and exceptional lazy-cycle publication",
-        "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes"
+        1,
+        "centralized client/spark evaluation and same-region exceptional lazy-cycle publication",
+        "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes; GCI11R-002D.2b.2e.3 nested-construction repair"
     ),
     entry!(
         "src/evaluation/session.rs",
@@ -255,6 +255,7 @@ struct RootPublicationOccurrence {
     surface: RootPublicationSurface,
     ordinal: usize,
     test_only: bool,
+    access_nesting: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -344,7 +345,6 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root" => {
                     RootPublicationDisposition::CanonicalConstructor
                 }
-                "src/evaluation/pump.rs::poison_lazy_cycle" => RootPublicationDisposition::Defect,
                 "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark"
                 | "src/evaluation/coordinator/task.rs::promise_assignment_terminal"
                 | "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf"
@@ -374,6 +374,7 @@ impl RootPublicationOccurrence {
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
                 | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
+                | "src/evaluation/pump.rs::poison_lazy_cycle"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
                 | "src/g_syntax.rs::impl Diagnostic::with_emission"
                 | "src/g_syntax/compiler_values.rs::root_value"
@@ -416,6 +417,7 @@ struct RootPublicationVisitor {
     test_scopes: Vec<bool>,
     ordinals: BTreeMap<(String, RootPublicationSurface), usize>,
     occurrences: Vec<RootPublicationOccurrence>,
+    access_nesting: usize,
 }
 
 impl RootPublicationVisitor {
@@ -426,6 +428,7 @@ impl RootPublicationVisitor {
             test_scopes: vec![test_only],
             ordinals: BTreeMap::new(),
             occurrences: Vec::new(),
+            access_nesting: 0,
         }
     }
 
@@ -467,6 +470,7 @@ impl RootPublicationVisitor {
             surface,
             ordinal: *ordinal,
             test_only: self.in_test_scope(),
+            access_nesting: self.access_nesting,
         });
     }
 }
@@ -513,7 +517,8 @@ impl<'ast> Visit<'ast> for RootPublicationVisitor {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        match node.method.to_string().as_str() {
+        let method = node.method.to_string();
+        match method.as_str() {
             "construct_runtime_value_root" | "try_construct_runtime_value_root" => {
                 self.record(RootPublicationSurface::ScopedFactory);
             }
@@ -522,7 +527,20 @@ impl<'ast> Visit<'ast> for RootPublicationVisitor {
             }
             _ => {}
         }
-        visit::visit_expr_method_call(self, node);
+        if method == "with_runtime_value_access" {
+            self.visit_expr(&node.receiver);
+            for argument in &node.args {
+                if matches!(argument, syn::Expr::Closure(_)) {
+                    self.access_nesting += 1;
+                    self.visit_expr(argument);
+                    self.access_nesting -= 1;
+                } else {
+                    self.visit_expr(argument);
+                }
+            }
+        } else {
+            visit::visit_expr_method_call(self, node);
+        }
     }
 }
 
@@ -607,7 +625,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#2|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::permanent_exit_wait_retains_only_its_summary_and_obligations#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
-    "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=scoped-factory|scope=production",
+    "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
     "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
     "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=production",
@@ -777,8 +795,8 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
             .iter()
             .filter(|review| review.disposition == RootPublicationDisposition::Defect)
             .count(),
-        1,
-        "the latched nested lazy-cycle root construction is the only immediate defect"
+        0,
+        "the immediate nested lazy-cycle root construction defect must stay repaired"
     );
     assert_eq!(
         reviews
@@ -801,6 +819,23 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
                         && review.disposition != RootPublicationDisposition::TemporaryTestFixture)
             }),
         "production and test-only root-publication dispositions must remain distinct"
+    );
+}
+
+#[test]
+fn runtime_root_construction_does_not_reenter_an_active_access_region() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let nested = collect_root_publication_occurrences(manifest)
+        .into_iter()
+        .filter(|occurrence| {
+            occurrence.access_nesting != 0
+                && occurrence.surface == RootPublicationSurface::ScopedFactory
+        })
+        .map(|occurrence| occurrence.record())
+        .collect::<Vec<_>>();
+    assert!(
+        nested.is_empty(),
+        "factory root construction reentered active runtime access: {nested:?}"
     );
 }
 

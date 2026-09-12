@@ -571,7 +571,7 @@ fn poison_lazy_cycle(
                             "a successful concurrent lazy result contradicts a strict dependency cycle"
                         );
                         EvaluationWaitTerminal::Complete(
-                            values.construct_runtime_value_root(|_| value.into_value()),
+                            access.root_runtime_value(value.into_value()),
                         )
                     }
                 };
