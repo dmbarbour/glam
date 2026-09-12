@@ -1369,6 +1369,32 @@ violation: D.2c fell from 201 to 191 operations, the value-demand family from
 29 to 19, and the D.2g compiler-diagnostic family rose from 29 to 34 while the
 repository-wide violation count fell from 477 to 472.
 
+Implementation ordering note, 2026-09-12: the remaining work must establish
+the suspension boundary before migrating the projection call tree.  The
+evaluator owns durable *outer* machines (`ClientDemandOperation`,
+`LazyTaskMachine`, and `PromiseFollower`), but the recursive evaluator below
+them is not itself a resumable machine. `eval_lazy_in` and `eval_promised_in`
+therefore retain their Rust call stack while they reserve, pump, or wait on a
+dependency. A regional operation cannot reuse that hybrid while retaining
+value access, because its mutator would cross scheduler coordination.
+
+An uncommitted D.2c.1d.1 prototype proved that returning only the exact rooted
+lazy/promise is insufficient. A reflection step which constructed an
+intermediate lazy retried from its preceding `MachineWork`, constructed a
+fresh lazy, and suspended again without bound. The dependency was durable, but
+the evaluator continuation which should consume its result was not. This is a
+deterministic replay defect, not a scheduling race.
+
+Consequently D.2c.1d begins with an explicit design checkpoint before
+D.2c.1b-c. The selected continuation direction requires a resumable evaluator
+or equivalent CPS/trampoline representation whose frames retain rooted state
+between polls. Merely adding lazy/promise variants to `EvaluationHalt`, or
+restarting the enclosing outer machine after their completion, is rejected.
+The fallback is to preserve Rust-stack pumping and weaken the proposed
+regional raw-value invariant; that does not implement the selected
+continuation model and requires an explicit policy decision rather than an
+accidental compatibility exception.
+
 **D.2c.1b — List, key, number, and tagged-value projections.** Migrate list
 front forcing, key conversion, tagged payload lookup, index/number extraction,
 and semantic-undefined inspection. Preserve the D.2b.3 rule that the force
@@ -1386,6 +1412,46 @@ promise following, deferred waits, and reflection-task evaluation so every
 wait/reservation/callback occurs after regional access has ended. A resumed
 step reopens access and reprojects from the durable owner. Latch both sides of
 each ordering with barriers or probes; repeated runs are not evidence.
+
+This is partitioned as follows:
+
+- **D.2c.1d.0 — Recursive evaluator continuation decision.** Inventory the
+  recursive call frames which may surround lazy, promise, reflection, net, or
+  host suspension. Specify the smallest resumable evaluator state which can
+  preserve those frames without retaining a mutator. Partition its migration
+  by frame family before editing production behavior. Verification must
+  include the reflection-annotation replay case which exposed unbounded fresh
+  lazy construction. If this checkpoint instead preserves Rust-stack pumping,
+  revise D.2c's regional invariant and root-traffic policy explicitly first.
+- **D.2c.1d.1 — Durable lazy and promise suspension.** Extend the existing
+  evaluation-halt/dependency vocabulary so a callback-free regional demand can
+  return the exact rooted lazy or promise which prevented completion.  The
+  regional operation performs no reservation, pumping, waiting, or wakeup.
+  After its access region closes, the owning client-demand, lazy-task,
+  promise-follower, spark, net, or reflection coordinator translates that
+  disposition into the existing scheduled dependency.  Preserve the cheaper
+  direct promise subscription for a resolver-owned unassigned promise; do not
+  manufacture a follower solely to wait for assignment.
+- **D.2c.1d.2 — Reflection suspension.** Separate reflection-task reservation,
+  activation, polling, and acknowledgement from regional inspection and
+  target projection.  A lazy task retains the durable reservation/handle or
+  completed root between polls; no reflection callback or coordinator access
+  occurs under `EvaluationValueAccess`.
+- **D.2c.1d.3 — Regional demand cutover.** Introduce the callback-free regional
+  value-demand entry and make the existing outer machine entry a continuation
+  driver over its success or durable-suspension result.  Regional recursion
+  passes one borrowed access through its call tree.  Scheduling a discovered
+  dependency is an outer-machine action after that borrow has ended, not a
+  recursive evaluator side effect.
+- **D.2c.1d.4 — Boundary verification.** Add deterministic probes on both sides
+  of lazy, promise, and reflection suspension.  They must prove the dependency
+  is discovered while access is active and reservation/poll/wait happens only
+  after access is closed.  Repetition remains stress evidence only.
+
+The provisional order is D.2c.1d.0, then the partition approved there,
+D.2c.1d.1-.3, D.2c.1b-c, and D.2c.1d.4. The final verification checkpoint
+closes the temporary raw-value seams exposed while the regional call tree is
+being converted.
 
 Verification: focused `eval::value` and lazy/promise/fixpoint tests ordinarily
 and with `aggressive-gc-verification`; root-registration counters across cache
