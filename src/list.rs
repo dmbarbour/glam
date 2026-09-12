@@ -23,11 +23,10 @@ enum ListLookup<V> {
     Exhausted(usize),
 }
 
-#[derive(Debug, Clone)]
-pub struct List<V: Clone, T: Clone>(Arc<ListNode<V, T>>);
+pub struct List<V, T>(Arc<ListNode<V, T>>);
 
-#[derive(Debug, Clone)]
-enum ListNode<V: Clone, T: Clone> {
+#[derive(Debug)]
+enum ListNode<V, T> {
     Empty,
     Bytes(Bytes),
     Values(SharedSlice<V>),
@@ -38,17 +37,47 @@ enum ListNode<V: Clone, T: Clone> {
 
 type FingerList<V> = fingertrees::sync::FingerTree<ListChunk<V>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ListChunk<V: Clone> {
+#[derive(Debug, PartialEq, Eq)]
+enum ListChunk<V> {
     Bytes(Bytes),
     Values(SharedSlice<V>),
 }
 
-#[derive(Clone)]
 struct SharedSlice<T> {
     data: Arc<[T]>,
     start: usize,
     len: usize,
+}
+
+impl<V, T> Clone for List<V, T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<V: fmt::Debug, T: fmt::Debug> fmt::Debug for List<V, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<V> Clone for ListChunk<V> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Bytes(bytes) => Self::Bytes(bytes.clone()),
+            Self::Values(values) => Self::Values(values.clone()),
+        }
+    }
+}
+
+impl<T> Clone for SharedSlice<T> {
+    fn clone(&self) -> Self {
+        Self {
+            data: Arc::clone(&self.data),
+            start: self.start,
+            len: self.len,
+        }
+    }
 }
 
 /// Logical work performed while enumerating a list without forcing thunks.
@@ -178,7 +207,7 @@ impl<T: PartialEq> PartialEq for SharedSlice<T> {
 
 impl<T: Eq> Eq for SharedSlice<T> {}
 
-impl<V: Clone> ListChunk<V> {
+impl<V> ListChunk<V> {
     fn len(&self) -> usize {
         match self {
             Self::Bytes(bytes) => bytes.len(),
@@ -199,7 +228,10 @@ impl<V: Clone> ListChunk<V> {
         }
     }
 
-    fn item_at(&self, index: usize) -> Option<ListItem<V>> {
+    fn item_at(&self, index: usize) -> Option<ListItem<V>>
+    where
+        V: Clone,
+    {
         match self {
             Self::Bytes(bytes) => bytes.get(index).copied().map(ListItem::Byte),
             Self::Values(values) => values.as_slice().get(index).cloned().map(ListItem::Value),
@@ -218,7 +250,7 @@ impl<V: Clone> ListChunk<V> {
     }
 }
 
-impl<V: Clone> Measured for ListChunk<V> {
+impl<V> Measured for ListChunk<V> {
     type Measure = Sum<usize>;
 
     fn measure(&self) -> Self::Measure {
@@ -714,6 +746,11 @@ impl<V: Clone, T: Clone> List<V, T> {
         matches!(self.0.as_ref(), ListNode::Empty)
     }
 
+    #[cfg(test)]
+    pub(crate) fn shares_spine_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     fn from_finger(finger: FingerList<V>) -> Self {
         if finger.is_empty() {
             Self::empty()
@@ -1036,6 +1073,20 @@ mod tests {
     use super::*;
 
     type TestList = List<u32, &'static str>;
+
+    struct NonClone;
+
+    #[test]
+    fn cloning_a_list_shell_does_not_require_cloneable_contents() {
+        let list: List<NonClone, NonClone> =
+            List(Arc::new(ListNode::Values(SharedSlice::from_vec(vec![
+                NonClone,
+            ]))));
+
+        let duplicate = list.clone();
+
+        assert!(Arc::ptr_eq(&list.0, &duplicate.0));
+    }
 
     #[test]
     fn byte_storage_stays_segmented_after_balancing() {

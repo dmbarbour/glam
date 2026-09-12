@@ -1057,6 +1057,54 @@ representation; compact/managed spines remain separately planned.
 Verification: persistent sharing remains intact, duplication adds no roots,
 and list/dictionary/net fixtures pass in ordinary and aggressive modes.
 
+This work is partitioned because the generic persistent-list bounds, the
+operations which actually duplicate list members, and the managed net-shell
+traits have different failure surfaces. The final `Value`/`Gc<T>` trait
+removal remains the nested plan's coordinated P4 cutover; these checkpoints
+remove the structural reasons that cutover would otherwise fail.
+
+**D.2b.3a — Shared-spine container traits.** Status: complete on 2026-09-12.
+Make cloning the persistent list
+shell depend only on cloning its shared spine, not on `V: Clone` or `T: Clone`.
+Do the same for internal shared slices and finger-tree chunks whose clone is
+only an `Arc`/`Bytes` operation. Keep element-producing methods bounded until
+D.2b.3b supplies their explicit duplication operation. Latch the distinction
+with a non-`Clone` element/thunk fixture and prove that the duplicate points to
+the same spine. Dictionary shell cloning already has this property through
+`rpds`; record and test it rather than wrapping or replacing that container.
+
+Completion record: `List<V, T>`, its shared slice, and its finger-tree chunk
+now implement structural cloning without `V: Clone` or `T: Clone`; the
+remaining large inherent implementation keeps its element-producing bounds
+for D.2b.3b. A compile-time generic fixture constructs and duplicates a list
+whose element and thunk types implement no `Clone`, then proves both shells
+name the same `Arc` spine. The access-qualified `Value` duplication fixture
+now also proves list spine identity and RPDS dictionary root identity while
+its existing collector counter proves that neither duplicate registers a
+root. Both operation inventories remained unchanged.
+
+**D.2b.3b — Element-producing persistent operations.** Separate list
+structure-only operations from operations which return another `V` or `T`.
+The latter accept borrowed duplication callbacks so core callers can thread
+one `RuntimeValueAccess::duplicate_value` operation through traversal. Retain
+ordinary `Clone` convenience only for genuinely external generic list users;
+the `List<Value, ListThunk>` paths must use the explicit regional operation.
+Verify lookup, split, front/back removal, balancing, shared leaves, and lazy
+tails without adding registered roots.
+
+**D.2b.3c — Function and net shells.** Replace internal duplication,
+representation comparison, and diagnostic formatting of `NetValue`,
+`FunctionCode`, `FunctionValue`, `BuiltinCall`, and `ListThunk` with the
+D.2b.1 access-qualified operations. The standard traits may remain only as
+the exact, source-latched compatibility declarations needed by unmigrated
+D.2c-D.2g callers; no new core operation may select them.
+
+**D.2b.3d — Container/shell closure.** Re-run the raw-value and persistent-edge
+inventories plus compiler closure probes. Update nested P3 with the exact
+remaining downstream compatibility dependencies. This is a closure and
+handoff checkpoint, not permission to remove `Value` or `Gc<T>` traits before
+their coordinated P4 cutover.
+
 ###### GCI11R-002D.2b.4 — Parent Interlock Closure
 
 Update both occurrence inventories after each migrated declaration. This

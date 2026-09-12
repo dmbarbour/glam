@@ -3323,11 +3323,18 @@ mod tests {
                 &duplicate_metadata.metadata
             ));
 
-            let list = Value::List(List::from_values(vec![lazy]));
-            let dict =
-                Value::Dict(Dict::new_sync().insert(Key::atom_from_text("promise"), promise));
-            assert!(matches!(access.duplicate_value(&list), Value::List(_)));
-            assert!(matches!(access.duplicate_value(&dict), Value::Dict(_)));
+            let list_shell = List::from_values(vec![lazy]);
+            let list = Value::List(list_shell.clone());
+            let dict_shell = Dict::new_sync().insert(Key::atom_from_text("promise"), promise);
+            let dict = Value::Dict(dict_shell.clone());
+            let Value::List(duplicate_list) = access.duplicate_value(&list) else {
+                panic!("duplicating a list preserves its outer variant");
+            };
+            assert!(list_shell.shares_spine_with(&duplicate_list));
+            let Value::Dict(duplicate_dict) = access.duplicate_value(&dict) else {
+                panic!("duplicating a dictionary preserves its outer variant");
+            };
+            assert!(dict_shell.ptr_eq(&duplicate_dict));
             assert_eq!(
                 access.duplicate_value(&Value::Number(42.into())),
                 Value::Number(42.into())
