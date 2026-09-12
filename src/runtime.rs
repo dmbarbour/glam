@@ -204,10 +204,11 @@ pub(crate) struct RuntimeValueRoot {
 }
 
 impl RuntimeValueRoot {
+    /// Test-fixture convenience which keeps production construction on the
+    /// access-qualified publication surface.
+    #[cfg(test)]
     pub(crate) fn new(values: &CoreValueFactory, value: Value) -> Self {
-        Self {
-            value: PreparedRuntimeValueRoot::prepare(values, value),
-        }
+        values.with_runtime_value_access(|access| access.root_runtime_value(value))
     }
 
     fn new_from_access(
@@ -218,16 +219,6 @@ impl RuntimeValueRoot {
         Self {
             value: PreparedRuntimeValueRoot::prepare_with_access(observer, access, value),
         }
-    }
-
-    pub(crate) fn from_observer(
-        observer: &crate::core::RuntimeValueObserver,
-        value: Value,
-    ) -> Self {
-        let values = observer
-            .upgrade()
-            .expect("a runtime value can only be rooted while its domain is live");
-        Self::new(&values, value)
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
@@ -257,20 +248,14 @@ impl RuntimeValueRoot {
         self.value.with_value(access, operation)
     }
 
-    /// Reopens this root's weak domain solely for inventoried owner-local
-    /// recovery where no caller-supplied access region exists.
-    ///
-    /// Callers may use the returned core shell only inside their bounded
-    /// operation; durable state must retain the original registered root.
-    pub(crate) fn clone_core_in_own_domain(&self) -> Option<Value> {
-        let values = self.value.observer().upgrade()?;
-        Some(values.with_runtime_value_access(|access| self.clone_core_with(&access)))
-    }
-
     #[cfg(test)]
     pub(crate) fn clone_core_for_test(&self) -> Value {
-        self.clone_core_in_own_domain()
-            .expect("test root observation requires its live value domain")
+        let values = self
+            .value
+            .observer()
+            .upgrade()
+            .expect("test root observation requires its live value domain");
+        values.with_runtime_value_access(|access| self.clone_core_with(&access))
     }
 }
 
@@ -331,7 +316,8 @@ struct RuntimeFailureRootInner {
 
 impl RuntimeFailureRoot {
     pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
-        let value_roots = Self::root_direct_values(values, &failure);
+        let value_roots =
+            values.with_runtime_value_access(|access| Self::root_direct_values(&access, &failure));
         Self(Arc::new(RuntimeFailureRootInner {
             values: values.runtime_value_observer(),
             failure,
@@ -350,12 +336,12 @@ impl RuntimeFailureRoot {
     }
 
     fn root_direct_values(
-        values: &CoreValueFactory,
+        access: &crate::core::RuntimeValueAccess<'_>,
         failure: &EvaluationFailure,
     ) -> Box<[RuntimeValueRoot]> {
         let mut value_roots = Vec::new();
         failure.visit_direct_values(&mut |value| {
-            value_roots.push(RuntimeValueRoot::new(values, value.clone()));
+            value_roots.push(access.root_runtime_value(access.duplicate_value(value)));
         });
         value_roots.into_boxed_slice()
     }

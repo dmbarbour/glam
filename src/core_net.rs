@@ -1360,7 +1360,8 @@ mod tests {
         assert_eq!(records[0].adding_edges(), 1);
 
         failed.with_test_access(&values, |runtime| {
-            runtime.fail_claimed_call(failed_call, EvaluationHalt::from_value(third));
+            let halt = EvaluationHalt::from_value(runtime.values(), third);
+            runtime.fail_claimed_call(failed_call, halt);
         });
         let records = completion_probe.records();
         assert_eq!(records.len(), 2);

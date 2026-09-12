@@ -59,23 +59,23 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
-        [11, 0, 1, 0],
-        "rooted input setup, recursive loader results, and existing module root through drain"
+        [10, 0, 1, 0],
+        "rooted input setup, recursive loader results, and existing module root through drain; D.2b.2 uses scoped construction without naming the concrete root"
     ),
     entry!(
         "src/compiler.rs",
-        [27, 0, 3, 0],
-        "rooted source definitions, final promise, origin, and import result; deferred import inputs are I10A HostCall captures"
+        [24, 0, 3, 0],
+        "rooted source definitions, final promise, origin, and import result; D.2b.2 removes direct constructor names; deferred import inputs are I10A HostCall captures"
     ),
     entry!(
         "src/g_syntax.rs",
-        [5, 0, 0, 0],
-        "rooted compiler diagnostics and lowered definitions across publication"
+        [4, 0, 1, 0],
+        "rooted compiler diagnostics and lowered definitions across publication; D.2b.2 projects diagnostic emissions through explicit access"
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [40, 0, 1, 0],
-        "owned closed-evaluation results and admitted complete compiler-helper and effect caches"
+        [39, 0, 1, 0],
+        "owned closed-evaluation results and admitted complete compiler-helper and effect caches; D.2b.2 uses scoped root construction"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",

@@ -60,13 +60,20 @@ pub(super) fn eval_anno_builtin(
             target,
         )),
         RecognizedAnnotation::Error => {
-            let message = eval_value_in(context, target)
-                .map_err(|error| error.with_context(evaluation_context_frame("error_message")))?;
-            Err(EvaluationHalt::from_value(message))
+            let message = eval_value_in(context, target).map_err(|error| {
+                context.with_value_access(|access| {
+                    error.with_context(access.values(), evaluation_context_frame("error_message"))
+                })
+            })?;
+            Err(context
+                .with_value_access(|access| EvaluationHalt::from_value(access.values(), message)))
         }
         RecognizedAnnotation::Context {
             context: diagnostic_context,
-        } => eval_value_in(context, target).map_err(|error| error.with_context(diagnostic_context)),
+        } => eval_value_in(context, target).map_err(|error| {
+            context
+                .with_value_access(|access| error.with_context(access.values(), diagnostic_context))
+        }),
         RecognizedAnnotation::Invalid(message) => Ok(annotation_error_value(context, message)),
         RecognizedAnnotation::Unknown(rendered) => {
             warn_unknown_annotation(&rendered);
@@ -119,8 +126,11 @@ fn recognize_annotation(
     context: &EvaluatorStepContext<'_>,
     annotation: &Value,
 ) -> Result<RecognizedAnnotation, EvaluationHalt> {
-    let annotation = eval_value_in(context, annotation)
-        .map_err(|error| error.with_context(evaluation_context_frame("annotation")))?;
+    let annotation = eval_value_in(context, annotation).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(access.values(), evaluation_context_frame("annotation"))
+        })
+    })?;
     if let Value::Atom(atom) = &annotation {
         return Ok(recognize_simple_annotation(atom)
             .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}"))));

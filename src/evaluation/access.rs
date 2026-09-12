@@ -170,7 +170,9 @@ impl EvaluatorStepContext<'_> {
     /// I4F.2 replaces the wrapper with a collector root without changing this
     /// step-owned boundary.
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
-        RuntimeValueRoot::new(self.context.values(), value)
+        self.context
+            .values()
+            .construct_runtime_value_root(|_| value)
     }
 
     /// Compatibility failure publication for one bounded evaluator result.
@@ -371,7 +373,7 @@ impl EvaluationPollContext {
     /// pretending the poll context carries managed access.
     #[cfg(test)]
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
-        RuntimeValueRoot::new(&self.demand.values, value)
+        self.demand.values.construct_runtime_value_root(|_| value)
     }
 
     /// Roots a machine failure before it crosses the poll boundary.

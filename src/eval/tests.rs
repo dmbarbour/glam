@@ -907,10 +907,15 @@ fn deferred_computation_caches_one_structured_failure() {
     let lazy = LazyValue::semantic_thunk(
         &crate::core::test_value_factory(),
         "structured deferred failure",
-        move |_| {
+        move |context| {
             counted_attempts.fetch_add(1, Ordering::SeqCst);
-            Err(EvaluationHalt::from_value(thunk_emission.clone())
-                .with_context(thunk_frame.clone()))
+            Err(context
+                .context()
+                .values()
+                .with_runtime_value_access(|access| {
+                    EvaluationHalt::from_value(&access, thunk_emission.clone())
+                        .with_context(&access, thunk_frame.clone())
+                }))
         },
     );
     let value = Value::Lazy(lazy.clone());

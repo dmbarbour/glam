@@ -1219,6 +1219,50 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
 }
 
 #[test]
+fn promise_resolver_publishes_managed_payloads_within_one_value_region() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+
+    let (success, success_resolver) = assembler.promise("managed success owner");
+    let (success_payload, success_payload_resolver) = assembler.promise("managed success payload");
+    success_resolver
+        .resolve(success_payload)
+        .expect("the managed success payload should publish");
+    drop(success_payload_resolver);
+
+    let (failure, failure_resolver) = assembler.promise("managed failure owner");
+    let (failure_payload, failure_payload_resolver) = assembler.promise("managed failure payload");
+    failure_resolver
+        .fail(failure_payload)
+        .expect("the managed failure payload should publish");
+    drop(failure_payload_resolver);
+
+    values
+        .core
+        .collect_managed_for_test()
+        .expect("both terminal promises should retain their managed payloads transitively");
+
+    let CoreValue::Promised(success) = success.clone_core_for_test() else {
+        panic!("the success owner should remain a promise")
+    };
+    assert!(matches!(
+        success.assignment(&values.core),
+        Some(Ok(CoreValue::Promised(payload))) if payload.assignment(&values.core).is_some()
+    ));
+
+    let CoreValue::Promised(failure) = failure.clone_core_for_test() else {
+        panic!("the failure owner should remain a promise")
+    };
+    let Some(Err(failure)) = failure.assignment(&values.core) else {
+        panic!("the failure owner should retain its structured failure")
+    };
+    assert!(matches!(
+        failure.emission_value(),
+        Some(CoreValue::Promised(payload)) if payload.assignment(&values.core).is_some()
+    ));
+}
+
+#[test]
 fn promise_resolver_drop_invokes_idempotent_retire_once() {
     let assembler = Assembler::default();
     let values = assembler.values();

@@ -2000,9 +2000,11 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
         self.release
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the promise producer");
-        self.promise
-            .publish(&self.values, Ok(self.value.clone()))
-            .expect("worker should resolve the host promise once");
+        let published = self.values.with_runtime_value_access(|access| {
+            self.promise.publish(&access, Ok(self.value.clone()))
+        });
+        let published = published.expect("worker should resolve the host promise once");
+        published.notify();
         EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
 }
@@ -2078,9 +2080,11 @@ impl EvaluationTaskMachine for AssignPromiseThenYield {
             .promise
             .take()
             .expect("assignment fixture should publish exactly once");
-        promise
-            .publish(&self.values, Ok(crate::core::keys::unit_value()))
-            .expect("the owning machine should assign its promise once");
+        let published = self.values.with_runtime_value_access(|access| {
+            promise.publish(&access, Ok(crate::core::keys::unit_value()))
+        });
+        let published = published.expect("the owning machine should assign its promise once");
+        published.notify();
         self.assigned
             .take()
             .expect("assignment fixture should signal exactly once")

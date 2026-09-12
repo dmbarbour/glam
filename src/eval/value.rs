@@ -556,8 +556,11 @@ fn produce_lazy_source_in(
                 context.with_value_access(|access| net.runtime().duplicate_in(access.values()));
             let exposed = context
                 .with_value_access(|access| access.net(&runtime).with(|runtime| runtime.exposed()));
-            extract_net_data(context, runtime, exposed, "lazy net computation")
-                .map_err(|error| error.with_context(evaluation_context_frame("net_computation")))
+            extract_net_data(context, runtime, exposed, "lazy net computation").map_err(|error| {
+                context.with_value_access(|access| {
+                    error.with_context(access.values(), evaluation_context_frame("net_computation"))
+                })
+            })
         }
         LazySource::FunctionCall {
             function,
@@ -621,7 +624,10 @@ fn eval_reflection_task_source(
         }
     };
     let task = computation.task(context.context()).map_err(|error| {
-        EvaluationHalt::failure(error).with_context(evaluation_context_frame(context_name))
+        context.with_value_access(|access| {
+            EvaluationHalt::failure(error)
+                .with_context(access.values(), evaluation_context_frame(context_name))
+        })
     })?;
     context.defer_reflection_activation(task.clone());
     let handle = task.handle();
@@ -635,20 +641,24 @@ fn eval_reflection_task_source(
         },
         EvaluationWaitPoll::Failed(error) => {
             handle.acknowledge_propagated_failure();
-            Err(EvaluationHalt::failure(error.into_failure())
-                .with_context(evaluation_context_frame(context_name)))
+            Err(context.with_value_access(|access| {
+                EvaluationHalt::failure(error.into_failure())
+                    .with_context(access.values(), evaluation_context_frame(context_name))
+            }))
         }
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
-        EvaluationWaitPoll::Abandoned => Err(EvaluationHalt::new(
-            "reflection task was abandoned when its evaluation session closed",
-        )
-        .with_context(evaluation_context_frame(context_name))),
-        EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(
-            "reflection task exited without producing a result",
-        )
-        .with_context(evaluation_context_frame(context_name))),
-        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error.into_failure())
-            .with_context(evaluation_context_frame(context_name))),
+        EvaluationWaitPoll::Abandoned => Err(context.with_value_access(|access| {
+            EvaluationHalt::new("reflection task was abandoned when its evaluation session closed")
+                .with_context(access.values(), evaluation_context_frame(context_name))
+        })),
+        EvaluationWaitPoll::Exited => Err(context.with_value_access(|access| {
+            EvaluationHalt::new("reflection task exited without producing a result")
+                .with_context(access.values(), evaluation_context_frame(context_name))
+        })),
+        EvaluationWaitPoll::Killed(error) => Err(context.with_value_access(|access| {
+            EvaluationHalt::failure(error.into_failure())
+                .with_context(access.values(), evaluation_context_frame(context_name))
+        })),
     }
 }
 
@@ -792,8 +802,11 @@ pub(super) fn eval_index_number_in(
     builtin_name: &str,
     evaluation_label: &str,
 ) -> Result<usize, EvaluationHalt> {
-    let value = eval_value_in(context, value)
-        .map_err(|error| error.with_context(evaluation_context_frame(evaluation_label)))?;
+    let value = eval_value_in(context, value).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(access.values(), evaluation_context_frame(evaluation_label))
+        })
+    })?;
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"

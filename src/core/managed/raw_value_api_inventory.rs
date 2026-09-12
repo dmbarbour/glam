@@ -1022,13 +1022,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        592,
+        586,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        13_894_851_819_660_123_354,
+        13_190_935_991_350_881_576,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1039,9 +1039,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 75),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 78),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 23),
-        ((ApiKind::Function, ApiDisposition::Violation), 483),
+        ((ApiKind::Function, ApiDisposition::Violation), 474),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             8,
@@ -1105,20 +1105,6 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 ReplacementShape::CoreStructuralOperation,
             ),
             40,
-        ),
-        (
-            (
-                RemediationOwner::D2bCoreCarriers,
-                ReplacementShape::ManagedCellAccess,
-            ),
-            6,
-        ),
-        (
-            (
-                RemediationOwner::D2bCoreCarriers,
-                ReplacementShape::RuntimeRootProjection,
-            ),
-            3,
         ),
         (
             (

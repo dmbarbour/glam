@@ -333,22 +333,24 @@ struct CoreValues {
 
 impl CoreValues {
     fn new(values: &CoreValueFactory) -> Self {
-        let atom = |key: &Key| match key {
-            Key::Atom(atom) => Value::Atom(*atom),
-            _ => Value::Atom(Atom::from_key(key)),
-        };
-        let root = |value| RuntimeValueRoot::new(values, value);
-        Self {
-            unit: root(atom(&keys::UNIT)),
-            object_reflection_guard: root(atom(&keys::OBJECT_REFLECTION_GUARD)),
-            tuple: root(atom(&keys::TUPLE)),
-            info: root(atom(&keys::INFO)),
-            warn: root(atom(&keys::WARN)),
-            error: root(atom(&keys::ERROR)),
-            initial_metadata: root(Value::Metadata(MetadataCarrier::new(Value::Dict(
-                Dict::new_sync(),
-            )))),
-        }
+        values.with_runtime_value_access(|access| {
+            let atom = |key: &Key| match key {
+                Key::Atom(atom) => Value::Atom(*atom),
+                _ => Value::Atom(Atom::from_key(key)),
+            };
+            let root = |value| access.root_runtime_value(value);
+            Self {
+                unit: root(atom(&keys::UNIT)),
+                object_reflection_guard: root(atom(&keys::OBJECT_REFLECTION_GUARD)),
+                tuple: root(atom(&keys::TUPLE)),
+                info: root(atom(&keys::INFO)),
+                warn: root(atom(&keys::WARN)),
+                error: root(atom(&keys::ERROR)),
+                initial_metadata: root(Value::Metadata(MetadataCarrier::new(Value::Dict(
+                    Dict::new_sync(),
+                )))),
+            }
+        })
     }
 }
 
@@ -663,8 +665,12 @@ pub(crate) fn publish_test_promise(
     promise: &PromisedValue,
     assignment: PromiseAssignment,
 ) -> Result<(), PromiseAssignment> {
-    let root = values.with_runtime_value_access(|access| promise.root_in(&access));
-    root.publish(values, assignment)
+    let published = values.with_runtime_value_access(|access| {
+        let root = promise.root_in(&access);
+        root.publish(&access, assignment)
+    })?;
+    published.notify();
+    Ok(())
 }
 
 #[cfg(test)]

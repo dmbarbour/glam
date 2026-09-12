@@ -76,9 +76,15 @@ fn all_managed_entries_have_bounded_mutator_regions() {
     }
 
     let expected_gateways = [
+        // D.2b.2 publishes imported bytes and the final module promise through
+        // one explicit bounded value region.
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
         ("src/api/tests.rs", GatewayCounts::new(0, 2)),
-        ("src/api/value.rs", GatewayCounts::new(2, 0)),
+        // D.2b.2 removes authority-free promise publication and public-root
+        // reprojection. Resolver success, structured failure, textual failure,
+        // and drop each use a local region; public projection explicitly
+        // upgrades its weak observer.
+        ("src/api/value.rs", GatewayCounts::new(7, 0)),
         ("src/compiler.rs", GatewayCounts::new(3, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
@@ -123,7 +129,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // construction/publication region.
         (
             "src/core/managed/recursive_cells.rs",
-            GatewayCounts::new(39, 0),
+            // D.2b.2 removes two authority-free prepared-root round trips;
+            // their callers now reuse an already-open region.
+            GatewayCounts::new(37, 0),
         ),
         // I4F.2c keeps the production-shaped node and prepared root private
         // while their local lifecycle, provenance, and nested-access fixtures
@@ -149,7 +157,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // without evaluating it. D.2b.1c adds one comparison region covering
         // structural containers and exact managed identity. D.2b.1d adds one
         // non-demanding recursive diagnostic-rendering region.
-        ("src/core.rs", GatewayCounts::new(36, 5)),
+        // D.2b.2 constructs the canonical runtime roots in one additional
+        // shared region.
+        ("src/core.rs", GatewayCounts::new(37, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching
@@ -159,6 +169,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(16, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
+        // D.2b.2 gives provenance-generated halt context an explicit bounded
+        // value region.
+        ("src/eval/builtins/provenance.rs", GatewayCounts::new(1, 0)),
         // P2B compares registered net roots under the same explicit access
         // authority used by production normalization batches. P2C adds
         // explicit test-only duplicate/root handoffs for cursor-driver and
@@ -168,8 +181,16 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks
         // compare managed-net identity under matching access.
-        ("src/eval/tests.rs", GatewayCounts::new(2, 1)),
+        // D.2b.2's structured deferred-failure fixture constructs its halt
+        // payload in one explicit access region.
+        ("src/eval/tests.rs", GatewayCounts::new(3, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
+        // D.2b.2 terminal promise assignment is access-qualified before its
+        // detached completion wake is delivered.
+        (
+            "src/evaluation/coordinator/task.rs",
+            GatewayCounts::new(1, 0),
+        ),
         // Promise terminalization projects a managed assignment through the
         // producer root while the coordinator mutation remains admitted.
         ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
@@ -182,7 +203,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
         // Production-shaped task fixtures retain lazy/promise roots and use
         // explicit matching-domain access rather than facade mutation.
-        ("src/evaluation/tests.rs", GatewayCounts::new(5, 0)),
+        // D.2b.2's production-shaped promise publishers install assignments
+        // under matching access before detached wakes.
+        ("src/evaluation/tests.rs", GatewayCounts::new(7, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
@@ -190,14 +213,24 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/g_syntax/diagnostic_formatter.rs",
             GatewayCounts::new(1, 0),
         ),
+        // D.2b.2 roots diagnostic emission through the compiler domain's
+        // explicit local region.
+        ("src/g_syntax.rs", GatewayCounts::new(1, 0)),
         ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
         ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
         // GCI5R-003D roots a freshly constructed reflection fixpoint before
         // publishing it into branch/coordinator state.
-        ("src/reflection/machine.rs", GatewayCounts::new(1, 0)),
+        // D.2b.2 adds access-qualified branch-root construction and reflection
+        // fixpoint publication without carrying access across machine polls.
+        ("src/reflection/machine.rs", GatewayCounts::new(3, 0)),
+        // Structured halt fixtures and production conversion now construct
+        // their raw payloads only within explicit regions.
+        ("src/reflection/protocol.rs", GatewayCounts::new(2, 0)),
         // I6C's isolated failure-root lifecycle fixture constructs its managed
         // promise in one explicit region before publishing the durable root.
-        ("src/runtime.rs", GatewayCounts::new(2, 0)),
+        // D.2b.2 replaces authority-free failure-root and test projection
+        // helpers with explicit bounded regions.
+        ("src/runtime.rs", GatewayCounts::new(4, 0)),
     ]
     .into_iter()
     .map(|(path, counts)| (PathBuf::from(path), counts))

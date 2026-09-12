@@ -111,7 +111,12 @@ pub(super) fn list_to_binary_bytes_in(
         &mut |values| {
             for value in values.iter() {
                 match eval_value_in(context, value).map_err(|error| {
-                    error.with_context(evaluation_context_frame("binary_extraction"))
+                    context.with_value_access(|access| {
+                        error.with_context(
+                            access.values(),
+                            evaluation_context_frame("binary_extraction"),
+                        )
+                    })
                 })? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
@@ -131,8 +136,14 @@ pub(super) fn list_to_binary_bytes_in(
             Ok(())
         },
         &mut |thunk| {
-            force_list_thunk_in(context, thunk)
-                .map_err(|error| error.with_context(evaluation_context_frame("binary_extraction")))
+            force_list_thunk_in(context, thunk).map_err(|error| {
+                context.with_value_access(|access| {
+                    error.with_context(
+                        access.values(),
+                        evaluation_context_frame("binary_extraction"),
+                    )
+                })
+            })
         },
     )?;
     Ok(bytes.into_inner())

@@ -108,16 +108,18 @@ impl Diagnostic {
     }
 
     fn with_emission(mut self, values: &CoreValueFactory, emission: Value) -> Self {
-        self.emission = Some(RuntimeValueRoot::new(values, emission));
+        self.emission = Some(values.construct_runtime_value_root(|_| emission));
         self
     }
 
     fn into_emission(self) -> Value {
         self.emission
             .map(|emission| {
-                emission
-                    .clone_core_in_own_domain()
-                    .expect("a compiler diagnostic emission remains in its live value domain")
+                let values = emission
+                    .value_observer()
+                    .upgrade()
+                    .expect("a compiler diagnostic emission retains its value domain");
+                values.with_runtime_value_access(|access| emission.clone_core_with(&access))
             })
             .unwrap_or_else(|| crate::diagnostic::text_message(Some(self.line), &self.message))
     }

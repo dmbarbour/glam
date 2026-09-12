@@ -16,7 +16,7 @@ use super::session::{
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
 use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::runtime::RuntimeFailureRoot;
 
 impl ClientDemandOperation {
     pub(super) fn poll(
@@ -570,10 +570,9 @@ fn poison_lazy_cycle(
                             false,
                             "a successful concurrent lazy result contradicts a strict dependency cycle"
                         );
-                        EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-                            &values,
-                            value.into_value(),
-                        ))
+                        EvaluationWaitTerminal::Complete(
+                            values.construct_runtime_value_root(|_| value.into_value()),
+                        )
                     }
                 };
                 (member, terminal)

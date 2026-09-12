@@ -56,21 +56,8 @@ impl fmt::Debug for PreparedRuntimeValueRoot {
 }
 
 impl PreparedRuntimeValueRoot {
-    /// Selects the private production inline-or-root representation.
-    pub(crate) fn prepare(values: &crate::core::CoreValueFactory, value: Value) -> Self {
-        if let Value::Number(number) = &value
-            && let Some(value) = number.to_i64_if_integer()
-        {
-            return Self {
-                observer: values.runtime_value_observer(),
-                value: PreparedValueRepresentation::InlineInteger(value),
-            };
-        }
-
-        let observer = values.runtime_value_observer();
-        values.with_runtime_value_access(|access| Self::managed(observer, &access, value))
-    }
-
+    /// Selects the private production inline-or-root representation while the
+    /// caller's value-domain access keeps every unpublished managed edge live.
     pub(crate) fn prepare_with_access(
         observer: RuntimeValueObserver,
         access: &RuntimeValueAccess<'_>,
@@ -148,20 +135,12 @@ impl PreparedRuntimeValueRoot {
             }
             PreparedValueRepresentation::Managed(root) => access
                 .admits_root(root)
-                .then(|| operation(access.get(root).value())),
+                .then(|| operation(&access.get(root).value)),
         }
     }
 }
 
 impl ManagedValueNode {
-    fn new(value: Value) -> Self {
-        Self { value }
-    }
-
-    pub(crate) fn value(&self) -> &Value {
-        &self.value
-    }
-
     /// Reports managed edges through the authoritative compatibility walk.
     ///
     /// Recursive lazy, promise, and core-net identities report their exact
@@ -207,7 +186,7 @@ impl RuntimeValueAccess<'_> {
         value: Value,
     ) -> Result<Root<ManagedValueNode>, UnsupportedLayout> {
         let allocator = self.allocator::<ManagedValueNode>()?;
-        Ok(self.root(allocator.alloc(ManagedValueNode::new(value))))
+        Ok(self.root(allocator.alloc(ManagedValueNode { value })))
     }
 }
 
@@ -232,6 +211,13 @@ mod tests {
 
     fn project(value: &PreparedRuntimeValueRoot, values: &CoreValueFactory) -> Option<Value> {
         values.with_runtime_value_access(|access| value.with_value(&access, Clone::clone))
+    }
+
+    fn prepare(values: &CoreValueFactory, value: Value) -> PreparedRuntimeValueRoot {
+        let observer = values.runtime_value_observer();
+        values.with_runtime_value_access(|access| {
+            PreparedRuntimeValueRoot::prepare_with_access(observer, &access, value)
+        })
     }
 
     // Trait selection becomes ambiguous if the private opaque root gains a
@@ -290,7 +276,7 @@ mod tests {
         });
         values.with_runtime_value_access(|access| {
             assert!(
-                matches!(access.get(&root).value(), Value::Number(number) if number == &42.into())
+                matches!(&access.get(&root).value, Value::Number(number) if number == &42.into())
             );
         });
 
@@ -364,7 +350,7 @@ mod tests {
             assert_eq!(
                 roots
                     .iter()
-                    .map(|root| compatibility_variant_name(access.get(root).value()))
+                    .map(|root| compatibility_variant_name(&access.get(root).value))
                     .collect::<Vec<_>>(),
                 [
                     "atom",
@@ -412,7 +398,7 @@ mod tests {
         let values = values();
         let before = values.managed_statistics();
         let roots = (-512..512)
-            .map(|value| PreparedRuntimeValueRoot::prepare(&values, Value::Number(value.into())))
+            .map(|value| prepare(&values, Value::Number(value.into())))
             .collect::<Vec<_>>();
 
         assert_eq!(values.managed_statistics(), before);
@@ -434,7 +420,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("canonical roots should collect before the clone fixture");
         let large_integer = Number::from_u64(u64::MAX);
-        let root = PreparedRuntimeValueRoot::prepare(&values, Value::Number(large_integer.clone()));
+        let root = prepare(&values, Value::Number(large_integer.clone()));
         let alias = root.clone();
         let worker_values = values.clone();
         let worker = std::thread::spawn(move || project(&alias, &worker_values))
@@ -465,9 +451,8 @@ mod tests {
     fn prepared_root_rejects_other_runtime_access_for_both_arms() {
         let owner = values();
         let other = values();
-        let inline = PreparedRuntimeValueRoot::prepare(&owner, Value::Number(42.into()));
-        let managed =
-            PreparedRuntimeValueRoot::prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
+        let inline = prepare(&owner, Value::Number(42.into()));
+        let managed = prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
 
         assert_eq!(project(&inline, &owner), Some(Value::Number(42.into())));
         assert!(matches!(project(&managed, &owner), Some(Value::Dict(dict)) if dict.is_empty()));
@@ -479,9 +464,8 @@ mod tests {
     fn prepared_root_becomes_inaccessible_when_its_domain_is_dropped() {
         let owner = values();
         let domain = Arc::downgrade(owner.value_domain());
-        let inline = PreparedRuntimeValueRoot::prepare(&owner, Value::Number((-7).into()));
-        let managed =
-            PreparedRuntimeValueRoot::prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
+        let inline = prepare(&owner, Value::Number((-7).into()));
+        let managed = prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
 
         drop(owner);
         assert!(domain.upgrade().is_none());
@@ -494,8 +478,7 @@ mod tests {
     #[test]
     fn prepared_root_projection_nests_inside_one_runtime_access_region() {
         let values = values();
-        let root =
-            PreparedRuntimeValueRoot::prepare(&values, Value::Dict(crate::core::Dict::new_sync()));
+        let root = prepare(&values, Value::Dict(crate::core::Dict::new_sync()));
 
         values.with_runtime_value_access(|outer| {
             root.with_value(&outer, |before| {

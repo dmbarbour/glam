@@ -1470,9 +1470,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let assignment = context.evaluate(&self.eval_context, |evaluator| {
                         evaluator.project_root(&value)
                     });
-                    handle
-                        .publish(self.eval_context.values(), Ok(assignment))
+                    let published =
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                handle.publish(&access, Ok(assignment))
+                            });
+                    let published = published
                         .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))?;
+                    published.notify();
                     branch.control.sequence.pop();
                     branch.active_fixes.pop();
                     Ok(MachineStep::Continue(MachineWork::deliver_root(
@@ -2242,7 +2248,10 @@ pub(super) struct ContextualValueEffectTask<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> ContextualValueEffectTask<S> {
     pub(super) fn new(task: EffectTask<S>, context: Value) -> Self {
-        let context = RuntimeValueRoot::new(task.eval_context.values(), context);
+        let context = task
+            .eval_context
+            .values()
+            .construct_runtime_value_root(|_| context);
         Self { task, context }
     }
 }
@@ -2376,10 +2385,16 @@ struct Branch<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> Branch<S> {
     fn new(values: &CoreValueFactory, effect: Value, state: Value) -> Self {
+        let (effect, state) = values.with_runtime_value_access(|access| {
+            (
+                access.root_runtime_value(effect),
+                access.root_runtime_value(state),
+            )
+        });
         Self {
-            effect: RuntimeValueRoot::new(values, effect),
+            effect,
             control: Control::default(),
-            state: RuntimeValueRoot::new(values, state),
+            state,
             transaction: None,
             active_fixes: Vec::new(),
             fix_restarts: Vec::new(),
@@ -2399,7 +2414,7 @@ impl<S: TaskSpecialization> Branch<S> {
 
     fn set_effect(&mut self, values: &CoreValueFactory, effect: Value) {
         debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
-        self.effect = RuntimeValueRoot::new(values, effect);
+        self.effect = values.construct_runtime_value_root(|_| effect);
     }
 
     fn set_effect_root(&mut self, effect: RuntimeValueRoot) {
@@ -2413,12 +2428,12 @@ impl<S: TaskSpecialization> Branch<S> {
 
     fn set_state(&mut self, values: &CoreValueFactory, state: Value) {
         debug_assert_eq!(values.runtime_id(), self.state.runtime_id());
-        self.state = RuntimeValueRoot::new(values, state);
+        self.state = values.construct_runtime_value_root(|_| state);
     }
 
     fn root_value(&self, values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
         debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
-        RuntimeValueRoot::new(values, value)
+        values.construct_runtime_value_root(|_| value)
     }
 
     fn retry_candidate(&self) -> Option<Box<Self>> {

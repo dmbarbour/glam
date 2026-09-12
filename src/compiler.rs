@@ -79,7 +79,7 @@ pub(crate) fn test_value_factory() -> CoreValueFactory {
 
 impl CompileContext {
     pub(crate) fn new(values: CoreValueFactory) -> Self {
-        let prior_defs = RuntimeValueRoot::new(&values, Value::Dict(Dict::new_sync()));
+        let prior_defs = values.construct_runtime_value_root(|_| Value::Dict(Dict::new_sync()));
         let final_defs = values.construct_runtime_value_root(|access| {
             let promise = access
                 .construct_managed_promise("final definitions")
@@ -135,10 +135,9 @@ impl CompileContext {
     }
 
     pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
-        self.opaque_origin = Some(RuntimeValueRoot::new(
-            &self.values,
-            crate::diagnostic::opaque_compilation_origin(&self.values, &trace),
-        ));
+        self.opaque_origin = Some(self.values.construct_runtime_value_root(|_| {
+            crate::diagnostic::opaque_compilation_origin(&self.values, &trace)
+        }));
         self.compilation_trace = Some(trace);
         self
     }
@@ -160,7 +159,7 @@ impl CompileContext {
 
     #[cfg(test)]
     pub(crate) fn with_prior_defs(mut self, prior: Value) -> Self {
-        self.prior_defs = RuntimeValueRoot::new(&self.values, prior);
+        self.prior_defs = self.values.construct_runtime_value_root(|_| prior);
         self
     }
 

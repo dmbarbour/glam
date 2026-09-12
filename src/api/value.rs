@@ -793,12 +793,14 @@ impl Value {
     }
 
     pub(crate) fn clone_core_in_own_domain(&self) -> Result<CoreValue, Error> {
-        self.0.clone_core_in_own_domain().ok_or_else(|| {
+        let observer = self.0.value_observer();
+        let values = observer.upgrade().ok_or_else(|| {
             Error::new(format!(
                 "evaluation runtime {} is no longer available for value observation",
                 self.runtime_id().get()
             ))
-        })
+        })?;
+        Ok(values.with_runtime_value_access(|access| self.0.clone_core_with(&access)))
     }
 
     pub(crate) fn value_observer(&self) -> RuntimeValueObserver {
@@ -1043,11 +1045,19 @@ impl PromiseResolver {
             return Err(error);
         }
         let (promise, values) = self.take_for_completion()?;
-        let value = value.clone_core_in_own_domain()?;
         let label = self.label.clone();
-        let published = promise
-            .publish(&values, Ok(value))
-            .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
+        let published = values.with_runtime_value_access(|access| {
+            promise.publish(&access, Ok(value.0.clone_core_with(&access)))
+        });
+        let published = match published {
+            Ok(publication) => {
+                publication.notify();
+                Ok(())
+            }
+            Err(_) => Err(Error::new(format!(
+                "promise `{label}` was already completed"
+            ))),
+        };
         drop(values);
         published
     }
@@ -1060,9 +1070,27 @@ impl PromiseResolver {
             let _ = resolver.retire();
             return Err(error);
         }
-        resolver.fail_with(Arc::new(EvaluationFailure::emission(
-            failure.clone_core_in_own_domain()?,
-        )))
+        let (promise, values) = resolver.take_for_completion()?;
+        let label = resolver.label.clone();
+        let published = values.with_runtime_value_access(|access| {
+            promise.publish(
+                &access,
+                Err(Arc::new(EvaluationFailure::emission(
+                    failure.0.clone_core_with(&access),
+                ))),
+            )
+        });
+        let published = match published {
+            Ok(publication) => {
+                publication.notify();
+                Ok(())
+            }
+            Err(_) => Err(Error::new(format!(
+                "promise `{label}` was already completed"
+            ))),
+        };
+        drop(values);
+        published
     }
 
     /// Completes the promise with a conventional textual producer error.
@@ -1073,9 +1101,17 @@ impl PromiseResolver {
     fn fail_with(mut self, failure: Arc<EvaluationFailure>) -> Result<(), Error> {
         let (promise, values) = self.take_for_completion()?;
         let label = self.label.clone();
-        let published = promise
-            .publish(&values, Err(failure))
-            .map_err(|_| Error::new(format!("promise `{label}` was already completed")));
+        let published =
+            values.with_runtime_value_access(|access| promise.publish(&access, Err(failure)));
+        let published = match published {
+            Ok(publication) => {
+                publication.notify();
+                Ok(())
+            }
+            Err(_) => Err(Error::new(format!(
+                "promise `{label}` was already completed"
+            ))),
+        };
         drop(values);
         published
     }
@@ -1093,7 +1129,12 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             self.label
         );
-        let _ = promise.publish(&values, Err(Arc::new(EvaluationFailure::message(message))));
+        let published = values.with_runtime_value_access(|access| {
+            promise.publish(&access, Err(Arc::new(EvaluationFailure::message(message))))
+        });
+        if let Ok(publication) = published {
+            publication.notify();
+        }
         drop(values);
     }
 }

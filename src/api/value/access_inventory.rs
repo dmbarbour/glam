@@ -11,14 +11,20 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RootPublicationCounts {
-    root_new: usize,
+    compatibility_root_new: usize,
+    scoped_factory_root: usize,
     access_root: usize,
 }
 
 impl RootPublicationCounts {
-    const fn new(root_new: usize, access_root: usize) -> Self {
+    const fn new(
+        compatibility_root_new: usize,
+        scoped_factory_root: usize,
+        access_root: usize,
+    ) -> Self {
         Self {
-            root_new,
+            compatibility_root_new,
+            scoped_factory_root,
             access_root,
         }
     }
@@ -26,6 +32,8 @@ impl RootPublicationCounts {
     fn in_source(source: &str) -> Self {
         Self::new(
             source.matches("RuntimeValueRoot::new(").count(),
+            source.matches(".construct_runtime_value_root(").count()
+                + source.matches(".try_construct_runtime_value_root(").count(),
             source.matches(".root_runtime_value(").count(),
         )
     }
@@ -39,10 +47,10 @@ struct InventoryEntry {
 }
 
 macro_rules! entry {
-    ($path:literal, $root_new:literal, $access_root:literal, $role:literal, $migration:literal) => {
+    ($path:literal, $root_new:literal, $scoped_root:literal, $access_root:literal, $role:literal, $migration:literal) => {
         InventoryEntry {
             path: $path,
-            counts: RootPublicationCounts::new($root_new, $access_root),
+            counts: RootPublicationCounts::new($root_new, $scoped_root, $access_root),
             role: $role,
             migration: $migration,
         }
@@ -52,6 +60,7 @@ macro_rules! entry {
 const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/assembly.rs",
+        0,
         1,
         0,
         "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
@@ -60,26 +69,30 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/api/value.rs",
         0,
+        0,
         1,
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch; GCI5R-001B same-region root publication"
     ),
     entry!(
         "src/compiler.rs",
-        7,
+        4,
+        5,
         0,
         "rooted source context, origins, definition promises, and import results; I10A import inputs are declared HostCall captures",
         "I3E.2 bounded compiler regions; I4F.1 durable roots; I10A explicit deferred-capture handoff"
     ),
     entry!(
         "src/core.rs",
-        3,
         2,
+        1,
+        3,
         "post-domain canonical-root initialization, test mutation-root publication, and I10A one-shot HostCall capture bundles",
         "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment"
     ),
     entry!(
         "src/core_net.rs",
+        0,
         0,
         2,
         "call claims rooted while matching managed net access remains admitted",
@@ -89,11 +102,29 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/core/managed/active_owner_inventory.rs",
         1,
         0,
+        0,
         "test-only external callback root-backedge containment proof",
         "I5F.4 external-owner closure audit; I10A deferred callback containment"
     ),
     entry!(
+        "src/core/managed/containment_inventory.rs",
+        0,
+        1,
+        0,
+        "source-backed managed-containment verification fixture",
+        "I11B managed containment closure; GCI11R-002D.2b.2 scoped root publication inventory"
+    ),
+    entry!(
+        "src/core/managed/recursive_cells.rs",
+        0,
+        4,
+        0,
+        "recursive-cell ownership and publication lifecycle fixtures",
+        "I5 managed recursive identities; GCI11R-002D.2b.2 access-qualified promise publication"
+    ),
+    entry!(
         "src/evaluation/access.rs",
+        0,
         2,
         0,
         "poll/evaluator-step completion rooting and scoped projection",
@@ -101,13 +132,23 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
+        0,
         1,
         0,
         "durable spark demand",
         "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
     ),
     entry!(
+        "src/evaluation/coordinator/task.rs",
+        0,
+        1,
+        0,
+        "promise terminal projection into one durable wait result",
+        "GCI11R-002D.2b.2 scoped task-promise terminal publication"
+    ),
+    entry!(
         "src/evaluation/pump.rs",
+        0,
         1,
         0,
         "centralized client/spark evaluation and exceptional lazy-cycle publication",
@@ -115,6 +156,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/evaluation/session.rs",
+        1,
         4,
         0,
         "session demand, reserved reflection activation, effect entry, and patient completion",
@@ -122,6 +164,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax.rs",
+        0,
         1,
         0,
         "rooted lowered definitions and compiler diagnostics across publication",
@@ -129,13 +172,23 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        1,
+        0,
+        3,
         0,
         "owned closed-evaluation results and complete runtime-cached compiler helper bundles",
         "I3E.2 rooted cache publication; I4F.1 durable roots; GCI11R-002C direct client-demand result ownership"
     ),
     entry!(
+        "src/g_syntax/macro_expansion/effects.rs",
+        0,
+        1,
+        0,
+        "macro effect completion fixture publication",
+        "phase-9 macro effect ownership; GCI11R-002D.2b.2 scoped root publication inventory"
+    ),
+    entry!(
         "src/g_syntax/module_lowering.rs",
+        0,
         0,
         1,
         "declaration-to-declaration definitions and directly owned reflection annotator",
@@ -143,15 +196,33 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/reflection/machine.rs",
-        6,
         0,
+        10,
+        2,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
     ),
     entry!(
-        "src/runtime.rs",
+        "src/reflection/protocol.rs",
+        0,
         1,
         0,
+        "reflection protocol structured-failure fixtures",
+        "GCI11R-002D.2b.2 scoped halt payload construction"
+    ),
+    entry!(
+        "src/reflection/store.rs",
+        0,
+        4,
+        0,
+        "reflection store publication and inspection boundaries",
+        "I3D.4 bounded reflection-store access; GCI11R-002D.2b.2 scoped root publication inventory"
+    ),
+    entry!(
+        "src/runtime.rs",
+        0,
+        0,
+        2,
         "shallow direct-value rooting for one runtime failure root",
         "I4F.1c.1 failure-root boundary; I6C failure-shell and owner audit"
     ),
@@ -204,7 +275,7 @@ fn registered_runtime_root_publication_inventory_is_complete() {
             }
             let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
             let counts = RootPublicationCounts::in_source(&source);
-            (counts != RootPublicationCounts::new(0, 0)).then(|| {
+            (counts != RootPublicationCounts::new(0, 0, 0)).then(|| {
                 (
                     relative
                         .to_str()

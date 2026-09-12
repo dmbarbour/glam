@@ -177,14 +177,22 @@ fn fix_deferred_list_effect_results(
     };
     let results = lazy_run_list_effect(context, operation.clone());
     let Some((head, tail)) = pop_list_front_in(context, &results)? else {
-        let root = context.with_value_access(|access| handle.root_in(access.values()));
-        root.publish(context.context().values(), Ok(Value::List(List::empty())))
-            .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
+        let published = context.with_value_access(|access| {
+            let root = handle.root_in(access.values());
+            root.publish(access.values(), Ok(Value::List(List::empty())))
+        });
+        let published =
+            published.map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
+        published.notify();
         return Ok(Value::List(List::empty()));
     };
-    let root = context.with_value_access(|access| handle.root_in(access.values()));
-    root.publish(context.context().values(), Ok(head.clone()))
-        .map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
+    let published = context.with_value_access(|access| {
+        let root = handle.root_in(access.values());
+        root.publish(access.values(), Ok(head.clone()))
+    });
+    let published =
+        published.map_err(|_| EvaluationHalt::new("list effect fix initialized twice"))?;
+    published.notify();
     Ok(Value::List(List::concat(
         List::from_values(vec![head]),
         tail,

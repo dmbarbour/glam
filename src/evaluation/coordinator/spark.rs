@@ -83,7 +83,7 @@ impl EvaluationWorkCoordinator {
         let id = EvaluationWorkId(self.ids.evaluation_work());
         let demand = SparkDemand {
             session: Arc::downgrade(&session),
-            value: RuntimeValueRoot::new(&session.values, value),
+            value: session.values.construct_runtime_value_root(|_| value),
         };
         let mutation = self.admission.mutation_guard();
         let admitted = {

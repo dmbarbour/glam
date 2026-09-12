@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::core_net::CoreWaitToken;
 
-use super::{EvaluationFailure, ManagedPromiseRoot, Value};
+use super::{EvaluationFailure, ManagedPromiseRoot, RuntimeValueAccess, Value};
 
 /// Explains why a demand could not currently produce a value.
 ///
@@ -66,7 +66,7 @@ impl EvaluationHalt {
         Self::failure(Arc::new(EvaluationFailure::message(message.into())))
     }
 
-    pub(crate) fn from_value(value: Value) -> Self {
+    pub(crate) fn from_value(_access: &RuntimeValueAccess<'_>, value: Value) -> Self {
         Self::failure(Arc::new(EvaluationFailure::emission(value)))
     }
 
@@ -82,7 +82,7 @@ impl EvaluationHalt {
         }
     }
 
-    pub(crate) fn with_context(self, context: Value) -> Self {
+    pub(crate) fn with_context(self, _access: &RuntimeValueAccess<'_>, context: Value) -> Self {
         match self.kind {
             EvaluationHaltKind::Failure(failure) => {
                 Self::failure(Arc::new(failure.with_context(context)))

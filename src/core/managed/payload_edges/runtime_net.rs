@@ -252,7 +252,7 @@ mod tests {
                     operator,
                     data,
                 },
-                EvaluationHalt::from_value(failure.clone()),
+                EvaluationHalt::from_value(&value_access, failure.clone()),
             );
         });
 

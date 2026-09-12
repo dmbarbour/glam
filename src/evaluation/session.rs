@@ -842,7 +842,10 @@ impl EvalContext {
         &self,
         value: &Value,
     ) -> Result<Value, crate::core::EvaluationHalt> {
-        let value = self.evaluate_root_whnf(RuntimeValueRoot::new(self.values(), value.clone()))?;
+        let input = self
+            .values()
+            .construct_runtime_value_root(|access| access.duplicate_value(value));
+        let value = self.evaluate_root_whnf(input)?;
         let poll = EvaluationPollContext::for_context(self);
         Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
     }
@@ -1485,7 +1488,7 @@ impl EvalContext {
             inner: Arc::new(PendingReflectionTaskInner {
                 context: self.clone(),
                 handle: self.reserve_task()?,
-                effect: RuntimeValueRoot::new(self.values(), effect),
+                effect: self.values().construct_runtime_value_root(|_| effect),
                 activated: AtomicBool::new(false),
             }),
         })
@@ -1508,7 +1511,7 @@ impl EvalContext {
                     observation,
                     activation: Mutex::new(Some(ReflectionTaskActivation {
                         context: self.clone(),
-                        effect: RuntimeValueRoot::new(self.values(), effect),
+                        effect: self.values().construct_runtime_value_root(|_| effect),
                         result_policy,
                         task_profile: default_profile,
                     })),

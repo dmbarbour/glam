@@ -838,6 +838,8 @@ recursive-payload classification.
 
 ###### GCI11R-002D.2b.2 — Managed Cells and Runtime-Root Projection
 
+Status: complete on 2026-09-12 through D.2b.2a-D.2b.2d below.
+
 Move the six managed-cell operations and three runtime-root projections to the
 new surface. Root/public clones continue to share registered root cells;
 projection of a raw value remains bounded by matching access. A managed cell
@@ -846,6 +848,50 @@ duplicates its persistent edge only through the P1/P2 gateway.
 Verification: same/wrong-runtime controls, root-registration counters, and
 aggressive collection before and after each projection or managed-cell
 operation.
+
+**D.2b.2a — Managed value storage.** Remove the authority-free managed-node
+constructor, value projection, and factory-opening prepared-root constructor.
+Construction and projection occur only beneath the caller's existing
+`RuntimeValueAccess`; update the prepared-root same/wrong-runtime and
+root-registration fixtures without weakening their checks.
+
+**D.2b.2b — Halt payload construction.** Require matching regional authority
+when an emission or context value becomes part of `EvaluationHalt`. This is an
+explicit transitional ownership handoff, not permission to carry an unrooted
+halt across a poll, callback, or durable-storage boundary.
+
+**D.2b.2c — Promise publication.** Split access-qualified promise assignment
+from post-region scheduler notification. Assignment is installed while the
+managed cell is borrowed; completion and producer wakes are delivered only
+after the caller has closed that access region and released mutation
+admission.
+
+**D.2b.2d — Runtime-root construction and projection.** Remove factory-based
+root construction, observer-based raw construction, and owner-local raw
+reprojection. Existing bounded regions publish through
+`RuntimeValueAccess::root_runtime_value`; callers which currently own only a
+factory or weak observer open one explicit local region. Preserve shared root
+cells for root/public clones, and reconcile raw-access, durable-owner, and
+persistent-edge inventories after the exact 6/3 violation set reaches zero.
+
+Completion record (2026-09-12): all nine assigned violations are zero. Halt
+payload construction and promise publication account for three new regional
+operations; six authority-free managed-node/runtime-root operations were
+removed. Promise assignment returns a must-use detached publication so wakes
+occur only after managed access closes, with test builds asserting that
+boundary. Root construction now uses either the
+caller's existing `RuntimeValueAccess` or the factory's higher-ranked scoped
+constructor; clones keep sharing registered root cells. The raw inventory is
+586 declarations / 78 regional functions / 474 violating functions / eight
+regional aliases / three violating derived traits, for 477 violations total.
+The root-publication gate now counts legacy test construction, scoped factory
+construction, and already-admitted publication separately, while the managed
+admission, durable-owner, and persistent-edge gates remain closed.
+
+Focused ordinary and aggressive managed-node, recursive-cell, and public
+promise-resolver tests pass. The aggressive scheduler promise-wakeup fixtures
+still use the test-only unrooted `PromisedValue::new` compatibility helper;
+their fixture migration remains deliberately assigned to GCI11R-002E.
 
 ###### GCI11R-002D.2b.3 — Persistent Containers and Net Shells
 

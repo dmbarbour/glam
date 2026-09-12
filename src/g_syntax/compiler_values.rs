@@ -137,7 +137,7 @@ fn with_values<R>(values: &CoreValueFactory, use_values: impl FnOnce(&GCompilerV
 }
 
 fn root_value(values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
-    RuntimeValueRoot::new(values, value)
+    values.construct_runtime_value_root(|_| value)
 }
 
 fn project_value(values: &CoreValueFactory, root: &RuntimeValueRoot) -> Value {

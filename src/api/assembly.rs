@@ -1423,10 +1423,8 @@ impl Assembler {
         importer
             .load_relative(&args.request)
             .map(|artifact| {
-                RuntimeValueRoot::new(
-                    &self.core_values(),
-                    CoreValue::Binary(artifact.bytes().clone()),
-                )
+                self.core_values()
+                    .construct_runtime_value_root(|_| CoreValue::Binary(artifact.bytes().clone()))
             })
             .map_err(|error| {
                 import_failure(
@@ -1446,17 +1444,15 @@ impl Assembler {
         context: &CompileContext,
         definitions: &RuntimeValueRoot,
     ) -> Result<RuntimeValueRoot, Error> {
-        let (module_value, final_defs) = self.core_values().with_runtime_value_access(|access| {
+        let published = self.core_values().with_runtime_value_access(|access| {
             let CoreValue::Promised(final_defs) = context.final_defs() else {
                 panic!("CompileContext.final_defs must be a promised value");
             };
-            let definitions = definitions.clone_core_with(&access);
             let final_defs = final_defs.root_in(&access);
-            (definitions, final_defs)
+            final_defs.publish(&access, Ok(definitions.clone_core_with(&access)))
         });
-        final_defs
-            .publish(&self.core_values(), Ok(module_value.clone()))
-            .expect("CompileContext.final_defs future must be unassigned");
+        let published = published.expect("CompileContext.final_defs future must be unassigned");
+        published.notify();
         self.eval_context()
             .evaluate_root_whnf(definitions.clone())
             .map_err(|error| self.evaluation_error(error))

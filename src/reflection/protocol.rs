@@ -1049,7 +1049,10 @@ mod root_inventory_tests {
         let public_values = Values::from_core_factory(values.clone());
         let emission = Value::Number(Number::integer(41));
         let context = public_values.integer(42);
-        let halt = TaskHalt::from(EvaluationHalt::from_value(emission));
+        let halt = TaskHalt::from(
+            values
+                .with_runtime_value_access(|access| EvaluationHalt::from_value(&access, emission)),
+        );
         assert!(
             halt.failure_root().is_none(),
             "the evaluator conversion remains bounded until publication"
@@ -1066,10 +1069,10 @@ mod root_inventory_tests {
     #[test]
     fn structured_api_error_preserves_its_runtime_root() {
         let values = crate::core::test_value_factory();
-        let error = ApiError::from_eval(
-            &values,
-            EvaluationHalt::from_value(Value::Number(Number::integer(42))),
-        );
+        let halt = values.with_runtime_value_access(|access| {
+            EvaluationHalt::from_value(&access, Value::Number(Number::integer(42)))
+        });
+        let error = ApiError::from_eval(&values, halt);
         let halt = TaskHalt::from(error);
         let root = halt
             .failure_root()

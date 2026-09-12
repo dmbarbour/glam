@@ -606,7 +606,12 @@ impl LocalPromiseOwner {
                 .value_observer()
                 .upgrade()
                 .expect("a registered local promise must retain its live value domain");
-            let _ = obligation.root.publish(&values, Err(failure.clone()));
+            let published = values.with_runtime_value_access(|access| {
+                obligation.root.publish(&access, Err(failure.clone()))
+            });
+            if let Ok(publication) = published {
+                publication.notify();
+            }
         }
     }
 }
@@ -768,10 +773,15 @@ fn promise_assignment_terminal(
     assignment: &PromiseAssignment,
 ) -> EvaluationWaitTerminal {
     match assignment {
-        Ok(value) => EvaluationWaitTerminal::Complete(RuntimeValueRoot::from_observer(
-            wait.value_observer(),
-            value.clone(),
-        )),
+        Ok(value) => {
+            let observer = wait.value_observer();
+            let values = observer
+                .upgrade()
+                .expect("promise completion requires its live value domain");
+            EvaluationWaitTerminal::Complete(
+                values.construct_runtime_value_root(|access| access.duplicate_value(value)),
+            )
+        }
         Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
             wait.value_observer(),
             error.clone(),

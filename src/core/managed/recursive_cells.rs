@@ -14,13 +14,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
-    CoreValueFactory, EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
-    PromisedValue, RuntimeValueAccess, Value,
+    EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId, PromisedValue,
+    RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
-    EvaluationWorkCoordinator, PromiseProducerObligation, WakeRegistration,
+    EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
+    WakeRegistration,
 };
 use crate::interaction_net::{
     RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutationGateway,
@@ -131,6 +132,33 @@ pub(crate) struct ManagedPromiseRoot {
     terminal: Arc<AtomicBool>,
     completion: Arc<CompletionSubscriptions>,
     producer: Arc<OnceLock<Arc<PromiseProducerObligation>>>,
+}
+
+/// Post-region notifications produced by one terminal promise assignment.
+///
+/// The managed cell and coordinator state have already committed before this
+/// value is returned. Callers retain it until their `RuntimeValueAccess`
+/// region closes, then wake completion and producer observers.
+#[must_use = "promise completion wakes must be delivered after managed access closes"]
+pub(crate) struct ManagedPromisePublication {
+    producer: Option<PromiseProducerPublication>,
+    completion: Option<CompletionWake>,
+}
+
+impl ManagedPromisePublication {
+    pub(crate) fn notify(self) {
+        #[cfg(test)]
+        assert!(
+            !super::thread_has_runtime_value_access_for_test(),
+            "promise completion wakes must run after managed access closes"
+        );
+        if let Some(completion) = self.completion {
+            completion.notify();
+        }
+        if let Some(producer) = self.producer {
+            producer.notify();
+        }
+    }
 }
 
 impl fmt::Debug for ManagedPromiseRoot {
@@ -572,52 +600,47 @@ impl ManagedPromiseRoot {
 
     /// Publishes one terminal assignment through this registered owner.
     ///
-    /// Managed access is bounded to the assignment transition. Completion
-    /// wakes and producer notifications run only after that region, and any
-    /// coordinator mutation admission it used, have been released.
+    /// Managed access is supplied explicitly for the assignment transition.
+    /// The returned notification must outlive that bounded region so scheduler
+    /// threads are not awakened while the publishing thread retains a mutator.
+    /// Acquiring shared runtime-mutation admission inside this region is safe:
+    /// runtime settlement never enters the collector, while collector
+    /// exclusivity can be elected only after every active mutator has left.
     pub(crate) fn publish(
         &self,
-        values: &CoreValueFactory,
+        authority: &RuntimeValueAccess<'_>,
         assignment: ManagedPromiseAssignment,
-    ) -> Result<(), ManagedPromiseAssignment> {
-        assert_eq!(
-            values.runtime_id(),
-            self.runtime_id(),
-            "promise root and publication factory must share one value domain"
-        );
+    ) -> Result<ManagedPromisePublication, ManagedPromiseAssignment> {
         let producer = self.producer();
         if let Some(producer) = producer
             && let Some(coordinator) = producer.coordinator()
         {
             let mutation = coordinator.mutation_guard();
-            let published = values.with_runtime_value_access(|authority| {
-                self.publish_guarded(
-                    &authority,
-                    &coordinator,
-                    &mutation,
-                    assignment,
-                    |assignment| {
-                        producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
-                    },
-                )
-            });
+            let published = self.publish_guarded(
+                authority,
+                &coordinator,
+                &mutation,
+                assignment,
+                |assignment| {
+                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
+                },
+            );
             let (producer, completion) = published?;
             drop(mutation);
-            completion.notify();
-            producer.notify();
-            return Ok(());
+            return Ok(ManagedPromisePublication {
+                producer: Some(producer),
+                completion: Some(completion),
+            });
         }
 
-        let producer = values.with_runtime_value_access(|authority| {
-            self.publish_detached(&authority, assignment, |assignment| {
-                self.producer()
-                    .map(|producer| producer.publish_assignment_detached(assignment))
-            })
+        let producer = self.publish_detached(authority, assignment, |assignment| {
+            self.producer()
+                .map(|producer| producer.publish_assignment_detached(assignment))
         })?;
-        if let Some(producer) = producer {
-            producer.notify();
-        }
-        Ok(())
+        Ok(ManagedPromisePublication {
+            producer,
+            completion: None,
+        })
     }
 
     pub(crate) fn install_producer(
@@ -2337,8 +2360,8 @@ mod tests {
         );
 
         assert!(matches!(
-            root.clone_core_in_own_domain(),
-            Some(Value::List(list)) if list.len() == 3
+            root.clone_core_for_test(),
+            Value::List(list) if list.len() == 3
         ));
 
         drop(root);
@@ -2853,12 +2876,11 @@ mod tests {
                 .expect("the managed core-net cell should fit a run");
             let root = access.root_managed_core_net(&edge);
             let net = crate::core_net::CoreRuntimeNet::from_managed_edge(edge);
-            net.access(&access).fail_claimed_call(
-                call,
-                EvaluationHalt::from_value(Value::Net(NetValue::new(
-                    net.duplicate_for_test(&values),
-                ))),
+            let halt = EvaluationHalt::from_value(
+                &access,
+                Value::Net(NetValue::new(net.duplicate_for_test(&values))),
             );
+            net.access(&access).fail_claimed_call(call, halt);
             root
         });
 
@@ -3478,7 +3500,8 @@ mod tests {
         }
 
         let resolver = source_declaration(resolver, "impl PromiseResolver {");
-        assert!(resolver.contains(".publish(&values"));
+        assert!(resolver.contains("with_runtime_value_access(|access| promise.publish(&access"));
+        assert!(resolver.contains("publication.notify()"));
         assert!(resolver.contains("take_for_completion"));
     }
 
