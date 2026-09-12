@@ -1218,7 +1218,7 @@ remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
-Status: partitioned on 2026-09-12; implementation has not started.
+Status: implementation in progress; D.2c.0a complete on 2026-09-12.
 
 Migrate the 201 evaluator-operation and builtin violations as call-tree
 families beneath `EvaluationValueAccess`. A callback-free evaluator quantum
@@ -1282,7 +1282,8 @@ orchestration boundary.
 
 ###### GCI11R-002D.2c.0 — Evaluator Boundary Manifest
 
-**D.2c.0a — Exact occurrence assignment.** Extend the raw-value inventory so
+**D.2c.0a — Exact occurrence assignment.** Status: complete on 2026-09-12.
+Extend the raw-value inventory so
 each of the 201 operations has one exact D.2c subcheckpoint and one of the
 three execution shapes above. Latch both the 29/12/20/25/43/42/22/8 family
 partition and the 146/7/48 signature baseline by declaration rather than only
@@ -1293,6 +1294,20 @@ Verification: deliberately misclassify one regional leaf and one suspendable
 coordinator to prove the manifest rejects both errors, then restore the exact
 assignment. Reconcile this manifest with `src/eval/access_inventory.rs`
 rather than creating a competing list of evaluator contexts.
+
+Completion record: the raw-value inventory now assigns every evaluator
+violation to one of the eight D.2c family checkpoints by production source
+owner. Per-family normalized declaration/signature fingerprints localize a
+rename, move, or signature edit; the exact family counts remain
+29/12/20/25/43/42/22/8. A second classification records the 146
+`EvaluatorStepContext`, seven `EvalContext`, and 48 context-free signatures.
+The conservative initial execution assignment treats all 153 context-bearing
+operations as suspendable coordinators and all 48 context-free raw-value
+operations as regional leaves. A family checkpoint may refine a coordinator
+into regional leaves or eliminate an operation in favor of immediate data,
+but must update this manifest explicitly. Synthetic boundary fixtures prove
+that neither evaluator context is confused with active access and that a
+context-free raw operation begins as regional work.
 
 **D.2c.0b — Access and suspension gates.** Teach the raw-value scanner to
 recognize `EvaluationValueAccess` as regional authority. Explicitly reject

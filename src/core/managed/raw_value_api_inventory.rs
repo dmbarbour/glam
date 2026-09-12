@@ -62,6 +62,32 @@ enum ReplacementShape {
     CompilerDiagnosticRegion,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum D2cFamily {
+    ValueDemand,
+    ApplicationAndSequence,
+    OperatorAndNet,
+    DispatchScalarAndStrategy,
+    CollectionsAndPatterns,
+    AnnotationsAndEffects,
+    Objects,
+    NetBuiltins,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum D2cCurrentContext {
+    EvaluatorStep,
+    DurableEval,
+    ContextFree,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum D2cExecutionShape {
+    RegionalOperation,
+    SuspendableCoordinator,
+    ImmediateDataHelper,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RemediationAssignment {
     owner: RemediationOwner,
@@ -197,6 +223,78 @@ impl ApiOccurrence {
             );
         };
         Some(assignment)
+    }
+
+    fn d2c_family(&self) -> Option<D2cFamily> {
+        if self.remediation_assignment()?.owner != RemediationOwner::D2cEvaluator {
+            return None;
+        }
+        let path = self
+            .declaration
+            .split("::")
+            .next()
+            .expect("an inventory declaration should begin with a source path");
+        let family = match path {
+            "src/eval/value.rs" => D2cFamily::ValueDemand,
+            "src/eval/application.rs" | "src/eval/sequence.rs" => D2cFamily::ApplicationAndSequence,
+            "src/eval/operator.rs" | "src/eval/net.rs" => D2cFamily::OperatorAndNet,
+            "src/eval/builtins.rs"
+            | "src/eval/builtins/assertion.rs"
+            | "src/eval/builtins/comparison.rs"
+            | "src/eval/builtins/comparison/implementation.rs"
+            | "src/eval/builtins/conditional.rs"
+            | "src/eval/builtins/numeric.rs"
+            | "src/eval/builtins/numeric/implementation.rs"
+            | "src/eval/builtins/provenance.rs"
+            | "src/eval/builtins/strategy.rs" => D2cFamily::DispatchScalarAndStrategy,
+            "src/eval/builtins/dict.rs"
+            | "src/eval/builtins/dict/basic.rs"
+            | "src/eval/builtins/dict/merge.rs"
+            | "src/eval/builtins/list.rs"
+            | "src/eval/builtins/list/implementation.rs"
+            | "src/eval/builtins/pattern.rs" => D2cFamily::CollectionsAndPatterns,
+            "src/eval/builtins/annotation.rs"
+            | "src/eval/builtins/annotation/implementation.rs"
+            | "src/eval/builtins/effect.rs"
+            | "src/eval/builtins/effect/implementation.rs"
+            | "src/eval/builtins/list_effect.rs"
+            | "src/eval/builtins/list_effect/implementation.rs" => D2cFamily::AnnotationsAndEffects,
+            "src/eval/builtins/object.rs" | "src/eval/builtins/object/implementation.rs" => {
+                D2cFamily::Objects
+            }
+            "src/eval/builtins/net.rs" | "src/eval/builtins/net/construction.rs" => {
+                D2cFamily::NetBuiltins
+            }
+            _ => panic!("{} has no reviewed GCI11R-002D.2c family", self.declaration),
+        };
+        Some(family)
+    }
+
+    fn d2c_current_context(&self) -> Option<D2cCurrentContext> {
+        self.d2c_family()?;
+        Some(if self.shape.contains("EvaluatorStepContext") {
+            D2cCurrentContext::EvaluatorStep
+        } else if self.shape.contains("EvalContext") {
+            D2cCurrentContext::DurableEval
+        } else {
+            D2cCurrentContext::ContextFree
+        })
+    }
+
+    /// Conservative initial migration shape for D.2c.0.
+    ///
+    /// An existing step/durable context may cross a demand boundary, so it is
+    /// a coordinator until its family checkpoint proves otherwise and splits
+    /// out a regional leaf. Context-free raw-value operations must first gain
+    /// regional authority; a later family checkpoint may instead eliminate
+    /// one by narrowing it to immediate semantic data.
+    fn d2c_execution_shape(&self) -> Option<D2cExecutionShape> {
+        Some(match self.d2c_current_context()? {
+            D2cCurrentContext::EvaluatorStep | D2cCurrentContext::DurableEval => {
+                D2cExecutionShape::SuspendableCoordinator
+            }
+            D2cCurrentContext::ContextFree => D2cExecutionShape::RegionalOperation,
+        })
     }
 }
 
@@ -1009,6 +1107,13 @@ fn remediation_summary(
         })
 }
 
+fn d2c_occurrences(occurrences: &[ApiOccurrence]) -> Vec<&ApiOccurrence> {
+    occurrences
+        .iter()
+        .filter(|occurrence| occurrence.d2c_family().is_some())
+        .collect()
+}
+
 #[test]
 fn raw_core_value_api_inventory_is_complete() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1229,6 +1334,171 @@ fn d2b_core_compatibility_declarations_are_exact() {
         actual, expected,
         "D.2b.4 permits only the exact compatibility declarations handed to D.2c-D.2g and P4"
     );
+}
+
+#[test]
+fn d2c_evaluator_boundary_manifest_is_exact() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inventory = collect_occurrences(manifest);
+    let occurrences = d2c_occurrences(&inventory);
+
+    let family_counts = occurrences
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, occurrence| {
+            *counts
+                .entry(
+                    occurrence
+                        .d2c_family()
+                        .expect("D.2c occurrence needs a family"),
+                )
+                .or_default() += 1;
+            counts
+        });
+    assert_eq!(
+        family_counts,
+        BTreeMap::from([
+            (D2cFamily::ValueDemand, 29),
+            (D2cFamily::ApplicationAndSequence, 12),
+            (D2cFamily::OperatorAndNet, 20),
+            (D2cFamily::DispatchScalarAndStrategy, 25),
+            (D2cFamily::CollectionsAndPatterns, 43),
+            (D2cFamily::AnnotationsAndEffects, 42),
+            (D2cFamily::Objects, 22),
+            (D2cFamily::NetBuiltins, 8),
+        ]),
+        "each raw evaluator operation needs one stable D.2c family"
+    );
+
+    let context_counts = occurrences
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, occurrence| {
+            *counts
+                .entry(
+                    occurrence
+                        .d2c_current_context()
+                        .expect("D.2c occurrence needs a current context shape"),
+                )
+                .or_default() += 1;
+            counts
+        });
+    assert_eq!(
+        context_counts,
+        BTreeMap::from([
+            (D2cCurrentContext::EvaluatorStep, 146),
+            (D2cCurrentContext::DurableEval, 7),
+            (D2cCurrentContext::ContextFree, 48),
+        ]),
+        "the D.2c signature baseline drifted"
+    );
+
+    let execution_counts = occurrences
+        .iter()
+        .fold([0_usize; 3], |mut counts, occurrence| {
+            let index = match occurrence
+                .d2c_execution_shape()
+                .expect("D.2c occurrence needs an execution shape")
+            {
+                D2cExecutionShape::RegionalOperation => 0,
+                D2cExecutionShape::SuspendableCoordinator => 1,
+                D2cExecutionShape::ImmediateDataHelper => 2,
+            };
+            counts[index] += 1;
+            counts
+        });
+    assert_eq!(
+        execution_counts,
+        [48, 153, 0],
+        "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
+    );
+}
+
+#[test]
+fn d2c_family_fingerprints_are_exact() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inventory = collect_occurrences(manifest);
+    let mut groups = BTreeMap::<D2cFamily, Vec<ApiOccurrence>>::new();
+    for occurrence in d2c_occurrences(&inventory) {
+        groups
+            .entry(
+                occurrence
+                    .d2c_family()
+                    .expect("D.2c occurrence needs a family"),
+            )
+            .or_default()
+            .push(occurrence.clone());
+    }
+    let actual = groups
+        .iter()
+        .map(|(family, occurrences)| (*family, occurrence_fingerprint(occurrences)))
+        .collect::<BTreeMap<_, _>>();
+    let expected = BTreeMap::from([
+        (D2cFamily::ValueDemand, 15_183_779_693_703_421_937),
+        (
+            D2cFamily::ApplicationAndSequence,
+            12_784_279_839_195_577_796,
+        ),
+        (D2cFamily::OperatorAndNet, 963_405_988_810_133_120),
+        (
+            D2cFamily::DispatchScalarAndStrategy,
+            18_123_437_161_959_930_221,
+        ),
+        (
+            D2cFamily::CollectionsAndPatterns,
+            16_633_895_905_255_689_776,
+        ),
+        (D2cFamily::AnnotationsAndEffects, 739_217_485_930_540_031),
+        (D2cFamily::Objects, 8_896_054_647_244_987_771),
+        (D2cFamily::NetBuiltins, 14_762_595_510_693_706_178),
+    ]);
+
+    assert_eq!(
+        actual, expected,
+        "a D.2c declaration or signature moved without updating its family checkpoint"
+    );
+}
+
+#[test]
+fn d2c_context_is_not_mistaken_for_active_access() {
+    let occurrence = |shape: &str| ApiOccurrence {
+        declaration: "src/eval/value.rs::fixture".to_owned(),
+        shape: shape.to_owned(),
+        kind: ApiKind::Function,
+        inputs: 1,
+        outputs: 1,
+        access: 0,
+    };
+
+    let step = occurrence("fn fixture(context: &EvaluatorStepContext<'_>, value: Value) -> Value");
+    assert_eq!(
+        step.d2c_current_context(),
+        Some(D2cCurrentContext::EvaluatorStep)
+    );
+    assert_eq!(
+        step.d2c_execution_shape(),
+        Some(D2cExecutionShape::SuspendableCoordinator)
+    );
+
+    let durable = occurrence("fn fixture(context: &EvalContext, value: Value) -> Value");
+    assert_eq!(
+        durable.d2c_current_context(),
+        Some(D2cCurrentContext::DurableEval)
+    );
+    assert_eq!(
+        durable.d2c_execution_shape(),
+        Some(D2cExecutionShape::SuspendableCoordinator)
+    );
+
+    let regional = occurrence("fn fixture(value: Value) -> Value");
+    assert_eq!(
+        regional.d2c_current_context(),
+        Some(D2cCurrentContext::ContextFree)
+    );
+    assert_eq!(
+        regional.d2c_execution_shape(),
+        Some(D2cExecutionShape::RegionalOperation)
+    );
+
+    let _future_narrowing = D2cExecutionShape::ImmediateDataHelper;
 }
 
 #[test]
