@@ -305,7 +305,7 @@ impl NetConstructionMachine {
 }
 
 fn net_construction_context() -> Value {
-    crate::eval::evaluation_context_frame("net_construction")
+    crate::diagnostic::evaluation_context_frame("net_construction")
 }
 
 fn construct_bind(
@@ -437,7 +437,7 @@ fn construction_copy_count(
         let values = context.values();
         halt.with_context(
             &values,
-            values.wrap(crate::eval::evaluation_context_frame("copy_count")),
+            values.wrap(crate::diagnostic::evaluation_context_frame("copy_count")),
         )
     })?;
     value

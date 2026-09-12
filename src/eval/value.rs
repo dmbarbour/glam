@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazySource,
-    LazyValue, List, ListThunk, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value, keys,
+    LazyValue, List, ListThunk, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
+    RuntimeValueAccess, Value, keys,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
@@ -19,6 +20,41 @@ use super::builtins::{
 use super::net::*;
 use super::sequence::list_to_key_items_in;
 
+pub(crate) fn failure_diagnostic_value_in(
+    access: &RuntimeValueAccess<'_>,
+    failure: &EvaluationFailure,
+) -> Value {
+    let emission = match failure.emission_value_in(access) {
+        Some(Value::Binary(text)) => {
+            crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
+        }
+        Some(emission @ Value::Dict(_)) => access.duplicate_value(emission),
+        Some(other) => {
+            return fallback_failure_diagnostic(
+                access,
+                failure,
+                Some(access.duplicate_value(other)),
+                failure_contexts_value(access, failure),
+            );
+        }
+        None => crate::diagnostic::text_message(None, failure.to_string()),
+    };
+
+    crate::diagnostic::prepend_contexts(
+        access.duplicate_value(&emission),
+        failure.contexts_in(access),
+    )
+    .unwrap_or_else(|_| {
+        fallback_failure_diagnostic(
+            access,
+            failure,
+            Some(emission),
+            failure_contexts_value(access, failure),
+        )
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     let emission = match failure.emission_value() {
         Some(Value::Binary(text)) => {
@@ -29,7 +65,7 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
             .expect("matched failure emission")
             .clone(),
         Some(other) => {
-            return fallback_failure_diagnostic(
+            return fallback_failure_diagnostic_for_test(
                 failure,
                 Some(other.clone()),
                 Value::List(List::from_values(failure.contexts().to_vec())),
@@ -39,34 +75,12 @@ pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     };
 
     crate::diagnostic::prepend_contexts(emission.clone(), failure.contexts()).unwrap_or_else(|_| {
-        fallback_failure_diagnostic(
+        fallback_failure_diagnostic_for_test(
             failure,
             Some(emission),
             Value::List(List::from_values(failure.contexts().to_vec())),
         )
     })
-}
-
-pub(crate) fn failure_diagnostic_value_with(
-    values: &crate::core::CoreValueFactory,
-    failure: &EvaluationFailure,
-) -> Value {
-    let emission = match failure.emission_value() {
-        Some(Value::Binary(text)) => {
-            crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
-        }
-        Some(emission) => emission.clone(),
-        None => crate::diagnostic::text_message(None, failure.to_string()),
-    };
-
-    crate::diagnostic::prepend_contexts_with(values, emission.clone(), failure.contexts())
-        .unwrap_or_else(|_| {
-            fallback_failure_diagnostic(
-                failure,
-                Some(emission),
-                Value::List(List::from_values(failure.contexts().to_vec())),
-            )
-        })
 }
 
 #[cfg(test)]
@@ -75,19 +89,18 @@ pub(crate) fn halt_diagnostic_value(halt: &EvaluationHalt) -> Option<Value> {
         .map(|failure| failure_diagnostic_value(failure))
 }
 
-pub(crate) fn halt_diagnostic_value_with(
-    values: &crate::core::CoreValueFactory,
-    halt: &EvaluationHalt,
-) -> Option<Value> {
-    halt.permanent_failure()
-        .map(|failure| failure_diagnostic_value_with(values, failure))
+pub(crate) fn evaluation_context_frame_in(
+    access: &RuntimeValueAccess<'_>,
+    operation: &str,
+) -> Value {
+    evaluation_context_frame_with_args_in(access, operation, Dict::new_sync())
 }
 
-pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
-    evaluation_context_frame_with_args(operation, Dict::new_sync())
-}
-
-pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
+pub(crate) fn evaluation_context_frame_with_args_in(
+    _access: &RuntimeValueAccess<'_>,
+    operation: &str,
+    args: Dict,
+) -> Value {
     let operation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
         operation,
     )));
@@ -98,7 +111,18 @@ pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) ->
     Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::Dict(detail)))
 }
 
+#[cfg(test)]
+pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
+    crate::diagnostic::evaluation_context_frame(operation)
+}
+
+#[cfg(test)]
+pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
+    crate::diagnostic::evaluation_context_frame_with_args(operation, args)
+}
+
 fn fallback_failure_diagnostic(
+    _access: &RuntimeValueAccess<'_>,
     failure: &EvaluationFailure,
     emission: Option<Value>,
     contexts: Value,
@@ -113,6 +137,34 @@ fn fallback_failure_diagnostic(
         message = message.insert((*keys::VALUE).clone(), emission);
     }
     Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
+}
+
+#[cfg(test)]
+fn fallback_failure_diagnostic_for_test(
+    failure: &EvaluationFailure,
+    emission: Option<Value>,
+    contexts: Value,
+) -> Value {
+    let mut message = Dict::new_sync()
+        .insert(
+            (*keys::TEXT).clone(),
+            Value::binary_from_text(&failure.to_string()),
+        )
+        .insert((*keys::CONTEXT).clone(), contexts);
+    if let Some(emission) = emission {
+        message = message.insert((*keys::VALUE).clone(), emission);
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
+}
+
+fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationFailure) -> Value {
+    Value::List(List::from_values(
+        failure
+            .contexts_in(access)
+            .iter()
+            .map(|context| access.duplicate_value(context))
+            .collect(),
+    ))
 }
 
 pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
@@ -173,7 +225,10 @@ impl LazyTaskMachine {
         result: Result<Value, EvaluationHalt>,
     ) -> EvaluationMachinePoll {
         match result {
-            Ok(value) if is_deferred(&value) => {
+            Ok(value)
+                if context
+                    .with_value_access(|access| is_deferred_value(access.values(), &value)) =>
+            {
                 self.work = LazyTaskWork::Follow(context.root_value(value));
                 EvaluationMachinePoll::Yielded
             }
@@ -345,7 +400,10 @@ impl EvaluationTaskMachine for PromiseFollower {
             };
 
             match result {
-                Ok(value) if is_deferred(&value) => {
+                Ok(value)
+                    if context
+                        .with_value_access(|access| is_deferred_value(access.values(), &value)) =>
+                {
                     self.state = PromiseFollowerState::FollowAssignment;
                     EvaluationMachinePoll::Yielded
                 }
@@ -354,10 +412,6 @@ impl EvaluationTaskMachine for PromiseFollower {
             }
         })
     }
-}
-
-fn is_deferred(value: &Value) -> bool {
-    matches!(value, Value::Lazy(_) | Value::Promised(_))
 }
 
 pub(super) fn promise_wait(
@@ -558,7 +612,10 @@ fn produce_lazy_source_in(
                 .with_value_access(|access| access.net(&runtime).with(|runtime| runtime.exposed()));
             extract_net_data(context, runtime, exposed, "lazy net computation").map_err(|error| {
                 context.with_value_access(|access| {
-                    error.with_context(access.values(), evaluation_context_frame("net_computation"))
+                    error.with_context(
+                        access.values(),
+                        evaluation_context_frame_in(access.values(), "net_computation"),
+                    )
                 })
             })
         }
@@ -580,7 +637,7 @@ fn eval_promised_in(
         });
         if let Some(assignment) = assignment {
             let value = assignment.map_err(EvaluationHalt::failure)?;
-            if !is_deferred(&value) {
+            if !context.with_value_access(|access| is_deferred_value(access.values(), &value)) {
                 return Ok(value);
             }
             let wait = promise_wait(context.context(), promise)
@@ -625,8 +682,10 @@ fn eval_reflection_task_source(
     };
     let task = computation.task(context.context()).map_err(|error| {
         context.with_value_access(|access| {
-            EvaluationHalt::failure(error)
-                .with_context(access.values(), evaluation_context_frame(context_name))
+            EvaluationHalt::failure(error).with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), context_name),
+            )
         })
     })?;
     context.defer_reflection_activation(task.clone());
@@ -642,22 +701,31 @@ fn eval_reflection_task_source(
         EvaluationWaitPoll::Failed(error) => {
             handle.acknowledge_propagated_failure();
             Err(context.with_value_access(|access| {
-                EvaluationHalt::failure(error.into_failure())
-                    .with_context(access.values(), evaluation_context_frame(context_name))
+                EvaluationHalt::failure(error.into_failure()).with_context(
+                    access.values(),
+                    evaluation_context_frame_in(access.values(), context_name),
+                )
             }))
         }
         EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(cancellation_message)),
         EvaluationWaitPoll::Abandoned => Err(context.with_value_access(|access| {
             EvaluationHalt::new("reflection task was abandoned when its evaluation session closed")
-                .with_context(access.values(), evaluation_context_frame(context_name))
+                .with_context(
+                    access.values(),
+                    evaluation_context_frame_in(access.values(), context_name),
+                )
         })),
         EvaluationWaitPoll::Exited => Err(context.with_value_access(|access| {
-            EvaluationHalt::new("reflection task exited without producing a result")
-                .with_context(access.values(), evaluation_context_frame(context_name))
+            EvaluationHalt::new("reflection task exited without producing a result").with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), context_name),
+            )
         })),
         EvaluationWaitPoll::Killed(error) => Err(context.with_value_access(|access| {
-            EvaluationHalt::failure(error.into_failure())
-                .with_context(access.values(), evaluation_context_frame(context_name))
+            EvaluationHalt::failure(error.into_failure()).with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), context_name),
+            )
         })),
     }
 }
@@ -774,7 +842,11 @@ pub(crate) fn pop_list_front_in(
         }))
 }
 
-pub(super) fn split_result_value(left: Value, right: Value) -> Value {
+pub(super) fn split_result_value(
+    _access: &RuntimeValueAccess<'_>,
+    left: Value,
+    right: Value,
+) -> Value {
     Value::Dict(
         crate::core::Dict::new_sync()
             .insert((*keys::LEFT).clone(), left)
@@ -804,7 +876,10 @@ pub(super) fn eval_index_number_in(
 ) -> Result<usize, EvaluationHalt> {
     let value = eval_value_in(context, value).map_err(|error| {
         context.with_value_access(|access| {
-            error.with_context(access.values(), evaluation_context_frame(evaluation_label))
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), evaluation_label),
+            )
         })
     })?;
     let Value::Number(number) = value else {
@@ -819,7 +894,7 @@ pub(super) fn eval_index_number_in(
     })
 }
 
-pub(super) fn is_deferred_value(value: &Value) -> bool {
+pub(super) fn is_deferred_value(_access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
     matches!(value, Value::Lazy(_) | Value::Promised(_))
 }
 
@@ -829,7 +904,7 @@ pub(super) fn is_error_lazy_value(context: &EvaluatorStepContext<'_>, value: &Va
             .is_some_and(|result| result.is_err()))
 }
 
-pub(super) fn is_undefined_dict_value(value: &Value) -> bool {
+pub(super) fn is_undefined_dict_value(_access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
     is_undefined_value(value)
 }
 

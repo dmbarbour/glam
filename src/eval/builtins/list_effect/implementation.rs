@@ -79,7 +79,9 @@ fn run_list_effect_to_list(
     };
     let Some(function) = dict
         .get(&*keys::EFF)
-        .filter(|function| !is_undefined_dict_value(function))
+        .filter(|function| {
+            !context.with_value_access(|access| is_undefined_dict_value(access.values(), function))
+        })
         .cloned()
     else {
         return Err(EvaluationHalt::new(

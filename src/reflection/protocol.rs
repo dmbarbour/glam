@@ -499,7 +499,7 @@ impl TaskHalt {
             values.core(),
             None,
             Severity::Error,
-            eval::failure_diagnostic_value_with(values.core(), failure),
+            crate::diagnostic::failure_diagnostic_value_with(values.core(), failure),
             None,
         )
     }

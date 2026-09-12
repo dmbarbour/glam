@@ -7,7 +7,6 @@ use super::{EvaluationRuntime, RuntimeDeliveryFailureSnapshot};
 use crate::api::{Diagnostic, Error, ReasoningFailure, Value, Values};
 use crate::core::{CoreValueFactory, Dict, EvaluationFailure, Key, Value as CoreValue};
 use crate::diagnostic::Severity;
-use crate::eval;
 #[cfg(test)]
 use crate::evaluation::ValidatedRuntimeSettlementPlan;
 use crate::evaluation::{
@@ -25,7 +24,7 @@ pub(super) fn reasoning_diagnostic(
         values,
         None,
         Severity::Error,
-        eval::failure_diagnostic_value_with(values, failure),
+        crate::diagnostic::failure_diagnostic_value_with(values, failure),
         None,
     )
 }

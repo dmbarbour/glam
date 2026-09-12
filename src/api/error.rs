@@ -4,7 +4,6 @@ use std::sync::Arc;
 use super::{Diagnostic, Value, Values};
 use crate::core::{CoreValueFactory, EvaluationHalt, Value as CoreValue};
 use crate::diagnostic::Severity;
-use crate::eval;
 use crate::evaluation::{EvaluationSessionId, EvaluationTaskId};
 use crate::interaction_net::NetBuildError;
 use crate::runtime::EvaluationRuntimeId;
@@ -31,7 +30,7 @@ impl Error {
         let message: Arc<str> = Arc::from(error.to_string());
         Self::from_eval_parts(
             values,
-            eval::halt_diagnostic_value_with(values, &error),
+            crate::diagnostic::halt_diagnostic_value_with(values, &error),
             message,
         )
     }

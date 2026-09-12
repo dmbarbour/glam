@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, List, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
-    Value, keys,
+    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List,
+    OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value, keys,
 };
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
@@ -251,6 +251,74 @@ pub(crate) fn text_message(line: Option<usize>, message: impl AsRef<str>) -> Val
         message_dict = message_dict.insert((*keys::LOCATION).clone(), Value::Dict(location));
     }
     Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message_dict)))
+}
+
+/// Transitional context-frame constructor for orchestration, reflection, and
+/// compiler callers which have not yet adopted their regional value-access
+/// boundary. Evaluator code uses `eval::evaluation_context_frame_in` instead.
+pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
+    evaluation_context_frame_with_args(operation, Dict::new_sync())
+}
+
+pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
+    let operation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+        operation,
+    )));
+    let mut detail = Dict::new_sync().insert((*keys::OP).clone(), operation);
+    if !args.is_empty() {
+        detail = detail.insert((*keys::ARGS).clone(), Value::Dict(args));
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::Dict(detail)))
+}
+
+/// Transitional runtime-aware projection of one evaluator failure.
+///
+/// Unlike `eval::failure_diagnostic_value_in`, this path may evaluate the
+/// emission while normalizing it into a diagnostic object. It therefore must
+/// not receive or retain an active value-access region. D.2g replaces its raw
+/// compatibility transport at the public diagnostic boundary.
+pub(crate) fn failure_diagnostic_value_with(
+    values: &CoreValueFactory,
+    failure: &EvaluationFailure,
+) -> Value {
+    let emission = match failure.emission_value() {
+        Some(Value::Binary(text)) => text_message(None, String::from_utf8_lossy(text)),
+        Some(emission) => emission.clone(),
+        None => text_message(None, failure.to_string()),
+    };
+
+    prepend_contexts_with(values, emission.clone(), failure.contexts()).unwrap_or_else(|_| {
+        fallback_failure_diagnostic(
+            failure,
+            Some(emission),
+            Value::List(List::from_values(failure.contexts().to_vec())),
+        )
+    })
+}
+
+pub(crate) fn halt_diagnostic_value_with(
+    values: &CoreValueFactory,
+    halt: &EvaluationHalt,
+) -> Option<Value> {
+    halt.permanent_failure()
+        .map(|failure| failure_diagnostic_value_with(values, failure))
+}
+
+fn fallback_failure_diagnostic(
+    failure: &EvaluationFailure,
+    emission: Option<Value>,
+    contexts: Value,
+) -> Value {
+    let mut message = Dict::new_sync()
+        .insert(
+            (*keys::TEXT).clone(),
+            Value::binary_from_text(&failure.to_string()),
+        )
+        .insert((*keys::CONTEXT).clone(), contexts);
+    if let Some(emission) = emission {
+        message = message.insert((*keys::VALUE).clone(), emission);
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
 }
 
 pub(crate) fn assembler_metadata(

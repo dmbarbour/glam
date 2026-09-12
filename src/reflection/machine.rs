@@ -2231,7 +2231,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 fn effect_dispatch_context(stage: &str) -> Value {
     let stage_key = Key::binary_from_text("stage");
     let stage = Value::Atom(Atom::from_key(&Key::binary_from_text(stage)));
-    eval::evaluation_context_frame_with_args(
+    crate::diagnostic::evaluation_context_frame_with_args(
         "effect_dispatch",
         Dict::new_sync().insert(stage_key, stage),
     )

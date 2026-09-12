@@ -597,7 +597,7 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
         crate::core::Key::atom_from_text("payload"),
         Value::Number(37.into()),
     ));
-    let frame = crate::eval::evaluation_context_frame("client_demand_retention");
+    let frame = crate::diagnostic::evaluation_context_frame("client_demand_retention");
     let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
     let promise = PromisedValue::new(context.values(), "failed client demand");
     let handle = context
@@ -5069,7 +5069,7 @@ fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
         crate::core::Key::atom_from_text("payload"),
         Value::Number(41.into()),
     ));
-    let frame = crate::eval::evaluation_context_frame("readiness_retention");
+    let frame = crate::diagnostic::evaluation_context_frame("readiness_retention");
     let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
     let weak_failure = Arc::downgrade(&failure);
     let task_failure = failure.clone();

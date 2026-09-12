@@ -82,10 +82,10 @@ impl EvaluationHalt {
         }
     }
 
-    pub(crate) fn with_context(self, _access: &RuntimeValueAccess<'_>, context: Value) -> Self {
+    pub(crate) fn with_context(self, access: &RuntimeValueAccess<'_>, context: Value) -> Self {
         match self.kind {
             EvaluationHaltKind::Failure(failure) => {
-                Self::failure(Arc::new(failure.with_context(context)))
+                Self::failure(Arc::new(failure.with_context_in(access, context)))
             }
             EvaluationHaltKind::Blocked(wait) => Self {
                 kind: EvaluationHaltKind::Blocked(wait),

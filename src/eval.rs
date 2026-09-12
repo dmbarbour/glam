@@ -51,11 +51,11 @@ pub(crate) use sequence::list_output_bytes;
 pub(crate) use sequence::list_to_value_items;
 pub use value::eval_value;
 pub(crate) use value::eval_value_in;
+pub(crate) use value::failure_diagnostic_value_in;
 #[cfg(test)]
-pub(crate) use value::halt_diagnostic_value;
 pub(crate) use value::{
     evaluation_context_frame, evaluation_context_frame_with_args, failure_diagnostic_value,
-    failure_diagnostic_value_with, halt_diagnostic_value_with,
+    halt_diagnostic_value,
 };
 
 pub(crate) use application::*;

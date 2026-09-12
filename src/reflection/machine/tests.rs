@@ -832,7 +832,7 @@ fn compile_effect_with_runtime(
 }
 
 fn task_halt_contexts(assembler: &Assembler, halt: &TaskHalt) -> Vec<Value> {
-    let diagnostic = eval::failure_diagnostic_value_with(
+    let diagnostic = crate::diagnostic::failure_diagnostic_value_with(
         &assembler.core_values(),
         halt.clone().into_failure().as_ref(),
     );
@@ -4317,9 +4317,9 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
     assert_eq!(
         eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
         [
-            eval::evaluation_context_frame("net_computation"),
+            crate::diagnostic::evaluation_context_frame("net_computation"),
             Value::binary_from_text("child dispatch"),
-            eval::evaluation_context_frame("net_computation"),
+            crate::diagnostic::evaluation_context_frame("net_computation"),
         ]
     );
 }
@@ -4890,8 +4890,8 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
     assert_eq!(
         task_halt_contexts(&message_assembler, &message_error),
         [
-            eval::evaluation_context_frame("log_message"),
-            eval::evaluation_context_frame("net_computation"),
+            crate::diagnostic::evaluation_context_frame("log_message"),
+            crate::diagnostic::evaluation_context_frame("net_computation"),
         ]
     );
 
@@ -4907,8 +4907,8 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
     assert_eq!(
         task_halt_contexts(&severity_assembler, &severity_error),
         [
-            eval::evaluation_context_frame("log_severity"),
-            eval::evaluation_context_frame("net_computation"),
+            crate::diagnostic::evaluation_context_frame("log_severity"),
+            crate::diagnostic::evaluation_context_frame("net_computation"),
         ]
     );
 }
@@ -4993,7 +4993,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
             )
             .insert(detail, Value::Number(Number::integer(7))),
     );
-    let frame = eval::evaluation_context_frame("producer_test");
+    let frame = crate::diagnostic::evaluation_context_frame("producer_test");
     let failure =
         Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
     context.fail_wait_with_failure(owner_task.wait(), failure.clone());

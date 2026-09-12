@@ -56,11 +56,21 @@ pub(super) fn merge_dicts(
     for (key, value) in updates.iter() {
         let next_value = match merged.get(key) {
             Some(existing) => Some(merge_duplicate_dict_value(context, key, existing, value)),
-            None if is_undefined_dict_value(value) => None,
+            None if context
+                .with_value_access(|access| is_undefined_dict_value(access.values(), value)) =>
+            {
+                None
+            }
             None => Some(value.clone()),
         };
         merged = match next_value {
-            Some(value) if is_undefined_dict_value(&value) => merged.remove(key),
+            Some(value)
+                if context.with_value_access(|access| {
+                    is_undefined_dict_value(access.values(), &value)
+                }) =>
+            {
+                merged.remove(key)
+            }
             Some(value) => merged.insert(key.clone(), value),
             None => merged,
         };
@@ -75,13 +85,13 @@ fn merge_duplicate_dict_value(
     left: &Value,
     right: &Value,
 ) -> Value {
-    if is_undefined_dict_value(left) {
+    if context.with_value_access(|access| is_undefined_dict_value(access.values(), left)) {
         right.clone()
-    } else if is_undefined_dict_value(right) {
+    } else if context.with_value_access(|access| is_undefined_dict_value(access.values(), right)) {
         left.clone()
     } else if matches!((left, right), (Value::Dict(_), Value::Dict(_)))
-        || is_deferred_value(left)
-        || is_deferred_value(right)
+        || context.with_value_access(|access| is_deferred_value(access.values(), left))
+        || context.with_value_access(|access| is_deferred_value(access.values(), right))
     {
         builtin_apply3_value(
             context,
@@ -123,7 +133,7 @@ pub(super) fn update_dict_path(
         update_nested_dict_path(context, head, rest, new_value, prior)
     };
 
-    if is_undefined_dict_value(&next_value) {
+    if context.with_value_access(|access| is_undefined_dict_value(access.values(), &next_value)) {
         dict.remove(head)
     } else {
         dict.insert(head.clone(), next_value)

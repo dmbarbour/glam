@@ -1218,15 +1218,15 @@ remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
-Status: implementation in progress; D.2c.0a-D.2c.0b complete on 2026-09-12.
+Status: implementation in progress; D.2c.0a-D.2c.1a complete on 2026-09-12.
 
-Migrate the 201 evaluator-operation and builtin violations as call-tree
-families beneath `EvaluationValueAccess`. A callback-free evaluator quantum
-opens one region and passes its authority through application, operator,
-sequence, net, annotation, pattern, list, dictionary, object, numeric, and
-effect helpers. Do not repair this family by opening hundreds of nested
-mutators or by carrying a mutator through a wait, reflection gate, host call,
-or scheduler handoff.
+Migrate the original 201 evaluator-operation and builtin violations as
+call-tree families beneath `EvaluationValueAccess`. A callback-free evaluator
+quantum opens one region and passes its authority through application,
+operator, sequence, net, annotation, pattern, list, dictionary, object,
+numeric, and effect helpers. Do not repair this family by opening hundreds of
+nested mutators or by carrying a mutator through a wait, reflection gate, host
+call, or scheduler handoff.
 
 Verification: one compile-exhaustive evaluator/builtin access inventory,
 focused builtin-family tests in both modes, and a source latch which rejects a
@@ -1255,12 +1255,15 @@ Likewise, merely calling `context.with_value_access` somewhere inside a broad
 raw-value API does not qualify the API: its raw inputs must already be
 protected, and no raw result may escape after the callback returns.
 
-The current 201-operation baseline has two independent partitions which every
-checkpoint must preserve:
+The original 201-operation baseline had two independent partitions. D.2c.1a
+removed ten evaluator violations and deliberately handed five demandful
+diagnostic compatibility operations to D.2g, leaving 191 D.2c operations and
+472 repository-wide violations. Every later checkpoint must preserve the
+updated exact manifests:
 
 | Call-tree family | Operations |
 | --- | ---: |
-| Value demand, failures, and deferred sources | 29 |
+| Value demand, failures, and deferred sources | 19 |
 | Application and sequence helpers | 12 |
 | Core operators and runtime-net evaluation | 20 |
 | Dispatch, scalar, comparison, and strategy builtins | 25 |
@@ -1270,7 +1273,7 @@ checkpoint must preserve:
 | Interaction-net builtins and construction callbacks | 8 |
 
 By signature shape, 146 currently receive `EvaluatorStepContext`, seven
-receive durable `EvalContext`, and 48 are context-free. These are census facts,
+receive durable `EvalContext`, and 38 are context-free. These are census facts,
 not accepted dispositions. In particular, the first group still lacks active
 access and the last group may need either regional authority or a narrower
 immediate-data signature.
@@ -1345,6 +1348,26 @@ construction, evaluation context frames, fallback diagnostic assembly,
 deferred-kind tests, undefined tests, and split-result construction beneath
 one borrowed access. Helpers which need only keys, atoms, numbers, or bytes
 instead take those narrower types. Do not format through raw `Value: Debug`.
+
+Status: complete on 2026-09-12.
+
+Completion record: evaluator-local failure projection, fallback assembly,
+context-frame construction, deferred/undefined shell inspection, and split
+result construction now require one `RuntimeValueAccess`. `EvaluationFailure`
+gained access-qualified emission/context borrows and context rebuilding, so
+`EvaluationHalt::with_context` no longer selects the authority-free failure
+clone. Production evaluator call sites either reuse an already-open region or
+open a short inspection-only region; no region crosses evaluation, a wait, or
+an effect callback.
+
+The runtime-aware diagnostic normalization helpers can evaluate an emission,
+so holding evaluator access across them would violate the suspension boundary.
+They and the compatibility context constructors used by reflection/compiler
+code moved to `diagnostic.rs`, where D.2g owns their eventual rooted/regional
+cutover. This is a deliberate role reassignment rather than hiding a D.2c
+violation: D.2c fell from 201 to 191 operations, the value-demand family from
+29 to 19, and the D.2g compiler-diagnostic family rose from 29 to 34 while the
+repository-wide violation count fell from 477 to 472.
 
 **D.2c.1b — List, key, number, and tagged-value projections.** Migrate list
 front forcing, key conversion, tagged payload lookup, index/number extraction,

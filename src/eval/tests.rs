@@ -479,6 +479,42 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
 }
 
 #[test]
+fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() {
+    let context = test_context();
+    let values = context.values();
+    let before = values.managed_root_registrations_for_test();
+    let detail = Key::binary_from_text("detail");
+
+    values.with_runtime_value_access(|access| {
+        let frame = evaluation_context_frame_in(&access, "regional_diagnostic");
+        let failure =
+            EvaluationFailure::emission(Value::Dict(Dict::new_sync().insert(detail.clone(), n(7))))
+                .with_context_in(&access, frame);
+        let Value::Dict(diagnostic) = failure_diagnostic_value_in(&access, &failure) else {
+            panic!("a dictionary emission should remain a diagnostic dictionary")
+        };
+        assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+
+        let Value::Dict(split) = split_result_value(&access, n(1), n(2)) else {
+            panic!("a split result should be a dictionary")
+        };
+        assert_eq!(split.get(&*keys::LEFT), Some(&n(1)));
+        assert_eq!(split.get(&*keys::RIGHT), Some(&n(2)));
+        assert!(is_undefined_dict_value(
+            &access,
+            &Value::Dict(Dict::new_sync())
+        ));
+        assert!(!is_deferred_value(&access, &n(3)));
+    });
+
+    assert_eq!(
+        values.managed_root_registrations_for_test(),
+        before,
+        "immediate shell projection must not register compatibility roots"
+    );
+}
+
+#[test]
 fn raw_net_values_are_opaque_while_net_computations_expose_data() {
     let net = closed_net(|builder| builder.data(n(42)));
     let raw = Value::Net(net.clone());

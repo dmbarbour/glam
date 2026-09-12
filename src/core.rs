@@ -184,6 +184,56 @@ impl EvaluationFailure {
         &self.contexts
     }
 
+    /// Rebuilds this failure while one matching value-domain access protects
+    /// every copied semantic edge.
+    ///
+    /// The authority-free `with_context` operation remains only for the
+    /// downstream compatibility cutover. Evaluator code must use this form so
+    /// a managed emission or prior context is never duplicated outside a
+    /// mutator region.
+    pub(crate) fn with_context_in(&self, access: &RuntimeValueAccess<'_>, context: Value) -> Self {
+        let mut contexts = Vec::with_capacity(self.contexts.len() + 1);
+        contexts.push(context);
+        contexts.extend(
+            self.contexts
+                .iter()
+                .map(|context| access.duplicate_value(context)),
+        );
+        let kind = match &self.kind {
+            EvaluationFailureKind::Emission(emission) => {
+                EvaluationFailureKind::Emission(access.duplicate_value(emission))
+            }
+            EvaluationFailureKind::DependencyCycle(cycle) => {
+                EvaluationFailureKind::DependencyCycle(Arc::clone(cycle))
+            }
+        };
+        Self {
+            kind,
+            contexts: contexts.into(),
+        }
+    }
+
+    /// Borrows the immediate emission only while matching value access is
+    /// active. Dependency-cycle failures have no semantic emission.
+    pub(crate) fn emission_value_in<'access>(
+        &'access self,
+        _access: &'access RuntimeValueAccess<'_>,
+    ) -> Option<&'access Value> {
+        match &self.kind {
+            EvaluationFailureKind::Emission(emission) => Some(emission),
+            EvaluationFailureKind::DependencyCycle(_) => None,
+        }
+    }
+
+    /// Borrows structured demand frames only while matching value access is
+    /// active.
+    pub(crate) fn contexts_in<'access>(
+        &'access self,
+        _access: &'access RuntimeValueAccess<'_>,
+    ) -> &'access [Value] {
+        &self.contexts
+    }
+
     /// Reports every direct semantic value retained by this failure without
     /// evaluating, formatting, comparing, or recursively visiting it.
     ///

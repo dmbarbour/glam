@@ -6077,14 +6077,14 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
         Some(&Value::Number(n(7)))
     );
 
-    let dispatch = crate::eval::evaluation_context_frame_with_args(
+    let dispatch = crate::diagnostic::evaluation_context_frame_with_args(
         "effect_dispatch",
         Dict::new_sync().insert(
             Key::binary_from_text("stage"),
             Value::Atom(Atom::from_key(&Key::binary_from_text("function"))),
         ),
     );
-    let net = crate::eval::evaluation_context_frame("net_construction");
+    let net = crate::diagnostic::evaluation_context_frame("net_construction");
     let net_index = failure
         .contexts()
         .iter()

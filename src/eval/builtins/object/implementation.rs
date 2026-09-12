@@ -87,7 +87,7 @@ pub(super) fn eval_object_with_defs_builtin(
         return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     };
     let spec = eval_value_in(context, spec)?;
-    if is_undefined_dict_value(&spec) {
+    if context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec)) {
         let extension = apply_value_in(context, extension_defs, object)?;
         return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     }
@@ -175,7 +175,7 @@ pub(super) fn eval_object_spec_builtin(
         ));
     };
     let spec = eval_value_in(context, spec)?;
-    if is_undefined_dict_value(&spec) {
+    if context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec)) {
         return Err(EvaluationHalt::new(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
         ));
@@ -199,12 +199,13 @@ pub(super) fn eval_object_from_dict_builtin(
         ));
     };
 
-    if let Some(spec) = dict.get(&*keys::SPEC)
-        && !is_undefined_dict_value(&eval_value_in(context, spec)?)
-    {
-        return Err(EvaluationHalt::new(
-            "object_from_dict requires a plain dictionary, not an object",
-        ));
+    if let Some(spec) = dict.get(&*keys::SPEC) {
+        let spec = eval_value_in(context, spec)?;
+        if !context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec)) {
+            return Err(EvaluationHalt::new(
+                "object_from_dict requires a plain dictionary, not an object",
+            ));
+        }
     }
 
     eval_object_instance_builtin(context, &dict_object_spec(dict))

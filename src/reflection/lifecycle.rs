@@ -242,6 +242,7 @@ impl Drop for ScheduledEffectRun {
 
 impl ScheduledEffectRun {
     pub fn run(self) -> Result<TaskOutcome, TaskHalt> {
+        let values = self.context.values().clone();
         loop {
             let children = self.context.run_until_quiescent();
             match self.context.poll_reflection_task(&self.task) {
@@ -253,6 +254,7 @@ impl ScheduledEffectRun {
                 }
                 EvaluationWaitPoll::Complete(value) => {
                     return combine_composed_result(
+                        &values,
                         Ok(TaskOutcome::Complete(PublicValue::from_runtime_root(
                             *value,
                         ))),
@@ -260,19 +262,25 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Failed(error) => {
-                    return combine_composed_result(Err(TaskHalt::rooted_failure(error)), children);
+                    return combine_composed_result(
+                        &values,
+                        Err(TaskHalt::rooted_failure(error)),
+                        children,
+                    );
                 }
                 EvaluationWaitPoll::Cancelled => {
-                    return combine_composed_result(Ok(TaskOutcome::Cancelled), children);
+                    return combine_composed_result(&values, Ok(TaskOutcome::Cancelled), children);
                 }
                 EvaluationWaitPoll::Abandoned => {
                     return combine_composed_result(
+                        &values,
                         Err(TaskHalt::new("scheduled effect root was abandoned")),
                         children,
                     );
                 }
                 EvaluationWaitPoll::Exited => {
                     return combine_composed_result(
+                        &values,
                         Err(TaskHalt::new(
                             "scheduled effect root exited without a result",
                         )),
@@ -280,7 +288,11 @@ impl ScheduledEffectRun {
                     );
                 }
                 EvaluationWaitPoll::Killed(error) => {
-                    return combine_composed_result(Err(TaskHalt::rooted_failure(error)), children);
+                    return combine_composed_result(
+                        &values,
+                        Err(TaskHalt::rooted_failure(error)),
+                        children,
+                    );
                 }
             }
         }
@@ -542,10 +554,12 @@ pub(super) fn run_composed_effect_task<S: TaskSpecialization>(
     let values = task.eval_context.values().clone();
     let parent = task.run();
     let children = task.eval_context.run_until_quiescent();
-    combine_composed_result(parent, children).map_err(|error| error.root_for_values(&values))
+    combine_composed_result(&values, parent, children)
+        .map_err(|error| error.root_for_values(&values))
 }
 
 fn combine_composed_result(
+    values: &crate::core::CoreValueFactory,
     parent: Result<TaskOutcome, TaskHalt>,
     children: EvaluationSessionRun,
 ) -> Result<TaskOutcome, TaskHalt> {
@@ -557,7 +571,10 @@ fn combine_composed_result(
             let child_failure = children
                 .permanent_failure()
                 .expect("composed child reporting produces a permanent failure");
-            Err(parent.with_core_context(eval::failure_diagnostic_value(child_failure)))
+            let context = values.with_runtime_value_access(|access| {
+                eval::failure_diagnostic_value_in(&access, child_failure)
+            });
+            Err(parent.with_core_context(context))
         }
     }
 }

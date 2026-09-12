@@ -114,7 +114,7 @@ pub(super) fn list_to_binary_bytes_in(
                     context.with_value_access(|access| {
                         error.with_context(
                             access.values(),
-                            evaluation_context_frame("binary_extraction"),
+                            evaluation_context_frame_in(access.values(), "binary_extraction"),
                         )
                     })
                 })? {
@@ -140,7 +140,7 @@ pub(super) fn list_to_binary_bytes_in(
                 context.with_value_access(|access| {
                     error.with_context(
                         access.values(),
-                        evaluation_context_frame("binary_extraction"),
+                        evaluation_context_frame_in(access.values(), "binary_extraction"),
                     )
                 })
             })

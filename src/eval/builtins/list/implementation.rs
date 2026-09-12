@@ -124,10 +124,13 @@ pub(super) fn eval_list_split_builtin(
             if index > bytes.len() {
                 return Err(EvaluationHalt::new("split builtin index is out of bounds"));
             }
-            Ok(split_result_value(
-                Value::Binary(bytes.slice(0..index)),
-                Value::Binary(bytes.slice(index..bytes.len())),
-            ))
+            Ok(context.with_value_access(|access| {
+                split_result_value(
+                    access.values(),
+                    Value::Binary(bytes.slice(0..index)),
+                    Value::Binary(bytes.slice(index..bytes.len())),
+                )
+            }))
         }
         Value::List(list) => {
             let Some((left, right)) =
@@ -135,7 +138,9 @@ pub(super) fn eval_list_split_builtin(
             else {
                 return Err(EvaluationHalt::new("split builtin index is out of bounds"));
             };
-            Ok(split_result_value(Value::List(left), Value::List(right)))
+            Ok(context.with_value_access(|access| {
+                split_result_value(access.values(), Value::List(left), Value::List(right))
+            }))
         }
         _ => Err(EvaluationHalt::new(
             "split builtin requires a list or binary value",
@@ -157,10 +162,13 @@ pub(super) fn eval_list_split_end_builtin(
                 ));
             }
             let index = bytes.len() - count;
-            Ok(split_result_value(
-                Value::Binary(bytes.slice(0..index)),
-                Value::Binary(bytes.slice(index..bytes.len())),
-            ))
+            Ok(context.with_value_access(|access| {
+                split_result_value(
+                    access.values(),
+                    Value::Binary(bytes.slice(0..index)),
+                    Value::Binary(bytes.slice(index..bytes.len())),
+                )
+            }))
         }
         Value::List(list) => {
             let Some((left, right)) =
@@ -170,7 +178,9 @@ pub(super) fn eval_list_split_end_builtin(
                     "split_end builtin count is out of bounds",
                 ));
             };
-            Ok(split_result_value(Value::List(left), Value::List(right)))
+            Ok(context.with_value_access(|access| {
+                split_result_value(access.values(), Value::List(left), Value::List(right))
+            }))
         }
         _ => Err(EvaluationHalt::new(
             "split_end builtin requires a list or binary value",

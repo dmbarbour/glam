@@ -4,7 +4,6 @@ use std::sync::Arc;
 use crate::api::{Diagnostic, Value, Values};
 use crate::core::{Atom, CoreValueFactory, Dict, Key, OpaqueValue, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
-use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
     EvaluationTaskStatus, EvaluationWaitPoll, PendingReflectionTask, PendingTaskPolicy,
@@ -561,10 +560,12 @@ fn evaluate_request<S: TaskSpecialization>(
             return Ok(RequestResult::Return(tagged_result(
                 &context.values(),
                 &keys::ERR,
-                context.values().wrap(eval::failure_diagnostic_value_with(
-                    context.eval_context().values(),
-                    failure,
-                )),
+                context
+                    .values()
+                    .wrap(crate::diagnostic::failure_diagnostic_value_with(
+                        context.eval_context().values(),
+                        failure,
+                    )),
             )));
         }
     };
@@ -667,7 +668,7 @@ fn task_status_query_value(values: &Values, status: EvaluationTaskStatus) -> Cor
         ),
         EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
             (*keys::ERR).clone(),
-            eval::failure_diagnostic_value_with(values.core(), error.as_failure()),
+            crate::diagnostic::failure_diagnostic_value_with(values.core(), error.as_failure()),
         )),
         EvaluationTaskStatus::Cancelled => values.core().key_value(&keys::CANCELED),
         EvaluationTaskStatus::Abandoned => values.core().key_value(&keys::ABANDONED),
@@ -834,7 +835,7 @@ pub(crate) fn prepare_message<S: TaskSpecialization>(
     context: &RequestContext<'_, S>,
     message: Value,
 ) -> Result<Value, TaskHalt> {
-    let log_message_context = || eval::evaluation_context_frame("log_message");
+    let log_message_context = || crate::diagnostic::evaluation_context_frame("log_message");
     let evaluated_message = context
         .evaluate(&message)
         .map_err(|error| error.with_core_context(log_message_context()))?;
@@ -862,9 +863,9 @@ pub(crate) fn parse_severity<S: TaskSpecialization>(
     context: &RequestContext<'_, S>,
     value: Value,
 ) -> Result<Severity, TaskHalt> {
-    let value = context
-        .evaluate(&value)
-        .map_err(|error| error.with_core_context(eval::evaluation_context_frame("log_severity")))?;
+    let value = context.evaluate(&value).map_err(|error| {
+        error.with_core_context(crate::diagnostic::evaluation_context_frame("log_severity"))
+    })?;
     let (info, warn, error) = value.with_core(|value| {
         (
             severity_matches(value, "info", &keys::INFO),

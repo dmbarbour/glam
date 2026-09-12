@@ -135,7 +135,7 @@ fn apply_dict_value_in(
     }
 
     if let Some(function) = dict.get(&*keys::APPLY)
-        && !is_undefined_dict_value(function)
+        && !context.with_value_access(|access| is_undefined_dict_value(access.values(), function))
     {
         return apply_value_in(context, eval_value_in(context, function)?, argument);
     }

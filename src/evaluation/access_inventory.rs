@@ -603,6 +603,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -631,6 +632,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_code#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_template#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::lower_resolved_expr#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/lifecycle.rs::combine_composed_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine.rs::impl Branch < S >::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine.rs::impl EffectTask < S >::deliver_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine.rs::impl EffectTask < S >::start_fixpoint#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -788,7 +790,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // compare managed-net identity under matching access.
         // D.2b.2's structured deferred-failure fixture constructs its halt
         // payload in one explicit access region.
-        ("src/eval/tests.rs", GatewayCounts::new(3, 1)),
+        ("src/eval/tests.rs", GatewayCounts::new(4, 1)),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         // D.2b.2 terminal promise assignment is access-qualified before its
         // detached completion wake is delivered.
@@ -827,6 +829,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // publishing it into branch/coordinator state.
         // D.2b.2 adds access-qualified branch-root construction and reflection
         // fixpoint publication without carrying access across machine polls.
+        // D.2c.1a projects a composed child failure through one short
+        // diagnostic region after child settlement has completed.
+        ("src/reflection/lifecycle.rs", GatewayCounts::new(1, 0)),
         ("src/reflection/machine.rs", GatewayCounts::new(3, 0)),
         // Structured halt fixtures and production conversion now construct
         // their raw payloads only within explicit regions.
@@ -970,7 +975,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        21
+        22
     );
 }
 

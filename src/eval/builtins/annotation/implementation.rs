@@ -62,7 +62,10 @@ pub(super) fn eval_anno_builtin(
         RecognizedAnnotation::Error => {
             let message = eval_value_in(context, target).map_err(|error| {
                 context.with_value_access(|access| {
-                    error.with_context(access.values(), evaluation_context_frame("error_message"))
+                    error.with_context(
+                        access.values(),
+                        evaluation_context_frame_in(access.values(), "error_message"),
+                    )
                 })
             })?;
             Err(context
@@ -128,7 +131,10 @@ fn recognize_annotation(
 ) -> Result<RecognizedAnnotation, EvaluationHalt> {
     let annotation = eval_value_in(context, annotation).map_err(|error| {
         context.with_value_access(|access| {
-            error.with_context(access.values(), evaluation_context_frame("annotation"))
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "annotation"),
+            )
         })
     })?;
     if let Value::Atom(atom) = &annotation {
@@ -389,10 +395,12 @@ fn metadata_update_outputs(
     output_count: usize,
     updates: Value,
 ) -> Value {
-    let projection_context = Value::Dict(crate::core::Dict::new_sync().insert(
-        (*keys::CONTEXT).clone(),
-        evaluation_context_frame("wrap_metadata"),
-    ));
+    let projection_context = context.with_value_access(|access| {
+        Value::Dict(crate::core::Dict::new_sync().insert(
+            (*keys::CONTEXT).clone(),
+            evaluation_context_frame_in(access.values(), "wrap_metadata"),
+        ))
+    });
     let carriers = (0..output_count)
         .map(|index| {
             let projection = Value::Lazy(context.construct_lazy(|access| {
