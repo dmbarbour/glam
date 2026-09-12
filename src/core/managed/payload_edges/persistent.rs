@@ -3,7 +3,7 @@
 use rpds::RedBlackTreeMapSync;
 
 use super::CompatibilityValueEdges;
-use crate::core::{Dict, Key, List, ListThunk, Value};
+use crate::core::{Dict, Key, List, Value};
 use crate::list::{LogicalListPart, LogicalListVisitStats};
 
 /// Trace-work counters retained by I7's persistent-representation audit.
@@ -89,11 +89,7 @@ pub(crate) fn visit_list_edges(
         }
         LogicalListPart::Thunk(thunk) => {
             stats.semantic_edges += 1;
-            let edge = match thunk {
-                ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
-                ListThunk::Promised(promise) => Value::Promised(promise.clone()),
-            };
-            visit(&edge);
+            let _ = thunk;
         }
     });
     stats
@@ -109,6 +105,14 @@ impl CompatibilityValueEdges for List {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         let _ = visit_list_edges(self, visit);
     }
+
+    fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.visit_logical_parts(&mut |part| {
+            if let LogicalListPart::Thunk(thunk) = part {
+                thunk.trace_managed_edge(visitor);
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +125,7 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        CoreValueFactory, EvaluationHalt, LazyValue, ManagedDropRecord, ManagedFamily,
+        CoreValueFactory, EvaluationHalt, LazyValue, ListThunk, ManagedDropRecord, ManagedFamily,
         PromisedValue,
     };
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
@@ -198,7 +202,7 @@ mod tests {
         let thunk = List::from_thunk(ListThunk::Lazy(lazy.clone()));
         let mut thunk_edges = Vec::new();
         let thunk_stats = visit_list_edges(&thunk, &mut |value| thunk_edges.push(value.clone()));
-        assert_eq!(thunk_edges, [Value::Lazy(lazy)]);
+        assert!(thunk_edges.is_empty());
         assert_eq!(thunk_stats.list.thunk_items, 1);
         assert_eq!(thunk_stats.semantic_edges, 1);
         assert!(!forced.load(Ordering::Acquire));
@@ -207,8 +211,8 @@ mod tests {
             &crate::core::test_value_factory(),
             "persistent adapter promise",
         );
-        let promise_thunk = List::from_thunk(ListThunk::Promised(promise.clone()));
-        assert_eq!(edges(&promise_thunk), [Value::Promised(promise)]);
+        let promise_thunk = List::from_thunk(ListThunk::Promised(promise));
+        assert!(edges(&promise_thunk).is_empty());
 
         let nested_key = Key::Dict(Arc::from([(
             Key::List(Arc::from([Key::Number(3.into()), Key::Number(4.into())])),

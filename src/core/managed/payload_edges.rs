@@ -23,6 +23,10 @@ use super::super::{
 )]
 pub(crate) trait CompatibilityValueEdges {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value));
+
+    /// Reports direct managed edges which cannot be borrowed as a raw
+    /// compatibility `Value` without duplicating a persistent identity.
+    fn trace_direct_compatibility_managed_edges(&self, _visitor: &mut glam_gc::Visitor<'_>) {}
 }
 
 mod managed;
@@ -58,6 +62,24 @@ impl CompatibilityValueEdges for Value {
             | Self::Net(_)
             | Self::Lazy(_)
             | Self::Promised(_)
+            | Self::Opaque(_) => {}
+        }
+    }
+
+    fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        match self {
+            Self::List(list) => list.trace_direct_compatibility_managed_edges(visitor),
+            Self::Atom(_)
+            | Self::Number(_)
+            | Self::Binary(_)
+            | Self::Dict(_)
+            | Self::Builtin(_)
+            | Self::PartialBuiltin(_)
+            | Self::Function(_)
+            | Self::Net(_)
+            | Self::Lazy(_)
+            | Self::Promised(_)
+            | Self::Metadata(_)
             | Self::Opaque(_) => {}
         }
     }

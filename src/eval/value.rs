@@ -738,10 +738,7 @@ pub(super) fn force_list_thunk_in(
     context: &EvaluatorStepContext<'_>,
     thunk: &ListThunk,
 ) -> Result<List, EvaluationHalt> {
-    let thunk = match thunk {
-        ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
-        ListThunk::Promised(promise) => Value::Promised(promise.clone()),
-    };
+    let thunk = context.with_value_access(|access| thunk.duplicate_as_value_in(access.values()));
     match eval_value_in(context, &thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),

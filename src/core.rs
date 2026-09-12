@@ -1337,6 +1337,16 @@ impl NetValue {
         Self::new(self.runtime.duplicate_in(access))
     }
 
+    /// Compares exact managed-net identity inside matching value access.
+    #[inline(always)]
+    pub(crate) fn same_representation_in(
+        &self,
+        other: &Self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.runtime.same_net_in(&other.runtime, access)
+    }
+
     pub fn into_runtime(self) -> CoreRuntimeNet {
         self.runtime
     }
@@ -1366,6 +1376,20 @@ impl FunctionCode {
     #[inline(always)]
     pub(crate) fn duplicate_runtime_in(&self, access: &RuntimeValueAccess<'_>) -> CoreRuntimeNet {
         self.runtime.duplicate_in(access)
+    }
+
+    /// Duplicates this immutable function-code shell inside matching access.
+    #[inline(always)]
+    #[allow(
+        dead_code,
+        reason = "D.2b.3c establishes the explicit shell operation before D.2c migrates core operators"
+    )]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self::new(
+            self.duplicate_runtime_in(access),
+            self.arity,
+            self.capture_count,
+        )
     }
 
     pub fn arity(&self) -> usize {
@@ -1405,6 +1429,23 @@ impl FunctionValue {
         self.stage.duplicate_in(access)
     }
 
+    /// Duplicates this immutable function stage inside matching value access.
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self::new(self.duplicate_stage_in(access), self.remaining_arity)
+    }
+
+    /// Compares exact stage identity and the remaining application arity.
+    #[inline(always)]
+    pub(crate) fn same_representation_in(
+        &self,
+        other: &Self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.remaining_arity == other.remaining_arity
+            && self.stage.same_representation_in(&other.stage, access)
+    }
+
     pub fn remaining_arity(&self) -> usize {
         self.remaining_arity
     }
@@ -1422,6 +1463,25 @@ impl BuiltinCall {
             builtin,
             arguments: Arc::from([]),
         }
+    }
+
+    /// Duplicates the immutable argument-array shell inside matching access.
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, _access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            builtin: self.builtin,
+            arguments: Arc::clone(&self.arguments),
+        }
+    }
+
+    fn same_representation_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.builtin == other.builtin
+            && self.arguments.len() == other.arguments.len()
+            && self
+                .arguments
+                .iter()
+                .zip(other.arguments.iter())
+                .all(|(left, right)| access.same_representation(left, right))
     }
 }
 
@@ -2067,6 +2127,39 @@ pub enum ListThunk {
     Promised(PromisedValue),
 }
 
+impl ListThunk {
+    /// Reifies a deferred list edge as a value under matching regional access.
+    pub(crate) fn duplicate_as_value_in(&self, access: &RuntimeValueAccess<'_>) -> Value {
+        match self {
+            Self::Lazy(lazy) => Value::Lazy(LazyValue {
+                edge: lazy.edge.duplicate_in(access),
+            }),
+            Self::Promised(promise) => Value::Promised(PromisedValue {
+                edge: promise.edge.duplicate_in(access),
+            }),
+        }
+    }
+
+    fn same_representation_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        match (self, other) {
+            (Self::Lazy(left), Self::Lazy(right)) => {
+                left.edge.same_allocation_in(&right.edge, access)
+            }
+            (Self::Promised(left), Self::Promised(right)) => {
+                left.edge.same_allocation_in(&right.edge, access)
+            }
+            (Self::Lazy(_), Self::Promised(_)) | (Self::Promised(_), Self::Lazy(_)) => false,
+        }
+    }
+
+    pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        match self {
+            Self::Lazy(lazy) => lazy.trace_managed_edge(visitor),
+            Self::Promised(promise) => promise.trace_managed_edge(visitor),
+        }
+    }
+}
+
 impl From<LazyValue> for ListThunk {
     fn from(lazy: LazyValue) -> Self {
         Self::Lazy(lazy)
@@ -2399,14 +2492,8 @@ impl RuntimeValueAccess<'_> {
             Value::List(value) => Value::List(value.clone()),
             Value::Dict(value) => Value::Dict(value.clone()),
             Value::Builtin(value) => Value::Builtin(*value),
-            Value::PartialBuiltin(value) => Value::PartialBuiltin(BuiltinCall {
-                builtin: value.builtin,
-                arguments: Arc::clone(&value.arguments),
-            }),
-            Value::Function(value) => Value::Function(FunctionValue::new(
-                value.duplicate_stage_in(self),
-                value.remaining_arity,
-            )),
+            Value::PartialBuiltin(value) => Value::PartialBuiltin(value.duplicate_in(self)),
+            Value::Function(value) => Value::Function(value.duplicate_in(self)),
             Value::Net(value) => Value::Net(value.duplicate_in(self)),
             Value::Lazy(value) => Value::Lazy(LazyValue {
                 edge: value.edge.duplicate_in(self),
@@ -2579,16 +2666,7 @@ impl RuntimeValueAccess<'_> {
                             self.same_representation(left, right)
                         }
                         (LogicalListItemRef::Thunk(left), LogicalListItemRef::Thunk(right)) => {
-                            match (left, right) {
-                                (ListThunk::Lazy(left), ListThunk::Lazy(right)) => {
-                                    left.edge.same_allocation_in(&right.edge, self)
-                                }
-                                (ListThunk::Promised(left), ListThunk::Promised(right)) => {
-                                    left.edge.same_allocation_in(&right.edge, self)
-                                }
-                                (ListThunk::Lazy(_), ListThunk::Promised(_))
-                                | (ListThunk::Promised(_), ListThunk::Lazy(_)) => false,
-                            }
+                            left.same_representation_in(right, self)
                         }
                         (LogicalListItemRef::Byte(_), LogicalListItemRef::Value(_))
                         | (LogicalListItemRef::Byte(_), LogicalListItemRef::Thunk(_))
@@ -2625,29 +2703,19 @@ impl RuntimeValueAccess<'_> {
                 let Value::PartialBuiltin(right) = right else {
                     unreachable!("equal value discriminants must select the same variant")
                 };
-                left.builtin == right.builtin
-                    && left.arguments.len() == right.arguments.len()
-                    && left
-                        .arguments
-                        .iter()
-                        .zip(right.arguments.iter())
-                        .all(|(left, right)| self.same_representation(left, right))
+                left.same_representation_in(right, self)
             }
             Value::Function(left) => {
                 let Value::Function(right) = right else {
                     unreachable!("equal value discriminants must select the same variant")
                 };
-                left.remaining_arity == right.remaining_arity
-                    && left
-                        .stage
-                        .runtime()
-                        .same_net_in(right.stage.runtime(), self)
+                left.same_representation_in(right, self)
             }
             Value::Net(left) => {
                 let Value::Net(right) = right else {
                     unreachable!("equal value discriminants must select the same variant")
                 };
-                left.runtime().same_net_in(right.runtime(), self)
+                left.same_representation_in(right, self)
             }
             Value::Lazy(left) => {
                 let Value::Lazy(right) = right else {
@@ -3286,6 +3354,14 @@ mod tests {
                     .runtime
                     .same_net_in(duplicate_net.runtime(), &access)
             );
+            let code = FunctionCode::new(original_net.runtime.duplicate_in(&access), 2, 1);
+            let duplicate_code = code.duplicate_in(&access);
+            assert_eq!(duplicate_code.arity(), 2);
+            assert_eq!(duplicate_code.capture_count(), 1);
+            assert!(
+                code.runtime()
+                    .same_net_in(duplicate_code.runtime(), &access)
+            );
 
             let Value::Function(duplicate_function) = access.duplicate_value(&function) else {
                 panic!("duplicating a function preserves its outer variant");
@@ -3335,6 +3411,18 @@ mod tests {
                 panic!("duplicating a dictionary preserves its outer variant");
             };
             assert!(dict_shell.ptr_eq(&duplicate_dict));
+            let list_thunk = ListThunk::Lazy(LazyValue::error_in(&access, "duplicate list thunk"));
+            let Value::Lazy(duplicate_list_thunk) = list_thunk.duplicate_as_value_in(&access)
+            else {
+                panic!("duplicating a lazy list thunk preserves its value variant");
+            };
+            let ListThunk::Lazy(original_list_thunk) = &list_thunk else {
+                unreachable!();
+            };
+            assert_eq!(
+                original_list_thunk.access(&access).id(),
+                duplicate_list_thunk.access(&access).id()
+            );
             assert_eq!(
                 access.duplicate_value(&Value::Number(42.into())),
                 Value::Number(42.into())

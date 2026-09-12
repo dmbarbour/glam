@@ -1111,12 +1111,38 @@ splitting; the D.2b.3a managed fixture continues to prove persistent
 duplication adds no registered roots. Both operation inventories remain
 closed at their prior counts.
 
-**D.2b.3c — Function and net shells.** Replace internal duplication,
+**D.2b.3c — Function and net shells.** Status: complete on 2026-09-12.
+Replace internal duplication,
 representation comparison, and diagnostic formatting of `NetValue`,
 `FunctionCode`, `FunctionValue`, `BuiltinCall`, and `ListThunk` with the
 D.2b.1 access-qualified operations. The standard traits may remain only as
 the exact, source-latched compatibility declarations needed by unmigrated
 D.2c-D.2g callers; no new core operation may select them.
+
+Completion record: `NetValue`, `FunctionValue`, `FunctionCode`, and
+`BuiltinCall` now expose explicit access-qualified shell duplication as
+needed, and the central `Value` duplicator delegates to those shell
+operations. Net, function, and partial-builtin representation comparison
+likewise delegates to shell-owned operations rather than selecting their
+temporary equality traits. The existing regional diagnostic views already
+hide these shells without invoking their `Debug` implementations.
+
+`ListThunk` now owns access-qualified reification and exact managed-identity
+comparison. Evaluator forcing uses the reification operation instead of
+cloning `LazyValue` or `PromisedValue`. More importantly, compatibility list
+tracing no longer constructs a temporary raw `Value` for a thunk at all: the
+compatibility visitor has a direct managed-edge channel, and list thunks trace
+their exact lazy/promise edge there. The persistent adapter's raw-value walk
+therefore visits only values actually stored as values. Existing lazy/promise
+tail reclamation fixtures latch the direct trace, while the focused shell test
+covers function code, function stages, nets, partial builtins, and list thunks
+without root registration.
+
+The raw operation inventory now contains 589 declarations: 79 regional
+operations, 25 collector primitives, 474 violating functions, eight regional
+aliases, and three transitional derived traits. Its 477 violation set is
+unchanged. The persistent-edge inventory retains the same 73 exact P4/parent
+interlocks; no new implicit trait consumer was admitted.
 
 **D.2b.3d — Container/shell closure.** Re-run the raw-value and persistent-edge
 inventories plus compiler closure probes. Update nested P3 with the exact

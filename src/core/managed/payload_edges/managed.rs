@@ -34,6 +34,7 @@ fn visit_value_with(value: &Value, visitor: &mut Visitor<'_>, stops: &impl Manag
     if stops.visit_stop(value, visitor) {
         return;
     }
+    value.trace_direct_compatibility_managed_edges(visitor);
     value.visit_compatibility_value_edges(&mut |child| {
         visit_value_with(child, visitor, stops);
     });
@@ -53,6 +54,7 @@ pub(crate) fn visit_compatibility_payload_managed_edges(
     payload: &impl CompatibilityValueEdges,
     visitor: &mut Visitor<'_>,
 ) {
+    payload.trace_direct_compatibility_managed_edges(visitor);
     payload.visit_compatibility_value_edges(&mut |value| {
         visit_compatibility_managed_edges(value, visitor);
     });
