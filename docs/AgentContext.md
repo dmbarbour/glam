@@ -84,6 +84,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
 ```
 
+The routine suite keeps scale-only proofs ignored. After changes to productive
+cursor materialization or its iterative driver, additionally run
+`scripts/check-cursor-stress.sh` to exercise the retained 1,100-layer cases.
+
 Add a focused regression before a broad fix when practical, then run the full
 suite. Documentation-only changes need link/path validation and
 `git diff --check`; they do not require a full Rust test cycle unless Rust docs

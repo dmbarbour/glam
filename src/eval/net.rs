@@ -1519,8 +1519,7 @@ mod driver_tests {
         );
     }
 
-    #[test]
-    fn deep_productive_cursor_chain_alternates_pairless_and_pair_owned_layers() {
+    fn assert_productive_cursor_chain_alternates_pairless_and_pair_owned_layers(layers: usize) {
         let expected = crate::core::test_value_factory().unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.clone());
@@ -1528,7 +1527,7 @@ mod driver_tests {
         let mut root_interface =
             source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
-        for layer in 0..1_100 {
+        for layer in 0..layers {
             if layer % 2 == 0 {
                 (source, root_interface) =
                     crate::core_net::CoreRuntimeNet::test_productive_pair_owned_copy_layer(
@@ -1559,6 +1558,17 @@ mod driver_tests {
             source.active_normalization_batch(&crate::core::test_value_factory()),
             None
         );
+    }
+
+    #[test]
+    fn productive_cursor_chain_alternates_pairless_and_pair_owned_layers() {
+        assert_productive_cursor_chain_alternates_pairless_and_pair_owned_layers(128);
+    }
+
+    #[test]
+    #[ignore = "cursor stress fixture; run scripts/check-cursor-stress.sh"]
+    fn cursor_stress_deep_productive_chain_alternates_pairless_and_pair_owned_layers() {
+        assert_productive_cursor_chain_alternates_pairless_and_pair_owned_layers(1_100);
     }
 
     #[test]
@@ -2561,8 +2571,7 @@ mod driver_tests {
         assert!(failure.to_string().contains("nested driver failure"));
     }
 
-    #[test]
-    fn iterative_cursor_driver_exceeds_the_former_recursion_limit() {
+    fn assert_iterative_cursor_driver_handles_productive_layers(layers: usize) {
         let expected = crate::core::test_value_factory().unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.clone());
@@ -2571,7 +2580,7 @@ mod driver_tests {
         let mut root_interface =
             source.test_with(&crate::core::test_value_factory(), |net| net.exposed());
 
-        for _ in 0..1_100 {
+        for _ in 0..layers {
             (source, root_interface) = crate::core_net::CoreRuntimeNet::test_copy_layer(
                 &crate::core::test_value_factory(),
                 source,
@@ -2593,6 +2602,17 @@ mod driver_tests {
             source.active_normalization_batch(&crate::core::test_value_factory()),
             None
         );
+    }
+
+    #[test]
+    fn iterative_cursor_driver_handles_productive_layers() {
+        assert_iterative_cursor_driver_handles_productive_layers(128);
+    }
+
+    #[test]
+    #[ignore = "cursor stress fixture; run scripts/check-cursor-stress.sh"]
+    fn cursor_stress_iterative_driver_exceeds_the_former_recursion_limit() {
+        assert_iterative_cursor_driver_handles_productive_layers(1_100);
     }
 
     #[test]
