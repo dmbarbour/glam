@@ -1300,11 +1300,56 @@ index. The compatibility access helper is now reachable only for `Index` or
 
 ##### W3C.2 — Recursive key and computed-path conversion
 
+Status: pending; perform W3C.2a after W3C.3a, then W3C.2b after W3C.3b.
+
+###### W3C.2a — Scalar computed access and recursive key owner
+
 Status: pending.
+
+Introduce one typed source owner for dynamic access. Retain the base, path
+part index, dynamic-argument index, and any in-progress recursive key
+conversion explicitly. A scalar `Index` evaluates and converts exactly once;
+dictionary key conversion retains an explicit member cursor and accumulator.
+
+###### W3C.2b — Computed path lists
+
+Status: pending; depends on W3C.3b.
+
+Use the same key converter and resumable logical-list walk for `PathIndex`.
+Append each completed list item key to the current access path without
+restarting either the source list or a previously selected dictionary.
 
 ##### W3C.3 — Lazy list chunks and list-backed projections
 
+Status: pending; its substrate is pulled before W3C.2 because recursive key
+conversion and `PathIndex` are themselves list clients.
+
+###### W3C.3a — Non-forcing logical front decomposition
+
 Status: pending.
+
+Add a stack-bounded representation-level list operation which returns one
+strict item, one deferred chunk plus its exact logical suffix, or exhaustion.
+It never invokes evaluation and therefore cannot suspend or retain a managed
+access region. This is shared infrastructure, not a second evaluator.
+
+###### W3C.3b — Resumable list/key walk
+
+Status: pending.
+
+Build the typed list walk used by recursive key conversion. A deferred chunk
+is evaluated once, checked as list-or-binary, then prepended to the retained
+suffix. Strict value leaves delegate through the ordinary WHNF/key converter;
+byte leaves become numeric keys without demand.
+
+###### W3C.3c — Remaining list-backed source projections
+
+Status: pending.
+
+Inventory source-time sequence projections still reachable from ordinary
+lazy production and either reuse the list walk or give them an explicit typed
+owner. Builtin operations that run only after a core active-pair claim are
+accounted separately by W3D/W4C and are not silently declared migrated here.
 
 ##### W3C.4 — Source-family suspension and diagnostics closure
 
