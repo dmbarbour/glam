@@ -1,18 +1,20 @@
 //! Crate-private protocol for resumable evaluation to outer WHNF.
 //!
-//! W1A installs only the state vocabulary. Regional reduction and checkpoint
-//! projection arrive in W1B-W1C; production evaluator entry points remain on
-//! their existing path until their named migration checkpoints.
+//! W1A installs the state vocabulary and W1B adds its callback-free regional
+//! driver. Checkpoint projection arrives in W1C; production evaluator entry
+//! points remain on their existing path until their named migration
+//! checkpoints.
 
 #![allow(
     dead_code,
-    reason = "W1A installs the additive WHNF protocol before W1B-W1C implement and exercise it"
+    reason = "the additive WHNF protocol remains production-inactive until its named W2+ cutovers"
 )]
 
 use std::sync::Arc;
 
 use crate::core::{EvaluationFailure, ManagedPromiseRoot, Value};
 use crate::core_net::CoreWaitToken;
+use crate::evaluation::EvaluationValueAccess;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
@@ -79,6 +81,75 @@ pub(crate) enum RegionalWhnfStep {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
     Failed(Arc<EvaluationFailure>),
+}
+
+/// Outcome of driving callback-free WHNF work beneath one managed-access
+/// region.
+///
+/// `Boundary` and `Yielded` deliberately return the exact regional work. W1C
+/// will project that work into a durable checkpoint before the access region
+/// closes; callers must not store this raw form in a machine.
+pub(crate) enum RegionalWhnfDrive {
+    Ready(Value),
+    Boundary {
+        work: RegionalWhnfWork,
+        request: RegionalBoundaryRequest,
+    },
+    Yielded(RegionalWhnfWork),
+    Failed(Arc<EvaluationFailure>),
+}
+
+/// Deterministic budget for one regional WHNF quantum.
+pub(crate) struct WhnfStepBudget {
+    remaining: usize,
+}
+
+impl WhnfStepBudget {
+    pub(crate) fn new(steps: usize) -> Self {
+        Self { remaining: steps }
+    }
+
+    fn consume(&mut self) -> bool {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
+
+    #[cfg(test)]
+    fn remaining(&self) -> usize {
+        self.remaining
+    }
+}
+
+/// Drives bounded callback-free transitions without recursive Rust calls.
+///
+/// The active access parameter is intentionally required even though the
+/// driver itself only rearranges already-projected values. A reducer may copy
+/// or inspect those values only through the same region. Dependency handling,
+/// callbacks, root publication, and scheduler actions remain outside this
+/// loop.
+pub(crate) fn drive_regional<'scope>(
+    access: &EvaluationValueAccess<'scope>,
+    mut work: RegionalWhnfWork,
+    budget: &mut WhnfStepBudget,
+    mut reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+) -> RegionalWhnfDrive {
+    loop {
+        if !budget.consume() {
+            return RegionalWhnfDrive::Yielded(work);
+        }
+        match reduce(access, &mut work) {
+            RegionalWhnfStep::Delegate(focus) => work.focus = focus,
+            RegionalWhnfStep::Continue(next) => work = next,
+            RegionalWhnfStep::Ready(value) => return RegionalWhnfDrive::Ready(value),
+            RegionalWhnfStep::Boundary(request) => {
+                return RegionalWhnfDrive::Boundary { work, request };
+            }
+            RegionalWhnfStep::Failed(failure) => return RegionalWhnfDrive::Failed(failure),
+        }
+    }
 }
 
 /// A regional result which requires orchestration outside managed access.
@@ -255,3 +326,7 @@ mod tests {
         assert_eq!(classify(WhnfFrameKind::DiagnosticContext), 6);
     }
 }
+
+#[cfg(test)]
+#[path = "whnf/tests/w1b.rs"]
+mod w1b_tests;

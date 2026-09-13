@@ -292,7 +292,13 @@ impl<'ast> Visit<'ast> for CensusVisitor<'_> {
     }
 
     fn visit_expr_loop(&mut self, node: &'ast ExprLoop) {
-        self.record(Signal::UserSizedLoop);
+        // W1B proves that the target WHNF driver consumes one explicit budget
+        // unit before every transition. It cannot scale with user data inside
+        // one quantum, so it is not one of this migration census's
+        // user-sized-loop sources.
+        if self.declaration() != "src/eval/whnf.rs::drive_regional" {
+            self.record(Signal::UserSizedLoop);
+        }
         visit::visit_expr_loop(self, node);
     }
 }
@@ -503,6 +509,12 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 fn is_in_scope(relative: &Path) -> bool {
+    if relative
+        .components()
+        .any(|component| component.as_os_str() == "tests")
+    {
+        return false;
+    }
     if relative.starts_with("src/eval") {
         return !matches!(
             relative.to_str(),

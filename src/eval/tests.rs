@@ -480,7 +480,13 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
 
 #[test]
 fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() {
-    let context = test_context();
+    // Root-registration counts belong to one heap. Use a private value domain
+    // so unrelated parallel tests using the shared fixture cannot perturb the
+    // before/after probe.
+    let context = EvalContext::isolated(CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
     let values = context.values();
     let before = values.managed_root_registrations_for_test();
     let detail = Key::binary_from_text("detail");

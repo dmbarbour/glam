@@ -1,6 +1,6 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0 and W1A complete on 2026-09-12; W1B-W8 planned. This is the focused implementation plan selected by
+Status: W0-W1A complete by 2026-09-12; W1B complete on 2026-09-13; W1C-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Production trampoline cutover has not begun; W1A installs only its
@@ -580,6 +580,8 @@ synthetic algebra before W1C adds checkpoint projection.
 
 #### W1B — Synthetic delegation and resumption
 
+Status: complete on 2026-09-13.
+
 Implement a minimal test work algebra covering immediate completion, tail
 delegation, nested post-demand work, permanent failure, dependency suspension,
 and budget yield. Prove that:
@@ -592,6 +594,33 @@ and budget yield. Prove that:
 
 This fixture tests the state-machine protocol before real lazy scheduling can
 obscure a protocol defect.
+
+Completion record: `drive_regional` is an iterative, callback-free driver
+which requires an active `EvaluationValueAccess` and consumes one deterministic
+budget unit before each transition. Its `Delegate` arm only replaces the
+current focus; it neither pushes a frame nor registers a root. Boundary and
+budget outcomes return the exact regional work to their in-region caller, with
+W1C still solely responsible for publishing a rooted checkpoint before real
+managed access closes.
+
+The synthetic fixture in
+[`src/eval/whnf/tests/w1b.rs`](../../src/eval/whnf/tests/w1b.rs) proves immediate
+completion, 100,000 iterative tail delegations without frame growth or root
+registration, dependency-free budget yield and resumption, and an explicitly
+ordered wait suspension. The latter stops with its dependency instruction
+and two caller frames intact, changes only dependency readiness, and then
+observes one post-demand continuation, no replay of the completed prefix, and
+outer-to-inner failure contexts introduced before and after suspension.
+
+The W0B source census now ignores test-directory sources and explicitly exempts
+the target driver's own loop: W1B proves that loop budget-bounded, so it is not
+a user-sized work source awaiting migration. The durable-owner baseline gained
+the bounded `RegionalWhnfDrive` result. The suspension fixture uses a root-free
+wait token so it cannot disturb shared-heap root-registration probes in
+parallel tests. The verification pass also generalized the evaluator-surface
+inventory to exclude nested test sources and moved an older root-neutrality
+probe onto its own heap, eliminating its pre-existing dependence on unrelated
+parallel tests using the shared fixture heap.
 
 #### W1C — Regional-to-durable checkpoint publication
 

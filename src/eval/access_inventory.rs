@@ -304,6 +304,9 @@ fn is_external_production_source(relative: &Path) -> bool {
 
 fn is_evaluator_surface_source(relative: &Path) -> bool {
     relative.starts_with("src/eval")
+        && !relative
+            .components()
+            .any(|component| component.as_os_str() == "tests")
         && !matches!(
             relative.to_str(),
             Some("src/eval/access_inventory.rs" | "src/eval/test_support.rs" | "src/eval/tests.rs")
