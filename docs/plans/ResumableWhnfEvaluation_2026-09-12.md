@@ -1826,14 +1826,22 @@ permanent evaluation failure.
 #### W6E — Annotations and effect values
 
 Convert pure annotations, reflection/strategy annotation recognition, general
-effect construction, and list-effect helpers. Preserve sealed metadata and
-the distinction between pure metadata updates and reflection boundaries.
+effect construction, and the remaining list-effect builtin dispatch. The W3
+lazy list-effect recipes and source owner are already complete and are not
+reimplemented here. Preserve sealed metadata and the distinction between pure
+metadata updates and reflection boundaries.
 
 #### W6F — Objects and interaction-net builtins
 
-Convert object construction, C3/identity validation, and the remaining
-interaction-net builtin request construction. Preserve referential-spec
-validation and source-owned net journals.
+Convert the remaining object builtins and interaction-net builtin request
+construction. Object-fixpoint C3 traversal, referential identity validation,
+and the mixin fold are already complete in W3B.2b and are not reimplemented
+here. Preserve referential-spec validation and source-owned net journals.
+
+W6 closure also revisits the temporary one-ordinary-machine-per-demand-session
+admission rule introduced to contain recursive compatibility evaluation.
+Remove it once converted builtin work no longer needs that containment, or
+record a narrower surviving owner and forced justification.
 
 Each W6 checkpoint updates the exact W0B and parent D.2c manifests, runs its
 focused suites in ordinary and `aggressive-gc-verification` modes, and adds a
