@@ -194,6 +194,7 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
                     cursor: 3,
                     retained: vec![text("first"), text("second")],
                 }],
+                followed: BTreeSet::new(),
             })
         })
     });
@@ -250,6 +251,7 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
             RegionalWhnfStep::Continue(RegionalWhnfWork {
                 focus: Value::Lazy(replacement),
                 frames: Vec::new(),
+                followed: BTreeSet::new(),
             })
         })
     });

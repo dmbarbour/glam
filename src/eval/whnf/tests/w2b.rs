@@ -61,6 +61,26 @@ fn assigned_promise_failure_remains_the_original_structured_failure() {
 }
 
 #[test]
+fn repeated_assigned_promise_requests_the_canonical_follower() {
+    let values = isolated_values();
+    let context = EvalContext::isolated(values.clone());
+    let poll = EvaluationPollContext::for_context(&context);
+    let (promise, mut computation) = promise_computation(&values, "assigned recursion");
+    crate::core::set_test_promise(&values, &promise, Value::Promised(promise.clone()))
+        .expect("promise should accept its own assignment");
+    let expected_id = poll.with_value_access(&context, |access| access.promise(&promise).id());
+
+    let outcome = poll.with_value_access(&context, |access| {
+        computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(2))
+    });
+    let WhnfPoll::Deferred(WhnfDeferredRequest::PromiseFollow(root)) = outcome else {
+        panic!("assigned promise recursion must leave through follower orchestration")
+    };
+    assert_eq!(root.id(), expected_id);
+    assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
 fn unassigned_promise_leaves_as_its_exact_root_then_resumes_after_assignment() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());

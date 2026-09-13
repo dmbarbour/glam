@@ -1133,7 +1133,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        5_077_579_158_699_135_940,
+        1_183_265_249_964_893_155,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1144,9 +1144,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 90),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 87),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 25),
-        ((ApiKind::Function, ApiDisposition::Violation), 469),
+        ((ApiKind::Function, ApiDisposition::Violation), 472),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             8,
@@ -1230,7 +1230,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2eFrontend,
                 ReplacementShape::FrontendRegion,
             ),
-            134,
+            137,
         ),
         (
             (

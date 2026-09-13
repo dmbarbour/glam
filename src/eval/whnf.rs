@@ -5,10 +5,12 @@
 //! boundaries. W2 uses that protocol for client demand and promise following;
 //! later checkpoints extend it through lazy sources and caller frames.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::core::{
-    CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
+    CoreValueFactory, DeferredValueId, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
+    PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::EvaluationValueAccess;
@@ -30,6 +32,7 @@ pub(crate) struct WhnfComputation {
 pub(crate) struct DurableWhnfState {
     focus: RuntimeValueRoot,
     frames: Vec<DurableWhnfFrame>,
+    followed: BTreeSet<DeferredValueId>,
 }
 
 /// One suspended caller frame with all cross-boundary semantic values rooted.
@@ -43,6 +46,7 @@ pub(crate) struct DurableWhnfFrame {
 pub(crate) struct RegionalWhnfWork {
     focus: Value,
     frames: Vec<RegionalWhnfFrame>,
+    followed: BTreeSet<DeferredValueId>,
 }
 
 /// Regional counterpart of [`DurableWhnfFrame`].
@@ -176,6 +180,7 @@ pub(crate) enum RegionalBoundaryRequest {
 pub(crate) enum WhnfDeferredRequest {
     Lazy(ManagedLazyRoot),
     Promise(ManagedPromiseRoot),
+    PromiseFollow(ManagedPromiseRoot),
 }
 
 /// External boundary family. Later checkpoints add the source-specific
@@ -225,6 +230,7 @@ impl DurableWhnfState {
                 .iter()
                 .map(|frame| frame.project(access))
                 .collect(),
+            followed: self.followed.clone(),
         }
     }
 
@@ -236,6 +242,7 @@ impl DurableWhnfState {
                 .into_iter()
                 .map(|frame| DurableWhnfFrame::root_regional(access, frame))
                 .collect(),
+            followed: work.followed,
         }
     }
 }
@@ -272,6 +279,7 @@ impl WhnfComputation {
             checkpoint: DurableWhnfState {
                 focus,
                 frames: Vec::new(),
+                followed: BTreeSet::new(),
             },
         }
     }
@@ -358,14 +366,25 @@ fn reduce_semantic_shell(
     );
     match &work.focus {
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
-            Some(Ok(value)) => RegionalWhnfStep::Delegate(value.into_value()),
+            Some(Ok(value)) => {
+                work.followed.insert(access.lazy(lazy).id().into());
+                RegionalWhnfStep::Delegate(value.into_value())
+            }
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
             None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
                 WhnfDeferredRequest::Lazy(lazy.root_in(access.values())),
             )),
         },
         Value::Promised(promise) => match access.promise(promise).assignment() {
-            Some(Ok(value)) => RegionalWhnfStep::Delegate(value),
+            Some(Ok(value)) => {
+                if work.followed.insert(access.promise(promise).id().into()) {
+                    RegionalWhnfStep::Delegate(value)
+                } else {
+                    RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                        WhnfDeferredRequest::PromiseFollow(promise.root_in(access.values())),
+                    ))
+                }
+            }
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
             None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
                 WhnfDeferredRequest::Promise(promise.root_in(access.values())),

@@ -61,6 +61,7 @@ fn immediate_completion_returns_whnf_in_one_step() {
         let work = RegionalWhnfWork {
             focus: access.values().duplicate_value(&expected),
             frames: Vec::new(),
+            followed: BTreeSet::new(),
         };
         let mut budget = WhnfStepBudget::new(1);
         let outcome = drive_regional(&access, work, &mut budget, |access, work| {
@@ -89,6 +90,7 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
         let work = RegionalWhnfWork {
             focus: access.values().duplicate_value(&expected),
             frames,
+            followed: BTreeSet::new(),
         };
         let mut transitions = 0;
         let mut budget = WhnfStepBudget::new(DELEGATIONS + 1);
@@ -124,6 +126,7 @@ fn budget_yield_retains_work_without_inventing_a_dependency() {
         let work = RegionalWhnfWork {
             focus: Value::binary_from_text("yield"),
             frames: Vec::new(),
+            followed: BTreeSet::new(),
         };
         let mut transitions = 0;
         let mut budget = WhnfStepBudget::new(3);
@@ -307,6 +310,7 @@ fn dependency_resumes_at_the_recorded_phase_without_replaying_completed_work() {
         let work = RegionalWhnfWork {
             focus: instruction(0),
             frames: Vec::new(),
+            followed: BTreeSet::new(),
         };
         let mut budget = WhnfStepBudget::new(10);
         let first = drive_regional(&access, work, &mut budget, |access, work| {

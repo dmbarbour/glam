@@ -72,6 +72,15 @@ pub(crate) fn poll_computation(
             }
             WhnfOwnerPoll::Pending(WorkDependency::Promise(promise))
         }
+        WhnfPoll::Deferred(WhnfDeferredRequest::PromiseFollow(promise)) => {
+            match crate::eval::promise_root_wait(context, &promise) {
+                Ok(wait) => WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)),
+                Err(error) => WhnfOwnerPoll::Failed(RuntimeFailureRoot::new(
+                    context.values(),
+                    std::sync::Arc::new(EvaluationFailure::message(error.as_ref())),
+                )),
+            }
+        }
         WhnfPoll::External(boundary) => WhnfOwnerPoll::External(boundary),
         WhnfPoll::Yielded => WhnfOwnerPoll::Yielded,
         WhnfPoll::Failed(failure) => WhnfOwnerPoll::Failed(failure),

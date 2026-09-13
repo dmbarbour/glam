@@ -412,7 +412,7 @@ pub(super) fn promise_wait(
     })
 }
 
-pub(super) fn promise_root_wait(
+pub(crate) fn promise_root_wait(
     context: &EvalContext,
     promise: &ManagedPromiseRoot,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {

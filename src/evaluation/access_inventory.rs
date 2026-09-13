@@ -630,6 +630,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::definitions#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::finish#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#2|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_code#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_template#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::lower_resolved_expr#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -827,7 +828,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // D.2b.2 roots diagnostic emission through the compiler domain's
         // explicit local region.
         ("src/g_syntax.rs", GatewayCounts::new(1, 0)),
-        ("src/g_syntax/module_lowering.rs", GatewayCounts::new(3, 0)),
+        ("src/g_syntax/module_lowering.rs", GatewayCounts::new(4, 0)),
         ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
         // GCI5R-003D roots a freshly constructed reflection fixpoint before
         // publishing it into branch/coordinator state.
@@ -979,7 +980,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        21
+        22
     );
 }
 

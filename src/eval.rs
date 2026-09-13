@@ -70,6 +70,7 @@ use operator::*;
 pub(crate) use sequence::*;
 #[cfg(test)]
 use test_support::*;
+pub(crate) use value::promise_root_wait;
 use value::*;
 
 fn with_direct_evaluator<R>(

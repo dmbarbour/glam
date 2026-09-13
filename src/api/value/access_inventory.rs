@@ -209,10 +209,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/g_syntax/module_lowering.rs",
         0,
-        0,
+        1,
         1,
         "declaration-to-declaration definitions and directly owned reflection annotator",
-        "I3E.2 bounded lowering regions; I4F.1 durable roots; GCI11R-002C owned closed-result handoff"
+        "I3E.2 bounded lowering regions; I4F.1 durable roots; GCI11R-002C owned closed-result handoff; W2R-001D.1 post-resolution publication"
     ),
     entry!(
         "src/reflection/machine.rs",
@@ -700,6 +700,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/compiler_values.rs::run_pure_match_resolved#1|surface=scoped-factory|scope=production",
     "src/g_syntax/macro_expansion/effects.rs::hidden_effect#1|surface=scoped-factory|scope=production",
     "src/g_syntax/macro_expansion/tests.rs::environment_root#1|surface=compatibility-new|scope=test",
+    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=scoped-factory|scope=production",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=access-publication|scope=production",
     "src/reflection/machine.rs::alternative_returns_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",

@@ -1012,6 +1012,37 @@ access; the original reflection-branch and diagnostic-callback fixtures pass
 as well. The compiler access inventory records the new explicit projection
 boundary.
 
+###### W2R-001D.2 — Assigned-promise recursion handoff
+
+Status: complete on 2026-09-13.
+
+The ordinary-suite run then exposed a deterministic hang in the existing
+`P := P` compatibility fixture. W2's shell reducer directly delegates through
+successful promise assignments; an assigned promise cycle therefore exhausts
+each finite quantum and resumes the same cycle forever. The former evaluator
+admitted the canonical promise follower for a deferred assigned value, whose
+self-dependency let the coordinator expose a stable retryable block without
+poisoning the promise.
+
+Retain deferred identities crossed by one `WhnfComputation` as root-free
+control state across yields. Insert an identity only when following a completed
+shell, not when first suspending on an unresolved shell. On a repeated promise,
+leave regional access with an explicit promise-follow request. After access
+closes, admit or reuse the canonical promise follower and block on its wait.
+This preserves direct delegation for ordinary acyclic assignments and restores
+the retryable-cycle behavior for self and multi-promise cycles. Add a bounded
+regional regression as well as the existing end-to-end compatibility fixture.
+
+Completion record: durable and regional WHNF state now retain the root-free
+set of deferred identities crossed through completed shells. Unresolved shells
+do not enter the set. Encountering an assigned promise twice emits a distinct
+`PromiseFollow` request; the outer driver admits or reuses the canonical
+promise follower only after access closes. A bounded two-step regional fixture
+proves the handoff without admitting work beneath access. The existing
+end-to-end self-promise and mixed promise/lazy fixtures both return their
+retryable blocked result without poisoning either cell, while the ordinary
+assigned-success fixture continues to delegate without a follower.
+
 ### Phase W3 — Lazy Producers and Source Progress
 
 #### W3A — Lazy task result disposition
