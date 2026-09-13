@@ -1084,12 +1084,14 @@ combination cannot be manufactured accidentally.
 
 Use one `WhnfComputation` enum with a source-entry checkpoint and the existing
 rooted value-demand checkpoint. W3A first transfers an ordinary lazy owner
-into that computation, records the source result as a rooted demand
-checkpoint, and removes `LazyTaskWork::Follow`. W3B-W3D then replace each
-recursive source entry with typed durable/regional source states. This
-temporary source-entry state may replay a source after a dependency, exactly
-as `Produce` does today; no source family is considered migrated until its
-typed phase state prevents that replay.
+into that computation, records the source result as a rooted source
+checkpoint, and removes `LazyTaskWork::Follow`. Until a source family is
+converted, its checkpoint retains the former direct compatibility demand:
+immediately switching that result to bounded general delegation caused deep
+legacy sources to exhaust their nested pump budget and replay completed
+prefixes indefinitely. W3B-W3D replace that compatibility step and each
+recursive source entry with typed durable/regional states. No source family is
+considered migrated until its typed phase state prevents replay.
 
 Partition the rest of W3 as follows:
 
@@ -1121,14 +1123,32 @@ Status: complete on 2026-09-13.
 addition to its rooted value-demand checkpoint. `LazyTaskMachine` classifies
 the two W4 outer modes first, then transfers every ordinary source and its
 exact lazy owner into that checkpoint. A successful source result is rooted
-and installed into the same computation before another poll can demand it;
-the specialized `Follow(RuntimeValueRoot)` mode and its direct recursive
-`eval_value_in` loop are gone. Runtime provenance is retained explicitly by
-the source-entry checkpoint and checked at the one-way source-result handoff.
+and installed into the same computation before it is demanded. The
+specialized outer `Follow(RuntimeValueRoot)` mode is gone; the source
+checkpoint temporarily owns its compatibility demand until W3B-W3D replace
+it family by family. Runtime provenance is retained explicitly by the
+source-entry checkpoint and checked at the one-way source-result handoff.
 
 ##### W3A.2 — Lazy cache and delegation verification
 
-Status: pending.
+Status: complete on 2026-09-13.
+
+A bounded source fixture now returns an unresolved promise, observes the
+source-entry handoff, polls the retained promise dependency more than once,
+assigns it, and proves that the source ran exactly once throughout. The final
+task result and lazy cache both contain the assigned number rather than the
+deferred promise, and terminal cache publication removes the source. A second
+fixture proves that a permanent source failure is cached and repeated task
+polls do not replay its source.
+
+The first general-delegation cutover passed the bounded fixtures but made
+several deep compiler and diagnostic evaluations fail to finish: a legacy
+access source could exhaust its finite nested pump after creating child work,
+then restart from its initial path on the next poll. The source-owned
+compatibility demand restores the pre-W3 scheduling behavior without
+reintroducing a separate machine mode. This is transitional, not evidence
+that the family is resumable; the W3 closure audit must remove it after every
+ordinary source has exact phase state.
 
 #### W3B — Application and computed fixpoint sources
 

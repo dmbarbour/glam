@@ -545,6 +545,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "parked producer retains its lazy owner and stores any followed semantic result only through a canonical runtime root"
     ),
     owner!(
+        "src/eval/whnf.rs::DurableWhnfCheckpoint",
+        [1, 0, 0],
+        DurableRoot,
+        None,
+        "a source-oriented WHNF checkpoint retains its exact lazy producer root"
+    ),
+    owner!(
         "src/eval/whnf.rs::WhnfDeferredRequest",
         [1, 2, 0],
         DurableRoot,
@@ -765,7 +772,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 20, 9],
+        [13, 21, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

@@ -34,6 +34,7 @@ enum DurableWhnfCheckpoint {
     Source {
         lazy: ManagedLazyRoot,
         runtime: crate::runtime::EvaluationRuntimeId,
+        result: Option<RuntimeValueRoot>,
     },
     Demand(DurableWhnfState),
 }
@@ -302,19 +303,26 @@ impl WhnfComputation {
         runtime: crate::runtime::EvaluationRuntimeId,
     ) -> Self {
         Self {
-            checkpoint: DurableWhnfCheckpoint::Source { lazy, runtime },
+            checkpoint: DurableWhnfCheckpoint::Source {
+                lazy,
+                runtime,
+                result: None,
+            },
         }
     }
 
     pub(crate) fn source_root(&self) -> Option<&ManagedLazyRoot> {
-        let DurableWhnfCheckpoint::Source { lazy, .. } = &self.checkpoint else {
+        let DurableWhnfCheckpoint::Source { lazy, result, .. } = &self.checkpoint else {
             return None;
         };
-        Some(lazy)
+        result.is_none().then_some(lazy)
     }
 
     pub(crate) fn install_source_result(&mut self, focus: RuntimeValueRoot) {
-        let DurableWhnfCheckpoint::Source { runtime, .. } = &self.checkpoint else {
+        let DurableWhnfCheckpoint::Source {
+            runtime, result, ..
+        } = &mut self.checkpoint
+        else {
             panic!("a lazy source result may be installed only once")
         };
         assert_eq!(
@@ -322,11 +330,14 @@ impl WhnfComputation {
             focus.runtime_id(),
             "a lazy source result must belong to its producer runtime"
         );
-        self.checkpoint = DurableWhnfCheckpoint::Demand(DurableWhnfState {
-            focus,
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-        });
+        *result = Some(focus);
+    }
+
+    pub(crate) fn source_result(&self) -> Option<&RuntimeValueRoot> {
+        let DurableWhnfCheckpoint::Source { result, .. } = &self.checkpoint else {
+            return None;
+        };
+        result.as_ref()
     }
 
     pub(crate) fn from_promise_root(

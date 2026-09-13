@@ -1133,7 +1133,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        1_183_265_249_964_893_155,
+        5_565_816_066_630_513_509,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1432,7 +1432,7 @@ fn d2c_family_fingerprints_are_exact() {
         .map(|(family, occurrences)| (*family, occurrence_fingerprint(occurrences)))
         .collect::<BTreeMap<_, _>>();
     let expected = BTreeMap::from([
-        (D2cFamily::ValueDemand, 813_681_363_753_478_312),
+        (D2cFamily::ValueDemand, 15_737_406_781_244_923_434),
         (
             D2cFamily::ApplicationAndSequence,
             12_784_279_839_195_577_796,

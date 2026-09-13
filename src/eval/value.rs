@@ -299,7 +299,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     self.lazy.clone(),
                     durable_context.values().runtime_id(),
                 ));
-                return EvaluationMachinePoll::Yielded;
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
@@ -320,14 +319,25 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 let Some(source) = source else {
                     return self.cached_poll(context);
                 };
-                return match produce_lazy_source_in(context, &self.lazy(context), &source) {
+                match produce_lazy_source_in(context, &self.lazy(context), &source) {
                     Ok(value) => {
                         let LazyTaskWork::Whnf(computation) = &mut self.work else {
                             unreachable!("source work must retain its WHNF computation")
                         };
                         computation.install_source_result(context.root_value(value));
-                        EvaluationMachinePoll::Yielded
                     }
+                    Err(error) => return self.fail(context, error),
+                }
+            }
+
+            let source_result = match &self.work {
+                LazyTaskWork::Whnf(computation) => computation.source_result().cloned(),
+                _ => None,
+            };
+            if let Some(source_result) = source_result {
+                let value = context.project_root(&source_result);
+                return match eval_value_in(context, &value) {
+                    Ok(value) => self.complete(context, value),
                     Err(error) => self.fail(context, error),
                 };
             }
@@ -1063,3 +1073,7 @@ mod ownership_tests {
         assert_eq!(value.clone_core_for_test(), Value::Number(73.into()));
     }
 }
+
+#[cfg(test)]
+#[path = "value/tests/w3a.rs"]
+mod w3a_tests;
