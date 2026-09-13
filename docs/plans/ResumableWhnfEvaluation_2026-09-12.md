@@ -672,7 +672,29 @@ deferred to W2 and later phases.
 
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 
+Status: partitioned into W2A.1-W2E.2 on 2026-09-13. Implementation order is
+W2A.1, W2B.1, W2C.1, W2A.2, W2B.2, W2D, then W2E.1-W2E.2: semantic shell
+inspection lands before either scheduler coordination or owner cutover.
+
 #### W2A — Regional lazy inspection
+
+##### W2A.1 — Lazy shell inspection
+
+Status: complete on 2026-09-13.
+
+Add the callback-free cached-success, cached-failure, and uncached-lazy
+transitions to the semantic WHNF reducer. The uncached transition carries the
+exact rooted lazy identity out of regional access without admitting work.
+
+Completion record: `poll_semantic_in` now recognizes outer lazy shells. A
+cached success delegates iteratively, a cached failure becomes the rooted
+terminal failure, and an uncached lazy publishes `WhnfDeferredRequest::Lazy`
+with the exact `ManagedLazyRoot`. Focused tests prove that inspection admits no
+deferred producer and that completing the requested root is observed by the
+same checkpoint on resumption. The recursive-identity and root-publication
+inventories classify the new durable request explicitly.
+
+##### W2A.2 — Post-region lazy admission
 
 Split lazy demand into callback-free cache/source inspection and mutator-free
 producer coordination. An uncached lazy returns its exact `ManagedLazyRoot` as
@@ -684,6 +706,15 @@ On wake, reproject the same lazy and inspect its cache. Do not snapshot and
 reconstruct a replacement `LazyValue` owner.
 
 #### W2B — Promise inspection and following
+
+##### W2B.1 — Promise shell inspection
+
+Add callback-free assigned-success, assigned-failure, and unassigned-promise
+transitions. An unassigned promise leaves regional access as its exact
+`ManagedPromiseRoot`; producer provenance and self-observation remain outer
+owner policy.
+
+##### W2B.2 — Promise-follower ownership
 
 Split promise assignment inspection from promise-follower admission. Preserve:
 
@@ -698,6 +729,8 @@ the same WHNF submachine rather than restart assignment evaluation.
 
 #### W2C — Client-demand cutover
 
+##### W2C.1 — Durable owner and budget yield
+
 Replace `ClientDemandOperation(RuntimeValueRoot)` with an operation owning one
 initialized `WhnfComputation`. Add an explicit yielded client-demand
 disposition and requeue it without dependency subscription. Blocked demand
@@ -708,12 +741,22 @@ outside coordinator locks.
 
 #### W2D — Direct driver compatibility
 
+##### W2D.1 — One client/WHNF driver
+
 Make synchronous assembler/test demand drive the same client/WHNF path.
 Remove recursive cooperative pumping from the selected entry rather than
 building a second trampoline. A synchronous caller may wait for claimed work
 only through the existing mutator-free client-demand driver.
 
 #### W2E — Deferred-demand verification
+
+##### W2E.1 — Forced subscription orderings
+
+Force producer completion both before and after exact client subscription;
+verify the canonical producer identity and the absence of lost or duplicate
+wakes without relying on repeated scheduling.
+
+##### W2E.2 — Lifecycle, cycle, and collection matrix
 
 Force both producer-before-subscription and subscription-before-producer
 completion orderings. Cover cached/uncached lazy, assigned/unassigned promise,

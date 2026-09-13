@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::core::{EvaluationFailure, ManagedPromiseRoot, Value};
+use crate::core::{EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, Value};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::EvaluationValueAccess;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -155,7 +155,18 @@ pub(crate) fn drive_regional<'scope>(
 /// A regional result which requires orchestration outside managed access.
 pub(crate) enum RegionalBoundaryRequest {
     Dependency(WhnfDependency),
+    Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
+}
+
+/// One unresolved semantic shell requiring policy outside managed access.
+///
+/// These registered roots preserve the exact lazy or promise identity. The
+/// semantic reducer neither admits a producer nor subscribes to completion;
+/// the durable owner performs those actions after its access region closes.
+pub(crate) enum WhnfDeferredRequest {
+    Lazy(ManagedLazyRoot),
+    Promise(ManagedPromiseRoot),
 }
 
 /// External boundary family. Later checkpoints add the source-specific
@@ -185,6 +196,7 @@ pub(crate) enum WhnfDependency {
 pub(crate) enum WhnfPoll {
     Ready(RuntimeValueRoot),
     Pending(WhnfDependency),
+    Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
     Yielded,
     Failed(RuntimeFailureRoot),
@@ -274,6 +286,7 @@ impl WhnfComputation {
                     RegionalBoundaryRequest::Dependency(dependency) => {
                         WhnfPoll::Pending(dependency)
                     }
+                    RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
                     RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
                 }
             }
@@ -291,6 +304,42 @@ impl WhnfComputation {
         let replacement = DurableWhnfState::from_regional(access, work);
         let prior = std::mem::replace(&mut self.checkpoint, replacement);
         drop(prior);
+    }
+
+    /// Polls the production outer-shell reducer beneath one managed region.
+    ///
+    /// W2 initially handles only lazy and promise shells. Later phases extend
+    /// the same reducer with caller frames and source-specific work without
+    /// changing the durable publication boundary.
+    pub(crate) fn poll_semantic_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        budget: &mut WhnfStepBudget,
+    ) -> WhnfPoll {
+        self.poll_in(access, budget, reduce_semantic_shell)
+    }
+}
+
+fn reduce_semantic_shell(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+) -> RegionalWhnfStep {
+    debug_assert!(
+        work.frames.is_empty(),
+        "W2 outer-shell demand does not yet interpret caller frames"
+    );
+    match &work.focus {
+        Value::Lazy(lazy) => match access.lazy(lazy).cached() {
+            Some(Ok(value)) => RegionalWhnfStep::Delegate(value.into_value()),
+            Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
+            None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(lazy.root_in(access.values())),
+            )),
+        },
+        Value::Promised(promise) => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+            WhnfDeferredRequest::Promise(promise.root_in(access.values())),
+        )),
+        _ => RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus)),
     }
 }
 
@@ -428,3 +477,7 @@ mod w1b_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w1c.rs"]
 mod w1c_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w2a.rs"]
+mod w2a_tests;
