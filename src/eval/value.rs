@@ -186,6 +186,7 @@ pub(crate) fn eval_value_in(
 enum LazyTaskWork {
     Produce,
     Whnf(super::whnf::WhnfComputation),
+    NetWhnf(Box<NetWhnfMachine>),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
@@ -322,6 +323,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             ))
                         }
                     },
+                    LazySource::FunctionCall {
+                        function,
+                        arguments,
+                    } => LazyTaskWork::NetWhnf(Box::new(NetWhnfMachine::from_function_call(
+                        context, &function, &arguments,
+                    ))),
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
                         durable_context.values().runtime_id(),
@@ -339,6 +346,14 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return match machine.poll(context, step_budget) {
                     Ok(Some(value)) => self.complete(context, value),
                     Ok(None) => EvaluationMachinePoll::Yielded,
+                    Err(error) => self.fail(context, error),
+                };
+            }
+
+            if let LazyTaskWork::NetWhnf(machine) = &mut self.work {
+                return match machine.poll(context) {
+                    Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context, value),
+                    Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
                     Err(error) => self.fail(context, error),
                 };
             }
@@ -679,10 +694,9 @@ fn produce_lazy_source_in(
                 })
             })
         }
-        LazySource::FunctionCall {
-            function,
-            arguments,
-        } => evaluate_function_call(context, function, arguments),
+        LazySource::FunctionCall { .. } => {
+            unreachable!("function calls retain one pollable net-WHNF owner")
+        }
     }
 }
 
@@ -1025,6 +1039,9 @@ mod ownership_tests {
             LazyTaskWork::Produce => {}
             LazyTaskWork::Whnf(computation) => {
                 let _: &crate::eval::whnf::WhnfComputation = computation;
+            }
+            LazyTaskWork::NetWhnf(machine) => {
+                let _: &NetWhnfMachine = machine;
             }
             LazyTaskWork::HostCall(producer) => {
                 let _: &Arc<crate::core::HostCallProducer> = producer;

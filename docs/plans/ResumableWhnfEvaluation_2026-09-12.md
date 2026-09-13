@@ -1263,12 +1263,19 @@ a dependency reorder within W3, not a relaxation of the W3 closure gate.
 
 ##### W3B.3 — Saturated function-call and net bridge
 
-Status: pending after W4C.1.
+Status: complete on 2026-09-13 with W4C.1c.
 
 Select a `FunctionCall` source once, attach its argument vector once, and move
 the resulting managed net into the reusable normalization owner from W4C.1.
 The function source does not allocate a nested lazy merely to retain the net.
 Blocked semantic calls retain the same net and normalization checkpoint.
+
+`LazyTaskMachine` now selects a `FunctionCall` once and installs a boxed
+`NetWhnfMachine`. Stage duplication, argument attachment, managed-net
+construction, and request rooting happen only during that transition. A data
+payload is handed to the same ordinary WHNF demand path rather than cached
+prematurely, so lazy function results retain their established semantics. The
+former source-time `evaluate_function_call` path is removed.
 
 #### W3C — Access and key/list source work
 
@@ -1357,7 +1364,8 @@ finish that operator.
 
 ##### W4C.1 — Reusable pollable net normalization owner
 
-Status: pending; pulled before W3B.3 by the W3 dependency review.
+Status: complete on 2026-09-13 through W4C.1a-W4C.1c; pulled before W3B.3 by
+the W3 dependency review.
 
 ###### W4C.1a — Persistent driver polling
 
@@ -1394,12 +1402,21 @@ normalization scope crosses the returned boundary.
 
 ###### W4C.1c — Net-WHNF source owner
 
+Status: complete on 2026-09-13.
+
 Introduce one owner around a managed runtime net, exposed interface,
 operation label, and persistent driver. It returns data, structured bind or
 normal-form failure, an exact semantic dependency, or a cooperative yield.
-Both `FunctionCall` and `NetComputation` use this owner; net construction keeps
-its existing effect machine and hands its terminal net to the same owner only
-where WHNF extraction is required.
+W3B.3 and W4C.2 connect `FunctionCall` and `NetComputation` to this owner; net
+construction keeps its existing effect machine and hands its terminal net to
+the same owner only where WHNF extraction is required.
+
+`NetWhnfMachine` now owns the exact request root, exposed interface, operation
+label, and persistent driver. Each poll returns one data payload, a
+cooperative yield after progress or contention handoff, or the existing
+structured/dependency failure. Extracting data deliberately does not force a
+lazy payload: the enclosing WHNF computation retains responsibility for that
+ordinary outer-shell demand.
 
 ##### W4C.2 — Remaining net source integration
 

@@ -79,18 +79,92 @@ pub(super) fn extract_net_data(
     }
 }
 
-pub(super) fn evaluate_function_call(
-    context: &EvaluatorStepContext<'_>,
-    function: &FunctionValue,
-    arguments: &[Value],
-) -> Result<Value, EvaluationHalt> {
-    let stage = context.with_value_access(|access| function.duplicate_stage_in(access.values()));
-    let net = attach_net_many(context, stage, arguments.to_vec());
-    let runtime = net.into_runtime();
-    let exposed = with_core_net_access(context, &runtime, |runtime| {
-        runtime.with(|runtime| runtime.exposed())
-    });
-    extract_net_data(context, runtime, exposed, "function call")
+pub(super) struct NetWhnfMachine {
+    request: NormalizationRequest,
+    driver: NetDriver,
+    operation: Arc<str>,
+}
+
+pub(super) enum NetWhnfPoll {
+    Ready(Value),
+    Yielded,
+}
+
+impl NetWhnfMachine {
+    pub(super) fn new(
+        context: &EvaluatorStepContext<'_>,
+        runtime: CoreRuntimeNet,
+        interface: Port,
+        operation: impl Into<Arc<str>>,
+    ) -> Self {
+        let request = NormalizationRequest::cursor_whnf(&runtime, interface, context);
+        let driver = NetDriver::new(&request);
+        Self {
+            request,
+            driver,
+            operation: operation.into(),
+        }
+    }
+
+    pub(super) fn from_function_call(
+        context: &EvaluatorStepContext<'_>,
+        function: &FunctionValue,
+        arguments: &[Value],
+    ) -> Self {
+        let stage =
+            context.with_value_access(|access| function.duplicate_stage_in(access.values()));
+        let net = attach_net_many(context, stage, arguments.to_vec());
+        let runtime = net.into_runtime();
+        let exposed = with_core_net_access(context, &runtime, |runtime| {
+            runtime.with(|runtime| runtime.exposed())
+        });
+        Self::new(context, runtime, exposed, "function call")
+    }
+
+    pub(super) fn poll(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+    ) -> Result<NetWhnfPoll, EvaluationHalt> {
+        match drive_net_driver_work_in(context, &mut self.driver)? {
+            NetDriverOutcome::Progressed => {
+                self.driver.restart_from_request_root();
+                Ok(NetWhnfPoll::Yielded)
+            }
+            NetDriverOutcome::Root(InterfaceDemand::Data) => {
+                let value = context.with_value_access(|access| {
+                    let runtime = CoreRuntimeNet::from_root(&self.request.root, access.values());
+                    access.net(&runtime).with(|runtime| {
+                        runtime.interface_data(self.request.root_interface).cloned()
+                    })
+                });
+                Ok(NetWhnfPoll::Ready(value.expect(
+                    "evaluated interaction-net interface must contain data",
+                )))
+            }
+            NetDriverOutcome::Root(InterfaceDemand::Bind) => Err(EvaluationHalt::new(format!(
+                "{} exposed a bind instead of data",
+                self.operation
+            ))),
+            NetDriverOutcome::Root(
+                InterfaceDemand::NormalForm | InterfaceDemand::StableCursor(_),
+            ) => Err(EvaluationHalt::new(format!(
+                "{} reached a non-data normal form",
+                self.operation
+            ))),
+            NetDriverOutcome::Root(InterfaceDemand::Cursor(_) | InterfaceDemand::ActivePair(_)) => {
+                unreachable!("root driver must dispatch nonterminal demand")
+            }
+            NetDriverOutcome::Contended(contention) => {
+                contention.wait_for_disturbance();
+                Ok(NetWhnfPoll::Yielded)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_root(&self) -> &crate::core::ManagedCoreNetRoot {
+        &self.request.root
+    }
 }
 
 fn with_core_net_access<R>(
@@ -2016,6 +2090,68 @@ mod driver_tests {
             runtime.active_normalization_batch(context.values()),
             None,
             "parking and resumption must not retain a normalization lease"
+        );
+    }
+
+    #[test]
+    fn net_whnf_machine_retains_one_root_across_semantic_dependency() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "net WHNF semantic wait");
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(Value::Promised(promise.clone()));
+        let value = builder.data(context.values().unit());
+        builder.wire(application, function);
+        builder.wire(argument, value);
+        let runtime = instantiate(builder.finish(result));
+        let interface = runtime.test_with(context.values(), |net| net.exposed());
+        let mut machine = crate::eval::with_direct_evaluator(&context, |evaluator| {
+            NetWhnfMachine::new(evaluator, runtime.clone(), interface, "test net")
+        });
+        context.values().with_runtime_value_access(|access| {
+            assert!(
+                machine
+                    .retained_root()
+                    .same_root_in(&runtime.root_in(&access), &access)
+            );
+        });
+
+        let parked =
+            match crate::eval::with_direct_evaluator(&context, |evaluator| machine.poll(evaluator))
+            {
+                Err(error) => error,
+                Ok(_) => panic!("the unresolved callable must park the net-WHNF owner"),
+            };
+        let wait = parked
+            .blocked_on()
+            .expect("the owner must expose its exact semantic wait");
+
+        let callable = crate::eval::test_support::closed_function_value_in(
+            context.values(),
+            1,
+            crate::eval::test_support::TestExpr::Value(context.values().unit()),
+        );
+        crate::core::set_test_promise(context.values(), &promise, callable)
+            .expect("the callable promise should accept its assignment");
+        assert!(matches!(
+            context.pump_wait(&wait.0, 256),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        ));
+
+        let value = crate::eval::with_direct_evaluator(&context, |evaluator| {
+            loop {
+                match machine.poll(evaluator)? {
+                    NetWhnfPoll::Ready(value) => return Ok::<_, EvaluationHalt>(value),
+                    NetWhnfPoll::Yielded => {}
+                }
+            }
+        })
+        .expect("the owner must resume through the same managed net");
+        assert!(matches!(value, Value::Lazy(_)));
+        assert_eq!(
+            crate::eval::eval_value(&context, &value)
+                .expect("the returned net payload must retain ordinary lazy demand"),
+            context.values().unit()
         );
     }
 

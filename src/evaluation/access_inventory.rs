@@ -597,6 +597,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_driver_releases_each_runtime_before_crossing_to_the_next#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::net_whnf_machine_retains_one_root_across_semantic_dependency#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::persistent_driver_requeues_the_exact_active_pair_before_semantic_parking#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain#1|surface=construction|scope=test|nested=0|carrier=none",
@@ -790,9 +791,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // authority used by production normalization batches. P2C adds
         // explicit test-only duplicate/root handoffs for cursor-driver and
         // concurrent normalization fixtures.
-        // W4C.1a's persistent-driver fixture compares the retained request
-        // root under one additional bounded test access.
-        ("src/eval/net.rs", GatewayCounts::new(7, 0)),
+        // W4C.1's persistent-driver fixtures compare retained request roots
+        // under two additional bounded test accesses.
+        ("src/eval/net.rs", GatewayCounts::new(8, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks
