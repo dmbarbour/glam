@@ -53,70 +53,75 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn lower_declaration(&mut self, declaration: Declaration) {
         let line = declaration.line;
-        let (result, definitions) = self.context.values().with_runtime_value_access(|access| {
-            let mut definitions = self.definitions.clone_core_with(&access);
-            let module_reflection = ReflectionBoundary {
-                annotator: self.module_reflection.clone_core_with(&access),
-            };
-            let result = match &declaration.kind {
-                DeclarationKind::Import(import) => {
-                    lower_import(import, line, self.context, &access, &mut definitions)
-                }
-                DeclarationKind::Unique(names) => {
-                    lower_unique(names, line, self.context, &access, &mut definitions)
-                }
-                DeclarationKind::Definition(definition) => {
-                    let scope = NameScope::module_with_reflection(
-                        self.context,
-                        definitions.clone(),
-                        module_reflection.clone(),
-                    );
-                    lower_definition(
+        let result = match &declaration.kind {
+            DeclarationKind::Import(_) | DeclarationKind::Unique(_) => {
+                let (result, definitions) =
+                    self.context.values().with_runtime_value_access(|access| {
+                        let mut definitions = self.definitions.clone_core_with(&access);
+                        let result = match &declaration.kind {
+                            DeclarationKind::Import(import) => {
+                                lower_import(import, line, self.context, &access, &mut definitions)
+                            }
+                            DeclarationKind::Unique(names) => {
+                                lower_unique(names, line, self.context, &access, &mut definitions)
+                            }
+                            _ => unreachable!("access-bound declarations were matched above"),
+                        };
+                        (result, access.root_runtime_value(definitions))
+                    });
+                self.definitions = definitions;
+                result
+            }
+            kind @ (DeclarationKind::Definition(_)
+            | DeclarationKind::Object(_)
+            | DeclarationKind::Extend(_)) => {
+                let (definitions, module_reflection) =
+                    self.context.values().with_runtime_value_access(|access| {
+                        (
+                            self.definitions.clone_core_with(&access),
+                            ReflectionBoundary {
+                                annotator: self.module_reflection.clone_core_with(&access),
+                            },
+                        )
+                    });
+                let scope = NameScope::module_with_reflection(
+                    self.context,
+                    definitions.clone(),
+                    module_reflection,
+                );
+                let resolved = match kind {
+                    DeclarationKind::Definition(definition) => resolve_module_definition(
                         definition,
                         line,
                         self.context,
-                        &access,
-                        &mut definitions,
+                        definitions,
                         &scope,
-                    )
+                    ),
+                    DeclarationKind::Object(object) => {
+                        lower_object(object, line, self.context, definitions, &scope)
+                    }
+                    DeclarationKind::Extend(extend) => {
+                        lower_extend(extend, line, self.context, definitions, &scope)
+                    }
+                    _ => unreachable!("resolved declarations were matched above"),
+                };
+                match resolved {
+                    Ok(resolved) => {
+                        self.definitions =
+                            self.context
+                                .values()
+                                .construct_runtime_value_root(|access| {
+                                    lower_resolved_expr_in(access, resolved)
+                                });
+                        Ok(())
+                    }
+                    Err(diagnostic) => Err(diagnostic),
                 }
-                DeclarationKind::Object(object) => {
-                    let scope = NameScope::module_with_reflection(
-                        self.context,
-                        definitions.clone(),
-                        module_reflection.clone(),
-                    );
-                    lower_object(
-                        object,
-                        line,
-                        self.context,
-                        &access,
-                        &mut definitions,
-                        &scope,
-                    )
-                }
-                DeclarationKind::Extend(extend) => {
-                    let scope = NameScope::module_with_reflection(
-                        self.context,
-                        definitions.clone(),
-                        module_reflection,
-                    );
-                    lower_extend(
-                        extend,
-                        line,
-                        self.context,
-                        &access,
-                        &mut definitions,
-                        &scope,
-                    )
-                }
-                DeclarationKind::Language(_)
-                | DeclarationKind::Abstract(_)
-                | DeclarationKind::Unknown => Ok(()),
-            };
-            (result, access.root_runtime_value(definitions))
-        });
-        self.definitions = definitions;
+            }
+            DeclarationKind::Language(_)
+            | DeclarationKind::Abstract(_)
+            | DeclarationKind::Unknown => Ok(()),
+        };
         if let Err(diagnostic) = result {
             self.diagnostics.push(diagnostic);
         }
@@ -168,24 +173,20 @@ pub(in crate::g_syntax) fn lower_parsed_source(
     lowerer.finish(diagnostics)
 }
 
-pub(super) fn lower_definition(
+fn resolve_module_definition(
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
-    access: &RuntimeValueAccess<'_>,
-    definitions: &mut Value,
+    definitions: Value,
     scope: &NameScope,
-) -> Result<(), Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
-    let definitions_root = ResolvedRoot::Provided(definitions.clone());
-    let resolved = lower_definition_resolved(
+    lower_definition_resolved(
         definition,
         line,
         context,
-        &definitions_root,
+        &ResolvedRoot::Provided(definitions),
         &scope.resolved(),
         &mut locals,
-    )?;
-    *definitions = lower_resolved_expr_in(access, resolved);
-    Ok(())
+    )
 }

@@ -5,13 +5,12 @@ pub(in crate::g_syntax) fn lower_object(
     object: &ObjectDecl,
     line: usize,
     context: &CompileContext,
-    access: &RuntimeValueAccess<'_>,
-    definitions: &mut Value,
+    definitions: Value,
     module_scope: &NameScope<Value>,
-) -> Result<(), Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
     let scope = module_scope.resolved();
-    let definitions_root = ResolvedRoot::Provided(definitions.clone());
+    let definitions_root = ResolvedRoot::Provided(definitions);
     let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
     let object_value = object_decl_resolved_in_scope(
         object,
@@ -30,11 +29,11 @@ pub(in crate::g_syntax) fn lower_object(
         &mut locals,
     )?;
     let object_value = annotate_definition_context(object_value, &object.target, line, context);
-    *definitions = lower_resolved_expr_in(
-        access,
-        update_module_resolved(definitions_root.expr(), &object.target, object_value),
-    );
-    Ok(())
+    Ok(update_module_resolved(
+        definitions_root.expr(),
+        &object.target,
+        object_value,
+    ))
 }
 
 pub(in crate::g_syntax) fn object_instance_from_parts_value_in(
@@ -356,14 +355,13 @@ pub(in crate::g_syntax) fn lower_extend(
     extend: &ObjectExtendDecl,
     line: usize,
     context: &CompileContext,
-    access: &RuntimeValueAccess<'_>,
-    definitions: &mut Value,
+    definitions: Value,
     module_scope: &NameScope<Value>,
-) -> Result<(), Diagnostic> {
+) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
     let scope = module_scope.resolved();
-    let definitions_root = ResolvedRoot::Provided(definitions.clone());
-    let updated = extend_object_resolved_in_scope(
+    let definitions_root = ResolvedRoot::Provided(definitions);
+    extend_object_resolved_in_scope(
         extend,
         line,
         context,
@@ -371,9 +369,7 @@ pub(in crate::g_syntax) fn lower_extend(
         &scope,
         &mut locals,
         declared_target_has_reflection(&extend.target),
-    )?;
-    *definitions = lower_resolved_expr_in(access, updated);
-    Ok(())
+    )
 }
 
 pub(in crate::g_syntax) fn lower_nested_extend_resolved(

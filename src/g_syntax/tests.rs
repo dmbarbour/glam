@@ -327,6 +327,31 @@ fn take_reflection_diagnostics(
 }
 
 #[test]
+fn declaration_resolution_builds_uncached_effects_outside_managed_access() {
+    let runtime = crate::api::EvaluationRuntime::new(0)
+        .expect("declaration-boundary test runtime should be constructible");
+    let assembler = crate::api::Assembler::builder()
+        .evaluation_runtime(runtime)
+        .build()
+        .expect("declaration-boundary test assembler should be constructible");
+    let context = CompileContext::from_module_path_with_values(
+        assembler.core_values(),
+        ["declaration_boundary"],
+    );
+
+    // This private effect path is absent from the compiler family's standard
+    // construction set, so resolving it deterministically takes the cache-miss
+    // path. The miss evaluates one closed compiler helper and therefore must
+    // not inherit the access region used to project or lower module state.
+    let lowered = lower_parsed_source(
+        parse("language g0\nresult = .w2r_declaration_resolution_probe\n"),
+        &context,
+    );
+
+    assert_eq!(lowered.diagnostics, []);
+}
+
+#[test]
 fn parses_language_declaration_with_extensions() {
     let parsed = parse("language g0 with utf8, demo\nanswer = 42\n");
 

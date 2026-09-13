@@ -974,6 +974,44 @@ Run the focused cache, compiler, formatter, ownership-inventory, ordinary
 workspace, and aggressive-GC suites. Mark W2 and its post-review complete only
 after no cache builder reaches WHNF orchestration beneath managed access.
 
+###### W2R-001D.1 — Declaration-resolution access boundary
+
+Status: complete on 2026-09-13.
+
+The first ordinary-suite closure run found one caller-side continuation of the
+same defect: `ModuleLowerer::lower_declaration` projected its durable module
+roots, resolved arbitrary syntax, and lowered the resulting semantic
+expression beneath one declaration-wide access region. A previously unseen
+effect path may populate its compiler subcache during resolution, so that
+region indirectly encloses the cache builder's closed WHNF evaluation even
+after W2R-001A removed the builder's own implicit region.
+
+Split definition, object, and extension declarations into three boundaries:
+
+1. briefly project the durable current-definitions and reflection roots;
+2. resolve syntax to the front end's affine semantic expression with no
+   managed access held; and
+3. lower and root the completed semantic expression in a fresh bounded access
+   region.
+
+The durable roots remain live throughout step 2, so every projected managed
+edge used by the resolved expression retains its owner. Keep import and
+`unique` construction on their existing bounded paths: they construct lazy
+host-call or immediate dictionary state without driving evaluation. Add a
+fresh effect-path regression so cache order in parallel tests cannot mask the
+boundary violation, then rerun the original reflection fixture before the
+full W2R-001D matrix.
+
+Completion record: module definition, object, and extension lowering now
+projects the current definitions and reflection boundary in one short region,
+resolves the complete syntax expression after that region closes, then lowers
+and roots the affine semantic expression in a new short region. The two source
+roots stay live across resolution. A fresh, runtime-local effect path forces a
+deterministic compiler subcache miss and passes without inheriting managed
+access; the original reflection-branch and diagnostic-callback fixtures pass
+as well. The compiler access inventory records the new explicit projection
+boundary.
+
 ### Phase W3 — Lazy Producers and Source Progress
 
 #### W3A — Lazy task result disposition
