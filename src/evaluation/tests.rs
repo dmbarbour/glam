@@ -220,6 +220,23 @@ fn poll_one_runtime_work(coordinator: &Arc<EvaluationWorkCoordinator>) -> bool {
     }
 }
 
+fn counted_client_lazy(
+    context: &EvalContext,
+    label: &'static str,
+    value: Value,
+) -> (RuntimeValueRoot, Arc<std::sync::atomic::AtomicUsize>) {
+    let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = evaluations.clone();
+    let lazy = LazyValue::semantic_thunk(context.values(), label, move |_| {
+        observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(value.clone())
+    });
+    (
+        RuntimeValueRoot::new(context.values(), Value::Lazy(lazy)),
+        evaluations,
+    )
+}
+
 fn poll_runtime_until(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     mut complete: impl FnMut() -> bool,
@@ -442,6 +459,104 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
         handle.poll(),
         Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
     ));
+}
+
+#[test]
+fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (root, evaluations) = counted_client_lazy(
+        &context,
+        "producer before subscription",
+        Value::Number(31.into()),
+    );
+    let handle = context
+        .demand_whnf(root)
+        .expect("lazy client demand should be admitted");
+
+    let mut claimed = coordinator
+        .claim_client_demand(handle.work())
+        .expect("client demand should be ready");
+    let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
+    let poll = claimed.poll(&poll_context, 64);
+    let ClientDemandPoll::Blocked(WorkDependency::Wait(wait)) = &poll else {
+        panic!("uncached lazy demand should expose its canonical producer wait")
+    };
+    let wait = wait.clone();
+    assert_eq!(context.deferred_task_count(), 1);
+    assert_eq!(wait.exact_subscription_count(), 0);
+
+    assert!(coordinator.promote_deferred_wait(&wait));
+    let producer = coordinator
+        .producer_for_wait(&wait)
+        .expect("canonical lazy wait should name its producer");
+    let work = coordinator
+        .claim_task(producer)
+        .expect("promoted lazy producer should be claimable");
+    coordinator.poll_claimed_task(work);
+    assert!(matches!(
+        context.poll_wait(&wait),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    coordinator.release_client_demand(claimed, poll);
+    assert_eq!(wait.exact_subscription_count(), 0);
+    assert!(matches!(
+        coordinator.client_demand_snapshot(handle.work()),
+        Some(ClientDemandSnapshot::Queued)
+    ));
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        handle.poll(),
+        Some(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == Value::Number(31.into())
+    ));
+    assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
+fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (root, evaluations) = counted_client_lazy(
+        &context,
+        "subscription before producer",
+        Value::Number(37.into()),
+    );
+    let handle = context
+        .demand_whnf(root)
+        .expect("lazy client demand should be admitted");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    let ClientDemandSnapshot::Blocked {
+        dependency: WorkDependency::Wait(wait),
+        ..
+    } = coordinator
+        .client_demand_snapshot(handle.work())
+        .expect("client demand should retain its exact lazy dependency")
+    else {
+        panic!("uncached lazy demand should block on its producer")
+    };
+    assert_eq!(context.deferred_task_count(), 1);
+    assert_eq!(wait.exact_subscription_count(), 1);
+
+    assert!(poll_one_runtime_work(&coordinator));
+    assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(wait.exact_subscription_count(), 0);
+    assert!(matches!(
+        coordinator.client_demand_snapshot(handle.work()),
+        Some(ClientDemandSnapshot::Queued)
+    ));
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        handle.poll(),
+        Some(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == Value::Number(37.into())
+    ));
+    assert_eq!(context.deferred_task_count(), 0);
 }
 
 #[test]

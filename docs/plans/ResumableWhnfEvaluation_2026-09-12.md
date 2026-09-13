@@ -807,9 +807,20 @@ compiler, and generic-client fixtures exercise the shared path behaviorally.
 
 ##### W2E.1 — Forced subscription orderings
 
+Status: complete on 2026-09-13.
+
 Force producer completion both before and after exact client subscription;
 verify the canonical producer identity and the absence of lost or duplicate
 wakes without relying on repeated scheduling.
+
+Completion record: two scheduler-controlled fixtures now force both sides of
+the exact-subscription race. The producer-before-subscription case keeps the
+client operation claimed, explicitly promotes and completes its canonical
+lazy producer, then releases the stale blocked poll and verifies immediate
+requeue. The subscription-before-producer case first observes one installed
+exact subscription, then runs the producer and observes one wake and cleanup.
+Both paths admit one deferred producer, invoke its source once, retire the
+subscription, and complete the same client demand without repeated runs.
 
 ##### W2E.2 — Lifecycle, cycle, and collection matrix
 
