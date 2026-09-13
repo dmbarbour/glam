@@ -3147,6 +3147,64 @@ mod tests {
     }
 
     #[test]
+    fn losing_complete_cache_candidate_retires_after_the_atomic_winner_race() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let next_candidate = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new([
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ]);
+        let handles = (0..2)
+            .map(|_| {
+                let factory = factory.clone();
+                let roots = factory.clone();
+                let barrier = barrier.clone();
+                let next_candidate = next_candidate.clone();
+                let dropped = dropped.clone();
+                std::thread::spawn(move || {
+                    factory.cached(|| {
+                        let candidate = next_candidate.fetch_add(1, Ordering::Relaxed);
+                        let probe = RootedCachedProbe {
+                            root: RuntimeValueRoot::new(
+                                &roots,
+                                Value::binary_from_text("racing cache candidate"),
+                            ),
+                            _dropped: DropSignal(dropped[candidate].clone()),
+                        };
+                        barrier.wait();
+                        probe
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let installed = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("cache race should finish"))
+            .collect::<Vec<_>>();
+
+        assert!(Arc::ptr_eq(&installed[0], &installed[1]));
+        assert_eq!(
+            dropped
+                .iter()
+                .filter(|flag| flag.load(Ordering::Acquire))
+                .count(),
+            1,
+            "exactly the losing complete candidate should retire after installation"
+        );
+
+        drop(installed);
+        drop(factory);
+        assert!(
+            dropped.iter().all(|flag| flag.load(Ordering::Acquire)),
+            "the installed winner should retire with its value domain"
+        );
+    }
+
+    #[test]
     fn distinct_runtime_caches_do_not_share_constructed_extensions() {
         let first = CoreValueFactory::new(
             crate::runtime::allocate_evaluation_runtime_id(),

@@ -88,7 +88,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/core.rs",
-        2,
+        3,
         1,
         3,
         "post-domain canonical-root initialization, test mutation-root publication, and I10A one-shot HostCall capture bundles",
@@ -619,6 +619,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=access-publication|scope=production",
     "src/core.rs::impl CoreValues::new#1|surface=access-publication|scope=production",
     "src/core.rs::impl HostCallRootBundle::from_captures#1|surface=access-publication|scope=production",
+    "src/core.rs::tests::losing_complete_cache_candidate_retires_after_the_atomic_winner_race#1|surface=compatibility-new|scope=test",
     "src/core.rs::tests::runtime_cache_rejects_a_root_from_another_runtime_before_publication#1|surface=compatibility-new|scope=test",
     "src/core.rs::tests::runtime_cache_retires_an_admitted_owner_with_the_value_domain#1|surface=compatibility-new|scope=test",
     "src/core/managed/active_owner_inventory.rs::arbitrary_host_callback_root_backedge_is_conservative_external_ownership#1|surface=compatibility-new|scope=test",

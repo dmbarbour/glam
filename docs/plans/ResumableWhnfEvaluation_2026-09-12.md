@@ -950,11 +950,23 @@ a prepared-expression wrapper or an added root.
 
 ###### W2R-001C — Collection and race verification
 
+Status: complete on 2026-09-13.
+
 Force collection between representative compiler-family construction steps
 and before final publication. Preserve the existing proof that racing misses
 may execute multiple builders but all callers receive one installed complete
 family. Verify that a losing candidate retires normally and that reopening an
 installed family registers no replacement roots.
+
+Completion record: the compiler construction fixture forces collection after
+every rooted helper and before publication, while the formatter fixture
+collects its unpublished candidate. The existing barrier-controlled race
+continues to prove that two builders may run and return one installed winner.
+A new two-candidate barrier fixture gives each candidate an independent drop
+signal: exactly the loser retires after atomic installation, and the winner
+retires with the value domain. Existing root-registration assertions prove
+that reopening either installed production family creates no replacement
+roots.
 
 ###### W2R-001D — W2 closure
 
