@@ -132,6 +132,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unpublished_formatter_candidate_is_already_rooted() {
+        let values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let candidate = CachedDiagnosticFormatter(build(&values));
+
+        assert!(
+            !crate::core::thread_has_runtime_value_access_for_test(),
+            "formatter evaluation must close managed access before candidate publication"
+        );
+        values
+            .collect_managed_for_test()
+            .expect("the unpublished formatter candidate must retain its function");
+        assert!(matches!(
+            candidate.0.clone_core_for_test(),
+            Value::Function(_)
+        ));
+    }
+
+    #[test]
     fn formatter_is_cached_after_exposing_its_function() {
         let values = CoreValueFactory::new(
             crate::runtime::allocate_evaluation_runtime_id(),

@@ -923,6 +923,8 @@ their prior behavior.
 
 ###### W2R-001B — Production family root audit
 
+Status: complete on 2026-09-13.
+
 Audit `GCompilerValues` and `CachedDiagnosticFormatter` one construction step
 at a time. Every managed raw `Value` embedded in a later closed expression
 must remain backed by a live `RuntimeValueRoot` until that expression is
@@ -933,6 +935,18 @@ For each closed helper evaluation, construct and root the input during one
 short access region, close the region, and then use the normal resumable
 client-demand path. Retain every completed helper root in the local candidate
 until the complete family is admitted.
+
+Completion record: the field-by-field audit found no missing owner.
+`GCompilerValues` retains each evaluated helper as a `RuntimeValueRoot`; raw
+projections used to construct `std` remain backed by the live `not` and
+`could` roots, and effect values remain backed by roots in the construction
+map. Construction now names every final field before bundle assembly and
+offers a test checkpoint after all thirteen rooted steps. A deterministic
+fixture collects at every checkpoint and again after the complete candidate
+returns but before cache admission. `CachedDiagnosticFormatter` already
+consisted of one rooted function; a companion fixture collects that
+unpublished candidate. Both pass in ordinary and aggressive-GC modes without
+a prepared-expression wrapper or an added root.
 
 ###### W2R-001C — Collection and race verification
 

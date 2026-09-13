@@ -158,14 +158,24 @@ fn project_module(values: &CoreValueFactory, module: &RootedBuiltinModule) -> Bu
 
 impl GCompilerValues {
     fn build(values: &CoreValueFactory) -> Self {
+        Self::build_with_root_checkpoint(values, || {})
+    }
+
+    fn build_with_root_checkpoint(
+        values: &CoreValueFactory,
+        mut rooted_checkpoint: impl FnMut(),
+    ) -> Self {
         let effects = Mutex::new(HashMap::new());
         let build_cache = BuildingEffectValues {
             runtime: values.runtime_id(),
             effects: &effects,
         };
         let not = build_not(values, &build_cache);
+        rooted_checkpoint();
         let could = build_could(values, &not);
+        rooted_checkpoint();
         let constant_object_defs = build_constant_object_defs(values);
+        rooted_checkpoint();
 
         let math_value = Value::Dict(
             Dict::new_sync()
@@ -188,6 +198,8 @@ impl GCompilerValues {
                 .insert(name_as_key("tail"), Value::Builtin(Builtin::ListTail))
                 .insert(name_as_key("pure"), Value::Builtin(Builtin::ListEffect)),
         );
+        // The raw projections below remain backed by `not` and `could` until
+        // `std_value` has been lowered into the rooted module candidate.
         let std_value = Value::Dict(
             Dict::new_sync()
                 .insert(name_as_key("anno"), Value::Builtin(Builtin::Anno))
@@ -225,20 +237,38 @@ impl GCompilerValues {
         };
 
         let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
+        rooted_checkpoint();
         let defined_or = build_defined_or(values, &build_cache, &pure_if_runner);
+        rooted_checkpoint();
+        let math = make_module(math_value);
+        rooted_checkpoint();
+        let list = make_module(list_value);
+        rooted_checkpoint();
+        let std = make_module(std_value);
+        rooted_checkpoint();
+        let empty_object_defs = build_empty_object_defs(values);
+        rooted_checkpoint();
+        let reflection_annotator = build_reflection_annotator(values, &build_cache);
+        rooted_checkpoint();
+        let require_defined = build_require_defined(values, &defined_or);
+        rooted_checkpoint();
+        let pure_match_runner = build_pure_conditional_runner(values, Builtin::MatchResult);
+        rooted_checkpoint();
+        let macro_environment = build_macro_environment(values);
+        rooted_checkpoint();
         Self {
             runtime: values.runtime_id(),
-            math: make_module(math_value),
-            list: make_module(list_value),
-            std: make_module(std_value),
-            empty_object_defs: build_empty_object_defs(values),
+            math,
+            list,
+            std,
+            empty_object_defs,
             constant_object_defs,
-            reflection_annotator: build_reflection_annotator(values, &build_cache),
-            require_defined: build_require_defined(values, &defined_or),
+            reflection_annotator,
+            require_defined,
             defined_or,
             pure_if_runner,
-            pure_match_runner: build_pure_conditional_runner(values, Builtin::MatchResult),
-            macro_environment: build_macro_environment(values),
+            pure_match_runner,
+            macro_environment,
             effects,
         }
     }
@@ -1029,6 +1059,41 @@ mod tests {
                 Value::Function(_)
             ));
         });
+    }
+
+    #[test]
+    fn compiler_candidate_survives_collection_between_rooted_build_steps() {
+        let values = fresh_test_values();
+        let mut checkpoints = 0usize;
+        let compiler = GCompilerValues::build_with_root_checkpoint(&values, || {
+            assert!(
+                !crate::core::thread_has_runtime_value_access_for_test(),
+                "compiler build checkpoints must remain outside managed access"
+            );
+            values
+                .collect_managed_for_test()
+                .expect("each completed compiler helper must root its managed result");
+            checkpoints += 1;
+        });
+
+        assert_eq!(checkpoints, 13);
+        values
+            .collect_managed_for_test()
+            .expect("the unpublished complete candidate must retain all of its roots");
+        let mut roots = 0usize;
+        compiler.visit_runtime_roots(&mut |root| {
+            assert_eq!(root.runtime_id(), values.runtime_id());
+            roots += 1;
+        });
+        assert!(roots >= 14);
+        assert!(matches!(
+            project_value(&values, &compiler.std.value),
+            Value::Dict(_)
+        ));
+        assert!(matches!(
+            project_value(&values, &compiler.macro_environment),
+            Value::Function(_)
+        ));
     }
 
     #[test]
