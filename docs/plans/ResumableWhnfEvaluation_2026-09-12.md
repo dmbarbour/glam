@@ -736,6 +736,8 @@ resumption with zero deferred-task admission.
 
 ##### W2B.2 — Promise-follower ownership
 
+Status: complete on 2026-09-13.
+
 Split promise assignment inspection from promise-follower admission. Preserve:
 
 - direct retryable observation of an unassigned resolver promise;
@@ -746,6 +748,17 @@ Split promise assignment inspection from promise-follower admission. Preserve:
 
 Whichever parts of `PromiseFollower` remain separate must host or delegate to
 the same WHNF submachine rather than restart assignment evaluation.
+
+Completion record: `PromiseFollower` now owns one `WhnfComputation` rooted at
+the canonical promise allocation instead of a promise root plus an
+`AwaitAssignment`/`FollowAssignment` phase marker. Its task poll delegates to
+the same post-region WHNF driver as client demand, translates an unassigned
+resolver promise directly to the exact coordinator dependency, preserves
+task-owned self-observation policy, and resumes assigned deferred shells from
+the installed checkpoint. A forced one-step fixture proves unassigned block,
+budget yield after assignment, and terminal resumption without restarting the
+assignment phase. The old follower `eval_value_in` occurrence and direct
+promise-root owner were removed from the WHNF and recursive-identity ledgers.
 
 #### W2C — Client-demand cutover
 

@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use crate::core::{EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, Value};
+use crate::core::{
+    CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
+};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::EvaluationValueAccess;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -260,6 +262,16 @@ impl WhnfComputation {
                 frames: Vec::new(),
             },
         }
+    }
+
+    pub(crate) fn from_promise_root(
+        values: &CoreValueFactory,
+        promise: &ManagedPromiseRoot,
+    ) -> Self {
+        let focus = values.construct_runtime_value_root(|access| {
+            Value::Promised(PromisedValue::from_root(promise, &access))
+        });
+        Self::from_root(focus)
     }
 
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {

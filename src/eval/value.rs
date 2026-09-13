@@ -8,7 +8,8 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WorkDependency,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
+    poll_whnf_computation,
 };
 use crate::list::ListItem;
 use crate::number::Number;
@@ -361,56 +362,38 @@ impl LazyTaskMachine {
     }
 }
 
-enum PromiseFollowerState {
-    AwaitAssignment,
-    FollowAssignment,
-}
-
 struct PromiseFollower {
     context: EvalContext,
-    promise: ManagedPromiseRoot,
-    state: PromiseFollowerState,
+    computation: super::whnf::WhnfComputation,
 }
 
 impl EvaluationTaskMachine for PromiseFollower {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        step_budget: usize,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
-        poll_context.evaluate(&durable_context, |context| {
-            let Some(assignment) =
-                context.with_value_access(|access| access.promise_root(&self.promise).assignment())
-            else {
-                debug_assert!(matches!(self.state, PromiseFollowerState::AwaitAssignment));
-                return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                    dependency: Some(WorkDependency::Promise(self.promise.clone())),
+        match poll_whnf_computation(
+            &mut self.computation,
+            poll_context,
+            &durable_context,
+            step_budget,
+        ) {
+            WhnfOwnerPoll::Ready(value) => EvaluationMachinePoll::Complete(value),
+            WhnfOwnerPoll::Pending(dependency) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(dependency),
                     observed_epoch: None,
                     error: None,
-                });
-            };
-            let assignment = assignment.map_err(EvaluationHalt::failure);
-            let result = match (&self.state, assignment) {
-                (PromiseFollowerState::AwaitAssignment, result) => result,
-                (PromiseFollowerState::FollowAssignment, Ok(target)) => {
-                    eval_value_in(context, &target)
-                }
-                (PromiseFollowerState::FollowAssignment, Err(error)) => Err(error),
-            };
-
-            match result {
-                Ok(value)
-                    if context
-                        .with_value_access(|access| is_deferred_value(access.values(), &value)) =>
-                {
-                    self.state = PromiseFollowerState::FollowAssignment;
-                    EvaluationMachinePoll::Yielded
-                }
-                Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value)),
-                Err(error) => block_or_fail(context, error),
+                })
             }
-        })
+            WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            WhnfOwnerPoll::External(boundary) => {
+                unreachable!("W2 promise follower produced an external {boundary:?} boundary")
+            }
+        }
     }
 }
 
@@ -420,9 +403,11 @@ pub(super) fn promise_wait(
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.promise_task(promise, |task_context, promise| {
         Box::new(PromiseFollower {
+            computation: crate::eval::whnf::WhnfComputation::from_promise_root(
+                task_context.values(),
+                &promise,
+            ),
             context: task_context,
-            promise,
-            state: PromiseFollowerState::AwaitAssignment,
         })
     })
 }
@@ -433,37 +418,13 @@ pub(super) fn promise_root_wait(
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.promise_root_task(promise, |task_context, promise| {
         Box::new(PromiseFollower {
+            computation: super::whnf::WhnfComputation::from_promise_root(
+                task_context.values(),
+                &promise,
+            ),
             context: task_context,
-            promise,
-            state: PromiseFollowerState::AwaitAssignment,
         })
     })
-}
-
-fn block_or_fail(
-    context: &EvaluatorStepContext<'_>,
-    error: EvaluationHalt,
-) -> EvaluationMachinePoll {
-    if let Some(wait) = error.blocked_on() {
-        return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            dependency: Some(WorkDependency::Wait(wait.0)),
-            observed_epoch: None,
-            error: None,
-        });
-    }
-    if let Some(promise) = error.unassigned_promise_root() {
-        return match promise_root_wait(context.context(), promise) {
-            Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: Some(WorkDependency::Wait(wait)),
-                observed_epoch: None,
-                error: None,
-            }),
-            Err(error) => EvaluationMachinePoll::Failed(
-                context.root_failure(Arc::new(EvaluationFailure::message(error.as_ref()))),
-            ),
-        };
-    }
-    EvaluationMachinePoll::Failed(context.root_failure(error.into_permanent_failure()))
 }
 
 #[cfg(test)]
@@ -993,7 +954,6 @@ mod ownership_tests {
     fn assert_poll_spanning_owner_inventory(
         work: &LazyTaskWork,
         lazy: &LazyTaskMachine,
-        promise_state: &PromiseFollowerState,
         promise: &PromiseFollower,
     ) {
         match work {
@@ -1018,22 +978,56 @@ mod ownership_tests {
         let _: &ManagedLazyRoot = lazy_root;
         let _: &LazyTaskWork = work;
 
-        match promise_state {
-            PromiseFollowerState::AwaitAssignment | PromiseFollowerState::FollowAssignment => {}
-        }
         let PromiseFollower {
             context,
-            promise: promise_root,
-            state,
+            computation,
         } = promise;
         let _: &EvalContext = context;
-        let _: &ManagedPromiseRoot = promise_root;
-        let _: &PromiseFollowerState = state;
+        let _: &crate::eval::whnf::WhnfComputation = computation;
     }
 
     #[test]
     fn poll_spanning_evaluator_state_uses_canonical_owners() {
-        let _: fn(&LazyTaskWork, &LazyTaskMachine, &PromiseFollowerState, &PromiseFollower) =
+        let _: fn(&LazyTaskWork, &LazyTaskMachine, &PromiseFollower) =
             assert_poll_spanning_owner_inventory;
+    }
+
+    #[test]
+    fn promise_follower_yields_from_its_retained_whnf_checkpoint() {
+        let context = EvalContext::standalone();
+        let promise = PromisedValue::new(context.values(), "resumable promise follower");
+        let promise_root = context
+            .values()
+            .with_runtime_value_access(|access| promise.root_in(&access));
+        let mut follower = PromiseFollower {
+            context: (*context).clone(),
+            computation: crate::eval::whnf::WhnfComputation::from_promise_root(
+                context.values(),
+                &promise_root,
+            ),
+        };
+        let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+        let pending = follower.poll(&poll_context, 1);
+        let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Promise(dependency)),
+            ..
+        }) = pending
+        else {
+            panic!("an unassigned follower must retain the exact promise dependency")
+        };
+        assert_eq!(dependency.runtime_id(), promise_root.runtime_id());
+        assert_eq!(dependency.id(), promise_root.id());
+
+        crate::core::set_test_promise(context.values(), &promise, Value::Number(73.into()))
+            .expect("the follower promise should accept one assignment");
+        assert!(matches!(
+            follower.poll(&poll_context, 1),
+            EvaluationMachinePoll::Yielded
+        ));
+        let EvaluationMachinePoll::Complete(value) = follower.poll(&poll_context, 1) else {
+            panic!("the yielded follower must resume from the assigned value")
+        };
+        assert_eq!(value.clone_core_for_test(), Value::Number(73.into()));
     }
 }

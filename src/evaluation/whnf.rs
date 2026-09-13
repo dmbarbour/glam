@@ -18,7 +18,7 @@ use crate::eval::whnf::{
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-pub(super) enum WhnfOwnerPoll {
+pub(crate) enum WhnfOwnerPoll {
     Ready(RuntimeValueRoot),
     Pending(WorkDependency),
     External(WhnfExternalBoundary),
@@ -35,7 +35,7 @@ pub(super) fn work_dependency(dependency: WhnfDependency) -> WorkDependency {
 
 /// Polls semantic WHNF work, then interprets its deferred-shell request only
 /// after the managed region has closed.
-pub(super) fn poll_computation(
+pub(crate) fn poll_computation(
     computation: &mut WhnfComputation,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,

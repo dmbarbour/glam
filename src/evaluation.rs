@@ -49,6 +49,7 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
+pub(crate) use whnf::{WhnfOwnerPoll, poll_computation as poll_whnf_computation};
 
 #[cfg(test)]
 pub(crate) fn test_execution_resources(

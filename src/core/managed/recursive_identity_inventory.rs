@@ -545,13 +545,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "parked producer retains its lazy owner and stores any followed semantic result only through a canonical runtime root"
     ),
     owner!(
-        "src/eval/value.rs::PromiseFollower",
-        [0, 1, 0],
-        DurableRoot,
-        None,
-        "parked follower retains its promise root and reprojects the immutable assignment from a payload-free phase marker"
-    ),
-    owner!(
         "src/eval/whnf.rs::WhnfDeferredRequest",
         [1, 1, 0],
         DurableRoot,
@@ -772,7 +765,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 21, 9],
+        [13, 20, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

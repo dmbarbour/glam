@@ -330,13 +330,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
-        "managed lazy or promise owner plus a canonical RuntimeValueRoot lazy-follow target or edge-free promise phase",
+        "managed lazy owner plus a canonical RuntimeValueRoot lazy-follow target; PromiseFollower delegates ownership to one WhnfComputation",
         "yielded or dependency-blocked evaluator task",
         "root publication within the producing evaluator step or existing promise-root ownership",
         "lazy/promise completion, failure, cancellation, or machine retirement",
         ManagedRootSurface,
         RootSurface,
-        "GCI11R-002B"
+        "GCI11R-002B / W2B.2"
     ),
     closed_durable!(
         "src/eval/whnf.rs",
