@@ -6,9 +6,13 @@
 
 mod builder;
 mod model;
+#[cfg(feature = "interaction-net-profiling")]
+pub(crate) mod profiling;
 mod runtime;
 
 pub(crate) use builder::{NetBuildError, NetBuilder};
+#[cfg(test)]
+pub(crate) use model::FanIdentity;
 pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };

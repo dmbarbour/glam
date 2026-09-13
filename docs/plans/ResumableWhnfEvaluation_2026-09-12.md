@@ -1872,6 +1872,8 @@ repair.
 
 ##### W4E.0 — Switchable interaction-net accounting
 
+**Status:** complete on 2026-09-13.
+
 Build a reusable reduction-accounting tool before adding fixture-specific
 counters. For a fixed closed net, demanded interface, and sequence of external
 semantic results, reaching the same result must have the same committed
@@ -1936,6 +1938,15 @@ Verification for the tool itself must establish:
 - ordinary builds contain no accounting state or calls, while profiling
   builds leave the result, structured failures, and scheduling decisions
   unchanged.
+
+Implemented as the static `interaction-net-profiling` Cargo feature. The
+runtime-owned snapshot separates committed rule-family counts from cursor-WHNF
+driver activity. Core-net facade commit points count ordinary rewrites,
+completed calls, completed operator calls, and completed cursor transitions;
+claim, release, block, retry, and stuck observations remain uncounted. Focused
+tests latch complete rule classification, call/operator commit timing,
+runtime isolation, and two forced ready-pair orders. W4E.1 owns the
+source-shaped comparison and its larger driver/scheduler measurement surface.
 
 For the W4E comparison, apply the same accounting patch to `7fed99e` and
 current head. Capture the last-known-good exact signature for the successful

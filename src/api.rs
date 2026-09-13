@@ -11,6 +11,10 @@ mod evaluator;
 mod runtime;
 mod value;
 
+#[cfg(feature = "interaction-net-profiling")]
+pub use crate::interaction_net::profiling::{
+    InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts,
+};
 pub(crate) use assembly::CompilationExecution;
 pub use assembly::{
     Assembler, AssemblerBuilder, BuiltModule, ModuleBuilder, ModuleInput, ReasoningVolume,

@@ -12,6 +12,9 @@ default = []
 # Private repository verification mode. This is not a supported embedding
 # policy or public runtime switch.
 aggressive-gc-verification = ["glam-gc/deterministic-test-hooks"]
+# Compile interaction-net semantic and driver accounting into every runtime.
+# This is a profiling build mode, not a runtime or Glam-language option.
+interaction-net-profiling = []
 
 [dependencies]
 bytes = "1.10.1"

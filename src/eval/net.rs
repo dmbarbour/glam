@@ -98,8 +98,17 @@ impl NetWhnfMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
     ) -> Result<NetWhnfPoll, EvaluationHalt> {
+        #[cfg(feature = "interaction-net-profiling")]
+        context
+            .context()
+            .values()
+            .record_net_driver(crate::interaction_net::profiling::DriverEvent::MachinePoll);
         match drive_net_driver_work_in(context, &mut self.driver)? {
             NetDriverOutcome::Progressed => {
+                #[cfg(feature = "interaction-net-profiling")]
+                context.context().values().record_net_driver(
+                    crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
+                );
                 self.driver.restart_from_request_root();
                 Ok(NetWhnfPoll::Yielded)
             }
@@ -332,6 +341,11 @@ fn drive_net_driver_work_in(
     driver: &mut NetDriver,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
+        #[cfg(feature = "interaction-net-profiling")]
+        context
+            .context()
+            .values()
+            .record_net_driver(crate::interaction_net::profiling::DriverEvent::WorkItem);
         let retained_work = work.clone();
         let outcome = context.with_value_access(|values| {
             let work_runtime = work.runtime(values.values());
@@ -347,6 +361,11 @@ fn drive_net_driver_work_in(
                 // Retain it before handing contention back to the scheduler,
                 // just as item-level cursor and active-pair contention does.
                 driver.worklist.push(retained_work);
+                #[cfg(feature = "interaction-net-profiling")]
+                context
+                    .context()
+                    .values()
+                    .record_net_driver(crate::interaction_net::profiling::DriverEvent::Contention);
                 return Ok(NetDriverOutcome::Contended(contention));
             }
         };
@@ -425,6 +444,8 @@ fn drive_net_work_item(
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
     match work {
         NetDriverWork::RequestRoot { root, interface } => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::InterfacePoll);
             match access.poll_interface_demand(interface) {
                 terminal @ (InterfaceDemand::Data
                 | InterfaceDemand::Bind
@@ -452,57 +473,87 @@ fn drive_net_work_item(
                 }
             }
         }
-        NetDriverWork::Cursor { root, cursor } => match access.step_cursor(cursor) {
-            CursorStep::Progressed(progress) => {
-                debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
-                driver.progressed = true;
+        NetDriverWork::Cursor { root, cursor } => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
+            match access.step_cursor(cursor) {
+                CursorStep::Progressed(progress) => {
+                    debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
+                    driver.progressed = true;
+                }
+                CursorStep::Disturbed | CursorStep::Gone => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access
+                        .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
+                    driver.progressed = true;
+                }
+                CursorStep::Dependency(dependency) => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access.record_driver(
+                        crate::interaction_net::profiling::DriverEvent::CursorDependency,
+                    );
+                    driver
+                        .worklist
+                        .follow_cursor_dependency(root, cursor, dependency);
+                }
+                CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
+                CursorStep::Contended(contention) => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access
+                        .record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
+                    driver.worklist.push(NetDriverWork::Cursor { root, cursor });
+                    return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
+                        contention,
+                    ))));
+                }
             }
-            CursorStep::Disturbed | CursorStep::Gone => {
-                driver.progressed = true;
-            }
-            CursorStep::Dependency(dependency) => {
-                driver
-                    .worklist
-                    .follow_cursor_dependency(root, cursor, dependency);
-            }
-            CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
-            CursorStep::Contended(contention) => {
-                driver.worklist.push(NetDriverWork::Cursor { root, cursor });
-                return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
-                    contention,
-                ))));
-            }
-        },
+        }
         NetDriverWork::ObservedCursor {
             observation,
             cursor,
-        } => match observation.step_cursor(access, cursor) {
-            CursorStep::Progressed(progress) => {
-                debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
-                driver.progressed = true;
+        } => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
+            match observation.step_cursor(access, cursor) {
+                CursorStep::Progressed(progress) => {
+                    debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
+                    driver.progressed = true;
+                }
+                CursorStep::Disturbed | CursorStep::Gone => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access
+                        .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
+                    driver.progressed = true;
+                }
+                CursorStep::Dependency(dependency) => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access.record_driver(
+                        crate::interaction_net::profiling::DriverEvent::CursorDependency,
+                    );
+                    driver.worklist.follow_cursor_dependency(
+                        observation.root().clone(),
+                        cursor,
+                        dependency,
+                    );
+                }
+                CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
+                CursorStep::Contended(contention) => {
+                    #[cfg(feature = "interaction-net-profiling")]
+                    access
+                        .record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
+                    driver.worklist.push(NetDriverWork::ObservedCursor {
+                        observation,
+                        cursor,
+                    });
+                    return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
+                        contention,
+                    ))));
+                }
             }
-            CursorStep::Disturbed | CursorStep::Gone => {
-                driver.progressed = true;
-            }
-            CursorStep::Dependency(dependency) => {
-                driver.worklist.follow_cursor_dependency(
-                    observation.root().clone(),
-                    cursor,
-                    dependency,
-                );
-            }
-            CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
-            CursorStep::Contended(contention) => {
-                driver.worklist.push(NetDriverWork::ObservedCursor {
-                    observation,
-                    cursor,
-                });
-                return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
-                    contention,
-                ))));
-            }
-        },
+        }
         NetDriverWork::ActivePair { root, pair } => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
             return prepare_active_pair_step(
                 driver,
                 access,
@@ -512,6 +563,8 @@ fn drive_net_work_item(
             );
         }
         NetDriverWork::ObservedActivePair { observation, pair } => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
             let step = observation.step_active_pair(access, pair);
             return prepare_active_pair_step(
                 driver,
@@ -534,7 +587,13 @@ fn drive_net_work_item(
                 }
             }
             CursorDependencyResolution::Disturbed | CursorDependencyResolution::Gone => {
+                #[cfg(feature = "interaction-net-profiling")]
+                access.record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
                 driver.progressed = true;
+                #[cfg(feature = "interaction-net-profiling")]
+                access.record_driver(
+                    crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
+                );
                 driver.restart_from_request_root();
             }
         },
@@ -581,6 +640,8 @@ fn prepare_active_pair_step(
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
         ActivePairStep::Contended(contention) => {
+            #[cfg(feature = "interaction-net-profiling")]
+            access.record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
             driver
                 .worklist
                 .push(NetDriverWork::ActivePair { root, pair });
@@ -640,6 +701,11 @@ fn drive_active_pair_semantic_step(
             _ => unreachable!("only semantic reductions leave a normalization batch"),
         },
         ActivePairStep::BlockedCall(blocked) => {
+            #[cfg(feature = "interaction-net-profiling")]
+            context
+                .context()
+                .values()
+                .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
             match context.context().poll_wait(&blocked.wait.0) {
                 crate::evaluation::EvaluationWaitPoll::Pending(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
@@ -667,6 +733,11 @@ fn drive_active_pair_semantic_step(
                 .push(NetDriverWork::ActivePair { root, pair });
         }
         ActivePairStep::BlockedOperatorCall(blocked) => {
+            #[cfg(feature = "interaction-net-profiling")]
+            context
+                .context()
+                .values()
+                .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
             match context.context().poll_wait(&blocked.wait.0) {
                 crate::evaluation::EvaluationWaitPoll::Pending(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));

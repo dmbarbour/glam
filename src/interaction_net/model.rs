@@ -85,6 +85,11 @@ impl FanIdentity {
             context: Arc::from(context),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(site: u64) -> Self {
+        Self::root(FanSite::from_raw(site))
+    }
 }
 
 /// Client semantics embedded in otherwise generic interaction-net topology.

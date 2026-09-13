@@ -413,6 +413,25 @@ pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
 }
 
 impl CoreValueFactory {
+    #[cfg(feature = "interaction-net-profiling")]
+    pub(crate) fn interaction_net_profile(
+        &self,
+    ) -> &crate::interaction_net::profiling::InteractionNetProfile {
+        &self.domain.interaction_net_profile
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    pub(crate) fn record_net_driver(&self, event: crate::interaction_net::profiling::DriverEvent) {
+        self.domain.interaction_net_profile.record_driver(event);
+    }
+
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn interaction_net_profile_snapshot(
+        &self,
+    ) -> crate::interaction_net::profiling::InteractionNetProfileSnapshot {
+        self.domain.interaction_net_profile.snapshot()
+    }
+
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
     ///

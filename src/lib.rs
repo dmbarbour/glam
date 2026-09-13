@@ -30,6 +30,8 @@ pub use api::{
     RuntimeSettlementError, RuntimeTaskCapability, RuntimeTaskWait, RuntimeWorkKind,
     RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
+#[cfg(feature = "interaction-net-profiling")]
+pub use api::{InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts};
 pub use diagnostic::Severity;
 pub use g_source::{
     GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,

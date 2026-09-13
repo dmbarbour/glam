@@ -368,6 +368,8 @@ pub(crate) struct RuntimeValueDomain {
     cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     external_owners: ExternalOwnerRegistry,
+    #[cfg(feature = "interaction-net-profiling")]
+    interaction_net_profile: crate::interaction_net::profiling::InteractionNetProfile,
 }
 
 /// Small canonical value set owned directly by one runtime.
@@ -429,6 +431,8 @@ impl CoreValueFactory {
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
             external_owners: ExternalOwnerRegistry::new(runtime),
+            #[cfg(feature = "interaction-net-profiling")]
+            interaction_net_profile: Default::default(),
         });
         debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
         let values = Self {

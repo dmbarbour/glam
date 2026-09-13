@@ -401,6 +401,20 @@ impl ReflectionQueryWriter for RuntimeTaskCapability {
 }
 
 impl EvaluationRuntime {
+    /// Returns the current interaction-net accounting snapshot for this
+    /// runtime in a profiling build.
+    #[cfg(feature = "interaction-net-profiling")]
+    pub fn interaction_net_profile(
+        &self,
+    ) -> crate::interaction_net::profiling::InteractionNetProfileSnapshot {
+        self.state
+            .shared_resources
+            .values
+            .core()
+            .interaction_net_profile()
+            .snapshot()
+    }
+
     pub fn new(worker_threads: usize) -> Result<Self, Error> {
         Self::with_conflict_analysis(worker_threads, Arc::new(ExactConflictAnalysis))
     }

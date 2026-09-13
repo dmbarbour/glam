@@ -224,6 +224,16 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     );
 }
 
+#[cfg(feature = "interaction-net-profiling")]
+#[test]
+fn interaction_net_profiles_are_runtime_local() {
+    let first = EvaluationRuntime::new(0).expect("first runtime should build");
+    let second = EvaluationRuntime::new(0).expect("second runtime should build");
+
+    assert_eq!(first.interaction_net_profile(), Default::default());
+    assert_eq!(second.interaction_net_profile(), Default::default());
+}
+
 #[test]
 fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");

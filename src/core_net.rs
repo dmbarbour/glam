@@ -10,6 +10,8 @@ use crate::core::{
     ManagedCoreNetEdge, ManagedCoreNetRoot, RuntimeValueAccess, Value,
 };
 use crate::evaluation::EvaluationWaitToken;
+#[cfg(feature = "interaction-net-profiling")]
+use crate::interaction_net::ReductionKind;
 #[cfg(test)]
 use crate::interaction_net::RuntimeNetRevisions;
 use crate::interaction_net::{
@@ -398,6 +400,51 @@ impl CoreRuntimeNet {
 }
 
 impl CoreRuntimeNetAccess<'_, '_> {
+    #[cfg(feature = "interaction-net-profiling")]
+    fn record_reduction(&self, kind: &ReductionKind) {
+        use crate::interaction_net::CursorProgress;
+        use crate::interaction_net::profiling::ReductionEvent;
+
+        let event = match kind {
+            ReductionKind::BindJoin => Some(ReductionEvent::BindJoin),
+            ReductionKind::FanJoin { .. } => Some(ReductionEvent::FanJoin),
+            ReductionKind::FanCommute { .. } => Some(ReductionEvent::FanCommute),
+            ReductionKind::FanData { .. } => Some(ReductionEvent::FanData),
+            ReductionKind::FanBind { .. } => Some(ReductionEvent::FanBind),
+            ReductionKind::FanOperator { .. } => Some(ReductionEvent::FanOperator),
+            ReductionKind::Erase => Some(ReductionEvent::Erase),
+            ReductionKind::RemoteCursor {
+                progress: CursorProgress::Materialized { .. },
+                ..
+            } => Some(ReductionEvent::CursorMaterialized),
+            ReductionKind::RemoteCursor {
+                progress: CursorProgress::Joined,
+                ..
+            } => Some(ReductionEvent::CursorJoined),
+            ReductionKind::Call { .. }
+            | ReductionKind::OperatorCall { .. }
+            | ReductionKind::RemoteCursor {
+                progress: CursorProgress::Claimed | CursorProgress::Blocked,
+                ..
+            }
+            | ReductionKind::Stuck => None,
+        };
+        if let Some(event) = event {
+            self.values
+                .values()
+                .interaction_net_profile()
+                .record_reduction(event);
+        }
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    pub(crate) fn record_driver(&self, event: crate::interaction_net::profiling::DriverEvent) {
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_driver(event);
+    }
+
     #[cfg(test)]
     pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
         self.runtime.cell().active_normalization_batch()
@@ -533,6 +580,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
             &self.runtime,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        if let CursorStep::Progressed(progress) = &step {
+            let kind = ReductionKind::RemoteCursor {
+                cursor,
+                progress: *progress,
+            };
+            self.record_reduction(&kind);
+        }
         CoreCursorStep::from_generic(step, self.values)
     }
 
@@ -547,6 +602,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
             &self.runtime,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        if let ActivePairStep::Reduction(reduction) = &step {
+            self.record_reduction(&reduction.kind);
+        }
         CoreActivePairStep::from_generic(step)
     }
 
@@ -570,6 +629,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_call_with_copy_edge_transition(call),
             |runtime| runtime.resume_claimed_call_with_copy(call, source),
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
     }
 
     pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
@@ -614,6 +678,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_call_with_operator_edge_transition(call),
             |runtime| runtime.resume_claimed_call_with_operator(call, operator),
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
     }
 
     pub(crate) fn block_claimed_call(
@@ -706,6 +775,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime, result| runtime.complete_operator_edge_transition(call, result),
             |runtime, result| runtime.complete_operator_call(call, result),
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_reduction(crate::interaction_net::profiling::ReductionEvent::OperatorCall);
     }
 
     pub(crate) fn block_claimed_operator_call(
@@ -1171,6 +1245,22 @@ mod tests {
         builder.finish(data)
     }
 
+    #[cfg(feature = "interaction-net-profiling")]
+    fn two_bind_join_template(values: &CoreValueFactory) -> CoreInteractionNet {
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        for _ in 0..2 {
+            let left = builder.bind();
+            let right = builder.bind();
+            builder.wire(left[0], right[0]);
+            for auxiliary in [left[1], left[2], right[1], right[2]] {
+                let data = builder.data(values.unit());
+                builder.wire(auxiliary, data);
+            }
+        }
+        let exposed = builder.data(values.unit());
+        builder.finish(exposed)
+    }
+
     fn claimed_call(
         values: &CoreValueFactory,
         callable: Value,
@@ -1334,6 +1424,230 @@ mod tests {
         assert_eq!(records[1].leaving_edges(), 1);
         assert_eq!(records[1].adding_edges(), 1);
         drop((old_root, new_root, source, copy_call, operator_call));
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn profiling_classifies_each_committed_rule_family_exactly_once() {
+        use crate::interaction_net::profiling::NetReductionCounts;
+
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let runtime = values.instantiate_core_net(&closed_unit_template(&values));
+        let fan = crate::interaction_net::FanIdentity::for_test(1);
+        let other_fan = crate::interaction_net::FanIdentity::for_test(2);
+        let node = runtime.test_with(&values, |runtime| runtime.exposed().node());
+        runtime.with_test_access(&values, |runtime| {
+            for kind in [
+                ReductionKind::BindJoin,
+                ReductionKind::FanJoin {
+                    identity: fan.clone(),
+                },
+                ReductionKind::FanCommute {
+                    left: fan.clone(),
+                    right: other_fan,
+                },
+                ReductionKind::FanData {
+                    identity: fan.clone(),
+                },
+                ReductionKind::FanBind {
+                    identity: fan.clone(),
+                },
+                ReductionKind::FanOperator { identity: fan },
+                ReductionKind::Erase,
+                ReductionKind::RemoteCursor {
+                    cursor: node,
+                    progress: CursorProgress::Materialized { node },
+                },
+                ReductionKind::RemoteCursor {
+                    cursor: node,
+                    progress: CursorProgress::Joined,
+                },
+            ] {
+                runtime.record_reduction(&kind);
+            }
+            for kind in [
+                ReductionKind::Call {
+                    bind: node,
+                    data: node,
+                },
+                ReductionKind::OperatorCall {
+                    operator: node,
+                    data: node,
+                },
+                ReductionKind::RemoteCursor {
+                    cursor: node,
+                    progress: CursorProgress::Claimed,
+                },
+                ReductionKind::RemoteCursor {
+                    cursor: node,
+                    progress: CursorProgress::Blocked,
+                },
+                ReductionKind::Stuck,
+            ] {
+                runtime.record_reduction(&kind);
+            }
+        });
+
+        assert_eq!(
+            values.interaction_net_profile_snapshot().reductions,
+            NetReductionCounts {
+                bind_join: 1,
+                fan_join: 1,
+                fan_commute: 1,
+                fan_data: 1,
+                fan_bind: 1,
+                fan_operator: 1,
+                erase: 1,
+                call: 0,
+                operator_call: 0,
+                cursor_materialized: 1,
+                cursor_joined: 1,
+            }
+        );
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn profiling_semantic_signature_is_independent_of_ready_pair_order() {
+        let reduce_in_order = |reverse| {
+            let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+            let runtime = values.instantiate_core_net(&two_bind_join_template(&values));
+            let mut pairs = runtime.test_with(&values, |runtime| {
+                runtime.active_pairs().collect::<Vec<_>>()
+            });
+            assert_eq!(pairs.len(), 2);
+            if reverse {
+                pairs.reverse();
+            }
+            for pair in pairs {
+                assert!(matches!(
+                    runtime.with_test_access(&values, |runtime| runtime.step_active_pair(pair)),
+                    CoreActivePairStep::Reduction(Reduction {
+                        kind: ReductionKind::BindJoin,
+                        ..
+                    })
+                ));
+            }
+            values.interaction_net_profile_snapshot()
+        };
+
+        let forward = reduce_in_order(false);
+        let reverse = reduce_in_order(true);
+        assert_eq!(forward.reductions, reverse.reductions);
+        assert_eq!(forward.reductions.bind_join, 2);
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn profiling_counts_calls_only_when_the_claimed_rewrite_commits() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let source = values.instantiate_core_net(&closed_unit_template(&values));
+        let prepared = source.test_prepare_copy_source(&values);
+        let (copy_runtime, copy_call) = claimed_call(&values, values.unit());
+        let (operator_runtime, operator_call) = claimed_call(&values, values.unit());
+
+        assert_eq!(
+            values.interaction_net_profile_snapshot().reductions.call,
+            0,
+            "recognizing and claiming a Bind/Data pair is not a committed rewrite"
+        );
+
+        copy_runtime.with_test_access(&values, |runtime| {
+            assert!(runtime.release_claimed_call(copy_call));
+        });
+        assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 0);
+
+        let pair = copy_runtime.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("released call is ready")
+        });
+        let reduction =
+            copy_runtime.with_test_access(&values, |runtime| runtime.step_active_pair(pair));
+        let CoreActivePairStep::Reduction(Reduction {
+            kind: crate::interaction_net::ReductionKind::Call { bind, data },
+            ..
+        }) = reduction
+        else {
+            panic!("released pair must be claimable again")
+        };
+        copy_runtime.with_test_access(&values, |runtime| {
+            runtime.resume_claimed_call_with_copy(
+                crate::interaction_net::Call { pair, bind, data },
+                prepared,
+            );
+        });
+        assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 1);
+
+        operator_runtime.with_test_access(&values, |runtime| {
+            runtime.resume_claimed_call_with_operator(
+                operator_call,
+                CoreOperator::Applicable(values.unit()),
+            );
+        });
+        assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 2);
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn profiling_counts_operator_calls_only_when_completion_commits() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (runtime, call) = claimed_operator_call(
+            &values,
+            CoreOperator::Applicable(values.unit()),
+            values.unit(),
+        );
+
+        assert_eq!(
+            values
+                .interaction_net_profile_snapshot()
+                .reductions
+                .operator_call,
+            0
+        );
+        runtime.with_test_access(&values, |runtime| {
+            assert!(runtime.release_claimed_operator_call(call));
+        });
+        assert_eq!(
+            values
+                .interaction_net_profile_snapshot()
+                .reductions
+                .operator_call,
+            0
+        );
+
+        let pair = runtime.test_with(&values, |runtime| {
+            runtime
+                .active_pairs()
+                .next()
+                .expect("released call is ready")
+        });
+        let reduction = runtime.with_test_access(&values, |runtime| runtime.step_active_pair(pair));
+        let CoreActivePairStep::Reduction(Reduction {
+            kind: crate::interaction_net::ReductionKind::OperatorCall { operator, data },
+            ..
+        }) = reduction
+        else {
+            panic!("released operator pair must be claimable again")
+        };
+        runtime.with_test_access(&values, |runtime| {
+            runtime.complete_claimed_operator_call(
+                crate::interaction_net::OperatorCall {
+                    pair,
+                    operator,
+                    data,
+                },
+                OperatorYield::Data(values.unit()),
+            );
+        });
+        assert_eq!(
+            values
+                .interaction_net_profile_snapshot()
+                .reductions
+                .operator_call,
+            1
+        );
     }
 
     #[test]
