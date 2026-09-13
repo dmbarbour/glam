@@ -618,6 +618,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseAfterRelease::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseThenYield::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl CacheLazyFailure::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -816,7 +817,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // explicit matching-domain access rather than facade mutation.
         // D.2b.2's production-shaped promise publishers install assignments
         // under matching access before detached wakes.
-        ("src/evaluation/tests.rs", GatewayCounts::new(7, 0)),
+        ("src/evaluation/tests.rs", GatewayCounts::new(8, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),

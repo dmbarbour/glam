@@ -672,9 +672,9 @@ deferred to W2 and later phases.
 
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 
-Status: partitioned into W2A.1-W2E.2 on 2026-09-13. Implementation order is
-W2A.1, W2B.1, W2A.2, W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell
-inspection lands before either scheduler coordination or owner cutover.
+Status: complete on 2026-09-13. Implementation order was W2A.1, W2B.1,
+W2A.2, W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell inspection
+landed before either scheduler coordination or owner cutover.
 
 #### W2A — Regional lazy inspection
 
@@ -824,11 +824,24 @@ subscription, and complete the same client demand without repeated runs.
 
 ##### W2E.2 — Lifecycle, cycle, and collection matrix
 
+Status: complete on 2026-09-13.
+
 Force both producer-before-subscription and subscription-before-producer
 completion orderings. Cover cached/uncached lazy, assigned/unassigned promise,
 cross-session producer, cancellation, abandonment, pure lazy cycle, and
 promise-inclusive retryable cycle. Record root registration and producer
 admission counts across each boundary.
+
+Completion record: W2E.1 supplies both forced producer/subscription orderings;
+the W2A/W2B shell fixtures retain the cached/uncached and
+assigned/unassigned cases. Existing client-owner fixtures cover cross-session
+production, cancellation, and abandonment. New deterministic fixtures prove
+that a pure lazy cycle publishes one canonical cached failure while a
+lazy/promise cycle remains retryable and unpoisoned. Under
+`aggressive-gc-verification`, an explicit collection between the blocked
+client checkpoint and promise assignment proves that the checkpoint's root
+survives without reconstructing its focus. The root-publication and mutator
+admission ledgers classify the added test boundary explicitly.
 
 Mandatory post-W2 review: audit correctness and later-phase drift before
 converting lazy-source production.

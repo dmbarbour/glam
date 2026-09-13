@@ -231,10 +231,11 @@ fn counted_client_lazy(
         observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(value.clone())
     });
-    (
-        RuntimeValueRoot::new(context.values(), Value::Lazy(lazy)),
-        evaluations,
-    )
+    (client_lazy_root(context, lazy), evaluations)
+}
+
+fn client_lazy_root(context: &EvalContext, lazy: LazyValue) -> RuntimeValueRoot {
+    RuntimeValueRoot::new(context.values(), Value::Lazy(lazy))
 }
 
 fn poll_runtime_until(
@@ -557,6 +558,109 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
             if value.clone_core_for_test() == Value::Number(37.into())
     ));
     assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
+fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let lazy = inert_lazy_for(context.values(), "client pure lazy cycle");
+    let dependency = Arc::new(OnceLock::new());
+    let wait = register_lazy_await(&context, &lazy, dependency.clone());
+    dependency
+        .set(wait.clone())
+        .expect("self-cycle dependency should be installed once");
+    let handle = context
+        .demand_whnf(client_lazy_root(&context, lazy.clone()))
+        .expect("cycle demand should be admitted");
+
+    fixture.runtime.pump_until_stable();
+
+    let Some(ClientDemandResult::Failed(failure)) = handle.poll() else {
+        panic!("pure lazy cycle must become the client demand's terminal failure")
+    };
+    assert!(failure.to_string().contains("lazy dependency cycle"));
+    let cached = context
+        .lazy_failure(&lazy)
+        .expect("the canonical lazy must retain the cycle failure");
+    assert_eq!(failure.to_string(), cached.to_string());
+    assert!(lazy.source_snapshot(context.values()).is_none());
+    assert_eq!(wait.exact_subscription_count(), 0);
+    assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
+fn client_demand_preserves_a_promise_inclusive_retryable_cycle() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let lazy = inert_lazy_for(context.values(), "client retryable lazy");
+    let promise = PromisedValue::new(context.values(), "client retryable promise");
+    let lazy_dependency = Arc::new(OnceLock::new());
+    let promise_dependency = Arc::new(OnceLock::new());
+    let lazy_wait = register_lazy_await(&context, &lazy, lazy_dependency.clone());
+    let promise_wait = register_promise_await(&context, &promise, promise_dependency.clone());
+    lazy_dependency
+        .set(promise_wait.clone())
+        .expect("lazy dependency should be installed once");
+    promise_dependency
+        .set(lazy_wait.clone())
+        .expect("promise dependency should be installed once");
+    let handle = context
+        .demand_whnf(client_lazy_root(&context, lazy.clone()))
+        .expect("retryable cycle demand should be admitted");
+
+    fixture.runtime.pump_until_stable();
+
+    assert!(handle.poll().is_none());
+    assert!(matches!(
+        context.poll_wait(&lazy_wait),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert!(matches!(
+        context.poll_wait(&promise_wait),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert!(lazy.cached(context.values()).is_none());
+    assert!(promise.assignment(context.values()).is_none());
+    assert_eq!(context.deferred_task_count(), 2);
+    handle.abandon();
+}
+
+#[cfg(feature = "aggressive-gc-verification")]
+#[test]
+fn blocked_client_checkpoint_survives_collection_until_promise_assignment() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (promise, root) = context.values().with_runtime_value_access(|access| {
+        let value = Value::Promised(
+            access
+                .construct_managed_promise("collected client checkpoint")
+                .expect("the checkpoint promise should fit its managed allocation class"),
+        );
+        let root = access.root_runtime_value(access.duplicate_value(&value));
+        let Value::Promised(promise) = value else {
+            unreachable!("the fixture just constructed a promise")
+        };
+        (promise, root)
+    });
+    let handle = context
+        .demand_whnf(root)
+        .expect("promise demand should be admitted");
+    assert!(poll_one_runtime_work(&coordinator));
+
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the blocked client checkpoint should remain a valid GC root");
+    set_promise(&context, &promise, Value::Number(41.into()))
+        .expect("the rooted promise should remain assignable after collection");
+    fixture.runtime.pump_until_stable();
+    assert!(matches!(
+        handle.poll(),
+        Some(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == Value::Number(41.into())
+    ));
 }
 
 #[test]
