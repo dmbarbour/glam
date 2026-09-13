@@ -1127,13 +1127,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        605,
+        604,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        8_469_350_591_787_704_603,
+        3_325_973_295_146_780_497,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1146,7 +1146,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let expected = BTreeMap::from([
         ((ApiKind::Function, ApiDisposition::RegionalAccess), 98),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 25),
-        ((ApiKind::Function, ApiDisposition::Violation), 471),
+        ((ApiKind::Function, ApiDisposition::Violation), 470),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             8,

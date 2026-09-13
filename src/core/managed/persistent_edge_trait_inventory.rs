@@ -823,7 +823,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        17_075_913_199_185_471_714,
+        6_473_371_483_398_578_614,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );

@@ -52,33 +52,6 @@ fn attached_net_runtime(
     template.instantiate()
 }
 
-pub(super) fn extract_net_data(
-    context: &EvaluatorStepContext<'_>,
-    runtime: CoreRuntimeNet,
-    interface: Port,
-    operation: &str,
-) -> Result<Value, EvaluationHalt> {
-    let request = NormalizationRequest::cursor_whnf(&runtime, interface, context);
-    match request.drive_in(context)? {
-        NetInterfaceOutcome::Data => {
-            let data = with_core_net_access(context, &runtime, |runtime| {
-                runtime.with(|runtime| runtime.interface_data(interface).cloned())
-            })
-            .expect("evaluated interaction-net interface must contain data");
-            // Extract exactly one Data payload. If it is lazy, the caller may
-            // force it after the enclosing net result has been memoized;
-            // forcing here can re-enter a productive fixpoint runtime.
-            Ok(data)
-        }
-        NetInterfaceOutcome::Bind => Err(EvaluationHalt::new(format!(
-            "{operation} exposed a bind instead of data"
-        ))),
-        NetInterfaceOutcome::NormalForm => Err(EvaluationHalt::new(format!(
-            "{operation} reached a non-data normal form"
-        ))),
-    }
-}
-
 pub(super) struct NetWhnfMachine {
     request: NormalizationRequest,
     driver: NetDriver,
@@ -183,16 +156,12 @@ pub(super) fn attach_function_stage(
     attach_net_many(context, function, arguments)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetInterfaceOutcome {
     Data,
     Bind,
     NormalForm,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NormalizationMode {
-    CursorWhnf,
 }
 
 /// Evaluator-owned description of one demanded interaction-net frontier.
@@ -202,7 +171,6 @@ enum NormalizationMode {
 struct NormalizationRequest {
     root: crate::core::ManagedCoreNetRoot,
     root_interface: Port,
-    mode: NormalizationMode,
 }
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
@@ -350,6 +318,7 @@ impl NetDriver {
     }
 }
 
+#[cfg(test)]
 fn drive_net_work_in(
     context: &EvaluatorStepContext<'_>,
     request: &NormalizationRequest,
@@ -743,7 +712,6 @@ impl NormalizationRequest {
         Self {
             root: context.with_value_access(|access| runtime.root_in(access.values())),
             root_interface,
-            mode: NormalizationMode::CursorWhnf,
         }
     }
 
@@ -754,6 +722,7 @@ impl NormalizationRequest {
         }
     }
 
+    #[cfg(test)]
     fn drive_in(
         &self,
         context: &EvaluatorStepContext<'_>,
@@ -767,6 +736,7 @@ impl NormalizationRequest {
     }
 }
 
+#[cfg(test)]
 fn drive_net_interface(
     context: &EvaluatorStepContext<'_>,
     request: &NormalizationRequest,
@@ -774,12 +744,12 @@ fn drive_net_interface(
     drive_net_interface_with_contention_handoff(context, request, || {})
 }
 
+#[cfg(test)]
 fn drive_net_interface_with_contention_handoff(
     context: &EvaluatorStepContext<'_>,
     request: &NormalizationRequest,
     mut before_handoff: impl FnMut(),
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
-    debug_assert_eq!(request.mode, NormalizationMode::CursorWhnf);
     loop {
         match drive_net_work_in(context, request)? {
             NetDriverOutcome::Progressed => continue,
@@ -1294,11 +1264,9 @@ mod driver_tests {
         let NormalizationRequest {
             root,
             root_interface,
-            mode,
         } = request;
         let _: &crate::core::ManagedCoreNetRoot = root;
         let _: &Port = root_interface;
-        let _: &NormalizationMode = mode;
 
         match work {
             NetDriverWork::RequestRoot { root, interface } => {

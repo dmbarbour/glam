@@ -188,7 +188,10 @@ pub(crate) fn eval_value_in(
 enum LazyTaskWork {
     Produce,
     Whnf(super::whnf::WhnfComputation),
-    NetWhnf(Box<NetWhnfMachine>),
+    NetWhnf {
+        machine: Box<NetWhnfMachine>,
+        failure_context: Option<&'static str>,
+    },
     Access(Box<AccessMachine>),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
@@ -329,9 +332,29 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     LazySource::FunctionCall {
                         function,
                         arguments,
-                    } => LazyTaskWork::NetWhnf(Box::new(NetWhnfMachine::from_function_call(
-                        context, &function, &arguments,
-                    ))),
+                    } => LazyTaskWork::NetWhnf {
+                        machine: Box::new(NetWhnfMachine::from_function_call(
+                            context, &function, &arguments,
+                        )),
+                        failure_context: None,
+                    },
+                    LazySource::NetComputation(net) => {
+                        let runtime = context.with_value_access(|access| {
+                            net.runtime().duplicate_in(access.values())
+                        });
+                        let exposed = context.with_value_access(|access| {
+                            access.net(&runtime).with(|runtime| runtime.exposed())
+                        });
+                        LazyTaskWork::NetWhnf {
+                            machine: Box::new(NetWhnfMachine::new(
+                                context,
+                                runtime,
+                                exposed,
+                                "lazy net computation",
+                            )),
+                            failure_context: Some("net_computation"),
+                        }
+                    }
                     LazySource::Access { path, arguments }
                         if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
                     {
@@ -394,11 +417,27 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 };
             }
 
-            if let LazyTaskWork::NetWhnf(machine) = &mut self.work {
+            if let LazyTaskWork::NetWhnf {
+                machine,
+                failure_context,
+            } = &mut self.work
+            {
                 return match machine.poll(context) {
                     Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context, value),
                     Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
-                    Err(error) => self.fail(context, error),
+                    Err(error) => {
+                        let error = if let Some(operation) = failure_context {
+                            context.with_value_access(|access| {
+                                error.with_context(
+                                    access.values(),
+                                    evaluation_context_frame_in(access.values(), operation),
+                                )
+                            })
+                        } else {
+                            error
+                        };
+                        self.fail(context, error)
+                    }
                 };
             }
 
@@ -745,19 +784,8 @@ fn produce_lazy_source_in(
         LazySource::NetConstruction(_) => {
             unreachable!("net construction must retain its pollable effect machine")
         }
-        LazySource::NetComputation(net) => {
-            let runtime =
-                context.with_value_access(|access| net.runtime().duplicate_in(access.values()));
-            let exposed = context
-                .with_value_access(|access| access.net(&runtime).with(|runtime| runtime.exposed()));
-            extract_net_data(context, runtime, exposed, "lazy net computation").map_err(|error| {
-                context.with_value_access(|access| {
-                    error.with_context(
-                        access.values(),
-                        evaluation_context_frame_in(access.values(), "net_computation"),
-                    )
-                })
-            })
+        LazySource::NetComputation(_) => {
+            unreachable!("net computations retain one pollable net-WHNF owner")
         }
         LazySource::FunctionCall { .. } => {
             unreachable!("function calls retain one pollable net-WHNF owner")
@@ -1105,7 +1133,7 @@ mod ownership_tests {
             LazyTaskWork::Whnf(computation) => {
                 let _: &crate::eval::whnf::WhnfComputation = computation;
             }
-            LazyTaskWork::NetWhnf(machine) => {
+            LazyTaskWork::NetWhnf { machine, .. } => {
                 let _: &NetWhnfMachine = machine;
             }
             LazyTaskWork::Access(machine) => {

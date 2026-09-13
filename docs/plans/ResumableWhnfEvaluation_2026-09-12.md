@@ -1368,12 +1368,17 @@ No projected raw `Value` or `List` crosses its access regions.
 
 ###### W3C.3c — Remaining list-backed source projections
 
-Status: pending.
+Status: complete on 2026-09-13 with W3D.1.
 
 Inventory source-time sequence projections still reachable from ordinary
 lazy production and either reuse the list walk or give them an explicit typed
-owner. Builtin operations that run only after a core active-pair claim are
-accounted separately by W3D/W4C and are not silently declared migrated here.
+owner. Generic saturated `Builtin` sources are accounted separately by W6 and
+are not silently declared migrated here.
+
+The source census found no independent sequence-projection family. All four
+production `SemanticComputation` operations are lazy list-effect projections
+and therefore move together in W3D.2. The remaining constructor and operation
+uses are containment and edge fixtures.
 
 ##### W3C.4 — Source-family suspension and diagnostics closure
 
@@ -1400,12 +1405,20 @@ The test-only opaque `SemanticThunk` may not serve as evidence for resumable
 production work. Either constrain it to nonsuspending fixtures or replace it
 with explicit synthetic work.
 
-Exit: ordinary lazy production no longer depends on a Rust-stack continuation
-across deferred children.
+Exit: object-fixpoint and semantic-computation lazy production no longer
+depends on a Rust-stack continuation across deferred children. External and
+net sources close in W4. Saturated generic `Builtin` sources remain an
+explicit compatibility exception until their operation families move in W6;
+W3 does not falsely certify their recursive bodies.
 
 ##### W3D.1 — Production operation inventory
 
-Status: pending.
+Status: complete on 2026-09-13 with W3C.3c.
+
+There is one production constructor site, in the list-effect handler, and
+four function-pointer operations: run one effect, sequence one list head,
+cut to one head, and publish one fixpoint head. W3D.2 replaces this closed
+production family with an inspectable list-effect recipe and pollable owner.
 
 ##### W3D.2 — Explicit list-effect source work
 
@@ -1508,12 +1521,19 @@ ordinary outer-shell demand.
 
 ##### W4C.2 — Remaining net source integration
 
-Status: pending after W3B.3.
+Status: complete on 2026-09-13 after W3B.3.
 
 Move `NetComputation` to the shared owner and reconcile
 `NetConstructionMachine` handoff behavior. Remove direct source-time calls to
 `extract_net_data` and `evaluate_function_call` once their final callers are
 gone.
+
+`NetComputation` now selects `NetWhnfMachine` once with the exact managed net
+and exposed interface. Progress, contention handoff, and semantic suspension
+resume in that owner; terminal failures retain `eval:{op:'net_computation}`.
+The direct `extract_net_data` compatibility entry is removed. Net construction
+continues to own its effect interpreter and does not invent a WHNF extraction
+when its terminal result is already the lazy result.
 
 #### W4D — Boundary verification
 
