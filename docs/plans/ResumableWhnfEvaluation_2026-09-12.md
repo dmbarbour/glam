@@ -1377,10 +1377,20 @@ migrated to the reusable owner.
 
 ###### W4C.1b — Driver ordering verification
 
+Status: complete on 2026-09-13.
+
 Force progress/yield, blocked-call/resume, source-frontier traversal, and
 contention handoff orderings. Assert that no poll retains a normalization
 scope or active claim and that resumption does not restart from a different
 root or duplicate a completed semantic call.
+
+The existing forced frontier and normalization-batch fixtures are joined by
+persistent-driver schedules for both semantic parking and pairless-cursor
+contention. Contended cursor/active-pair work is requeued before handoff; the
+same driver observes the forced publication afterward. The semantic fixture
+publishes `Blocked` first, retains the exact request root and active pair, and
+resumes only after the exact wait is completed. Both assert that no claim or
+normalization scope crosses the returned boundary.
 
 ###### W4C.1c — Net-WHNF source owner
 

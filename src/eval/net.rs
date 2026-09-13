@@ -417,6 +417,7 @@ fn drive_net_work_item(
             }
             CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
             CursorStep::Contended(contention) => {
+                driver.worklist.push(NetDriverWork::Cursor { root, cursor });
                 return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
                     contention,
                 ))));
@@ -442,6 +443,10 @@ fn drive_net_work_item(
             }
             CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
             CursorStep::Contended(contention) => {
+                driver.worklist.push(NetDriverWork::ObservedCursor {
+                    observation,
+                    cursor,
+                });
                 return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
                     contention,
                 ))));
@@ -526,6 +531,9 @@ fn prepare_active_pair_step(
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
         ActivePairStep::Contended(contention) => {
+            driver
+                .worklist
+                .push(NetDriverWork::ActivePair { root, pair });
             return Ok(Some(NetBatchOutcome::Driver(NetDriverOutcome::Contended(
                 contention,
             ))));
@@ -1787,6 +1795,7 @@ mod driver_tests {
 
     #[test]
     fn demanded_claim_completion_before_wait_registration_is_not_lost() {
+        let context = test_context();
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let data = source.data(crate::core::test_value_factory().unit());
         let source = instantiate(source.finish(data));
@@ -1805,7 +1814,12 @@ mod driver_tests {
                 .test_claim_pairless_cursor_obligation(&crate::core::test_value_factory(), cursor)
         );
         let request = normalization_request(&target, interface);
-        let contention = match drive_net_work(&test_context(), &request).unwrap() {
+        let mut driver = NetDriver::new(&request);
+        let contention = match crate::eval::with_direct_evaluator(&context, |evaluator| {
+            drive_net_driver_work_in(evaluator, &mut driver)
+        })
+        .unwrap()
+        {
             NetDriverOutcome::Contended(contention) => contention,
             _ => panic!("claimed demanded cursor must report contention"),
         };
@@ -1814,12 +1828,19 @@ mod driver_tests {
             Some(crate::interaction_net::CursorProgress::Materialized { .. })
         ));
         contention.wait_for_disturbance();
-        assert_eq!(
-            normalization_request(&target, interface)
-                .drive(&test_context())
-                .unwrap(),
-            NetInterfaceOutcome::Data
-        );
+        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+            loop {
+                match drive_net_driver_work_in(evaluator, &mut driver)? {
+                    NetDriverOutcome::Progressed => driver.restart_from_request_root(),
+                    outcome => return Ok::<_, EvaluationHalt>(outcome),
+                }
+            }
+        })
+        .expect("the retained driver must observe the claimed cursor publication");
+        assert!(matches!(
+            outcome,
+            NetDriverOutcome::Root(InterfaceDemand::Data)
+        ));
     }
 
     #[test]
