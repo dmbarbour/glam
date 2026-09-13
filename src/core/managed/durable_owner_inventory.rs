@@ -785,10 +785,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 133;
+const DECLARATION_BASELINE_COUNT: usize = 134;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([104, 77, 1, 12, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_144_538_018_976_675_018;
+    DeclarationSignals::new([104, 78, 1, 12, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_010_167_157_510_038_859;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -918,6 +918,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "src/eval/whnf.rs::DurableWhnfFrame"
             | "src/eval/whnf.rs::DurableWhnfState"
             | "src/eval/whnf.rs::WhnfPoll"
+            | "src/evaluation/whnf.rs::WhnfOwnerPoll"
     ) {
         "resumable WHNF durable checkpoints and dependencies"
     } else if declaration.starts_with("src/eval/whnf.rs::")

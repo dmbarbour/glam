@@ -1153,7 +1153,22 @@ impl EvalContext {
             .values()
             .with_runtime_value_access(|access| lazy.root_in(&access));
         let machine_root = root.clone();
-        self.deferred_task(DeferredProducer::Lazy(root), |context| {
+        self.deferred_root_task(DeferredProducer::Lazy(root), |context| {
+            build(context, machine_root)
+        })
+    }
+
+    pub(crate) fn lazy_root_task<F>(
+        &self,
+        root: &ManagedLazyRoot,
+        build: F,
+    ) -> Result<EvaluationWaitToken, Arc<str>>
+    where
+        F: FnOnce(EvalContext, ManagedLazyRoot) -> Box<dyn EvaluationTaskMachine>,
+    {
+        let root = root.clone();
+        let machine_root = root.clone();
+        self.deferred_root_task(DeferredProducer::Lazy(root), |context| {
             build(context, machine_root)
         })
     }
@@ -1182,12 +1197,12 @@ impl EvalContext {
     {
         let root = root.clone();
         let machine_root = root.clone();
-        self.deferred_task(DeferredProducer::Promise(root), |context| {
+        self.deferred_root_task(DeferredProducer::Promise(root), |context| {
             build(context, machine_root)
         })
     }
 
-    fn deferred_task<F>(
+    fn deferred_root_task<F>(
         &self,
         producer: DeferredProducer,
         build: F,

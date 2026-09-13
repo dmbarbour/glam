@@ -262,6 +262,10 @@ impl WhnfComputation {
         }
     }
 
+    pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.checkpoint.focus.runtime_id()
+    }
+
     /// Polls one bounded callback-free quantum beneath matching value access.
     ///
     /// The prior checkpoint remains installed while its regional projection

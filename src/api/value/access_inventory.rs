@@ -175,6 +175,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
+        "src/evaluation/whnf.rs",
+        0,
+        3,
+        0,
+        "post-region WHNF lazy admission and focused dependency tests",
+        "W2A.2 regional-shell polling followed by callback-capable admission"
+    ),
+    entry!(
         "src/g_syntax.rs",
         0,
         1,
@@ -678,6 +686,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::terminal_wait_dispositions_retain_only_their_documented_runtime_roots#1|surface=compatibility-new|scope=test",
+    "src/evaluation/whnf.rs::tests::task_owned_promise_self_observation_fails_outside_regional_access#1|surface=scoped-factory|scope=test",
+    "src/evaluation/whnf.rs::tests::unassigned_resolver_promise_becomes_a_direct_dependency#1|surface=scoped-factory|scope=test",
+    "src/evaluation/whnf.rs::tests::uncached_lazy_admission_occurs_after_regional_access_closes#1|surface=scoped-factory|scope=test",
     "src/g_syntax.rs::impl Diagnostic::with_emission#1|surface=scoped-factory|scope=production",
     "src/g_syntax/compiler_values.rs::evaluate_closed#1|surface=scoped-factory|scope=production",
     "src/g_syntax/compiler_values.rs::root_value#1|surface=scoped-factory|scope=production",

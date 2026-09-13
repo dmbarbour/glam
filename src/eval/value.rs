@@ -497,6 +497,19 @@ pub(super) fn eval_lazy_in(
     }
 }
 
+pub(crate) fn lazy_root_wait(
+    context: &EvalContext,
+    lazy: &ManagedLazyRoot,
+) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
+    context.lazy_root_task(lazy, |task_context, lazy| {
+        Box::new(LazyTaskMachine {
+            context: task_context,
+            lazy,
+            work: LazyTaskWork::Produce,
+        })
+    })
+}
+
 fn await_deferred_task(
     context: &EvaluatorStepContext<'_>,
     wait: crate::evaluation::EvaluationWaitToken,

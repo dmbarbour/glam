@@ -673,7 +673,7 @@ deferred to W2 and later phases.
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 
 Status: partitioned into W2A.1-W2E.2 on 2026-09-13. Implementation order is
-W2A.1, W2B.1, W2C.1, W2A.2, W2B.2, W2D, then W2E.1-W2E.2: semantic shell
+W2A.1, W2B.1, W2A.2, W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell
 inspection lands before either scheduler coordination or owner cutover.
 
 #### W2A — Regional lazy inspection
@@ -696,6 +696,8 @@ inventories classify the new durable request explicitly.
 
 ##### W2A.2 — Post-region lazy admission
 
+Status: complete on 2026-09-13.
+
 Split lazy demand into callback-free cache/source inspection and mutator-free
 producer coordination. An uncached lazy returns its exact `ManagedLazyRoot` as
 a boundary request; it does not reserve, pump, wait, or wake under access.
@@ -704,6 +706,15 @@ records the returned dependency in the same `WhnfComputation`.
 
 On wake, reproject the same lazy and inspect its cache. Do not snapshot and
 reconstruct a replacement `LazyValue` owner.
+
+Completion record: `evaluation::whnf::poll_computation` now closes the
+callback-free `RuntimeValueAccess` region before interpreting a deferred shell
+request. An uncached lazy is admitted through its exact `ManagedLazyRoot`,
+while unassigned promises remain direct coordinator dependencies and
+task-owned self-observation preserves the prior diagnostic. Focused tests
+prove post-region admission, exact promise identity, and zero promise-follower
+admission; the access, root-publication, and durable-owner inventories record
+the new boundary.
 
 #### W2B — Promise inspection and following
 
