@@ -1252,7 +1252,8 @@ the source census latches both removals.
 
 ###### W3B.2b — Object fixpoints
 
-Status: pending; perform after W3C.3.
+Status: partitioned into W3B.2b.1-W3B.2b.4 on 2026-09-13; perform after
+W3C.3.
 
 Object construction consumes the same access, key, and lazy-list child
 operations converted by W3C. Building a parallel compatibility trampoline
@@ -1260,6 +1261,46 @@ before those child frames exist would preserve two representations and make
 the later removal harder. After W3C.3, represent C3 traversal and the ordered
 definition-mixin fold as one explicit object-construction computation. This is
 a dependency reorder within W3, not a relaxation of the W3 closure gate.
+
+####### W3B.2b.1 — Reusable resumable logical-list front
+
+Status: pending.
+
+Wrap W3C.3a's non-forcing decomposition in one durable owner which can demand
+a deferred list-or-binary chunk, prepend it to the exact suffix, and resume.
+Return one rooted value plus rooted tail or exhaustion; do not force a strict
+value leaf. Object dependency traversal and W3D list-effect projection share
+this owner.
+
+####### W3B.2b.2 — Explicit object C3 traversal
+
+Status: pending.
+
+Replace recursive `object_c3_linearization` with an explicit DFS frame stack.
+Each frame retains its exact spec, name, dependency cursor, completed child
+linearizations, and direct-dependency sequence. Reuse the recursive key owner
+for names and the logical-list-front owner for dependencies. Preserve
+anonymous-before-named ordering and referential spec-identity validation.
+
+####### W3B.2b.3 — Explicit object mixin fold
+
+Status: pending.
+
+Retain the reversed C3 result, current base, self marker, spec cursor, and two
+application phases. Each definitions mixin is demanded and applied to base
+then self exactly once through ordinary WHNF application work. Validate the
+dictionary result before advancing and install the original spec only after
+the final mixin.
+
+####### W3B.2b.4 — Object source closure
+
+Status: pending.
+
+Force suspension in spec demand, name conversion, dependency chunks, nested
+dependency specs, and both mixin applications. Preserve the existing C3,
+identity, anonymous-ordering, and result fixtures. Remove object fixpoints
+from `produce_lazy_source_in` and the recursive construction export after its
+last source caller is gone.
 
 ##### W3B.3 — Saturated function-call and net bridge
 
@@ -1422,7 +1463,33 @@ production family with an inspectable list-effect recipe and pollable owner.
 
 ##### W3D.2 — Explicit list-effect source work
 
+Status: partitioned into W3D.2a-W3D.2c on 2026-09-13.
+
+###### W3D.2a — Inspectable list-effect recipe
+
 Status: pending.
+
+Replace the function pointer plus capture array with a closed core recipe for
+run, sequence, cut, and fix. Each variant exposes its exact managed edges to
+the existing compatibility tracer without an opaque callback.
+
+###### W3D.2b — Pollable list-effect source owner
+
+Status: pending.
+
+Interpret the recipe with explicit phases, rooted operands, ordinary WHNF
+subcomputations, application state, and W3B.2b.1 list-front work. A yielded or
+blocked run resumes after the exact completed effect/application/list prefix.
+Promise publication for fix remains outside a retained managed-access region
+and occurs once.
+
+###### W3D.2c — List-effect source verification and retirement
+
+Status: pending.
+
+Force dependencies at every recipe boundary, preserve lazy sequence/cut/fix
+behavior and failures, then remove production `SemanticComputation`. Test-only
+synthetic work is addressed separately by W3D.3.
 
 ##### W3D.3 — Opaque fixture policy and W3 closure audit
 
