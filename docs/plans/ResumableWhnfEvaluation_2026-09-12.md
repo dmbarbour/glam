@@ -1093,27 +1093,35 @@ prefixes indefinitely. W3B-W3D replace that compatibility step and each
 recursive source entry with typed durable/regional states. No source family is
 considered migrated until its typed phase state prevents replay.
 
-Partition the rest of W3 as follows:
+Partition the rest of W3 as follows. The W3B.3 review confirmed that source
+families cannot retain one attached function-call net without the pollable
+normalization owner originally scheduled for W4C. The implementation order is
+therefore dependency-based rather than phase-number-based:
 
 1. W3A.1 installs the source-entry/value-demand computation shape and cuts
    over `LazyTaskMachine` without moving host or net-construction modes.
 2. W3A.2 latches cache publication, deferred-result delegation, yield, and
    failure behavior at the new owner boundary.
-3. W3B.1 converts ordinary application; W3B.2 converts function and object
-   fixpoints; W3B.3 handles saturated `FunctionCall` construction. Before
-   W3B.3, review whether retaining net normalization progress requires a
-   narrow W4C bridge rather than rebuilding the attached net.
-4. W3C.1 converts access-path progress; W3C.2 converts recursive key/path
+3. W3B.1 converts ordinary application and W3B.2a converts function fixpoints.
+4. W4C.1 extracts the existing net driver into a reusable pollable owner;
+   W3B.3 then retains one attached function-call net in that owner. This
+   deliberately absorbs the common normalization part of W4C early rather
+   than adding a temporary nested lazy or a second driver.
+5. W3C.1 converts access-path progress; W3C.2 converts recursive key/path
    conversion; W3C.3 converts lazy list chunks and list-backed projections;
    W3C.4 closes their structured-error and forced-yield matrix.
-5. W3D.1 inventories the remaining production `SemanticComputation`
+6. W3B.2b converts object fixpoints after those child operations have typed
+   resumable owners.
+7. W3D.1 inventories the remaining production `SemanticComputation`
    operations; W3D.2 replaces the list-effect operations with explicit typed
    work; W3D.3 classifies or removes the test-only opaque thunk and performs
    the ordinary-source closure audit.
 
-This ordering is provisional at the W3B.3/W4C seam. Stop there if preserving
-one attached net cannot be expressed without prematurely absorbing the net
-driver into the WHNF machine.
+After W3D, perform an extra-thorough post-W3 audit before completing the
+remaining W4 boundary sources. The audit must account for every ordinary
+`LazySource`, every compatibility call left in `produce_lazy_source_in`, and
+every typed checkpoint's exact roots. Drift from the original phase order is
+acceptable only where this dependency order records it explicitly.
 
 ##### W3A.1 — Source-entry ownership and lazy-task cutover
 
@@ -1255,7 +1263,12 @@ a dependency reorder within W3, not a relaxation of the W3 closure gate.
 
 ##### W3B.3 — Saturated function-call and net bridge
 
-Status: pending; review the W4C seam before implementation.
+Status: pending after W4C.1.
+
+Select a `FunctionCall` source once, attach its argument vector once, and move
+the resulting managed net into the reusable normalization owner from W4C.1.
+The function source does not allocate a nested lazy merely to retain the net.
+Blocked semantic calls retain the same net and normalization checkpoint.
 
 #### W3C — Access and key/list source work
 
@@ -1341,6 +1354,43 @@ Preserve cursor-WHNF's local claim containment, disturbance wait, fallback
 restoration, and no-materialization observation rules. A blocked core operator
 retains both the net-owned call state and the evaluator checkpoint needed to
 finish that operator.
+
+##### W4C.1 — Reusable pollable net normalization owner
+
+Status: pending; pulled before W3B.3 by the W3 dependency review.
+
+###### W4C.1a — Persistent driver polling
+
+Refactor `NetDriver` so its request root, worklist, and progress disposition
+survive a returned yield, semantic dependency, or contention handoff. A
+blocked active pair is requeued before the poll returns. Managed net access and
+all call claims remain regional; the durable driver contains identities and
+roots only.
+
+###### W4C.1b — Driver ordering verification
+
+Force progress/yield, blocked-call/resume, source-frontier traversal, and
+contention handoff orderings. Assert that no poll retains a normalization
+scope or active claim and that resumption does not restart from a different
+root or duplicate a completed semantic call.
+
+###### W4C.1c — Net-WHNF source owner
+
+Introduce one owner around a managed runtime net, exposed interface,
+operation label, and persistent driver. It returns data, structured bind or
+normal-form failure, an exact semantic dependency, or a cooperative yield.
+Both `FunctionCall` and `NetComputation` use this owner; net construction keeps
+its existing effect machine and hands its terminal net to the same owner only
+where WHNF extraction is required.
+
+##### W4C.2 — Remaining net source integration
+
+Status: pending after W3B.3.
+
+Move `NetComputation` to the shared owner and reconcile
+`NetConstructionMachine` handoff behavior. Remove direct source-time calls to
+`extract_net_data` and `evaluate_function_call` once their final callers are
+gone.
 
 #### W4D — Boundary verification
 
