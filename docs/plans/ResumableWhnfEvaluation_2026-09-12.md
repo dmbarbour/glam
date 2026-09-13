@@ -1810,6 +1810,8 @@ and non-forcing constructors.
 Convert operator descriptors/execution and the remaining runtime-net evaluator
 bridges. Keep topology and claim state in their existing net owners.
 
+TBD: revisit and resolve WHNFW3R-004
+
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
 Convert builtin dispatch, arity/assertion/conditional operations, numeric and
