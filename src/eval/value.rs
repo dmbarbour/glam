@@ -14,7 +14,7 @@ use crate::evaluation::{
 use crate::list::ListItem;
 use crate::number::Number;
 
-use super::application::{apply_value_in, apply_values_in};
+use super::application::apply_values_in;
 use super::builtins::{
     NetConstructionMachine, apply_builtin_in, construct_fixpoint_object, is_undefined_value,
 };
@@ -302,6 +302,26 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         });
                         LazyTaskWork::Whnf(computation)
                     }
+                    LazySource::ComputedFixpoint(fixpoint) => match fixpoint.as_ref() {
+                        FixpointComputation::Function(function) => {
+                            let computation = context.with_value_access(|access| {
+                                let marker =
+                                    Value::Lazy(LazyValue::from_root(&self.lazy, access.values()));
+                                super::whnf::WhnfComputation::from_application_checkpoint_in(
+                                    &access,
+                                    function.clone(),
+                                    std::slice::from_ref(&marker),
+                                )
+                            });
+                            LazyTaskWork::Whnf(computation)
+                        }
+                        FixpointComputation::ObjectInstance(_) => {
+                            LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
+                                self.lazy.clone(),
+                                durable_context.values().runtime_id(),
+                            ))
+                        }
+                    },
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
                         durable_context.values().runtime_id(),
@@ -613,9 +633,15 @@ fn produce_lazy_source_in(
         LazySource::Error => Err(EvaluationHalt::new(
             "initialized lazy errors must be returned from their result cache",
         )),
-        LazySource::ComputedFixpoint(fixpoint) => {
-            eval_computed_fixpoint_in(context, lazy, fixpoint)
-        }
+        LazySource::ComputedFixpoint(fixpoint) => match fixpoint.as_ref() {
+            FixpointComputation::ObjectInstance(spec) => {
+                let marker = Value::Lazy(lazy.clone());
+                construct_fixpoint_object(context, spec, marker)
+            }
+            FixpointComputation::Function(_) => {
+                unreachable!("function fixpoints retain typed WHNF application work")
+            }
+        },
         LazySource::SemanticComputation(computation) => computation.evaluate(context),
         #[cfg(test)]
         LazySource::SemanticThunk(thunk) => thunk(context),
@@ -761,23 +787,6 @@ fn eval_reflection_task_source(
                 evaluation_context_frame_in(access.values(), context_name),
             )
         })),
-    }
-}
-
-fn eval_computed_fixpoint_in(
-    context: &EvaluatorStepContext<'_>,
-    lazy: &LazyValue,
-    computation: &FixpointComputation,
-) -> Result<Value, EvaluationHalt> {
-    let marker = Value::Lazy(lazy.clone());
-    match computation {
-        FixpointComputation::Function(function) => {
-            apply_value_in(context, function.clone(), marker)
-                .and_then(|application| eval_value_in(context, &application))
-        }
-        FixpointComputation::ObjectInstance(spec) => {
-            construct_fixpoint_object(context, spec, marker)
-        }
     }
 }
 

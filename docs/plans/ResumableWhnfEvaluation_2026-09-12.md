@@ -1224,7 +1224,34 @@ dependency behavior without relying on repeated scheduling.
 
 ##### W3B.2 — Function and object fixpoints
 
-Status: pending.
+Status: partitioned into W3B.2a-W3B.2b on 2026-09-13.
+
+###### W3B.2a — Function fixpoints
+
+Status: complete on 2026-09-13.
+
+Convert `FixpointComputation::Function` directly into the typed application
+checkpoint with the exact producer lazy as its marker argument. The source is
+selected once; subsequent suspension belongs to ordinary application and
+outer-shell demand.
+
+Function fixpoints now enter the typed application checkpoint directly from
+the lazy source selector. The exact managed producer is projected as the knot
+marker once, so strict cycles retain their prior identity and suspended bodies
+resume through ordinary WHNF dependencies. The compatibility helper no longer
+contains either the function application or its following recursive demand;
+the source census latches both removals.
+
+###### W3B.2b — Object fixpoints
+
+Status: pending; perform after W3C.3.
+
+Object construction consumes the same access, key, and lazy-list child
+operations converted by W3C. Building a parallel compatibility trampoline
+before those child frames exist would preserve two representations and make
+the later removal harder. After W3C.3, represent C3 traversal and the ordered
+definition-mixin fold as one explicit object-construction computation. This is
+a dependency reorder within W3, not a relaxation of the W3 closure gate.
 
 ##### W3B.3 — Saturated function-call and net bridge
 
