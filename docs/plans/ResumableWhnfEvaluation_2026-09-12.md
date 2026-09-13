@@ -1,7 +1,7 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W2 implementation complete by 2026-09-13; post-W2 full-suite
-verification is blocked on W2R-001 below; W3-W8 planned. This is the focused implementation plan selected by
+Status: W0-W2 and the post-W2 remediation are complete by 2026-09-13;
+W3-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand and promise following now own the crate-private resumable
@@ -674,8 +674,7 @@ deferred to W2 and later phases.
 
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 
-Status: implementation complete on 2026-09-13; full-suite verification is
-blocked on W2R-001 below. Implementation order was W2A.1, W2B.1, W2A.2,
+Status: complete on 2026-09-13 after W2R-001. Implementation order was W2A.1, W2B.1, W2A.2,
 W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell inspection landed
 before either scheduler coordination or owner cutover.
 
@@ -851,8 +850,8 @@ converting lazy-source production.
 
 #### Post-W2 review — 2026-09-13
 
-Status: implementation audit complete; full-suite verification exposed
-W2R-001 after the focused checks passed.
+Status: complete after resolving W2R-001 and rerunning the ordinary workspace
+plus the focused aggressive-GC ownership matrix.
 
 The two production owners selected for W2 each retain exactly one
 `WhnfComputation`: client demand owns the request from admission through
@@ -970,9 +969,25 @@ roots.
 
 ###### W2R-001D — W2 closure
 
-Run the focused cache, compiler, formatter, ownership-inventory, ordinary
-workspace, and aggressive-GC suites. Mark W2 and its post-review complete only
-after no cache builder reaches WHNF orchestration beneath managed access.
+Status: complete on 2026-09-13.
+
+Run the focused cache, compiler, formatter, ownership-inventory, and WHNF
+suites in ordinary and aggressive-GC modes, followed by the ordinary
+workspace. Mark W2 and its post-review complete only after no cache builder
+reaches WHNF orchestration beneath managed access. Complete-repository
+aggressive-GC certification remains owned by GCI11R-002D.2c-H and the final W8
+gate; this intermediate W2 checkpoint does not duplicate that open migration.
+
+Completion record: formatting and clippy pass, the ordinary workspace passes
+all 1,534 active library tests and every integration/doc-test group, and the
+focused aggressive-GC matrix passes the runtime-cache, compiler-family,
+diagnostic-formatter, declaration cache-miss, WHNF, assigned-promise-cycle,
+mixed promise/lazy-cycle, and collection-between-polls fixtures. Exact source
+ledgers record the added declaration publication/access region, root-free
+deferred-ID control state, and second promise-root boundary. The attempted
+complete aggressive run still reaches the independently planned
+GCI11R-002D.2c ownership failures; its first isolated failure is unchanged in
+the public array/deque annotation path rather than this cache or W2 boundary.
 
 ###### W2R-001D.1 — Declaration-resolution access boundary
 
