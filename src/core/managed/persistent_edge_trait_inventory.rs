@@ -817,13 +817,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        721,
+        723,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_822_996_898_581_801_623,
+        17_075_913_199_185_471_714,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -868,7 +868,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 152),
+            ((SourceScope::Production, EdgeSurface::Typed), 154),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 519),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

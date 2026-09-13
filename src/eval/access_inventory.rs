@@ -130,6 +130,11 @@ macro_rules! context_entry {
 /// `builtins.rs`; it does not create another production admission gate.
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
+        "src/eval/access_machine.rs",
+        [7, 4],
+        "W3C.2-W3C.3 scoped projection and durable access/key/list source owner"
+    ),
+    context_entry!(
         "src/eval/application.rs",
         [5, 3],
         "I3B.2 and I3D/I3E direct callers"

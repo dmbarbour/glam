@@ -127,6 +127,22 @@ const INVENTORY: &[InventoryEntry] = &[
         "I5 managed recursive identities; GCI11R-002D.2b.2 access-qualified promise publication"
     ),
     entry!(
+        "src/eval/access_machine.rs",
+        0,
+        0,
+        3,
+        "computed-access dictionary selection, recursive key members, and deferred binary-list normalization",
+        "W3C.2-W3C.3 rooted source progress"
+    ),
+    entry!(
+        "src/eval/value.rs",
+        0,
+        0,
+        1,
+        "computed-access source arguments published before entering the poll-spanning owner",
+        "W3C.2 source handoff"
+    ),
+    entry!(
         "src/eval/whnf.rs",
         0,
         1,
@@ -389,6 +405,10 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
+                | "src/eval/access_machine.rs::classify_key_value"
+                | "src/eval/access_machine.rs::select_dict_member"
+                | "src/eval/access_machine.rs::value_as_list_root"
+                | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
                 | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
                 | "src/eval/whnf.rs::impl DurableWhnfState::from_regional"
@@ -633,10 +653,14 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
     "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted#1|surface=access-publication|scope=production",
     "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call#1|surface=access-publication|scope=production",
+    "src/eval/access_machine.rs::classify_key_value#1|surface=access-publication|scope=production",
+    "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
+    "src/eval/access_machine.rs::value_as_list_root#1|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#3|surface=access-publication|scope=production",

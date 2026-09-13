@@ -22,6 +22,7 @@ fn static_access(
             &access,
             base,
             keys.into_iter().collect::<Vec<_>>().into(),
+            None,
         )
     })
 }

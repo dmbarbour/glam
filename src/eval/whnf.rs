@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::core::{
-    CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyValue,
+    CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyId, LazyValue,
     ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
@@ -47,6 +47,8 @@ pub(crate) struct DurableWhnfState {
     focus: RuntimeValueRoot,
     frames: Vec<DurableWhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
+    source_owner: Option<LazyId>,
+    cycle_promise: Option<ManagedPromiseRoot>,
 }
 
 /// One suspended caller frame with all cross-boundary semantic values rooted.
@@ -89,6 +91,8 @@ pub(crate) struct RegionalWhnfWork {
     focus: Value,
     frames: Vec<RegionalWhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
+    source_owner: Option<LazyId>,
+    cycle_promise: Option<PromisedValue>,
 }
 
 /// Regional counterpart of [`DurableWhnfFrame`].
@@ -319,6 +323,11 @@ impl DurableWhnfState {
                 .map(|frame| frame.project(access))
                 .collect(),
             followed: self.followed.clone(),
+            source_owner: self.source_owner,
+            cycle_promise: self
+                .cycle_promise
+                .as_ref()
+                .map(|promise| PromisedValue::from_root(promise, access.values())),
         }
     }
 
@@ -331,6 +340,10 @@ impl DurableWhnfState {
                 .map(|frame| DurableWhnfContinuation::root_continuation(access, frame))
                 .collect(),
             followed: work.followed,
+            source_owner: work.source_owner,
+            cycle_promise: work
+                .cycle_promise
+                .map(|promise| promise.root_in(access.values())),
         }
     }
 }
@@ -474,6 +487,8 @@ impl WhnfComputation {
                 focus,
                 frames: Vec::new(),
                 followed: BTreeSet::new(),
+                source_owner: None,
+                cycle_promise: None,
             }),
         }
     }
@@ -541,6 +556,8 @@ impl WhnfComputation {
                     next: 0,
                 }],
                 followed: BTreeSet::new(),
+                source_owner: None,
+                cycle_promise: None,
             }),
         }
     }
@@ -549,6 +566,7 @@ impl WhnfComputation {
         access: &EvaluationValueAccess<'_>,
         base: Value,
         keys: Arc<[crate::core::Key]>,
+        source_owner: Option<LazyId>,
     ) -> Self {
         let frames = (!keys.is_empty())
             .then_some(DurableWhnfContinuation::StaticAccess { keys, next: 0 })
@@ -559,6 +577,8 @@ impl WhnfComputation {
                 focus: access.values().root_runtime_value(base),
                 frames,
                 followed: BTreeSet::new(),
+                source_owner,
+                cycle_promise: None,
             }),
         }
     }
@@ -578,6 +598,14 @@ impl WhnfComputation {
             DurableWhnfCheckpoint::Source { runtime, .. } => *runtime,
             DurableWhnfCheckpoint::Demand(checkpoint) => checkpoint.focus.runtime_id(),
         }
+    }
+
+    pub(crate) fn with_source_owner(mut self, source_owner: LazyId) -> Self {
+        let DurableWhnfCheckpoint::Demand(checkpoint) = &mut self.checkpoint else {
+            panic!("a source-entry checkpoint already owns its lazy identity")
+        };
+        checkpoint.source_owner = Some(source_owner);
+        self
     }
 
     /// Polls one bounded callback-free quantum beneath matching value access.
@@ -655,12 +683,24 @@ fn reduce_semantic_shell(
                 RegionalWhnfStep::Delegate(value.into_value())
             }
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
-            None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
-                WhnfDeferredRequest::Lazy(lazy.root_in(access.values())),
-            )),
+            None => {
+                let id = access.lazy(lazy).id();
+                if work.source_owner == Some(id)
+                    && let Some(promise) = &work.cycle_promise
+                {
+                    RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                        WhnfDeferredRequest::PromiseFollow(promise.root_in(access.values())),
+                    ))
+                } else {
+                    RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                        WhnfDeferredRequest::Lazy(lazy.root_in(access.values())),
+                    ))
+                }
+            }
         },
         Value::Promised(promise) => match access.promise(promise).assignment() {
             Some(Ok(value)) => {
+                work.cycle_promise = Some(promise.duplicate_in(access.values()));
                 if work.followed.insert(access.promise(promise).id().into()) {
                     RegionalWhnfStep::Delegate(value)
                 } else {

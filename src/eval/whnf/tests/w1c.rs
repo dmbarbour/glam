@@ -210,6 +210,8 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
                     .into(),
                 ],
                 followed: BTreeSet::new(),
+                source_owner: None,
+                cycle_promise: None,
             })
         })
     });
@@ -267,6 +269,8 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
                 focus: Value::Lazy(replacement),
                 frames: Vec::new(),
                 followed: BTreeSet::new(),
+                source_owner: None,
+                cycle_promise: None,
             })
         })
     });

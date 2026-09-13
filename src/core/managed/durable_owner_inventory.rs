@@ -328,6 +328,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.2"
     ),
     closed_durable!(
+        "src/eval/access_machine.rs",
+        "computed-access source, recursive dictionary-key, and lazy-list progress",
+        "canonical RuntimeValueRoot fields plus root-free path/key cursors and accumulators",
+        "yielded or dependency-blocked lazy producer",
+        "source argument publication and bounded child-result publication",
+        "access completion, failure, cancellation, or lazy-owner retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W3C.2-W3C.3"
+    ),
+    closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
         "managed lazy owner plus one source-oriented WhnfComputation; PromiseFollower delegates ownership to one WhnfComputation",
@@ -785,10 +796,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 139;
+const DECLARATION_BASELINE_COUNT: usize = 144;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([111, 82, 1, 13, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 7_325_982_458_533_575_636;
+    DeclarationSignals::new([111, 90, 1, 13, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_373_872_872_234_710_362;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -911,6 +922,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         )
     {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
+    } else if declaration.starts_with("src/eval/access_machine.rs::") {
+        "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration == "src/eval/value.rs::LazyTaskWork" {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
     } else if matches!(

@@ -18,6 +18,18 @@ pub enum ListItem<V> {
     Value(V),
 }
 
+/// One non-forcing decomposition of the logical front of a persistent list.
+///
+/// A deferred chunk represents an unknown-length list segment, so its exact
+/// strict tail cannot be known yet. `suffix` retains everything logically
+/// following that chunk; callers may resume with `forced ++ suffix` after
+/// evaluating the deferred value.
+pub(crate) enum ListFrontStep<U, D, V, T> {
+    Empty,
+    Item { item: ListItem<U>, tail: List<V, T> },
+    Deferred { deferred: D, suffix: List<V, T> },
+}
+
 enum ListLookup<V> {
     Found(ListItem<V>),
     Exhausted(usize),
@@ -521,6 +533,80 @@ impl<V, T> List<V, T> {
                 force_thunk(thunk)?.try_pop_front_by(duplicate_value, force_thunk)
             }
         }
+    }
+
+    /// Decomposes one logical front item without forcing a deferred chunk.
+    ///
+    /// The explicit local worklist bounds Rust-stack use for arbitrarily deep
+    /// `Concat` spines. Only the selected strict value or deferred chunk is
+    /// duplicated; the returned tail continues to share all list structure.
+    pub(crate) fn pop_front_step_by<U, D>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+        duplicate_deferred: &mut impl FnMut(&T) -> D,
+    ) -> ListFrontStep<U, D, V, T> {
+        let mut worklist = vec![self.clone()];
+
+        while let Some(list) = worklist.pop() {
+            match list.0.as_ref() {
+                ListNode::Empty => {}
+                ListNode::Bytes(bytes) => {
+                    let item = ListItem::Byte(
+                        *bytes.first().expect("a canonical byte leaf is never empty"),
+                    );
+                    let local_tail = Self::from_bytes(bytes.slice(1..bytes.len()));
+                    return ListFrontStep::Item {
+                        item,
+                        tail: Self::join_logical_suffix(local_tail, &worklist),
+                    };
+                }
+                ListNode::Values(values) => {
+                    let first = values
+                        .as_slice()
+                        .first()
+                        .expect("a canonical value leaf is never empty");
+                    let local_tail = Self::from_value_slice(values.slice(1, values.len()));
+                    return ListFrontStep::Item {
+                        item: ListItem::Value(duplicate_value(first)),
+                        tail: Self::join_logical_suffix(local_tail, &worklist),
+                    };
+                }
+                ListNode::Concat(left, right) => {
+                    worklist.push(right.clone());
+                    worklist.push(left.clone());
+                }
+                ListNode::Finger(finger) => {
+                    let (chunk, mut rest) = finger
+                        .view_left()
+                        .expect("a canonical finger-tree node is never empty");
+                    let item = chunk
+                        .item_at_by(0, duplicate_value)
+                        .expect("finger trees do not store empty chunks");
+                    if let Some(chunk_tail) = chunk.slice(1, chunk.len()) {
+                        rest = rest.push_left(chunk_tail);
+                    }
+                    return ListFrontStep::Item {
+                        item,
+                        tail: Self::join_logical_suffix(Self::from_finger(rest), &worklist),
+                    };
+                }
+                ListNode::Thunk(thunk) => {
+                    return ListFrontStep::Deferred {
+                        deferred: duplicate_deferred(thunk),
+                        suffix: Self::join_logical_suffix(Self::empty(), &worklist),
+                    };
+                }
+            }
+        }
+
+        ListFrontStep::Empty
+    }
+
+    fn join_logical_suffix(mut prefix: Self, pending: &[Self]) -> Self {
+        for suffix in pending.iter().rev() {
+            prefix = Self::concat(prefix, suffix.clone());
+        }
+        prefix
     }
 
     /// Removes the final item while forcing only lazy chunks which must be
@@ -1243,6 +1329,66 @@ mod tests {
             ListItem::Value(2)
         );
         assert_eq!(forces.get(), 1);
+    }
+
+    #[test]
+    fn nonforcing_front_decomposition_retains_the_exact_deferred_suffix() {
+        let list = TestList::concat(
+            TestList::from_values(vec![1]),
+            TestList::concat(
+                TestList::from_thunk("middle"),
+                TestList::from_bytes(Bytes::from_static(b"Z")),
+            ),
+        );
+        let mut duplicate_value = |value: &u32| *value;
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let ListFrontStep::Item { item, tail } =
+            list.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the strict prefix must be returned first")
+        };
+        assert_eq!(item, ListItem::Value(1));
+
+        let ListFrontStep::Deferred { deferred, suffix } =
+            tail.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the deferred segment must be reported without forcing")
+        };
+        assert_eq!(deferred, "middle");
+        let ListFrontStep::Item { item, tail } =
+            suffix.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the logical suffix must survive the deferred boundary")
+        };
+        assert_eq!(item, ListItem::Byte(b'Z'));
+        assert!(matches!(
+            tail.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred),
+            ListFrontStep::Empty
+        ));
+    }
+
+    #[test]
+    fn nonforcing_front_decomposition_bounds_deep_concat_spines() {
+        let mut list = TestList::from_values(vec![0]);
+        for value in 1..20_000 {
+            list = TestList::concat(list, TestList::from_values(vec![value]));
+        }
+        let mut duplicate_value = |value: &u32| *value;
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let ListFrontStep::Item { item, tail } =
+            list.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("a deep strict list must expose its first item")
+        };
+        assert_eq!(item, ListItem::Value(0));
+
+        // This fixture deliberately leaks its pathological compatibility
+        // spine: recursive `Arc` destruction is outside the front-walk
+        // contract and will disappear with managed list spines.
+        std::mem::forget(list);
+        std::mem::forget(tail);
     }
 
     #[test]

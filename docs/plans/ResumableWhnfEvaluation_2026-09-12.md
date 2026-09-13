@@ -1295,29 +1295,40 @@ key vector and next index. Each demanded dictionary advances one key and
 delegates its selected member through ordinary WHNF; a missing member remains
 `{}` and a non-dictionary retains the established structured failure. A
 forced intermediate promise fixture proves resumption from the retained path
-index. The compatibility access helper is now reachable only for `Index` or
-`PathIndex` parts.
+index. W3C.2 subsequently removed the compatibility access helper from
+ordinary lazy-source production entirely.
 
 ##### W3C.2 — Recursive key and computed-path conversion
 
-Status: pending; perform W3C.2a after W3C.3a, then W3C.2b after W3C.3b.
+Status: complete on 2026-09-13 through W3C.2a-W3C.2b.
 
 ###### W3C.2a — Scalar computed access and recursive key owner
 
-Status: pending.
+Status: complete on 2026-09-13 with W3C.3b.
 
 Introduce one typed source owner for dynamic access. Retain the base, path
 part index, dynamic-argument index, and any in-progress recursive key
 conversion explicitly. A scalar `Index` evaluates and converts exactly once;
 dictionary key conversion retains an explicit member cursor and accumulator.
 
+`AccessMachine` now retains rooted source arguments, current selection,
+dynamic-argument and path cursors, pending keys, and a typed recursive key
+converter. Scalar dynamic keys and dictionary-valued keys resume after their
+exact child promise without re-reading completed members. Dynamic keys are
+still evaluated before the corresponding dictionary base, preserving the
+legacy source evaluation order.
+
 ###### W3C.2b — Computed path lists
 
-Status: pending; depends on W3C.3b.
+Status: complete on 2026-09-13 with W3C.3b.
 
 Use the same key converter and resumable logical-list walk for `PathIndex`.
 Append each completed list item key to the current access path without
 restarting either the source list or a previously selected dictionary.
+
+`PathIndex` uses the same `KeyListMachine` as list-valued key conversion but
+returns its completed items as sequential access keys. A forced deferred
+middle-chunk fixture resumes at that chunk and preserves the completed prefix.
 
 ##### W3C.3 — Lazy list chunks and list-backed projections
 
@@ -1326,21 +1337,34 @@ conversion and `PathIndex` are themselves list clients.
 
 ###### W3C.3a — Non-forcing logical front decomposition
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Add a stack-bounded representation-level list operation which returns one
 strict item, one deferred chunk plus its exact logical suffix, or exhaustion.
 It never invokes evaluation and therefore cannot suspend or retain a managed
 access region. This is shared infrastructure, not a second evaluator.
 
+`List::pop_front_step_by` now walks arbitrary `Concat` depth with an explicit
+local worklist and reports `Item`, `Deferred { deferred, suffix }`, or
+`Empty`. It duplicates only the selected leaf or thunk and preserves the
+remaining persistent structure. Fixtures cover a deferred middle segment and
+its exact byte suffix as well as a 20,000-node compatibility concat spine.
+
 ###### W3C.3b — Resumable list/key walk
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Build the typed list walk used by recursive key conversion. A deferred chunk
 is evaluated once, checked as list-or-binary, then prepended to the retained
 suffix. Strict value leaves delegate through the ordinary WHNF/key converter;
 byte leaves become numeric keys without demand.
+
+`KeyListMachine` owns only runtime roots, item/chunk state, and completed
+`Key`s across polls. It expands a forced list or binary chunk before its exact
+retained suffix, delegates strict values to `KeyConversionMachine`, and maps
+compact bytes directly to numeric keys. The original path operand remains
+list-only while deferred chunks preserve the established list-or-binary rule.
+No projected raw `Value` or `List` crosses its access regions.
 
 ###### W3C.3c — Remaining list-backed source projections
 
@@ -1353,7 +1377,17 @@ accounted separately by W3D/W4C and are not silently declared migrated here.
 
 ##### W3C.4 — Source-family suspension and diagnostics closure
 
-Status: pending.
+Status: complete on 2026-09-13 for access and recursive key/list source work;
+W3C.3c retains the broader list-projection inventory.
+
+Fixtures now cover scalar and recursive-dictionary promise suspension,
+deferred computed-path chunks, path/chunk kind diagnostics, missing/static
+members, non-dictionary bases, and the pre-existing computed-path integration
+case. Source-owned WHNF computations retain the owning lazy identity and the
+last assigned promise reached within the same demand. If that promise leads
+back to the source lazy, orchestration resumes through the canonical promise
+follower rather than incorrectly poisoning the mixed retryable cycle. Pure
+lazy cycles retain their permanent-failure behavior.
 
 #### W3D — Semantic computation representation
 

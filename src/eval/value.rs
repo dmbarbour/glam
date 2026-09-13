@@ -15,6 +15,7 @@ use crate::evaluation::{
 use crate::list::ListItem;
 use crate::number::Number;
 
+use super::access_machine::{AccessMachine, AccessMachinePoll};
 use super::application::apply_values_in;
 use super::builtins::{
     NetConstructionMachine, apply_builtin_in, construct_fixpoint_object, is_undefined_value,
@@ -188,6 +189,7 @@ enum LazyTaskWork {
     Produce,
     Whnf(super::whnf::WhnfComputation),
     NetWhnf(Box<NetWhnfMachine>),
+    Access(Box<AccessMachine>),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
@@ -349,9 +351,27 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 &access,
                                 base,
                                 Arc::from(keys),
+                                Some(self.lazy.id()),
                             )
                         });
                         LazyTaskWork::Whnf(computation)
+                    }
+                    LazySource::Access { path, arguments } => {
+                        let arguments = context.with_value_access(|access| {
+                            arguments
+                                .iter()
+                                .map(|value| {
+                                    access
+                                        .values()
+                                        .root_runtime_value(access.values().duplicate_value(value))
+                                })
+                                .collect()
+                        });
+                        LazyTaskWork::Access(Box::new(AccessMachine::new(
+                            self.lazy.id(),
+                            path,
+                            arguments,
+                        )))
                     }
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
@@ -379,6 +399,25 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context, value),
                     Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
                     Err(error) => self.fail(context, error),
+                };
+            }
+
+            if let LazyTaskWork::Access(machine) = &mut self.work {
+                return match machine.poll(poll_context, context, &durable_context, step_budget) {
+                    AccessMachinePoll::Ready(value) => {
+                        self.complete(context, context.project_root(&value))
+                    }
+                    AccessMachinePoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    AccessMachinePoll::Yielded => EvaluationMachinePoll::Yielded,
+                    AccessMachinePoll::Failed(failure) => {
+                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                    }
                 };
             }
 
@@ -688,12 +727,8 @@ fn produce_lazy_source_in(
             unreachable!("a host call must execute outside the evaluator step")
         }
         LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
-        LazySource::Access { path, arguments } => {
-            debug_assert!(
-                path.iter().any(|part| !matches!(part, CoreDataKey::Key(_))),
-                "static access retains typed WHNF path work"
-            );
-            resolve_core_access_in(context, arguments, path)
+        LazySource::Access { .. } => {
+            unreachable!("access sources retain one pollable access owner")
         }
         LazySource::Application(application) => apply_values_in(
             context,
@@ -1072,6 +1107,9 @@ mod ownership_tests {
             }
             LazyTaskWork::NetWhnf(machine) => {
                 let _: &NetWhnfMachine = machine;
+            }
+            LazyTaskWork::Access(machine) => {
+                let _: &AccessMachine = machine;
             }
             LazyTaskWork::HostCall(producer) => {
                 let _: &Arc<crate::core::HostCallProducer> = producer;

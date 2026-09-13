@@ -1016,6 +1016,13 @@ impl PromisedValue {
         self.edge.trace(visitor);
     }
 
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            edge: self.edge.duplicate_in(access),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
         Self::with_cell(values, label)

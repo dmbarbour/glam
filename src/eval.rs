@@ -25,6 +25,7 @@ use crate::{evaluation::OwnedEvalContext, list::ListItem};
 
 #[cfg(test)]
 mod access_inventory;
+mod access_machine;
 mod application;
 mod builtins;
 mod net;
