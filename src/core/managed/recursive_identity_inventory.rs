@@ -546,10 +546,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/eval/whnf.rs::WhnfDeferredRequest",
-        [1, 1, 0],
+        [1, 2, 0],
         DurableRoot,
         None,
-        "an unresolved WHNF shell carries its exact lazy or promise root to post-region policy"
+        "an unresolved WHNF shell or repeated assigned promise carries its exact root to post-region policy"
     ),
     owner!(
         "src/eval/whnf.rs::WhnfDependency",
