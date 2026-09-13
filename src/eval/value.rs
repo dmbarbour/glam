@@ -294,7 +294,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     LazySource::HostCall(producer) => LazyTaskWork::HostCall(producer),
                     LazySource::Application(application) => {
                         let computation = context.with_value_access(|access| {
-                            super::whnf::WhnfComputation::from_application_in(
+                            super::whnf::WhnfComputation::from_application_checkpoint_in(
                                 &access,
                                 application.function().clone(),
                                 application.arguments(),
@@ -370,24 +370,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
                 WhnfOwnerPoll::External(_) => {
                     unreachable!("W4 external sources retain explicit lazy-task modes")
-                }
-                WhnfOwnerPoll::LegacyApplication => {
-                    let (function, arguments) = computation
-                        .legacy_application()
-                        .expect("legacy dictionary application must retain its exact frame");
-                    let function = context.project_root(function);
-                    let arguments = arguments
-                        .iter()
-                        .map(|argument| context.project_root(argument))
-                        .collect();
-                    match apply_values_in(context, function, arguments) {
-                        Ok(value) => {
-                            computation
-                                .install_legacy_application_result(context.root_value(value));
-                            EvaluationMachinePoll::Yielded
-                        }
-                        Err(error) => self.fail(context, error),
-                    }
                 }
                 WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
                 WhnfOwnerPoll::Failed(failure) => {
@@ -466,9 +448,6 @@ impl EvaluationTaskMachine for PromiseFollower {
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             WhnfOwnerPoll::External(boundary) => {
                 unreachable!("W2 promise follower produced an external {boundary:?} boundary")
-            }
-            WhnfOwnerPoll::LegacyApplication => {
-                unreachable!("a promise follower cannot own an application frame")
             }
         }
     }

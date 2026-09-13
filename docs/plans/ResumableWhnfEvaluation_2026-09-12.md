@@ -1189,12 +1189,21 @@ demanded. Dictionary application alone returns the named
 
 ###### W3B.1b — Dictionary applicability
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Represent `eff` tagged-payload recognition, recursive semantic-undefined
 checks, and `apply` member demand as typed application phases. Remove the
 dictionary compatibility disposition after equal success, mismatch, failure,
 and retryable-wait behavior is established.
+
+Dictionary application now retains a typed tag-recognition frame and a
+bounded recursive semantic-undefined walk. Each nested dictionary member is
+demanded through the shared deferred-shell protocol, and one ancestor is
+unwound per regional step. The original `eff` payload remains distinct from
+its demanded classification value, preserving effect construction semantics.
+The fallback `apply` member still uses the prior deliberately shallow test for
+literal `{}` before demanding the member. The compatibility disposition and
+its outer `apply_values_in` call are removed.
 
 ###### W3B.1c — Application phase verification
 

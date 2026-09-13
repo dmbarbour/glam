@@ -39,9 +39,6 @@ impl ClientDemandOperation {
             super::whnf::WhnfOwnerPoll::External(boundary) => {
                 unreachable!("W2 semantic shell produced an external {boundary:?} boundary")
             }
-            super::whnf::WhnfOwnerPoll::LegacyApplication => {
-                unreachable!("client demand cannot own an application frame")
-            }
         }
     }
 }

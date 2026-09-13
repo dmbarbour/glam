@@ -604,6 +604,9 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -796,6 +799,14 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         ("src/eval/value.rs", GatewayCounts::new(1, 0)),
+        // W3B application fixtures inspect exact managed application
+        // checkpoints under three bounded test regions. Their shared
+        // application/poll helpers reuse the caller's poll access and are not
+        // independent mutator introductions.
+        (
+            "src/eval/whnf/tests/w3b_application.rs",
+            GatewayCounts::new(3, 0),
+        ),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         // D.2b.2 terminal promise assignment is access-qualified before its
         // detached completion wake is delivered.

@@ -130,9 +130,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/whnf.rs",
         0,
         1,
-        3,
-        "access-scoped WHNF checkpoint focus/frame publication, terminal result rooting, and promise-follower focus construction",
-        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership"
+        10,
+        "access-scoped WHNF checkpoint focus/frame publication, application-frame publication, terminal result rooting, and promise-follower focus construction",
+        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W3B typed application state"
     ),
     entry!(
         "src/evaluation/access.rs",
@@ -389,8 +389,10 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
+                | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
                 | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
                 | "src/eval/whnf.rs::impl DurableWhnfState::from_regional"
+                | "src/eval/whnf.rs::impl WhnfComputation::from_application_checkpoint_in"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::impl WhnfComputation::poll_in"
                 | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
@@ -634,8 +636,14 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#3|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#4|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#5|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfState::from_regional#1|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl WhnfComputation::from_application_checkpoint_in#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::poll_in#1|surface=access-publication|scope=production",
     "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",

@@ -16,7 +16,8 @@ pub(super) fn attach_net_many(
     function: NetValue,
     arguments: Vec<Value>,
 ) -> NetValue {
-    let runtime = attached_net_runtime(function, arguments);
+    let runtime = context
+        .with_value_access(|access| attached_net_runtime(access.values(), function, arguments));
     NetValue::new(context.construct_core_net(runtime))
 }
 
@@ -25,7 +26,7 @@ pub(super) fn attach_net_many_in(
     function: NetValue,
     arguments: Vec<Value>,
 ) -> NetValue {
-    let runtime = attached_net_runtime(function, arguments);
+    let runtime = attached_net_runtime(access, function, arguments);
     NetValue::new(
         access
             .construct_managed_core_net(runtime)
@@ -34,6 +35,7 @@ pub(super) fn attach_net_many_in(
 }
 
 fn attached_net_runtime(
+    _access: &RuntimeValueAccess<'_>,
     function: NetValue,
     arguments: Vec<Value>,
 ) -> RuntimeNet<CoreSpecialization> {

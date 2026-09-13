@@ -62,6 +62,22 @@ enum DurableWhnfContinuation {
         arguments: Vec<RuntimeValueRoot>,
         next: usize,
     },
+    DictionaryApplication {
+        effect_payload: RuntimeValueRoot,
+        remaining_effect_values: Vec<RuntimeValueRoot>,
+        next_effect_value: usize,
+        apply_member: Option<RuntimeValueRoot>,
+    },
+    SemanticUndefined {
+        purpose: UndefinedPurpose,
+        ancestors: Vec<DurableUndefinedDictionary>,
+        phase: UndefinedPhase,
+    },
+}
+
+struct DurableUndefinedDictionary {
+    members: Vec<RuntimeValueRoot>,
+    next: usize,
 }
 
 /// Callback-free working state projected beneath one managed-access region.
@@ -81,9 +97,40 @@ pub(crate) struct RegionalWhnfFrame {
     retained: Vec<Value>,
 }
 
-pub(crate) enum RegionalWhnfContinuation {
+enum RegionalWhnfContinuation {
     Generic(RegionalWhnfFrame),
-    Application { arguments: Vec<Value>, next: usize },
+    Application {
+        arguments: Vec<Value>,
+        next: usize,
+    },
+    DictionaryApplication {
+        effect_payload: Value,
+        remaining_effect_values: Vec<Value>,
+        next_effect_value: usize,
+        apply_member: Option<Value>,
+    },
+    SemanticUndefined {
+        purpose: UndefinedPurpose,
+        ancestors: Vec<RegionalUndefinedDictionary>,
+        phase: UndefinedPhase,
+    },
+}
+
+struct RegionalUndefinedDictionary {
+    members: Vec<Value>,
+    next: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UndefinedPurpose {
+    EffectPayload,
+    EffectExtra,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UndefinedPhase {
+    Inspect,
+    ReturnTrue,
 }
 
 impl From<RegionalWhnfFrame> for RegionalWhnfContinuation {
@@ -203,7 +250,6 @@ pub(crate) enum RegionalBoundaryRequest {
     Dependency(WhnfDependency),
     Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
-    LegacyApplication,
 }
 
 /// One unresolved semantic shell requiring policy outside managed access.
@@ -251,7 +297,6 @@ pub(crate) enum WhnfPoll {
     Pending(WhnfDependency),
     Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
-    LegacyApplication,
     Yielded,
     Failed(RuntimeFailureRoot),
 }
@@ -319,6 +364,39 @@ impl DurableWhnfContinuation {
                     .collect(),
                 next: *next,
             },
+            Self::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            } => RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload: access.clone_root(effect_payload),
+                remaining_effect_values: remaining_effect_values
+                    .iter()
+                    .map(|value| access.clone_root(value))
+                    .collect(),
+                next_effect_value: *next_effect_value,
+                apply_member: apply_member.as_ref().map(|value| access.clone_root(value)),
+            },
+            Self::SemanticUndefined {
+                purpose,
+                ancestors,
+                phase,
+            } => RegionalWhnfContinuation::SemanticUndefined {
+                purpose: *purpose,
+                ancestors: ancestors
+                    .iter()
+                    .map(|ancestor| RegionalUndefinedDictionary {
+                        members: ancestor
+                            .members
+                            .iter()
+                            .map(|value| access.clone_root(value))
+                            .collect(),
+                        next: ancestor.next,
+                    })
+                    .collect(),
+                phase: *phase,
+            },
         }
     }
 
@@ -336,6 +414,39 @@ impl DurableWhnfContinuation {
                     .map(|argument| access.values().root_runtime_value(argument))
                     .collect(),
                 next,
+            },
+            RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            } => Self::DictionaryApplication {
+                effect_payload: access.values().root_runtime_value(effect_payload),
+                remaining_effect_values: remaining_effect_values
+                    .into_iter()
+                    .map(|value| access.values().root_runtime_value(value))
+                    .collect(),
+                next_effect_value,
+                apply_member: apply_member.map(|value| access.values().root_runtime_value(value)),
+            },
+            RegionalWhnfContinuation::SemanticUndefined {
+                purpose,
+                ancestors,
+                phase,
+            } => Self::SemanticUndefined {
+                purpose,
+                ancestors: ancestors
+                    .into_iter()
+                    .map(|ancestor| DurableUndefinedDictionary {
+                        members: ancestor
+                            .members
+                            .into_iter()
+                            .map(|value| access.values().root_runtime_value(value))
+                            .collect(),
+                        next: ancestor.next,
+                    })
+                    .collect(),
+                phase,
             },
         }
     }
@@ -394,7 +505,7 @@ impl WhnfComputation {
         result.as_ref()
     }
 
-    pub(crate) fn from_application_in(
+    pub(crate) fn from_application_checkpoint_in(
         access: &EvaluationValueAccess<'_>,
         function: Value,
         arguments: &[Value],
@@ -417,38 +528,6 @@ impl WhnfComputation {
                 followed: BTreeSet::new(),
             }),
         }
-    }
-
-    pub(crate) fn legacy_application(&self) -> Option<(&RuntimeValueRoot, Vec<RuntimeValueRoot>)> {
-        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
-            return None;
-        };
-        let Some(DurableWhnfContinuation::Application { arguments, next }) =
-            checkpoint.frames.last()
-        else {
-            return None;
-        };
-        Some((&checkpoint.focus, arguments[*next..].to_vec()))
-    }
-
-    pub(crate) fn install_legacy_application_result(&mut self, result: RuntimeValueRoot) {
-        let DurableWhnfCheckpoint::Demand(checkpoint) = &mut self.checkpoint else {
-            panic!("legacy application must resume a value-demand checkpoint")
-        };
-        assert_eq!(
-            checkpoint.focus.runtime_id(),
-            result.runtime_id(),
-            "application result must belong to its computation runtime"
-        );
-        let frame = checkpoint
-            .frames
-            .pop()
-            .expect("legacy application must retain its application frame");
-        assert!(
-            matches!(frame, DurableWhnfContinuation::Application { .. }),
-            "legacy application must consume the top application frame"
-        );
-        checkpoint.focus = result;
     }
 
     pub(crate) fn from_promise_root(
@@ -497,7 +576,6 @@ impl WhnfComputation {
                     }
                     RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
                     RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-                    RegionalBoundaryRequest::LegacyApplication => WhnfPoll::LegacyApplication,
                 }
             }
             RegionalWhnfDrive::Yielded(work) => {
@@ -572,7 +650,7 @@ fn reduce_semantic_shell(
 
 enum DirectApplicationStep {
     Applied { value: Value, consumed: usize },
-    LegacyDictionary,
+    Dictionary(crate::core::Dict),
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -580,27 +658,243 @@ fn resume_semantic_frame(
     access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfWork,
 ) -> RegionalWhnfStep {
+    match work.frames.last() {
+        Some(RegionalWhnfContinuation::SemanticUndefined { .. }) => {
+            return resume_semantic_undefined(access, work);
+        }
+        Some(RegionalWhnfContinuation::Application { .. }) => {}
+        Some(RegionalWhnfContinuation::DictionaryApplication { .. }) => {
+            unreachable!("dictionary application must be evaluating an undefined candidate")
+        }
+        Some(RegionalWhnfContinuation::Generic(_)) => {
+            unreachable!("W3C has not activated the remaining generic frame families")
+        }
+        None => unreachable!("a semantic frame resume requires one frame"),
+    }
+
     let function = access.values().duplicate_value(&work.focus);
-    let Some(frame) = work.frames.last_mut() else {
-        unreachable!("a semantic frame resume requires one frame")
+    let (arguments, next) = match work.frames.last() {
+        Some(RegionalWhnfContinuation::Application { arguments, next }) => (arguments, *next),
+        _ => unreachable!(),
     };
-    let RegionalWhnfContinuation::Application { arguments, next } = frame else {
-        unreachable!("W3B has not activated the remaining generic frame families")
-    };
-    let step = apply_whnf_callable(access, function, &arguments[*next..]);
+    let step = apply_whnf_callable(access, function, &arguments[next..]);
     match step {
         DirectApplicationStep::Applied { value, consumed } => {
-            *next += consumed;
-            if *next == arguments.len() {
-                work.frames.pop();
-            }
-            RegionalWhnfStep::Delegate(value)
+            advance_application(access, work, value, consumed)
         }
-        DirectApplicationStep::LegacyDictionary => {
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::LegacyApplication)
-        }
+        DirectApplicationStep::Dictionary(dict) => begin_dictionary_application(access, work, dict),
         DirectApplicationStep::Failed(failure) => RegionalWhnfStep::Failed(failure),
     }
+}
+
+fn advance_application(
+    _access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+    value: Value,
+    consumed: usize,
+) -> RegionalWhnfStep {
+    let Some(RegionalWhnfContinuation::Application { arguments, next }) = work.frames.last_mut()
+    else {
+        unreachable!("an application result requires its application frame")
+    };
+    *next += consumed;
+    let complete = *next == arguments.len();
+    if complete {
+        work.frames.pop();
+    }
+    RegionalWhnfStep::Delegate(value)
+}
+
+fn begin_dictionary_application(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+    dict: crate::core::Dict,
+) -> RegionalWhnfStep {
+    let diagnostic_kind = if dict.is_empty() { "Undefined" } else { "Dict" };
+    let apply_member = dict
+        .get(&*crate::core::keys::APPLY)
+        .map(|value| access.values().duplicate_value(value));
+    let Some(effect_payload) = dict
+        .get(&*crate::core::keys::EFF)
+        .map(|value| access.values().duplicate_value(value))
+    else {
+        return dictionary_application_fallback(access, apply_member, diagnostic_kind);
+    };
+    let remaining_effect_values = dict
+        .iter()
+        .filter(|(key, _)| *key != &*crate::core::keys::EFF)
+        .map(|(_, value)| access.values().duplicate_value(value))
+        .collect();
+    let candidate = access.values().duplicate_value(&effect_payload);
+    work.frames
+        .push(RegionalWhnfContinuation::DictionaryApplication {
+            effect_payload,
+            remaining_effect_values,
+            next_effect_value: 0,
+            apply_member,
+        });
+    begin_semantic_undefined(access, work, candidate, UndefinedPurpose::EffectPayload)
+}
+
+fn begin_semantic_undefined(
+    _access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+    candidate: Value,
+    purpose: UndefinedPurpose,
+) -> RegionalWhnfStep {
+    work.frames
+        .push(RegionalWhnfContinuation::SemanticUndefined {
+            purpose,
+            ancestors: Vec::new(),
+            phase: UndefinedPhase::Inspect,
+        });
+    RegionalWhnfStep::Delegate(candidate)
+}
+
+fn resume_semantic_undefined(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+) -> RegionalWhnfStep {
+    let frame = work
+        .frames
+        .pop()
+        .expect("semantic-undefined work must retain its frame");
+    let RegionalWhnfContinuation::SemanticUndefined {
+        purpose,
+        mut ancestors,
+        phase,
+    } = frame
+    else {
+        unreachable!()
+    };
+    match phase {
+        UndefinedPhase::Inspect => {
+            let retained_focus = access.values().duplicate_value(&work.focus);
+            let Value::Dict(dict) = &retained_focus else {
+                return finish_semantic_undefined(access, work, purpose, false);
+            };
+            let members = dict
+                .iter()
+                .map(|(_, value)| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
+            let Some(first) = members.first() else {
+                work.frames
+                    .push(RegionalWhnfContinuation::SemanticUndefined {
+                        purpose,
+                        ancestors,
+                        phase: UndefinedPhase::ReturnTrue,
+                    });
+                return RegionalWhnfStep::Delegate(retained_focus);
+            };
+            let first = access.values().duplicate_value(first);
+            ancestors.push(RegionalUndefinedDictionary { members, next: 1 });
+            work.frames
+                .push(RegionalWhnfContinuation::SemanticUndefined {
+                    purpose,
+                    ancestors,
+                    phase: UndefinedPhase::Inspect,
+                });
+            RegionalWhnfStep::Delegate(first)
+        }
+        UndefinedPhase::ReturnTrue => {
+            let retained_focus = access.values().duplicate_value(&work.focus);
+            let Some(ancestor) = ancestors.last_mut() else {
+                return finish_semantic_undefined(access, work, purpose, true);
+            };
+            if ancestor.next < ancestor.members.len() {
+                let next = access
+                    .values()
+                    .duplicate_value(&ancestor.members[ancestor.next]);
+                ancestor.next += 1;
+                work.frames
+                    .push(RegionalWhnfContinuation::SemanticUndefined {
+                        purpose,
+                        ancestors,
+                        phase: UndefinedPhase::Inspect,
+                    });
+                RegionalWhnfStep::Delegate(next)
+            } else {
+                ancestors.pop();
+                work.frames
+                    .push(RegionalWhnfContinuation::SemanticUndefined {
+                        purpose,
+                        ancestors,
+                        phase: UndefinedPhase::ReturnTrue,
+                    });
+                RegionalWhnfStep::Delegate(retained_focus)
+            }
+        }
+    }
+}
+
+fn finish_semantic_undefined(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+    purpose: UndefinedPurpose,
+    undefined: bool,
+) -> RegionalWhnfStep {
+    let frame = work
+        .frames
+        .pop()
+        .expect("dictionary application must underlie its undefined walk");
+    let RegionalWhnfContinuation::DictionaryApplication {
+        effect_payload,
+        remaining_effect_values,
+        mut next_effect_value,
+        apply_member,
+    } = frame
+    else {
+        unreachable!("semantic-undefined result must return to dictionary application")
+    };
+
+    let effect_rejected = match purpose {
+        UndefinedPurpose::EffectPayload => undefined,
+        UndefinedPurpose::EffectExtra => !undefined,
+    };
+    if effect_rejected {
+        return dictionary_application_fallback(access, apply_member, "Dict");
+    }
+    if next_effect_value < remaining_effect_values.len() {
+        let candidate = access
+            .values()
+            .duplicate_value(&remaining_effect_values[next_effect_value]);
+        next_effect_value += 1;
+        work.frames
+            .push(RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            });
+        return begin_semantic_undefined(access, work, candidate, UndefinedPurpose::EffectExtra);
+    }
+
+    let argument = match work.frames.last() {
+        Some(RegionalWhnfContinuation::Application { arguments, next }) => {
+            access.values().duplicate_value(&arguments[*next])
+        }
+        _ => unreachable!("dictionary application must retain its caller frame"),
+    };
+    let effect = super::application::effect_value(super::application::apply_effect_function_value(
+        effect_payload,
+        argument,
+    ));
+    advance_application(access, work, effect, 1)
+}
+
+fn dictionary_application_fallback(
+    access: &EvaluationValueAccess<'_>,
+    apply_member: Option<Value>,
+    diagnostic_kind: &str,
+) -> RegionalWhnfStep {
+    if let Some(apply_member) = apply_member
+        && !super::value::is_undefined_dict_value(access.values(), &apply_member)
+    {
+        return RegionalWhnfStep::Delegate(apply_member);
+    }
+    RegionalWhnfStep::Failed(Arc::new(EvaluationFailure::message(format!(
+        "application requires a function value, received {diagnostic_kind}"
+    ))))
 }
 
 fn apply_whnf_callable(
@@ -621,7 +915,7 @@ fn apply_whnf_callable(
             arguments,
         ),
         Value::Function(function) => apply_whnf_function(access, function, arguments),
-        Value::Dict(_) => DirectApplicationStep::LegacyDictionary,
+        Value::Dict(dict) => DirectApplicationStep::Dictionary(dict),
         value => DirectApplicationStep::Failed(Arc::new(EvaluationFailure::message(format!(
             "application requires a function value, received {}",
             value.diagnostic_kind_name()
