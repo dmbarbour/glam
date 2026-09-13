@@ -1162,7 +1162,7 @@ net attachment, or fixpoint marker is rebuilt after resumption.
 
 ##### W3B.1 — Ordinary application
 
-Status: pending.
+Status: complete on 2026-09-13 through W3B.1a-W3B.1c.
 
 ###### W3B.1a — Typed application frame and direct callable families
 
@@ -1207,12 +1207,20 @@ its outer `apply_values_in` call are removed.
 
 ###### W3B.1c — Application phase verification
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Force a yield or dependency after function demand, partial application,
 saturation, and each extra argument. Assert exact argument order, one stage
 attachment or saturated-call allocation per completed prefix, and unchanged
 structured non-callable failures.
+
+The focused matrix now forces the callable promise, partial-builtin and
+partial-function boundaries, dictionary `apply` member demand, saturation,
+and the first extra argument in exact order. A saturated result is explicitly
+published before the extra argument can be attempted, and that attempt retains
+the established structured non-callable failure. Together with the existing
+source-backed application matrix, this latches success, mismatch, and
+dependency behavior without relying on repeated scheduling.
 
 ##### W3B.2 — Function and object fixpoints
 

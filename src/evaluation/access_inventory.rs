@@ -607,6 +607,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/whnf/tests/w3b_application.rs::saturated_result_is_demanded_before_any_extra_argument_is_applied#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -799,13 +800,13 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         ("src/eval/value.rs", GatewayCounts::new(1, 0)),
-        // W3B application fixtures inspect exact managed application
-        // checkpoints under three bounded test regions. Their shared
+        // W3B application fixtures inspect or terminalize exact managed
+        // application checkpoints under four bounded test regions. Their shared
         // application/poll helpers reuse the caller's poll access and are not
         // independent mutator introductions.
         (
             "src/eval/whnf/tests/w3b_application.rs",
-            GatewayCounts::new(3, 0),
+            GatewayCounts::new(4, 0),
         ),
         ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
         // D.2b.2 terminal promise assignment is access-qualified before its

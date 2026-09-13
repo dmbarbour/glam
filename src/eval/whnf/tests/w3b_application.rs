@@ -105,6 +105,39 @@ fn partial_builtin_resumes_without_replaying_supplied_arguments() {
 }
 
 #[test]
+fn promised_callable_resumes_at_function_demand_before_applying_arguments() {
+    let context = context();
+    let promise = PromisedValue::new(context.values(), "promised callable");
+    let mut computation = application(
+        &context,
+        Value::Promised(promise.clone()),
+        &[Value::Number(41.into()), Value::Number(1.into())],
+    );
+
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) =
+        poll(&context, &mut computation, 1)
+    else {
+        panic!("application must first suspend on the exact callable promise")
+    };
+    assert_eq!(root.id(), promise.id(context.values()));
+
+    crate::core::set_test_promise(context.values(), &promise, Value::Builtin(Builtin::Add))
+        .expect("the callable promise should accept its assignment");
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(_))
+    ));
+}
+
+#[test]
 fn function_application_batches_arguments_without_intermediate_roots() {
     let context = context();
     let function = closed_function_value_in(context.values(), 3, TestExpr::Local(2));
@@ -198,5 +231,91 @@ fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
     assert!(
         matches!(result, Value::Dict(ref dict) if dict.get(&Key::atom_from_text("eff")).is_some()),
         "a recursively undefined extra must not disqualify the effect tag"
+    );
+}
+
+#[test]
+fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
+    let context = context();
+    let promise = PromisedValue::new(context.values(), "promised apply member");
+    let applicable = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("apply"),
+        Value::Promised(promise.clone()),
+    ));
+    let mut computation = application(
+        &context,
+        applicable,
+        &[Value::Number(19.into()), Value::Number(23.into())],
+    );
+
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) =
+        poll(&context, &mut computation, 1)
+    else {
+        panic!("the shallow apply fallback must suspend on its exact member")
+    };
+    assert_eq!(root.id(), promise.id(context.values()));
+
+    crate::core::set_test_promise(context.values(), &promise, Value::Builtin(Builtin::Add))
+        .expect("the apply member should accept its assignment");
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(_))
+    ));
+}
+
+#[test]
+fn saturated_result_is_demanded_before_any_extra_argument_is_applied() {
+    let context = context();
+    let mut computation = application(
+        &context,
+        Value::Builtin(Builtin::Add),
+        &[
+            Value::Number(2.into()),
+            Value::Number(3.into()),
+            Value::Number(7.into()),
+        ],
+    );
+
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) = poll(&context, &mut computation, 1)
+    else {
+        panic!("the saturated prefix must be demanded before the extra argument")
+    };
+    let cached = context.values().with_runtime_value_access(|access| {
+        lazy.cache(
+            &access,
+            Ok(
+                crate::core::EvaluatedValue::try_from(Value::Number(5.into()))
+                    .expect("a number is already in WHNF"),
+            ),
+        )
+    });
+    assert!(cached.is_ok());
+
+    assert!(matches!(
+        poll(&context, &mut computation, 1),
+        WhnfPoll::Yielded
+    ));
+    let WhnfPoll::Failed(failure) = poll(&context, &mut computation, 1) else {
+        panic!("only the demanded saturated result may receive the extra argument")
+    };
+    assert_eq!(
+        failure.as_failure().to_string(),
+        "application requires a function value, received Number"
     );
 }
