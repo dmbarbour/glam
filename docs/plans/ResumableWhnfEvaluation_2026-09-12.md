@@ -895,6 +895,50 @@ removal of the outer cache region is unsafe until those intermediate raw
 to retain one mutator across cache evaluation is smaller but would preserve
 the callback and future collector-starvation defect.
 
+##### W2R-001 remediation — Rooted candidate construction
+
+Decision: a cache miss is not currently discovered beneath an existing
+managed-access region. The large access scope is introduced by
+`CoreValueFactory::cached` itself as a conservative legacy ownership blanket.
+Do not add a cache-pending WHNF disposition or install an in-progress entry.
+Racing callers continue to build independent complete candidates and race
+only the final `RuntimeCacheEntry` insertion.
+
+###### W2R-001A — Remove implicit access
+
+First add a fixture which fails because a cache builder inherits managed
+access. Then invoke the candidate builder with no implicit access and retain
+the existing complete-winner race. Document that a family builder may open
+its own short callback-free access regions, but cannot assume hidden access
+across orchestration or waiting.
+
+###### W2R-001B — Production family root audit
+
+Audit `GCompilerValues` and `CachedDiagnosticFormatter` one construction step
+at a time. Every managed raw `Value` embedded in a later closed expression
+must remain backed by a live `RuntimeValueRoot` until that expression is
+lowered into its own rooted input. Add an explicit root only for an observed
+gap; do not introduce a general prepared-expression wrapper preemptively.
+
+For each closed helper evaluation, construct and root the input during one
+short access region, close the region, and then use the normal resumable
+client-demand path. Retain every completed helper root in the local candidate
+until the complete family is admitted.
+
+###### W2R-001C — Collection and race verification
+
+Force collection between representative compiler-family construction steps
+and before final publication. Preserve the existing proof that racing misses
+may execute multiple builders but all callers receive one installed complete
+family. Verify that a losing candidate retires normally and that reopening an
+installed family registers no replacement roots.
+
+###### W2R-001D — W2 closure
+
+Run the focused cache, compiler, formatter, ownership-inventory, ordinary
+workspace, and aggressive-GC suites. Mark W2 and its post-review complete only
+after no cache builder reaches WHNF orchestration beneath managed access.
+
 ### Phase W3 — Lazy Producers and Source Progress
 
 #### W3A — Lazy task result disposition
