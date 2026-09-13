@@ -473,7 +473,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/compiler.rs::impl CompileContext::import_binary#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/compiler.rs::impl CompileContext::import_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::cache_test_lazy#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl CoreValueFactory::cached#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/core.rs::impl CoreValueFactory::clone_cached_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/core.rs::impl CoreValueFactory::root_core_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -768,7 +767,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // non-demanding recursive diagnostic-rendering region.
         // D.2b.2 constructs the canonical runtime roots in one additional
         // shared region.
-        ("src/core.rs", GatewayCounts::new(37, 5)),
+        ("src/core.rs", GatewayCounts::new(36, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching
@@ -980,7 +979,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        22
+        21
     );
 }
 

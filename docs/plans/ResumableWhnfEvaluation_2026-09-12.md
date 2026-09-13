@@ -906,11 +906,20 @@ only the final `RuntimeCacheEntry` insertion.
 
 ###### W2R-001A — Remove implicit access
 
+Status: complete on 2026-09-13.
+
 First add a fixture which fails because a cache builder inherits managed
 access. Then invoke the candidate builder with no implicit access and retain
 the existing complete-winner race. Document that a family builder may open
 its own short callback-free access regions, but cannot assume hidden access
 across orchestration or waiting.
+
+Completion record: a focused cache-family fixture first failed by observing
+the hidden managed access supplied by `CoreValueFactory::cached`. Candidate
+construction now runs with no implicit access; builders may open only their
+own bounded callback-free regions. Complete-candidate admission, runtime-root
+validation, harmless duplicate construction, and one installed winner retain
+their prior behavior.
 
 ###### W2R-001B — Production family root audit
 

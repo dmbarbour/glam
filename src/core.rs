@@ -647,11 +647,12 @@ impl CoreValueFactory {
             return value;
         }
 
-        // A closed cache family may compose helpers which each open managed
-        // access. Keep one outer region around the complete build so those
-        // nested entries cannot collect an intermediate managed edge before
-        // the family's declared runtime roots have been installed.
-        let candidate = Arc::new(self.with_runtime_value_access(|_| build()));
+        // A builder may open its own short callback-free access regions, but
+        // cache construction itself is not a managed-access region: compiler
+        // families may evaluate rooted helpers and coordinate work. The
+        // completed candidate must retain every managed edge through its
+        // declared runtime roots before admission below.
+        let candidate = Arc::new(build());
         let candidate = Arc::new(RuntimeCacheEntry::admit(self.runtime_id(), candidate));
         let entry = {
             let mut values = self
@@ -3094,6 +3095,24 @@ mod tests {
         factory.with_managed_values(|scope| {
             assert_eq!(scope.get(&root).0, [29]);
         });
+    }
+
+    #[test]
+    fn runtime_cache_builder_has_no_implicit_managed_access() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+
+        let cached = factory.cached(|| {
+            assert!(
+                !thread_has_runtime_value_access_for_test(),
+                "a cache-family builder must open only its own bounded access regions"
+            );
+            CachedProbe
+        });
+
+        assert!(Arc::ptr_eq(&cached, &factory.cached(|| CachedProbe)));
     }
 
     #[test]
