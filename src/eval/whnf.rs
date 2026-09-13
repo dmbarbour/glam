@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::core::{
-    CoreValueFactory, DeferredValueId, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
-    PromisedValue, Value,
+    CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyValue,
+    ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::EvaluationValueAccess;
@@ -45,7 +45,7 @@ enum DurableWhnfCheckpoint {
 /// Region-bound raw values exist only in [`RegionalWhnfWork`].
 pub(crate) struct DurableWhnfState {
     focus: RuntimeValueRoot,
-    frames: Vec<DurableWhnfFrame>,
+    frames: Vec<DurableWhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
 }
 
@@ -56,10 +56,18 @@ pub(crate) struct DurableWhnfFrame {
     retained: Vec<RuntimeValueRoot>,
 }
 
+enum DurableWhnfContinuation {
+    Generic(DurableWhnfFrame),
+    Application {
+        arguments: Vec<RuntimeValueRoot>,
+        next: usize,
+    },
+}
+
 /// Callback-free working state projected beneath one managed-access region.
 pub(crate) struct RegionalWhnfWork {
     focus: Value,
-    frames: Vec<RegionalWhnfFrame>,
+    frames: Vec<RegionalWhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
 }
 
@@ -71,6 +79,17 @@ pub(crate) struct RegionalWhnfFrame {
     kind: WhnfFrameKind,
     cursor: usize,
     retained: Vec<Value>,
+}
+
+pub(crate) enum RegionalWhnfContinuation {
+    Generic(RegionalWhnfFrame),
+    Application { arguments: Vec<Value>, next: usize },
+}
+
+impl From<RegionalWhnfFrame> for RegionalWhnfContinuation {
+    fn from(frame: RegionalWhnfFrame) -> Self {
+        Self::Generic(frame)
+    }
 }
 
 /// Shared resumption shapes selected by the W0 census.
@@ -184,6 +203,7 @@ pub(crate) enum RegionalBoundaryRequest {
     Dependency(WhnfDependency),
     Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
+    LegacyApplication,
 }
 
 /// One unresolved semantic shell requiring policy outside managed access.
@@ -231,6 +251,7 @@ pub(crate) enum WhnfPoll {
     Pending(WhnfDependency),
     Deferred(WhnfDeferredRequest),
     External(WhnfExternalBoundary),
+    LegacyApplication,
     Yielded,
     Failed(RuntimeFailureRoot),
 }
@@ -254,7 +275,7 @@ impl DurableWhnfState {
             frames: work
                 .frames
                 .into_iter()
-                .map(|frame| DurableWhnfFrame::root_regional(access, frame))
+                .map(|frame| DurableWhnfContinuation::root_continuation(access, frame))
                 .collect(),
             followed: work.followed,
         }
@@ -283,6 +304,39 @@ impl DurableWhnfFrame {
                 .into_iter()
                 .map(|value| access.values().root_runtime_value(value))
                 .collect(),
+        }
+    }
+}
+
+impl DurableWhnfContinuation {
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfContinuation {
+        match self {
+            Self::Generic(frame) => RegionalWhnfContinuation::Generic(frame.project(access)),
+            Self::Application { arguments, next } => RegionalWhnfContinuation::Application {
+                arguments: arguments
+                    .iter()
+                    .map(|argument| access.clone_root(argument))
+                    .collect(),
+                next: *next,
+            },
+        }
+    }
+
+    fn root_continuation(
+        access: &EvaluationValueAccess<'_>,
+        frame: RegionalWhnfContinuation,
+    ) -> Self {
+        match frame {
+            RegionalWhnfContinuation::Generic(frame) => {
+                Self::Generic(DurableWhnfFrame::root_regional(access, frame))
+            }
+            RegionalWhnfContinuation::Application { arguments, next } => Self::Application {
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| access.values().root_runtime_value(argument))
+                    .collect(),
+                next,
+            },
         }
     }
 }
@@ -340,6 +394,63 @@ impl WhnfComputation {
         result.as_ref()
     }
 
+    pub(crate) fn from_application_in(
+        access: &EvaluationValueAccess<'_>,
+        function: Value,
+        arguments: &[Value],
+    ) -> Self {
+        assert!(!arguments.is_empty(), "application requires an argument");
+        Self {
+            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
+                focus: access.values().root_runtime_value(function),
+                frames: vec![DurableWhnfContinuation::Application {
+                    arguments: arguments
+                        .iter()
+                        .map(|argument| {
+                            access
+                                .values()
+                                .root_runtime_value(access.values().duplicate_value(argument))
+                        })
+                        .collect(),
+                    next: 0,
+                }],
+                followed: BTreeSet::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn legacy_application(&self) -> Option<(&RuntimeValueRoot, Vec<RuntimeValueRoot>)> {
+        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
+            return None;
+        };
+        let Some(DurableWhnfContinuation::Application { arguments, next }) =
+            checkpoint.frames.last()
+        else {
+            return None;
+        };
+        Some((&checkpoint.focus, arguments[*next..].to_vec()))
+    }
+
+    pub(crate) fn install_legacy_application_result(&mut self, result: RuntimeValueRoot) {
+        let DurableWhnfCheckpoint::Demand(checkpoint) = &mut self.checkpoint else {
+            panic!("legacy application must resume a value-demand checkpoint")
+        };
+        assert_eq!(
+            checkpoint.focus.runtime_id(),
+            result.runtime_id(),
+            "application result must belong to its computation runtime"
+        );
+        let frame = checkpoint
+            .frames
+            .pop()
+            .expect("legacy application must retain its application frame");
+        assert!(
+            matches!(frame, DurableWhnfContinuation::Application { .. }),
+            "legacy application must consume the top application frame"
+        );
+        checkpoint.focus = result;
+    }
+
     pub(crate) fn from_promise_root(
         values: &CoreValueFactory,
         promise: &ManagedPromiseRoot,
@@ -386,6 +497,7 @@ impl WhnfComputation {
                     }
                     RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
                     RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+                    RegionalBoundaryRequest::LegacyApplication => WhnfPoll::LegacyApplication,
                 }
             }
             RegionalWhnfDrive::Yielded(work) => {
@@ -425,10 +537,6 @@ fn reduce_semantic_shell(
     access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfWork,
 ) -> RegionalWhnfStep {
-    debug_assert!(
-        work.frames.is_empty(),
-        "W2 outer-shell demand does not yet interpret caller frames"
-    );
     match &work.focus {
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
             Some(Ok(value)) => {
@@ -455,8 +563,119 @@ fn reduce_semantic_shell(
                 WhnfDeferredRequest::Promise(promise.root_in(access.values())),
             )),
         },
-        _ => RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus)),
+        _ if work.frames.is_empty() => {
+            RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus))
+        }
+        _ => resume_semantic_frame(access, work),
     }
+}
+
+enum DirectApplicationStep {
+    Applied { value: Value, consumed: usize },
+    LegacyDictionary,
+    Failed(Arc<EvaluationFailure>),
+}
+
+fn resume_semantic_frame(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+) -> RegionalWhnfStep {
+    let function = access.values().duplicate_value(&work.focus);
+    let Some(frame) = work.frames.last_mut() else {
+        unreachable!("a semantic frame resume requires one frame")
+    };
+    let RegionalWhnfContinuation::Application { arguments, next } = frame else {
+        unreachable!("W3B has not activated the remaining generic frame families")
+    };
+    let step = apply_whnf_callable(access, function, &arguments[*next..]);
+    match step {
+        DirectApplicationStep::Applied { value, consumed } => {
+            *next += consumed;
+            if *next == arguments.len() {
+                work.frames.pop();
+            }
+            RegionalWhnfStep::Delegate(value)
+        }
+        DirectApplicationStep::LegacyDictionary => {
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::LegacyApplication)
+        }
+        DirectApplicationStep::Failed(failure) => RegionalWhnfStep::Failed(failure),
+    }
+}
+
+fn apply_whnf_callable(
+    access: &EvaluationValueAccess<'_>,
+    function: Value,
+    arguments: &[Value],
+) -> DirectApplicationStep {
+    debug_assert!(!arguments.is_empty());
+    match function {
+        Value::Builtin(builtin) => apply_whnf_builtin(access, builtin, Vec::new(), arguments),
+        Value::PartialBuiltin(call) => apply_whnf_builtin(
+            access,
+            call.builtin,
+            call.arguments
+                .iter()
+                .map(|argument| access.values().duplicate_value(argument))
+                .collect(),
+            arguments,
+        ),
+        Value::Function(function) => apply_whnf_function(access, function, arguments),
+        Value::Dict(_) => DirectApplicationStep::LegacyDictionary,
+        value => DirectApplicationStep::Failed(Arc::new(EvaluationFailure::message(format!(
+            "application requires a function value, received {}",
+            value.diagnostic_kind_name()
+        )))),
+    }
+}
+
+fn apply_whnf_builtin(
+    access: &EvaluationValueAccess<'_>,
+    builtin: crate::core::Builtin,
+    mut supplied: Vec<Value>,
+    arguments: &[Value],
+) -> DirectApplicationStep {
+    let remaining = builtin
+        .arity()
+        .checked_sub(supplied.len())
+        .expect("a partial builtin cannot contain too many arguments");
+    let consumed = remaining.min(arguments.len());
+    supplied.extend(
+        arguments[..consumed]
+            .iter()
+            .map(|argument| access.values().duplicate_value(argument)),
+    );
+    DirectApplicationStep::Applied {
+        value: Value::builtin_call_in(access.values(), builtin, supplied),
+        consumed,
+    }
+}
+
+fn apply_whnf_function(
+    access: &EvaluationValueAccess<'_>,
+    function: FunctionValue,
+    arguments: &[Value],
+) -> DirectApplicationStep {
+    let remaining = function.remaining_arity();
+    let consumed = remaining.min(arguments.len());
+    let saturating = arguments[..consumed]
+        .iter()
+        .map(|argument| access.values().duplicate_value(argument))
+        .collect::<Vec<_>>();
+    let value = if consumed < remaining {
+        let stage = function.duplicate_stage_in(access.values());
+        Value::Function(FunctionValue::new(
+            super::net::attach_net_many_in(access.values(), stage, saturating),
+            remaining - consumed,
+        ))
+    } else {
+        Value::Lazy(LazyValue::from_function_call_in(
+            access.values(),
+            function,
+            Arc::from(saturating),
+        ))
+    };
+    DirectApplicationStep::Applied { value, consumed }
 }
 
 #[cfg(test)]
@@ -605,3 +824,7 @@ mod w2a_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w2b.rs"]
 mod w2b_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w3b_application.rs"]
+mod w3b_application_tests;

@@ -17,6 +17,7 @@ pub(crate) enum WhnfOwnerPoll {
     Ready(RuntimeValueRoot),
     Pending(WorkDependency),
     External(WhnfExternalBoundary),
+    LegacyApplication,
     Yielded,
     Failed(RuntimeFailureRoot),
 }
@@ -82,6 +83,7 @@ pub(crate) fn poll_computation(
             }
         }
         WhnfPoll::External(boundary) => WhnfOwnerPoll::External(boundary),
+        WhnfPoll::LegacyApplication => WhnfOwnerPoll::LegacyApplication,
         WhnfPoll::Yielded => WhnfOwnerPoll::Yielded,
         WhnfPoll::Failed(failure) => WhnfOwnerPoll::Failed(failure),
     }

@@ -8,7 +8,7 @@ use crate::core_net::{
 };
 use crate::interaction_net::{
     BlockedCall, BlockedOperatorCall, CursorDependencyDisposition, CursorDependencyResolution,
-    DemandEndpoint, InterfaceDemand,
+    DemandEndpoint, InterfaceDemand, RuntimeNet,
 };
 
 pub(super) fn attach_net_many(
@@ -16,6 +16,27 @@ pub(super) fn attach_net_many(
     function: NetValue,
     arguments: Vec<Value>,
 ) -> NetValue {
+    let runtime = attached_net_runtime(function, arguments);
+    NetValue::new(context.construct_core_net(runtime))
+}
+
+pub(super) fn attach_net_many_in(
+    access: &RuntimeValueAccess<'_>,
+    function: NetValue,
+    arguments: Vec<Value>,
+) -> NetValue {
+    let runtime = attached_net_runtime(function, arguments);
+    NetValue::new(
+        access
+            .construct_managed_core_net(runtime)
+            .expect("managed core-net representation must fit one collector run"),
+    )
+}
+
+fn attached_net_runtime(
+    function: NetValue,
+    arguments: Vec<Value>,
+) -> RuntimeNet<CoreSpecialization> {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
     let mut net = NetBuilder::new();
     let spine = net.bind_spine(arguments.len());
@@ -26,7 +47,7 @@ pub(super) fn attach_net_many(
         net.wire(argument_port, argument);
     }
     let template = net.finish(spine.result);
-    NetValue::new(context.construct_core_net(template.instantiate()))
+    template.instantiate()
 }
 
 pub(super) fn extract_net_data(

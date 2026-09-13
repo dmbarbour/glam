@@ -1166,7 +1166,7 @@ Status: pending.
 
 ###### W3B.1a — Typed application frame and direct callable families
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Replace the generic application placeholder with typed durable/regional
 argument state. Demand the current function once, then advance builtin,
@@ -1176,6 +1176,16 @@ work; extra arguments remain in the frame and apply only after that result is
 demanded. Preserve a narrow explicit compatibility disposition for dictionary
 application until W3B.1b rather than hiding its semantic-undefined recursion
 inside the regional reducer.
+
+The application frame now owns one rooted argument vector and an exact next
+argument index. Builtin and partial-builtin saturation, function-stage
+attachment, and saturated function-call allocation occur under the active
+regional access. Each transition publishes only its resulting semantic value;
+immediate arguments do not acquire artificial managed roots. Extra arguments
+remain behind the same frame and cannot run before a saturated lazy result is
+demanded. Dictionary application alone returns the named
+`LegacyApplication` disposition, and the WHNF census records that one remaining
+`apply_values_in` compatibility call until W3B.1b removes it.
 
 ###### W3B.1b — Dictionary applicability
 

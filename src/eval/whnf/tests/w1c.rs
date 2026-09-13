@@ -37,11 +37,14 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
             assert_eq!(work.focus, text("initial"));
             assert!(work.frames.is_empty());
             work.focus = text("replacement");
-            work.frames.push(RegionalWhnfFrame {
-                kind: WhnfFrameKind::OrderedOperands,
-                cursor: 7,
-                retained: vec![text("left"), text("right")],
-            });
+            work.frames.push(
+                RegionalWhnfFrame {
+                    kind: WhnfFrameKind::OrderedOperands,
+                    cursor: 7,
+                    retained: vec![text("left"), text("right")],
+                }
+                .into(),
+            );
             RegionalWhnfStep::Boundary(RegionalBoundaryRequest::External(
                 WhnfExternalBoundary::Reflection,
             ))
@@ -75,9 +78,12 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
         computation.poll_in(&access, &mut resume_budget, |_access, work| {
             assert_eq!(work.focus, text("replacement"));
             assert_eq!(work.frames.len(), 1);
-            assert_eq!(work.frames[0].kind, WhnfFrameKind::OrderedOperands);
-            assert_eq!(work.frames[0].cursor, 7);
-            assert_eq!(work.frames[0].retained, [text("left"), text("right")]);
+            let RegionalWhnfContinuation::Generic(frame) = &work.frames[0] else {
+                panic!("expected a generic ordered-operands frame")
+            };
+            assert_eq!(frame.kind, WhnfFrameKind::OrderedOperands);
+            assert_eq!(frame.cursor, 7);
+            assert_eq!(frame.retained, [text("left"), text("right")]);
             RegionalWhnfStep::Ready(Value::Number(42.into()))
         })
     });
@@ -130,11 +136,14 @@ fn unwind_preserves_a_nonempty_prior_checkpoint() {
     let installed = poll.with_value_access(&context, |access| {
         computation.poll_in(&access, &mut install_budget, |_access, work| {
             work.focus = text("prior");
-            work.frames.push(RegionalWhnfFrame {
-                kind: WhnfFrameKind::AccessPath,
-                cursor: 11,
-                retained: vec![text("retained")],
-            });
+            work.frames.push(
+                RegionalWhnfFrame {
+                    kind: WhnfFrameKind::AccessPath,
+                    cursor: 11,
+                    retained: vec![text("retained")],
+                }
+                .into(),
+            );
             RegionalWhnfStep::Boundary(RegionalBoundaryRequest::External(
                 WhnfExternalBoundary::Host,
             ))
@@ -165,9 +174,12 @@ fn unwind_preserves_a_nonempty_prior_checkpoint() {
         computation.poll_in(&access, &mut resume_budget, |_access, work| {
             assert_eq!(work.focus, text("prior"));
             assert_eq!(work.frames.len(), 1);
-            assert_eq!(work.frames[0].kind, WhnfFrameKind::AccessPath);
-            assert_eq!(work.frames[0].cursor, 11);
-            assert_eq!(work.frames[0].retained, [text("retained")]);
+            let RegionalWhnfContinuation::Generic(frame) = &work.frames[0] else {
+                panic!("expected a generic access-path frame")
+            };
+            assert_eq!(frame.kind, WhnfFrameKind::AccessPath);
+            assert_eq!(frame.cursor, 11);
+            assert_eq!(frame.retained, [text("retained")]);
             RegionalWhnfStep::Ready(Value::Number(17.into()))
         })
     });
@@ -189,11 +201,14 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
         computation.poll_in(&access, &mut budget, |_access, _work| {
             RegionalWhnfStep::Continue(RegionalWhnfWork {
                 focus: text("replacement"),
-                frames: vec![RegionalWhnfFrame {
-                    kind: WhnfFrameKind::CollectionWalk,
-                    cursor: 3,
-                    retained: vec![text("first"), text("second")],
-                }],
+                frames: vec![
+                    RegionalWhnfFrame {
+                        kind: WhnfFrameKind::CollectionWalk,
+                        cursor: 3,
+                        retained: vec![text("first"), text("second")],
+                    }
+                    .into(),
+                ],
                 followed: BTreeSet::new(),
             })
         })

@@ -200,11 +200,14 @@ impl SyntheticAlgebra {
                 child,
             } => {
                 self.events.push(event);
-                work.frames.push(RegionalWhnfFrame {
-                    kind: WhnfFrameKind::DiagnosticContext,
-                    cursor: usize::MAX,
-                    retained: vec![Value::binary_from_text(context)],
-                });
+                work.frames.push(
+                    RegionalWhnfFrame {
+                        kind: WhnfFrameKind::DiagnosticContext,
+                        cursor: usize::MAX,
+                        retained: vec![Value::binary_from_text(context)],
+                    }
+                    .into(),
+                );
                 RegionalWhnfStep::Delegate(instruction(child))
             }
             SyntheticOperation::DemandThen {
@@ -213,11 +216,14 @@ impl SyntheticAlgebra {
                 continuation,
             } => {
                 self.events.push(event);
-                work.frames.push(RegionalWhnfFrame {
-                    kind: WhnfFrameKind::DemandThenInspect,
-                    cursor: continuation,
-                    retained: Vec::new(),
-                });
+                work.frames.push(
+                    RegionalWhnfFrame {
+                        kind: WhnfFrameKind::DemandThenInspect,
+                        cursor: continuation,
+                        retained: Vec::new(),
+                    }
+                    .into(),
+                );
                 RegionalWhnfStep::Delegate(instruction(child))
             }
             SyntheticOperation::Suspend {
@@ -237,6 +243,9 @@ impl SyntheticAlgebra {
                 let Some(frame) = work.frames.pop() else {
                     return RegionalWhnfStep::Ready(Value::binary_from_text(result));
                 };
+                let RegionalWhnfContinuation::Generic(frame) = frame else {
+                    panic!("synthetic return encountered an application frame")
+                };
                 match frame.kind {
                     WhnfFrameKind::DemandThenInspect => {
                         assert!(frame.retained.is_empty());
@@ -252,7 +261,10 @@ impl SyntheticAlgebra {
             SyntheticOperation::Fail { event, message } => {
                 self.events.push(event);
                 let mut failure = EvaluationFailure::message(message);
-                while let Some(mut frame) = work.frames.pop() {
+                while let Some(frame) = work.frames.pop() {
+                    let RegionalWhnfContinuation::Generic(mut frame) = frame else {
+                        panic!("synthetic failure encountered an application frame")
+                    };
                     assert_eq!(frame.kind, WhnfFrameKind::DiagnosticContext);
                     assert_eq!(frame.retained.len(), 1);
                     let context = frame.retained.pop().expect("one context was retained");
@@ -321,9 +333,15 @@ fn dependency_resumes_at_the_recorded_phase_without_replaying_completed_work() {
         };
         assert_eq!(instruction_index(&work.focus), 2);
         assert_eq!(work.frames.len(), 2);
-        assert_eq!(work.frames[0].kind, WhnfFrameKind::DiagnosticContext);
-        assert_eq!(work.frames[1].kind, WhnfFrameKind::DemandThenInspect);
-        assert_eq!(work.frames[1].cursor, 4);
+        let RegionalWhnfContinuation::Generic(outer) = &work.frames[0] else {
+            panic!("expected a generic diagnostic frame")
+        };
+        let RegionalWhnfContinuation::Generic(inner) = &work.frames[1] else {
+            panic!("expected a generic demand frame")
+        };
+        assert_eq!(outer.kind, WhnfFrameKind::DiagnosticContext);
+        assert_eq!(inner.kind, WhnfFrameKind::DemandThenInspect);
+        assert_eq!(inner.cursor, 4);
         let RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(observed)) = request else {
             panic!("the synthetic suspension must retain its wait dependency")
         };
