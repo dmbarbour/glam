@@ -1,9 +1,9 @@
 //! Crate-private protocol for resumable evaluation to outer WHNF.
 //!
 //! W1A installs the state vocabulary and W1B adds its callback-free regional
-//! driver. Checkpoint projection arrives in W1C; production evaluator entry
-//! points remain on their existing path until their named migration
-//! checkpoints.
+//! driver. W1C projects and publishes durable checkpoints at real regional
+//! boundaries; production evaluator entry points remain on their existing
+//! path until their named migration checkpoints.
 
 #![allow(
     dead_code,
@@ -185,8 +185,59 @@ pub(crate) enum WhnfDependency {
 pub(crate) enum WhnfPoll {
     Ready(RuntimeValueRoot),
     Pending(WhnfDependency),
+    External(WhnfExternalBoundary),
     Yielded,
     Failed(RuntimeFailureRoot),
+}
+
+impl DurableWhnfState {
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
+        RegionalWhnfWork {
+            focus: access.clone_root(&self.focus),
+            frames: self
+                .frames
+                .iter()
+                .map(|frame| frame.project(access))
+                .collect(),
+        }
+    }
+
+    fn from_regional(access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) -> Self {
+        Self {
+            focus: access.values().root_runtime_value(work.focus),
+            frames: work
+                .frames
+                .into_iter()
+                .map(|frame| DurableWhnfFrame::root_regional(access, frame))
+                .collect(),
+        }
+    }
+}
+
+impl DurableWhnfFrame {
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfFrame {
+        RegionalWhnfFrame {
+            kind: self.kind,
+            cursor: self.cursor,
+            retained: self
+                .retained
+                .iter()
+                .map(|value| access.clone_root(value))
+                .collect(),
+        }
+    }
+
+    fn root_regional(access: &EvaluationValueAccess<'_>, frame: RegionalWhnfFrame) -> Self {
+        Self {
+            kind: frame.kind,
+            cursor: frame.cursor,
+            retained: frame
+                .retained
+                .into_iter()
+                .map(|value| access.values().root_runtime_value(value))
+                .collect(),
+        }
+    }
 }
 
 impl WhnfComputation {
@@ -197,6 +248,49 @@ impl WhnfComputation {
                 frames: Vec::new(),
             },
         }
+    }
+
+    /// Polls one bounded callback-free quantum beneath matching value access.
+    ///
+    /// The prior checkpoint remains installed while its regional projection
+    /// is driven and while a replacement is rooted. `publish_checkpoint`
+    /// installs the complete replacement before retiring the old roots.
+    /// Returned boundary dispositions contain no active access and are
+    /// interpreted by the outer owner only after its access callback returns.
+    pub(crate) fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        budget: &mut WhnfStepBudget,
+        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+    ) -> WhnfPoll {
+        let work = self.checkpoint.project(access);
+        match drive_regional(access, work, budget, reduce) {
+            RegionalWhnfDrive::Ready(value) => {
+                WhnfPoll::Ready(access.values().root_runtime_value(value))
+            }
+            RegionalWhnfDrive::Boundary { work, request } => {
+                self.publish_checkpoint(access, work);
+                match request {
+                    RegionalBoundaryRequest::Dependency(dependency) => {
+                        WhnfPoll::Pending(dependency)
+                    }
+                    RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+                }
+            }
+            RegionalWhnfDrive::Yielded(work) => {
+                self.publish_checkpoint(access, work);
+                WhnfPoll::Yielded
+            }
+            RegionalWhnfDrive::Failed(failure) => {
+                WhnfPoll::Failed(access.values().root_runtime_failure(failure))
+            }
+        }
+    }
+
+    fn publish_checkpoint(&mut self, access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) {
+        let replacement = DurableWhnfState::from_regional(access, work);
+        let prior = std::mem::replace(&mut self.checkpoint, replacement);
+        drop(prior);
     }
 }
 
@@ -330,3 +424,7 @@ mod tests {
 #[cfg(test)]
 #[path = "whnf/tests/w1b.rs"]
 mod w1b_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w1c.rs"]
+mod w1c_tests;

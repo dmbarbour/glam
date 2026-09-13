@@ -1,6 +1,6 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W1A complete by 2026-09-12; W1B complete on 2026-09-13; W1C-W8 planned. This is the focused implementation plan selected by
+Status: W0-W1C complete by 2026-09-13; W2-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Production trampoline cutover has not begun; W1A installs only its
@@ -624,10 +624,25 @@ parallel tests using the shared fixture heap.
 
 #### W1C — Regional-to-durable checkpoint publication
 
+Status: complete on 2026-09-13 after partitioning into W1C.1-W1C.2.
+
+##### W1C.1 — Projection and atomic replacement
+
+Status: complete on 2026-09-13.
+
 Implement the access-scoped projection and replacement protocol. Add probes
 which verify root construction precedes access closure and every scheduler or
-callback action follows it. Exercise cancellation and panic/unwind with a
-nonempty prior checkpoint.
+callback action follows it. Keep the prior durable checkpoint installed until
+the complete replacement has been rooted, then install the replacement before
+retiring the prior roots. Publish ready values and failures beneath the same
+access region; return dependency, external-boundary, and yield dispositions
+for interpretation only after access closes.
+
+##### W1C.2 — Lifecycle and collection verification
+
+Status: complete on 2026-09-13.
+
+Exercise cancellation and panic/unwind with a nonempty prior checkpoint.
 
 Under `aggressive-gc-verification`, collect between two polls and prove that
 every live checkpoint value survives while superseded state becomes
@@ -635,6 +650,25 @@ collectible after retirement.
 
 Exit: a scheduler-independent WHNF submachine can delegate, yield, suspend,
 resume, complete, and fail without Rust-stack continuation state.
+
+Completion record: `WhnfComputation::poll_in` projects a durable checkpoint
+to regional work only beneath matching `EvaluationValueAccess`, drives one
+bounded callback-free quantum, and roots every replacement, successful result,
+or structured failure before that access closes. Dependency and external
+boundaries remain explicit poll dispositions for the future owner to interpret
+afterward. Checkpoint publication constructs the entire replacement while the
+prior roots remain installed, atomically replaces the durable state, and only
+then retires the prior roots.
+
+The W1C fixtures force external suspension and exact resumption, permanent
+failure with rooted context values, panic/unwind after mutating a regional
+projection, and cancellation by dropping a suspended computation. Under
+`aggressive-gc-verification`, an explicit collection between polls proves that
+the installed focus, frames, and retained managed values survive while the
+superseded checkpoint is reclaimed. The evaluator and value-access source
+inventories record the three production publication sites and keep fixture
+construction distinct. Production evaluator cutover remains intentionally
+deferred to W2 and later phases.
 
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 

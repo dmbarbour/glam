@@ -64,7 +64,7 @@ not define language semantics or collect subsystem invariants.
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `evaluation/whnf.rs` | Narrow translation from semantic WHNF dependencies to coordinator work dependencies |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs` | Value forcing and semantic execution |
-| `eval/whnf.rs`, `eval/whnf/tests/` | Additive crate-private regional/durable WHNF submachine protocol, bounded callback-free regional driver, and scheduler-independent protocol fixtures; production reduction remains on existing entry points until the named migration checkpoints |
+| `eval/whnf.rs`, `eval/whnf/tests/` | Additive crate-private regional/durable WHNF submachine protocol, bounded callback-free regional driver, atomic rooted checkpoint publication, and scheduler-independent lifecycle/collection fixtures; production reduction remains on existing entry points until the named migration checkpoints |
 | `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
 | `eval/builtins/` | Builtin implementations by semantic family; I3B's scoped dispatcher keeps ordinary pure work on `EvaluatorStepContext` and source-latches durable effect, strategy, net, provenance, and reflection handoffs |
 | `eval/builtins/net/construction.rs` | Source interaction-net construction search |

@@ -268,6 +268,19 @@ impl crate::core::RuntimeValueAccess<'_> {
     pub(crate) fn root_runtime_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new_from_access(self.values().runtime_value_observer(), self, value)
     }
+
+    /// Publishes one structured evaluation failure while this admitted region
+    /// still protects every direct semantic value carried by it.
+    pub(crate) fn root_runtime_failure(
+        &self,
+        failure: Arc<EvaluationFailure>,
+    ) -> RuntimeFailureRoot {
+        RuntimeFailureRoot(Arc::new(RuntimeFailureRootInner {
+            values: self.values().runtime_value_observer(),
+            value_roots: RuntimeFailureRoot::root_direct_values(self, &failure),
+            failure,
+        }))
+    }
 }
 
 impl PartialEq for RuntimeValueRoot {
@@ -316,13 +329,7 @@ struct RuntimeFailureRootInner {
 
 impl RuntimeFailureRoot {
     pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
-        let value_roots =
-            values.with_runtime_value_access(|access| Self::root_direct_values(&access, &failure));
-        Self(Arc::new(RuntimeFailureRootInner {
-            values: values.runtime_value_observer(),
-            failure,
-            value_roots,
-        }))
+        values.with_runtime_value_access(|access| access.root_runtime_failure(failure))
     }
 
     pub(crate) fn from_observer(

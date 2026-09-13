@@ -127,6 +127,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "I5 managed recursive identities; GCI11R-002D.2b.2 access-qualified promise publication"
     ),
     entry!(
+        "src/eval/whnf.rs",
+        0,
+        0,
+        3,
+        "access-scoped WHNF checkpoint focus/frame publication and terminal result rooting",
+        "W1C regional-to-durable checkpoint publication"
+    ),
+    entry!(
         "src/evaluation/access.rs",
         0,
         2,
@@ -373,6 +381,9 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
+                | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
+                | "src/eval/whnf.rs::impl DurableWhnfState::from_regional"
+                | "src/eval/whnf.rs::impl WhnfComputation::poll_in"
                 | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
                 | "src/evaluation/pump.rs::poison_lazy_cycle"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
@@ -613,6 +624,11 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional#1|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl DurableWhnfState::from_regional#1|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl WhnfComputation::poll_in#1|surface=access-publication|scope=production",
+    "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",
+    "src/eval/whnf/tests/w1c.rs::root#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
     "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=production",
