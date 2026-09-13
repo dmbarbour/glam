@@ -1,10 +1,11 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W1C complete by 2026-09-13; W2-W8 planned. This is the focused implementation plan selected by
+Status: W0-W2 complete by 2026-09-13; W3-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-Production trampoline cutover has not begun; W1A installs only its
-crate-private protocol vocabulary and evaluation-boundary adapter.
+Client demand and promise following now own the crate-private resumable
+protocol; lazy-source production and deeper evaluator callers remain on the
+legacy recursive path until W3 and later checkpoints.
 
 ## Purpose
 
@@ -845,6 +846,35 @@ admission ledgers classify the added test boundary explicitly.
 
 Mandatory post-W2 review: audit correctness and later-phase drift before
 converting lazy-source production.
+
+#### Post-W2 review — 2026-09-13
+
+Status: complete.
+
+The two production owners selected for W2 each retain exactly one
+`WhnfComputation`: client demand owns the request from admission through
+terminal publication, and `PromiseFollower` owns the canonical promise
+projection used by the remaining deferred-task adapter. Both use the same
+post-region driver. Dependency subscription, producer admission, task
+self-observation policy, and client result publication remain in their outer
+owners; no callback or coordinator operation moved beneath managed access.
+
+The review found one stale negative source latch from W1A: it still prohibited
+`WhnfComputation` in the two files deliberately cut over by W2. The test was
+first observed failing, then changed to require those named owners while
+continuing to reject premature reflection ownership. Broad module-level
+dead-code allowances also carried obsolete “production inactive” rationale;
+they are now limited to the frame and boundary variants deliberately staged
+for W3-W4.
+
+The actual `LazyTaskMachine` remains aligned with W3: ordinary `Produce` and
+`Follow` work still use the recursive source path, while `HostCall` and
+`NetConstruction` remain explicit outer modes. W3B and W3C each cover several
+independent source families and should receive a checkpoint partitioning pass
+immediately before implementation, once W3A reveals the concrete source
+machine handoff. W4-W8 require no semantic revision from the W2 cutover.
+
+No new semantic decision or blocker was discovered.
 
 ### Phase W3 — Lazy Producers and Source Progress
 

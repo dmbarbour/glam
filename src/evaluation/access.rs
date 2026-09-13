@@ -119,6 +119,7 @@ impl<'scope> EvaluationValueAccess<'scope> {
         promise.access(&self.values)
     }
 
+    #[cfg(test)]
     pub(crate) fn promise_root<'access>(
         &'access self,
         promise: &'access ManagedPromiseRoot,

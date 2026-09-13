@@ -1,12 +1,7 @@
 //! Scheduler-boundary adapters for resumable WHNF evaluation.
 //!
-//! Semantic progress remains in `eval::whnf`. This module is the only W1A
-//! layer which knows both its dependency vocabulary and coordinator work.
-
-#![allow(
-    dead_code,
-    reason = "W1A installs dependency translation before a production WHNF owner is cut over"
-)]
+//! Semantic progress remains in `eval::whnf`. This module is the only layer
+//! which knows both its dependency vocabulary and coordinator work.
 
 use super::{EvalContext, EvaluationPollContext, WorkDependency};
 use crate::core::EvaluationFailure;

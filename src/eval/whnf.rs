@@ -2,13 +2,8 @@
 //!
 //! W1A installs the state vocabulary and W1B adds its callback-free regional
 //! driver. W1C projects and publishes durable checkpoints at real regional
-//! boundaries; production evaluator entry points remain on their existing
-//! path until their named migration checkpoints.
-
-#![allow(
-    dead_code,
-    reason = "the additive WHNF protocol remains production-inactive until its named W2+ cutovers"
-)]
+//! boundaries. W2 uses that protocol for client demand and promise following;
+//! later checkpoints extend it through lazy sources and caller frames.
 
 use std::sync::Arc;
 
@@ -61,6 +56,10 @@ pub(crate) struct RegionalWhnfFrame {
 }
 
 /// Shared resumption shapes selected by the W0 census.
+#[allow(
+    dead_code,
+    reason = "W0 selected the complete frame vocabulary; W3-W6 construct the deeper frame families"
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WhnfFrameKind {
     DemandThenInspect,
@@ -77,6 +76,10 @@ pub(crate) enum WhnfFrameKind {
 /// `Delegate` replaces the current focus without pushing a frame. `Boundary`
 /// carries only a durable request; its interpretation belongs to the outer
 /// evaluation driver after regional access closes.
+#[allow(
+    dead_code,
+    reason = "W2 needs delegation and terminal steps; W3+ adds explicit continuation frames"
+)]
 pub(crate) enum RegionalWhnfStep {
     Delegate(Value),
     Continue(RegionalWhnfWork),
@@ -155,6 +158,10 @@ pub(crate) fn drive_regional<'scope>(
 }
 
 /// A regional result which requires orchestration outside managed access.
+#[allow(
+    dead_code,
+    reason = "W2 implements deferred shells; W3-W4 construct direct dependencies and external boundaries"
+)]
 pub(crate) enum RegionalBoundaryRequest {
     Dependency(WhnfDependency),
     Deferred(WhnfDeferredRequest),
@@ -174,6 +181,7 @@ pub(crate) enum WhnfDeferredRequest {
 /// External boundary family. Later checkpoints add the source-specific
 /// durable payload only when a production boundary is migrated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code, reason = "external source families are staged for W4")]
 pub(crate) enum WhnfExternalBoundary {
     Reflection,
     Host,
@@ -186,6 +194,10 @@ pub(crate) enum WhnfExternalBoundary {
 /// broader `WorkDependency` vocabulary. The evaluation boundary owns that
 /// translation.
 #[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "W2 consumes translated dependencies; W3+ constructs them inside the semantic machine"
+)]
 pub(crate) enum WhnfDependency {
     Wait(CoreWaitToken),
     Promise(ManagedPromiseRoot),
@@ -269,7 +281,7 @@ impl WhnfComputation {
         promise: &ManagedPromiseRoot,
     ) -> Self {
         let focus = values.construct_runtime_value_root(|access| {
-            Value::Promised(PromisedValue::from_root(promise, &access))
+            Value::Promised(PromisedValue::from_root(promise, access))
         });
         Self::from_root(focus)
     }
@@ -435,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn whnf_protocol_remains_private_and_outside_semantic_values() {
+    fn whnf_protocol_remains_private_and_has_only_named_production_owners() {
         let source = include_str!("whnf.rs");
         for declaration in [
             "pub(crate) struct WhnfComputation",
@@ -458,18 +470,22 @@ mod tests {
             !core.contains("WhnfComputation"),
             "WHNF progress must not become a Value or LazySource variant"
         );
-        for entry in [
-            "src/eval/value.rs",
-            "src/evaluation/coordinator/client_demand.rs",
-            "src/reflection/machine.rs",
-        ] {
-            let source = fs::read_to_string(manifest.join(entry))
-                .expect("production entry source should be readable");
-            assert!(
-                !source.contains("WhnfComputation"),
-                "W1A must not cut over production entry point {entry}"
-            );
-        }
+        let deferred = fs::read_to_string(manifest.join("src/eval/value.rs"))
+            .expect("deferred evaluator source should be readable");
+        assert!(deferred.contains("computation: super::whnf::WhnfComputation"));
+        let client =
+            fs::read_to_string(manifest.join("src/evaluation/coordinator/client_demand.rs"))
+                .expect("client-demand source should be readable");
+        assert!(
+            client.contains("ClientDemandOperation(pub(in crate::evaluation) WhnfComputation)")
+        );
+
+        let reflection = fs::read_to_string(manifest.join("src/reflection/machine.rs"))
+            .expect("reflection machine source should be readable");
+        assert!(
+            !reflection.contains("WhnfComputation"),
+            "reflection cutover remains staged for W5"
+        );
     }
 
     #[test]
