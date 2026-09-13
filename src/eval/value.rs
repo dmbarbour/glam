@@ -185,7 +185,7 @@ pub(crate) fn eval_value_in(
 
 enum LazyTaskWork {
     Produce,
-    Follow(crate::runtime::RuntimeValueRoot),
+    Whnf(super::whnf::WhnfComputation),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
@@ -220,22 +220,15 @@ impl LazyTaskMachine {
         }
     }
 
-    fn finish_poll(
+    fn follow_value(
         &mut self,
         context: &EvaluatorStepContext<'_>,
-        result: Result<Value, EvaluationHalt>,
+        value: Value,
     ) -> EvaluationMachinePoll {
-        match result {
-            Ok(value)
-                if context
-                    .with_value_access(|access| is_deferred_value(access.values(), &value)) =>
-            {
-                self.work = LazyTaskWork::Follow(context.root_value(value));
-                EvaluationMachinePoll::Yielded
-            }
-            Ok(value) => self.complete(context, value),
-            Err(error) => self.fail(context, error),
-        }
+        self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_root(
+            context.root_value(value),
+        ));
+        EvaluationMachinePoll::Yielded
     }
 }
 
@@ -264,7 +257,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
                 Ok(value) => {
                     let value = context.project_root(&value);
-                    self.finish_poll(context, Ok(value))
+                    self.follow_value(context, value)
                 }
                 Err(failure) => self.fail(context, EvaluationHalt::failure(failure)),
             });
@@ -302,8 +295,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     self.work = LazyTaskWork::HostCall(producer);
                     return EvaluationMachinePoll::Yielded;
                 }
-                let result = produce_lazy_source_in(context, &self.lazy(context), &source);
-                return self.finish_poll(context, result);
+                self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
+                    self.lazy.clone(),
+                    durable_context.values().runtime_id(),
+                ));
+                return EvaluationMachinePoll::Yielded;
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
@@ -314,12 +310,48 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 };
             }
 
-            let LazyTaskWork::Follow(target) = &self.work else {
-                unreachable!("non-producing lazy work must follow a value or construct a net")
+            let source_pending = matches!(
+                &self.work,
+                LazyTaskWork::Whnf(computation) if computation.source_root().is_some()
+            );
+            if source_pending {
+                let source = context
+                    .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
+                let Some(source) = source else {
+                    return self.cached_poll(context);
+                };
+                return match produce_lazy_source_in(context, &self.lazy(context), &source) {
+                    Ok(value) => {
+                        let LazyTaskWork::Whnf(computation) = &mut self.work else {
+                            unreachable!("source work must retain its WHNF computation")
+                        };
+                        computation.install_source_result(context.root_value(value));
+                        EvaluationMachinePoll::Yielded
+                    }
+                    Err(error) => self.fail(context, error),
+                };
+            }
+
+            let LazyTaskWork::Whnf(computation) = &mut self.work else {
+                unreachable!("non-producing lazy work must demand a value or construct a net")
             };
-            let target = context.project_root(target);
-            let result = eval_value_in(context, &target);
-            self.finish_poll(context, result)
+            match poll_whnf_computation(computation, poll_context, &durable_context, step_budget) {
+                WhnfOwnerPoll::Ready(value) => self.complete(context, context.project_root(&value)),
+                WhnfOwnerPoll::Pending(dependency) => {
+                    EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        dependency: Some(dependency),
+                        observed_epoch: None,
+                        error: None,
+                    })
+                }
+                WhnfOwnerPoll::External(_) => {
+                    unreachable!("W4 external sources retain explicit lazy-task modes")
+                }
+                WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                WhnfOwnerPoll::Failed(failure) => {
+                    self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                }
+            }
         })
     }
 }
@@ -958,8 +990,8 @@ mod ownership_tests {
     ) {
         match work {
             LazyTaskWork::Produce => {}
-            LazyTaskWork::Follow(value) => {
-                let _: &crate::runtime::RuntimeValueRoot = value;
+            LazyTaskWork::Whnf(computation) => {
+                let _: &crate::eval::whnf::WhnfComputation = computation;
             }
             LazyTaskWork::HostCall(producer) => {
                 let _: &Arc<crate::core::HostCallProducer> = producer;

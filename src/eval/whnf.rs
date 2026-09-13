@@ -22,7 +22,20 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 /// An outer owner moves one computation between polls and remains solely
 /// responsible for the eventual result destination.
 pub(crate) struct WhnfComputation {
-    checkpoint: DurableWhnfState,
+    checkpoint: DurableWhnfCheckpoint,
+}
+
+/// Durable entry mode for one WHNF request.
+///
+/// A lazy producer begins with the exact lazy identity whose source it owns.
+/// Once that source has produced a value, the same computation installs the
+/// ordinary rooted demand checkpoint and never reconstructs the source result.
+enum DurableWhnfCheckpoint {
+    Source {
+        lazy: ManagedLazyRoot,
+        runtime: crate::runtime::EvaluationRuntimeId,
+    },
+    Demand(DurableWhnfState),
 }
 
 /// Machine-safe state retained whenever regional managed access is closed.
@@ -276,12 +289,44 @@ impl DurableWhnfFrame {
 impl WhnfComputation {
     pub(crate) fn from_root(focus: RuntimeValueRoot) -> Self {
         Self {
-            checkpoint: DurableWhnfState {
+            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
                 focus,
                 frames: Vec::new(),
                 followed: BTreeSet::new(),
-            },
+            }),
         }
+    }
+
+    pub(crate) fn from_lazy_source(
+        lazy: ManagedLazyRoot,
+        runtime: crate::runtime::EvaluationRuntimeId,
+    ) -> Self {
+        Self {
+            checkpoint: DurableWhnfCheckpoint::Source { lazy, runtime },
+        }
+    }
+
+    pub(crate) fn source_root(&self) -> Option<&ManagedLazyRoot> {
+        let DurableWhnfCheckpoint::Source { lazy, .. } = &self.checkpoint else {
+            return None;
+        };
+        Some(lazy)
+    }
+
+    pub(crate) fn install_source_result(&mut self, focus: RuntimeValueRoot) {
+        let DurableWhnfCheckpoint::Source { runtime, .. } = &self.checkpoint else {
+            panic!("a lazy source result may be installed only once")
+        };
+        assert_eq!(
+            *runtime,
+            focus.runtime_id(),
+            "a lazy source result must belong to its producer runtime"
+        );
+        self.checkpoint = DurableWhnfCheckpoint::Demand(DurableWhnfState {
+            focus,
+            frames: Vec::new(),
+            followed: BTreeSet::new(),
+        });
     }
 
     pub(crate) fn from_promise_root(
@@ -295,7 +340,10 @@ impl WhnfComputation {
     }
 
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
-        self.checkpoint.focus.runtime_id()
+        match &self.checkpoint {
+            DurableWhnfCheckpoint::Source { runtime, .. } => *runtime,
+            DurableWhnfCheckpoint::Demand(checkpoint) => checkpoint.focus.runtime_id(),
+        }
     }
 
     /// Polls one bounded callback-free quantum beneath matching value access.
@@ -311,7 +359,10 @@ impl WhnfComputation {
         budget: &mut WhnfStepBudget,
         reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
     ) -> WhnfPoll {
-        let work = self.checkpoint.project(access);
+        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
+            panic!("a lazy source must install its result before WHNF demand")
+        };
+        let work = checkpoint.project(access);
         match drive_regional(access, work, budget, reduce) {
             RegionalWhnfDrive::Ready(value) => {
                 WhnfPoll::Ready(access.values().root_runtime_value(value))
@@ -338,7 +389,10 @@ impl WhnfComputation {
 
     fn publish_checkpoint(&mut self, access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) {
         let replacement = DurableWhnfState::from_regional(access, work);
-        let prior = std::mem::replace(&mut self.checkpoint, replacement);
+        let prior = std::mem::replace(
+            &mut self.checkpoint,
+            DurableWhnfCheckpoint::Demand(replacement),
+        );
         drop(prior);
     }
 

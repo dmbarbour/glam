@@ -1115,7 +1115,16 @@ driver into the WHNF machine.
 
 ##### W3A.1 — Source-entry ownership and lazy-task cutover
 
-Status: pending.
+Status: complete on 2026-09-13.
+
+`WhnfComputation` now has an explicit durable source-entry checkpoint in
+addition to its rooted value-demand checkpoint. `LazyTaskMachine` classifies
+the two W4 outer modes first, then transfers every ordinary source and its
+exact lazy owner into that checkpoint. A successful source result is rooted
+and installed into the same computation before another poll can demand it;
+the specialized `Follow(RuntimeValueRoot)` mode and its direct recursive
+`eval_value_in` loop are gone. Runtime provenance is retained explicitly by
+the source-entry checkpoint and checked at the one-way source-result handoff.
 
 ##### W3A.2 — Lazy cache and delegation verification
 
