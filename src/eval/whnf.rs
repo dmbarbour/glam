@@ -336,9 +336,13 @@ fn reduce_semantic_shell(
                 WhnfDeferredRequest::Lazy(lazy.root_in(access.values())),
             )),
         },
-        Value::Promised(promise) => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
-            WhnfDeferredRequest::Promise(promise.root_in(access.values())),
-        )),
+        Value::Promised(promise) => match access.promise(promise).assignment() {
+            Some(Ok(value)) => RegionalWhnfStep::Delegate(value),
+            Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
+            None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Promise(promise.root_in(access.values())),
+            )),
+        },
         _ => RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus)),
     }
 }
@@ -481,3 +485,7 @@ mod w1c_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w2a.rs"]
 mod w2a_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w2b.rs"]
+mod w2b_tests;

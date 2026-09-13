@@ -709,10 +709,19 @@ reconstruct a replacement `LazyValue` owner.
 
 ##### W2B.1 — Promise shell inspection
 
+Status: complete on 2026-09-13.
+
 Add callback-free assigned-success, assigned-failure, and unassigned-promise
 transitions. An unassigned promise leaves regional access as its exact
 `ManagedPromiseRoot`; producer provenance and self-observation remain outer
 owner policy.
+
+Completion record: the regional reducer now reads a promise assignment once
+under access. Success delegates directly to the assigned value, failure keeps
+the original structured failure, and an unassigned promise leaves as its exact
+managed root without constructing `PromiseFollower` work. Focused tests prove
+all three paths, including assignment after suspension and exact-identity
+resumption with zero deferred-task admission.
 
 ##### W2B.2 — Promise-follower ownership
 
