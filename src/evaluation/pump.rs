@@ -12,7 +12,7 @@ use super::coordinator::{
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
-    EvaluationUnfinishedTask, client_demand_halt_poll,
+    EvaluationUnfinishedTask,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
 use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
@@ -23,14 +23,23 @@ impl ClientDemandOperation {
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvalContext,
+        step_budget: usize,
     ) -> coordinator::ClientDemandPoll {
-        poll_context.evaluate(context, |evaluator| {
-            let value = evaluator.project_root(&self.0);
-            match crate::eval::eval_value_in(evaluator, &value) {
-                Ok(value) => coordinator::ClientDemandPoll::Complete(evaluator.root_value(value)),
-                Err(halt) => client_demand_halt_poll(evaluator, halt),
+        match super::whnf::poll_computation(&mut self.0, poll_context, context, step_budget) {
+            super::whnf::WhnfOwnerPoll::Ready(value) => {
+                coordinator::ClientDemandPoll::Complete(value)
             }
-        })
+            super::whnf::WhnfOwnerPoll::Pending(dependency) => {
+                coordinator::ClientDemandPoll::Blocked(dependency)
+            }
+            super::whnf::WhnfOwnerPoll::Yielded => coordinator::ClientDemandPoll::Yielded,
+            super::whnf::WhnfOwnerPoll::Failed(failure) => {
+                coordinator::ClientDemandPoll::Failed(failure)
+            }
+            super::whnf::WhnfOwnerPoll::External(boundary) => {
+                unreachable!("W2 semantic shell produced an external {boundary:?} boundary")
+            }
+        }
     }
 }
 
@@ -642,7 +651,7 @@ impl EvaluationWorkCoordinator {
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
         let context = EvaluationPollContext::for_claim(&claimed.demand);
-        let poll = claimed.poll(&context);
+        let poll = claimed.poll(&context, TASK_POLL_QUANTUM);
         self.release_client_demand(claimed, poll);
     }
 

@@ -630,10 +630,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // Filled from W0B's deliberately failing initial AST scan. The per-signal
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
-const EXPECTED_OCCURRENCES: usize = 305;
-const EXPECTED_FINGERPRINT: u64 = 13_812_119_740_430_377_017;
+const EXPECTED_OCCURRENCES: usize = 303;
+const EXPECTED_FINGERPRINT: u64 = 17_057_907_937_679_198_270;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 107),
+    (Signal::EvalValue, 106),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 20),
@@ -642,7 +642,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionEvaluate, 17),
     (Signal::RetryableWait, 11),
     (Signal::UnassignedPromise, 2),
-    (Signal::DependencyTranslation, 3),
+    (Signal::DependencyTranslation, 2),
     (Signal::CoordinatorBoundary, 17),
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 22),
@@ -652,14 +652,14 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 157),
+    (WorkShape::DemandThenInspect, 156),
     (WorkShape::OrderedOperands, 4),
     (WorkShape::CollectionWalk, 45),
     (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 23),
     (WorkShape::AccessPath, 12),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 50),
+    (WorkShape::OrchestrationHandoff, 49),
 ];
 
 #[test]

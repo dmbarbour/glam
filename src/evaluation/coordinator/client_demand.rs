@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(test)]
 use crate::core::EvaluationFailure;
+use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
@@ -16,12 +17,11 @@ use super::{
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
-#[derive(Debug)]
-pub(crate) struct ClientDemandOperation(pub(in crate::evaluation) RuntimeValueRoot);
+pub(crate) struct ClientDemandOperation(pub(in crate::evaluation) WhnfComputation);
 
 impl ClientDemandOperation {
     pub(crate) fn new(value: RuntimeValueRoot) -> Self {
-        Self(value)
+        Self(WhnfComputation::from_root(value))
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
@@ -252,6 +252,7 @@ pub(crate) enum ClientDemandPoll {
     Complete(RuntimeValueRoot),
     Failed(RuntimeFailureRoot),
     Blocked(WorkDependency),
+    Yielded,
 }
 
 pub(crate) enum ClientDemandSnapshot {
@@ -471,6 +472,20 @@ impl EvaluationWorkCoordinator {
                         claimed.prior_subscription.take(),
                         ClientDemandResult::Failed(failure),
                     )),
+                    ClientDemandPoll::Yielded => {
+                        obsolete_subscription = claimed.prior_subscription.take();
+                        let record = state
+                            .work
+                            .get_mut(&claimed.id)
+                            .expect("yielded client demand must remain registered");
+                        let client = client_demand_work_mut(record);
+                        assert!(client.operation.is_none());
+                        client.operation = claimed.operation.take();
+                        client.subscription = None;
+                        record.state = WorkState::Queued;
+                        queue_client_demand(&mut state, claimed.id);
+                        None
+                    }
                     ClientDemandPoll::Blocked(dependency)
                         if dependency.runtime_id() != self.runtime =>
                     {

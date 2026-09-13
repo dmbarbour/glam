@@ -128,7 +128,7 @@ fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &Cli
         ClientDemandPoll::Failed(failure) => {
             let _: &RuntimeFailureRoot = failure;
         }
-        ClientDemandPoll::Blocked(_) => {}
+        ClientDemandPoll::Blocked(_) | ClientDemandPoll::Yielded => {}
     }
     match result {
         ClientDemandResult::Complete(value) => {
@@ -413,11 +413,9 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let promise = PromisedValue::new(context.values(), "client input");
+    let root = RuntimeValueRoot::new(context.values(), Value::Promised(promise.clone()));
     let handle = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            Value::Promised(promise.clone()),
-        ))
+        .demand_whnf(root)
         .expect("promise demand should be admitted");
 
     assert!(poll_one_runtime_work(&coordinator));
@@ -426,6 +424,18 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
 
     let expected = Value::Number(7.into());
     set_promise(&context, &promise, expected.clone()).expect("host promise should resolve once");
+    assert_eq!(promise.exact_subscription_count(context.values()), 0);
+    let mut claimed = coordinator
+        .claim_client_demand(handle.work())
+        .expect("assigned promise demand should be ready");
+    let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
+    let poll = claimed.poll(&poll_context, 1);
+    assert!(matches!(poll, ClientDemandPoll::Yielded));
+    coordinator.release_client_demand(claimed, poll);
+    assert!(matches!(
+        coordinator.client_demand_snapshot(handle.work()),
+        Some(ClientDemandSnapshot::Queued)
+    ));
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
@@ -483,6 +493,10 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
 
     assert!(poll_one_runtime_work(&coordinator));
     assert!(owner_demand.poll().is_none());
+    assert_eq!(promise.exact_subscription_count(owner.values()), 0);
+    assert!(poll_one_runtime_work(&coordinator));
+    assert_eq!(promise.exact_subscription_count(owner.values()), 0);
+    assert!(poll_one_runtime_work(&coordinator));
     assert_eq!(promise.exact_subscription_count(owner.values()), 1);
 
     let observer_demand = observer

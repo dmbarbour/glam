@@ -751,6 +751,8 @@ the same WHNF submachine rather than restart assignment evaluation.
 
 ##### W2C.1 — Durable owner and budget yield
 
+Status: complete on 2026-09-13.
+
 Replace `ClientDemandOperation(RuntimeValueRoot)` with an operation owning one
 initialized `WhnfComputation`. Add an explicit yielded client-demand
 disposition and requeue it without dependency subscription. Blocked demand
@@ -758,6 +760,16 @@ retains both its exact subscription and unchanged computation checkpoint.
 
 Retirement publishes only terminal WHNF/failure and drops the computation
 outside coordinator locks.
+
+Completion record: `ClientDemandOperation` now owns one `WhnfComputation` and
+polls it through the post-region WHNF driver with the runtime task quantum.
+Budget exhaustion produces `ClientDemandPoll::Yielded`; release removes any
+obsolete exact subscription, restores the unchanged computation, and queues
+it without installing a new dependency. A forced one-step poll after promise
+assignment proves the formerly blocked demand yields, becomes queued with no
+subscription, then completes from the same checkpoint. The WHNF census and
+durable-owner ledger record removal of the old per-poll `eval_value_in` restart
+and `EvaluationHalt` dependency translation.
 
 #### W2D — Direct driver compatibility
 

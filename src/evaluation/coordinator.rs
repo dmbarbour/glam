@@ -478,7 +478,11 @@ impl Drop for SessionClosureWork {
 }
 
 impl ClaimedClientDemand {
-    pub(super) fn poll(&mut self, poll_context: &super::EvaluationPollContext) -> ClientDemandPoll {
+    pub(super) fn poll(
+        &mut self,
+        poll_context: &super::EvaluationPollContext,
+        step_budget: usize,
+    ) -> ClientDemandPoll {
         assert_eq!(
             self.operation
                 .as_ref()
@@ -492,7 +496,7 @@ impl ClaimedClientDemand {
             .operation
             .as_mut()
             .expect("claimed client demand must retain its operation");
-        operation.poll(poll_context, &context)
+        operation.poll(poll_context, &context, step_budget)
     }
 }
 
