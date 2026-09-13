@@ -1,6 +1,7 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W2 complete by 2026-09-13; W3-W8 planned. This is the focused implementation plan selected by
+Status: W0-W2 implementation complete by 2026-09-13; post-W2 full-suite
+verification is blocked on W2R-001 below; W3-W8 planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand and promise following now own the crate-private resumable
@@ -673,9 +674,10 @@ deferred to W2 and later phases.
 
 ### Phase W2 — Deferred Shell Demand and Client Ownership
 
-Status: complete on 2026-09-13. Implementation order was W2A.1, W2B.1,
-W2A.2, W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell inspection
-landed before either scheduler coordination or owner cutover.
+Status: implementation complete on 2026-09-13; full-suite verification is
+blocked on W2R-001 below. Implementation order was W2A.1, W2B.1, W2A.2,
+W2C.1, W2B.2, W2D, then W2E.1-W2E.2: semantic shell inspection landed
+before either scheduler coordination or owner cutover.
 
 #### W2A — Regional lazy inspection
 
@@ -849,7 +851,8 @@ converting lazy-source production.
 
 #### Post-W2 review — 2026-09-13
 
-Status: complete.
+Status: implementation audit complete; full-suite verification exposed
+W2R-001 after the focused checks passed.
 
 The two production owners selected for W2 each retain exactly one
 `WhnfComputation`: client demand owns the request from admission through
@@ -874,7 +877,23 @@ independent source families and should receive a checkpoint partitioning pass
 immediately before implementation, once W3A reveals the concrete source
 machine handoff. W4-W8 require no semantic revision from the W2 cutover.
 
-No new semantic decision or blocker was discovered.
+W2R-001: `CoreValueFactory::cached` deliberately runs an arbitrary closed
+cache-family builder beneath one outer `RuntimeValueAccess`. This protected
+unrooted intermediate managed edges during construction, but compiler cache
+builders also call `evaluate_closed`, which now reaches client demand and its
+post-region scheduler orchestration. The W2 boundary assertion correctly
+observes that the nested WHNF region has closed while the enclosing cache
+mutator remains active. Removing the assertion would permit coordinator work
+and callbacks beneath managed access, contrary to the I3 and W2 boundary.
+
+Resolution requires an ownership decision before W3. The likely direction is
+to split callback-free cache construction from orchestrated cache building,
+then make the compiler and diagnostic cache builders retain every managed
+intermediate explicitly while evaluation runs outside access. A blanket
+removal of the outer cache region is unsafe until those intermediate raw
+`Value`/resolved-expression edges have been inventoried. A special permission
+to retain one mutator across cache evaluation is smaller but would preserve
+the callback and future collector-starvation defect.
 
 ### Phase W3 — Lazy Producers and Source Progress
 
