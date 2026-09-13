@@ -1831,13 +1831,173 @@ before beginning reflection-machine integration.
 
 See
 [`ResumableWhnfW4_2026-09-13.md`](../reviews/ResumableWhnfW4_2026-09-13.md).
-The review found no blocking defect or unresolved semantic decision. W5 still
-owns reflection-effect-machine integration; W4 moved only the lazy reflection
+The review initially found no blocking correctness defect or unresolved
+semantic decision. Subsequent whole-program timing exposed the blocking
+performance defect assigned to W4E below. W5 still owns
+reflection-effect-machine integration; W4 moved only the lazy reflection
 source boundary. W6 retains the sole production source compatibility family
 and the temporary per-session admission policy. W7-W8 remain correctly
-ordered after those migrations.
+ordered after those migrations, subject to the W4E reconciliation gate.
+
+#### W4E — Direct-assembly net-WHNF performance remediation
+
+**Priority:** blocking before W5.
+
+**Status:** pending.
+
+The source-shaped duplicate-symbol executable fixture completed in about 8.1
+to 8.5 seconds at every sampled revision from the pre-W0 baseline through
+`7fed99e`. Its immediate successor, `e496248` (W4C.1c and W3B.3), did not
+complete within 45 seconds; the completed W3 revision did not complete within
+75 seconds, and current head did not complete within the isolated limits used
+during investigation. The four affected executable fixtures remained
+CPU-bound together after more than twelve minutes.
+
+The first-bad transition moves function-call normalization from the direct
+evaluator path into ordinary scheduled `NetWhnfMachine` dependencies. Initial
+instrumentation showed continued growth in function-call owners, net
+reductions, and driver work after the old path had already terminated. It also
+exposed two potentially superlinear scheduler paths:
+
+- `prioritized_task_for` walks the complete producer/dependency chain and
+  constructs a `Vec` and `HashSet` on each selection; and
+- `claim_ready_task` may call `session_has_running_machine` while scanning
+  ready candidates, and that query scans the session's complete work set.
+
+The observation is not yet sufficient to classify the defect as pure
+scheduler amplification, replayed semantic work, or both. In particular, the
+increased net-reduction count must not be dismissed as constant-factor
+scheduling overhead. W4E determines that distinction before selecting a
+repair.
+
+##### W4E.1 — Deterministic reproducer and measurement surface
+
+First reproduce the mismatch with a source-shaped in-process fixture which
+uses the same `direct_assembly.g` configuration and duplicate-symbol program
+as `direct_assembly_rejects_duplicate_symbol_publication`. Do not replace it
+with a small synthetic net unless that net independently exhibits the same
+growth signature. Add zero-publication, one-publication, and duplicate-
+publication prefixes so the last completed public assembly operation locates
+where growth begins.
+
+Add test-only, read-only counters at the authoritative owners for:
+
+- unique deferred producers and unique `FunctionCall` source selections;
+- lazy-task polls and their yielded, blocked, resumed, and terminal
+  dispositions;
+- calls to `prioritized_task_for`, dependency edges visited, and maximum chain
+  depth;
+- ready-queue candidates examined and session-work records visited by running
+  admission checks;
+- `NetDriver` work items, request-root restarts, and reductions by broad kind;
+- committed public direct-assembly operation dispatches in exact order; and
+- terminal lazy caches and the final duplicate-publication diagnostic.
+
+Counters must not use semantic values as identities, force lazy operands, or
+alter queue selection. Scope them to an explicit test probe or fixture-owned
+observer so ordinary and release builds pay nothing. Record stable producer,
+task, and net identities only where the runtime already exposes such an
+identity.
+
+Drive the fixture with a deterministic limit on scheduler polls and net work,
+not a wall-clock timeout. A scheduler-only limit is insufficient: the current
+driver may perform an unbounded amount of work before returning one poll.
+Enforce the net-work limit immediately after a normalization batch or semantic
+step has closed all managed scopes and claims, and report exhaustion through a
+test-only out-of-band probe result rather than a Glam evaluation failure. The
+probe must leave the runtime safely droppable and must not publish a terminal
+lazy cache for the interrupted computation.
+
+Before repairing the implementation, latch a test which reaches that limit
+and reports the counter snapshot plus the last committed public assembly
+operation. The limit should be comfortably above the work performed by the
+last-known-good revision while still failing in seconds under the regression.
+Preserve that failing snapshot in the checkpoint record, then change the
+assertion to the intended bounded completion result as part of the repair.
+
+Run the exact executable test serially against `7fed99e`, `e496248`, and
+current head with compilation excluded. Record wall time and CPU time as
+corroborating benchmark evidence only; elapsed time is not a correctness gate
+and repeated success is not evidence about scheduling order.
+
+Exit: one bounded fixture distinguishes at least these cases:
+
+1. a source or completed semantic prefix is selected more than once;
+2. logical function-call and net work remains comparable but scheduler visits
+   grow superlinearly; or
+3. new net work continues without advancing the public assembly-operation
+   prefix; or
+4. both semantic work and scheduler work grow.
+
+##### W4E.2 — Semantic replay repair
+
+If W4E.1 finds replay, identify the first duplicated stable identity or
+completed prefix and add the smallest forced-order fixture at that boundary.
+Repair ownership or resumption there. A `FunctionCall` source is selected
+once, stage attachment occurs once, one successful active-pair transition is
+not reconstructed as fresh work, and a completed lazy cache is never replaced
+by a new producer. Preserve the persistent `NetWhnfMachine` and exact blocked
+active-pair restoration guarantees; do not restore user-controlled recursion
+to the Rust stack as a performance workaround.
+
+If semantic counts remain bounded, mark this checkpoint not applicable with
+the W4E.1 evidence rather than manufacturing a semantic change.
+
+##### W4E.3 — Scheduler amplification repair
+
+Remove the measured superlinear selection behavior without weakening exact
+demand, cycle detection, or the temporary one-ordinary-machine-per-session
+rule by accident. Candidate changes include an authoritative O(1)
+per-session running-machine count and explicit propagation/indexing of the
+next claimable producer instead of rescanning a complete dependency chain.
+Choose from evidence; do not optimize both paths merely because both are
+visible in source.
+
+If the correct repair is to retire the temporary per-session admission rule,
+pull forward only the minimum W6 proof required first: nested same-session
+pure work must begin after the caller's managed region and net claim have
+closed, and the caller must remain a durable resumable owner. Record the
+resulting W6 scope reduction explicitly.
+
+Make `NetWhnfMachine` consume a declared portion of the task's step budget
+only if W4E.1 shows that its existing cooperative-yield boundary contributes
+materially. A temporary experiment batching 64 progress outcomes did not
+resolve the regression, so a larger quantum alone is not an accepted repair.
+
+##### W4E.4 — Verification and plan reconciliation
+
+The repaired source-shaped fixture must deterministically:
+
+- terminate within the latched poll and net-work budgets;
+- select each function-call source and publish each terminal cache once;
+- emit exactly one duplicate-symbol diagnostic with unchanged structured
+  context;
+- leave no claimed net call, normalization scope, or running task behind; and
+- keep dependency-edge and ready-candidate visits within the fixture's stated
+  linear or otherwise justified bound.
+
+Add a successful direct-assembly fixture to the same bounded harness so the
+repair cannot specialize failure. Exercise zero workers and one worker with
+forced scheduling barriers where ordering matters. Re-run the W3B.3 and W4C
+identity/restoration suites, followed by the four affected executable tests
+serially. Only after those pass, run the ordinary full suite.
+
+Run the normal Rust gates for the completed repair:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
+```
+
+Update W6's per-session-policy checkpoint, W7C's quantitative work
+verification, and W8A's compatibility retirement description with whichever
+responsibility W4E actually removes. Record a new dated review finding rather
+than silently rewriting the original W4 outcome.
 
 ### Phase W5 — Reflection Machine Integration
+
+**Entry gate:** W4E is complete and the bounded direct-assembly fixtures pass.
 
 #### W5A — WHNF submachine work state
 
@@ -2036,6 +2196,7 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 | effects | Existing `.alt`, `.cut`, transaction, exit, and task semantics unchanged. |
 | nets | Raw nets remain WHNF; cursor/net-construction worklists preserve identity and restoration. |
 | stack control | User-controlled semantic depth completes on a deliberately small stack. |
+| bounded whole-program work | Source-shaped direct assembly completes within deterministic scheduler/net budgets; semantic selections and terminal caches are not replayed. |
 | closure | Source-backed manifests show no unclassified recursive/suspendable WHNF entry. |
 
 ## Risks and Review Triggers
@@ -2057,6 +2218,9 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
   a general precedent.
 - If root registration scales with uninterrupted semantic depth, treat it as
   an architectural regression even if correctness tests pass.
+- If source-shaped work exceeds a deterministic scheduler or net-work budget,
+  classify replay versus scheduler amplification before increasing the budget
+  or relying on a later phase to hide the regression.
 - If stack closure would require converting unrelated balanced persistent
   data structures, record their actual depth bound rather than enlarging this
   plan without evidence.
@@ -2078,6 +2242,8 @@ This plan is complete only when:
 7. every current retryable `EvaluationHalt` caller has moved to the stateful
    protocol or has a documented bounded exception;
 8. deterministic suspension, cycle, callback, collection, and small-stack
-   verification passes; and
-9. a post-implementation review accounts for every deliberate or accidental
+   verification passes;
+9. source-shaped direct assembly has deterministic bounded-work evidence and
+   no replayed function-call source or terminal cache; and
+10. a post-implementation review accounts for every deliberate or accidental
    departure from this plan.

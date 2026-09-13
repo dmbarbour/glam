@@ -3,11 +3,12 @@
 Baseline: `3458421`, followed by the W4D inventory reconciliation in this
 review.
 
-Status: complete. Every external or pre-existing pollable lazy-source boundary
-now has one explicit owner. The review found no open correctness defect or
-semantic question which blocks W5. It did catch one invalid test fixture whose
-opaque host closure hid a managed value; the fixture now uses the production
-explicit-capture protocol.
+Status: implementation review complete, with a subsequently discovered
+performance blocker. Every external or pre-existing pollable lazy-source
+boundary now has one explicit owner. The initial review found no open
+correctness defect or semantic question, but later whole-program profiling
+isolated severe scheduler and/or semantic-work growth at the W4C.1c/W3B.3
+integration boundary. W5 is gated on W4E remediation in the parent plan.
 
 ## Scope
 
@@ -169,6 +170,28 @@ Saturated `LazySource::Builtin` remains the sole production computation in
 per-session scheduling containment are deliberately handled as one conversion
 in W6.
 
+### WHNFW4R-004 — Open: function-call scheduling causes unbounded or superlinear whole-program work
+
+**Severity:** high performance; possible correctness defect
+
+**Status:** assigned to W4E and blocking W5
+
+After this review closed, the exact duplicate-symbol executable fixture was
+benchmarked across the transition. It remained near 8.1 to 8.5 seconds through
+`7fed99e`, then exceeded 45 seconds at its immediate successor `e496248`; later
+revisions exceeded longer isolated limits. Instrumentation showed continued
+growth in function-call owners, net reductions, and driver work after the old
+path had terminated. Dependency-chain and per-session running-work scans are
+also potentially superlinear once function calls become ordinary scheduled
+dependencies.
+
+It is not yet established whether the increased net work represents replay,
+an infinite computation, a different but finite demand order, or a mixture
+with scheduler amplification. The parent plan's W4E checkpoint therefore
+requires a deterministic source-shaped work budget and identity/counter
+probe before choosing a repair. Wall-clock repetition is expressly not the
+verification mechanism.
+
 ## Verification
 
 Passed during W4 implementation and review:
@@ -198,6 +221,6 @@ collects between every new boundary in both modes.
 The required `cargo test -q` command was also run. Its library and intervening
 integration suites passed, but four pre-existing direct-assembly executable
 fixtures remained CPU-bound after 12 minutes 49 seconds and the run was
-terminated without a terminal result. This is the separate slow-fixture issue
-already tracked from W3, not substitute evidence for W4 correctness; no test
-had failed before the slow tail.
+terminated without a terminal result. Subsequent bisection established that
+this was not ordinary fixture cost: it begins at W4C.1c/W3B.3 and is now the
+open WHNFW4R-004 blocker. No test had failed before the slow tail.
