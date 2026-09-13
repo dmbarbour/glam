@@ -706,6 +706,29 @@ fn whnf_census_rejects_tail_and_nested_misclassification() {
 }
 
 #[test]
+fn synchronous_whnf_demand_uses_the_runtime_owned_client_submachine() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let session = fs::read_to_string(manifest.join("src/evaluation/session.rs"))
+        .expect("the evaluation session source should be readable");
+    let client = fs::read_to_string(manifest.join("src/evaluation/coordinator/client_demand.rs"))
+        .expect("the client-demand source should be readable");
+    let pump = fs::read_to_string(manifest.join("src/evaluation/pump.rs"))
+        .expect("the evaluation pump source should be readable");
+
+    assert!(session.contains("let handle = self\n            .demand_whnf(value)"));
+    assert!(client.contains(
+        "pub(crate) struct ClientDemandOperation(pub(in crate::evaluation) WhnfComputation);"
+    ));
+    assert!(pump.contains(
+        "super::whnf::poll_computation(&mut self.0, poll_context, context, step_budget)"
+    ));
+    assert!(
+        !pump.contains("crate::eval::eval_value_in"),
+        "the runtime-owned client operation must not restart recursive evaluation"
+    );
+}
+
+#[test]
 fn selected_whnf_work_vocabulary_is_compile_exhaustive() {
     let variants = [
         SelectedWorkVariant::Delegate,

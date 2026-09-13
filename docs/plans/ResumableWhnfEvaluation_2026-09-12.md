@@ -788,10 +788,20 @@ and `EvaluationHalt` dependency translation.
 
 ##### W2D.1 — One client/WHNF driver
 
+Status: complete on 2026-09-13.
+
 Make synchronous assembler/test demand drive the same client/WHNF path.
 Remove recursive cooperative pumping from the selected entry rather than
 building a second trampoline. A synchronous caller may wait for claimed work
 only through the existing mutator-free client-demand driver.
+
+Completion record: synchronous `evaluate_root_whnf` and builtin evaluation
+continue through `demand_whnf` and `drive_client_demand`, while the claimed
+client operation now advances only its retained `WhnfComputation`. The outer
+driver may iteratively claim producer work with no managed access held; the
+operation itself neither recursively pumps nor calls `eval_value_in`. A source
+latch ties those three layers together, and the existing synchronous,
+compiler, and generic-client fixtures exercise the shared path behaviorally.
 
 #### W2E — Deferred-demand verification
 
