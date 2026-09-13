@@ -1287,7 +1287,16 @@ contexts.
 
 ##### W3C.1 — Access-path progress
 
-Status: pending.
+Status: complete on 2026-09-13 for static path parts; dynamic part conversion
+is W3C.2.
+
+Static access sources now select a typed path checkpoint containing the exact
+key vector and next index. Each demanded dictionary advances one key and
+delegates its selected member through ordinary WHNF; a missing member remains
+`{}` and a non-dictionary retains the established structured failure. A
+forced intermediate promise fixture proves resumption from the retained path
+index. The compatibility access helper is now reachable only for `Index` or
+`PathIndex` parts.
 
 ##### W3C.2 — Recursive key and computed-path conversion
 

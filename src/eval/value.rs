@@ -5,6 +5,7 @@ use crate::core::{
     LazyValue, List, ListThunk, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
     RuntimeValueAccess, Value, keys,
 };
+use crate::core_net::CoreDataKey;
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
@@ -329,6 +330,29 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     } => LazyTaskWork::NetWhnf(Box::new(NetWhnfMachine::from_function_call(
                         context, &function, &arguments,
                     ))),
+                    LazySource::Access { path, arguments }
+                        if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
+                    {
+                        let keys = path
+                            .iter()
+                            .map(|part| match part {
+                                CoreDataKey::Key(key) => key.clone(),
+                                CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
+                            })
+                            .collect::<Vec<_>>();
+                        let base = arguments
+                            .first()
+                            .cloned()
+                            .expect("value access must retain its base value");
+                        let computation = context.with_value_access(|access| {
+                            super::whnf::WhnfComputation::from_static_access_checkpoint_in(
+                                &access,
+                                base,
+                                Arc::from(keys),
+                            )
+                        });
+                        LazyTaskWork::Whnf(computation)
+                    }
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
                         durable_context.values().runtime_id(),
@@ -664,7 +688,13 @@ fn produce_lazy_source_in(
             unreachable!("a host call must execute outside the evaluator step")
         }
         LazySource::ReflectionTask(task) => eval_reflection_task_source(context, task),
-        LazySource::Access { path, arguments } => resolve_core_access_in(context, arguments, path),
+        LazySource::Access { path, arguments } => {
+            debug_assert!(
+                path.iter().any(|part| !matches!(part, CoreDataKey::Key(_))),
+                "static access retains typed WHNF path work"
+            );
+            resolve_core_access_in(context, arguments, path)
+        }
         LazySource::Application(application) => apply_values_in(
             context,
             application.function().clone(),

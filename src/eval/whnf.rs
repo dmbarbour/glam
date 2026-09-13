@@ -73,6 +73,10 @@ enum DurableWhnfContinuation {
         ancestors: Vec<DurableUndefinedDictionary>,
         phase: UndefinedPhase,
     },
+    StaticAccess {
+        keys: Arc<[crate::core::Key]>,
+        next: usize,
+    },
 }
 
 struct DurableUndefinedDictionary {
@@ -113,6 +117,10 @@ enum RegionalWhnfContinuation {
         purpose: UndefinedPurpose,
         ancestors: Vec<RegionalUndefinedDictionary>,
         phase: UndefinedPhase,
+    },
+    StaticAccess {
+        keys: Arc<[crate::core::Key]>,
+        next: usize,
     },
 }
 
@@ -397,6 +405,10 @@ impl DurableWhnfContinuation {
                     .collect(),
                 phase: *phase,
             },
+            Self::StaticAccess { keys, next } => RegionalWhnfContinuation::StaticAccess {
+                keys: Arc::clone(keys),
+                next: *next,
+            },
         }
     }
 
@@ -448,6 +460,9 @@ impl DurableWhnfContinuation {
                     .collect(),
                 phase,
             },
+            RegionalWhnfContinuation::StaticAccess { keys, next } => {
+                Self::StaticAccess { keys, next }
+            }
         }
     }
 }
@@ -525,6 +540,24 @@ impl WhnfComputation {
                         .collect(),
                     next: 0,
                 }],
+                followed: BTreeSet::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn from_static_access_checkpoint_in(
+        access: &EvaluationValueAccess<'_>,
+        base: Value,
+        keys: Arc<[crate::core::Key]>,
+    ) -> Self {
+        let frames = (!keys.is_empty())
+            .then_some(DurableWhnfContinuation::StaticAccess { keys, next: 0 })
+            .into_iter()
+            .collect();
+        Self {
+            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
+                focus: access.values().root_runtime_value(base),
+                frames,
                 followed: BTreeSet::new(),
             }),
         }
@@ -666,6 +699,9 @@ fn resume_semantic_frame(
         Some(RegionalWhnfContinuation::DictionaryApplication { .. }) => {
             unreachable!("dictionary application must be evaluating an undefined candidate")
         }
+        Some(RegionalWhnfContinuation::StaticAccess { .. }) => {
+            return resume_static_access(access, work);
+        }
         Some(RegionalWhnfContinuation::Generic(_)) => {
             unreachable!("W3C has not activated the remaining generic frame families")
         }
@@ -685,6 +721,34 @@ fn resume_semantic_frame(
         DirectApplicationStep::Dictionary(dict) => begin_dictionary_application(access, work, dict),
         DirectApplicationStep::Failed(failure) => RegionalWhnfStep::Failed(failure),
     }
+}
+
+fn resume_static_access(
+    access: &EvaluationValueAccess<'_>,
+    work: &mut RegionalWhnfWork,
+) -> RegionalWhnfStep {
+    let frame = work
+        .frames
+        .pop()
+        .expect("static access must retain its path frame");
+    let RegionalWhnfContinuation::StaticAccess { keys, next } = frame else {
+        unreachable!()
+    };
+    let Value::Dict(dict) = &work.focus else {
+        return RegionalWhnfStep::Failed(Arc::new(EvaluationFailure::message(
+            "value access base is not a dictionary",
+        )));
+    };
+    let value = dict
+        .get(&keys[next])
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+    let next = next + 1;
+    if next < keys.len() {
+        work.frames
+            .push(RegionalWhnfContinuation::StaticAccess { keys, next });
+    }
+    RegionalWhnfStep::Delegate(value)
 }
 
 fn advance_application(
@@ -1122,3 +1186,7 @@ mod w2b_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w3b_application.rs"]
 mod w3b_application_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w3c_access.rs"]
+mod w3c_access_tests;
