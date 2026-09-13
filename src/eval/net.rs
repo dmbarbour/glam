@@ -281,12 +281,19 @@ fn drive_net_work_in(
     request: &NormalizationRequest,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     let mut driver = NetDriver::new(request);
+    drive_net_driver_work_in(context, &mut driver)
+}
+
+fn drive_net_driver_work_in(
+    context: &EvaluatorStepContext<'_>,
+    driver: &mut NetDriver,
+) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
         let outcome = context.with_value_access(|values| {
             let work_runtime = work.runtime(values.values());
             let access = values.net(&work_runtime);
             access.with_normalization_batch(|access| {
-                drive_net_batch(&mut driver, &work_runtime, work, access)
+                drive_net_batch(driver, &work_runtime, work, access)
             })
         });
         let outcome = match outcome {
@@ -297,7 +304,18 @@ fn drive_net_work_in(
             NetBatchOutcome::Continue => {}
             NetBatchOutcome::Driver(outcome) => return Ok(outcome),
             NetBatchOutcome::Semantic { root, pair, step } => {
-                drive_active_pair_semantic_step(context, &mut driver, root, pair, step)?;
+                let retained_root = root.clone();
+                if let Err(error) =
+                    drive_active_pair_semantic_step(context, driver, root, pair, step)
+                {
+                    if error.blocked_on().is_some() || error.unassigned_promise_root().is_some() {
+                        driver.worklist.push(NetDriverWork::ActivePair {
+                            root: retained_root,
+                            pair,
+                        });
+                    }
+                    return Err(error);
+                }
             }
         }
     }
@@ -1909,6 +1927,74 @@ mod driver_tests {
             runtime.active_normalization_batch(&crate::core::test_value_factory()),
             None,
             "the semantic park must retain neither a claim nor a normalization lease"
+        );
+    }
+
+    #[test]
+    fn persistent_driver_requeues_the_exact_active_pair_before_semantic_parking() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "persistent semantic net wait");
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(Value::Promised(promise.clone()));
+        let value = builder.data(context.values().unit());
+        builder.wire(application, function);
+        builder.wire(argument, value);
+        let runtime = instantiate(builder.finish(result));
+        let interface = runtime.test_with(context.values(), |net| net.exposed());
+        let request = normalization_request(&runtime, interface);
+        let mut driver = NetDriver::new(&request);
+
+        let parked = match crate::eval::with_direct_evaluator(&context, |evaluator| {
+            drive_net_driver_work_in(evaluator, &mut driver)
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("the unresolved callable promise must park the persistent driver"),
+        };
+        let wait = parked
+            .blocked_on()
+            .expect("the parked driver must retain its exact semantic wait");
+        let Some(NetDriverWork::ActivePair { root, .. }) = driver.worklist.items.last() else {
+            panic!("the exact active pair must be retained for resumption")
+        };
+        context.values().with_runtime_value_access(|access| {
+            assert!(root.same_root_in(&request.root, &access));
+        });
+
+        let callable = crate::eval::test_support::closed_function_value_in(
+            context.values(),
+            1,
+            crate::eval::test_support::TestExpr::Value(context.values().unit()),
+        );
+        crate::core::set_test_promise(context.values(), &promise, callable)
+            .expect("the callable promise should accept its assignment");
+        assert!(matches!(
+            context.pump_wait(&wait.0, 256),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        ));
+        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+            loop {
+                match drive_net_driver_work_in(evaluator, &mut driver)? {
+                    NetDriverOutcome::Progressed => driver.restart_from_request_root(),
+                    outcome => return Ok::<_, EvaluationHalt>(outcome),
+                }
+            }
+        })
+        .expect("the same driver must resume after its semantic dependency");
+        match outcome {
+            NetDriverOutcome::Root(InterfaceDemand::Data) => {}
+            NetDriverOutcome::Root(other) => {
+                panic!("resumed driver exposed unexpected root demand {other:?}")
+            }
+            NetDriverOutcome::Contended(_) => {
+                panic!("resumed driver unexpectedly remained contended")
+            }
+            NetDriverOutcome::Progressed => unreachable!("the fixture loop consumes progress"),
+        }
+        assert_eq!(
+            runtime.active_normalization_batch(context.values()),
+            None,
+            "parking and resumption must not retain a normalization lease"
         );
     }
 

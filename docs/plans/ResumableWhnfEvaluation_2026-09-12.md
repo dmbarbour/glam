@@ -1361,11 +1361,19 @@ Status: pending; pulled before W3B.3 by the W3 dependency review.
 
 ###### W4C.1a — Persistent driver polling
 
+Status: complete on 2026-09-13.
+
 Refactor `NetDriver` so its request root, worklist, and progress disposition
 survive a returned yield, semantic dependency, or contention handoff. A
 blocked active pair is requeued before the poll returns. Managed net access and
 all call claims remain regional; the durable driver contains identities and
 roots only.
+
+`drive_net_driver_work_in` now advances an existing driver rather than
+constructing one implicitly. A semantic dependency requeues its exact active
+pair before returning, after the claim and normalization scope have closed.
+The former one-shot entry remains a compatibility wrapper for callers not yet
+migrated to the reusable owner.
 
 ###### W4C.1b — Driver ordering verification
 
