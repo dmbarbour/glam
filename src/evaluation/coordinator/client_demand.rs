@@ -8,12 +8,11 @@ use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
-use super::deferred::promote_deferred_wait_locked;
 use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
     WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
     WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
-    queue_current_registration,
+    queue_current_registration, session_has_running_machine,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -525,9 +524,6 @@ impl EvaluationWorkCoordinator {
                         });
                         record.state = WorkState::Blocked;
                         exact_subscription = Some((dependency.clone(), registration));
-                        if let Some(wait) = dependency.producer_wait() {
-                            promote_deferred_wait_locked(&mut state, &wait);
-                        }
                         None
                     }
                 }
@@ -538,9 +534,15 @@ impl EvaluationWorkCoordinator {
         if let Some(subscription) = obsolete_subscription {
             subscription.unsubscribe();
         }
+        let promoted_wait = exact_subscription
+            .as_ref()
+            .and_then(|(dependency, _)| dependency.producer_wait());
         let woke = exact_subscription.is_some_and(|(dependency, registration)| {
             self.subscribe_dependency_guarded(&mutation, dependency, registration)
         });
+        if let Some(wait) = promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, &wait);
+        }
         drop(mutation);
         if let Some(retirement) = retirement {
             retirement.finish();
@@ -715,7 +717,16 @@ pub(super) fn claim_ready_client_demand(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
 ) -> Option<ClaimedClientDemand> {
-    while let Some(id) = state.ready_client_demands.pop_front() {
+    while let Some(position) = state.ready_client_demands.iter().position(|id| {
+        state
+            .work
+            .get(id)
+            .is_some_and(|record| !session_has_running_machine(state, record.demand_session))
+    }) {
+        let id = state
+            .ready_client_demands
+            .remove(position)
+            .expect("selected client-demand position must remain present");
         state.ready_client_demand_set.remove(&id);
         if let Some(claimed) = claim_client_demand(state, runtime, id) {
             return Some(claimed);

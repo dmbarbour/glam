@@ -842,7 +842,7 @@ impl LazyValue {
         values.with_runtime_value_access(|access| Self::semantic_thunk_in(&access, label, thunk))
     }
 
-    /// Defers callback-free evaluator work with every recursive value capture
+    /// Defers callback-free test work with every recursive value capture
     /// represented explicitly in source order.
     ///
     /// The operation is a function pointer rather than a closure, so the
@@ -859,6 +859,7 @@ impl LazyValue {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn semantic_computation_in(
         access: &RuntimeValueAccess<'_>,
         label: impl Into<Arc<str>>,
@@ -872,6 +873,18 @@ impl LazyValue {
                 operation,
                 captures: captures.into(),
             })),
+        )
+    }
+
+    pub(crate) fn list_effect_computation_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        computation: ListEffectComputation,
+    ) -> Self {
+        Self::with_source_in(
+            access,
+            label,
+            LazySource::ListEffectComputation(Arc::new(computation)),
         )
     }
 
@@ -1547,7 +1560,9 @@ impl BuiltinCall {
 pub(crate) enum LazySource {
     Error,
     ComputedFixpoint(Arc<FixpointComputation>),
+    #[cfg(test)]
     SemanticComputation(Arc<SemanticComputation>),
+    ListEffectComputation(Arc<ListEffectComputation>),
     #[cfg(test)]
     SemanticThunk(Arc<SemanticThunk>),
     HostCall(Arc<HostCallProducer>),
@@ -1589,15 +1604,18 @@ pub(crate) enum FixpointComputation {
     ObjectInstance(Value),
 }
 
+#[cfg(test)]
 pub(crate) type SemanticOperation =
     fn(&EvaluatorStepContext<'_>, &[Value]) -> Result<Value, EvaluationHalt>;
 
 /// Explicit, exactly traceable state for callback-free deferred evaluation.
+#[cfg(test)]
 pub(crate) struct SemanticComputation {
     operation: SemanticOperation,
     captures: Arc<[Value]>,
 }
 
+#[cfg(test)]
 impl SemanticComputation {
     pub(crate) fn evaluate(
         &self,
@@ -1605,6 +1623,14 @@ impl SemanticComputation {
     ) -> Result<Value, EvaluationHalt> {
         (self.operation)(context, &self.captures)
     }
+}
+
+#[derive(Clone)]
+pub(crate) enum ListEffectComputation {
+    Run { effect: Value },
+    Sequence { results: List, continuation: Value },
+    Cut { operation: Value },
+    Fix { operation: Value, handle: Value },
 }
 
 #[cfg(test)]

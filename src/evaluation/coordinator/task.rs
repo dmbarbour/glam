@@ -450,6 +450,10 @@ impl EvaluationWaitToken {
         self.0.completion.unsubscribe(registration)
     }
 
+    pub(crate) fn has_exact_subscriptions(&self) -> bool {
+        self.0.completion.len() != 0
+    }
+
     #[cfg(test)]
     pub(crate) fn exact_subscription_count(&self) -> usize {
         self.0.completion.len()

@@ -45,14 +45,14 @@ enum AccessConversion {
     Path(Box<KeyListMachine>),
 }
 
-enum ConversionPoll<T> {
+pub(super) enum ConversionPoll<T> {
     Ready(T),
     Pending(crate::evaluation::WorkDependency),
     Yielded,
     Failed(RuntimeFailureRoot),
 }
 
-struct KeyConversionMachine {
+pub(super) struct KeyConversionMachine {
     state: KeyConversionState,
     source_owner: LazyId,
 }
@@ -238,7 +238,7 @@ impl AccessMachine {
 }
 
 impl KeyConversionMachine {
-    fn new(value: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    pub(super) fn new(value: RuntimeValueRoot, source_owner: LazyId) -> Self {
         Self {
             state: KeyConversionState::Demand(
                 WhnfComputation::from_root(value).with_source_owner(source_owner),
@@ -247,7 +247,7 @@ impl KeyConversionMachine {
         }
     }
 
-    fn poll(
+    pub(super) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,

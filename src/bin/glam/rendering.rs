@@ -229,17 +229,14 @@ impl DefaultLogger {
     ) -> Result<String, Error> {
         let default_header = "msg: ".to_owned();
         let values = self.evaluator.values();
-        let message = Diagnostic::apply_updates(
-            &values,
-            message,
-            self.terminal_viewer_updates(
-                terminal,
-                frame_indent,
-                default_header.clone(),
-                String::new(),
-                None,
-            ),
-        )?;
+        let updates = self.terminal_viewer_updates(
+            terminal,
+            frame_indent,
+            default_header.clone(),
+            String::new(),
+            None,
+        );
+        let message = Diagnostic::apply_updates(&values, message, updates)?;
         let header = self.context_message_header(&message, terminal);
         let message = if header == default_header {
             message

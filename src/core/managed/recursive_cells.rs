@@ -1650,7 +1650,7 @@ mod tests {
                     "src/eval/builtins/dict/merge.rs::merge_duplicate_dict_value",
                     "src/eval/builtins/dict/merge.rs::update_nested_dict_path",
                     "src/eval/builtins/effect/implementation.rs::eval_fixpoint_builtin",
-                    "src/eval/builtins/list_effect/implementation.rs::deferred_list",
+                    "src/eval/list_effect_machine.rs::sequence_result",
                     "src/eval/builtins/net.rs::apply_net_arity",
                     "src/eval/builtins/net.rs::apply",
                     "src/eval/builtins/object/implementation.rs::eval_object_instance_builtin",

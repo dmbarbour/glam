@@ -46,13 +46,15 @@ pub(crate) fn trace_lazy_source_managed_net_edges(source: &LazySource, visitor: 
         }
         LazySource::Error
         | LazySource::ComputedFixpoint(_)
-        | LazySource::SemanticComputation(_)
+        | LazySource::ListEffectComputation(_)
         | LazySource::HostCall(_)
         | LazySource::ReflectionTask(_)
         | LazySource::Access { .. }
         | LazySource::Application(_)
         | LazySource::Builtin(_)
         | LazySource::NetConstruction(_) => {}
+        #[cfg(test)]
+        LazySource::SemanticComputation(_) => {}
         #[cfg(test)]
         LazySource::SemanticThunk(_) => {}
     }

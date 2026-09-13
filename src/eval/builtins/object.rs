@@ -3,7 +3,6 @@ use super::dict::eval_dict_union_builtin_in;
 
 mod implementation;
 
-pub(in crate::eval) use implementation::construct_object_instance_in as construct_fixpoint_object;
 use implementation::*;
 
 pub(super) fn apply(

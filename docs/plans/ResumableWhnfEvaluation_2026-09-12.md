@@ -1232,7 +1232,7 @@ dependency behavior without relying on repeated scheduling.
 
 ##### W3B.2 — Function and object fixpoints
 
-Status: partitioned into W3B.2a-W3B.2b on 2026-09-13.
+Status: complete on 2026-09-13 through W3B.2a-W3B.2b.
 
 ###### W3B.2a — Function fixpoints
 
@@ -1252,8 +1252,7 @@ the source census latches both removals.
 
 ###### W3B.2b — Object fixpoints
 
-Status: partitioned into W3B.2b.1-W3B.2b.4 on 2026-09-13; perform after
-W3C.3.
+Status: complete on 2026-09-13 through W3B.2b.1-W3B.2b.4 after W3C.3.
 
 Object construction consumes the same access, key, and lazy-list child
 operations converted by W3C. Building a parallel compatibility trampoline
@@ -1264,7 +1263,7 @@ a dependency reorder within W3, not a relaxation of the W3 closure gate.
 
 ####### W3B.2b.1 — Reusable resumable logical-list front
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Wrap W3C.3a's non-forcing decomposition in one durable owner which can demand
 a deferred list-or-binary chunk, prepend it to the exact suffix, and resume.
@@ -1272,9 +1271,14 @@ Return one rooted value plus rooted tail or exhaustion; do not force a strict
 value leaf. Object dependency traversal and W3D list-effect projection share
 this owner.
 
+`ListFrontMachine` owns the current list, an optional WHNF computation for
+the exact deferred chunk, and the chunk's exact suffix as runtime roots. A
+resolved list or binary chunk is prepended to that suffix; strict leaves are
+returned without demand.
+
 ####### W3B.2b.2 — Explicit object C3 traversal
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Replace recursive `object_c3_linearization` with an explicit DFS frame stack.
 Each frame retains its exact spec, name, dependency cursor, completed child
@@ -1282,9 +1286,14 @@ linearizations, and direct-dependency sequence. Reuse the recursive key owner
 for names and the logical-list-front owner for dependencies. Preserve
 anonymous-before-named ordering and referential spec-identity validation.
 
+`ObjectLinearizationMachine` now uses explicit DFS frames for spec demand,
+name conversion, dependency-list demand and traversal, and child return.
+Named specs retain referential dictionary equality while anonymous specs
+receive occurrence-local identities exactly as before.
+
 ####### W3B.2b.3 — Explicit object mixin fold
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Retain the reversed C3 result, current base, self marker, spec cursor, and two
 application phases. Each definitions mixin is demanded and applied to base
@@ -1292,15 +1301,36 @@ then self exactly once through ordinary WHNF application work. Validate the
 dictionary result before advancing and install the original spec only after
 the final mixin.
 
+`ObjectMixMachine` retains the reversed linearization, exact base and self
+roots, current spec index, and base/self application phase. Each application
+is an ordinary typed WHNF checkpoint; only a dictionary result advances the
+fold. A definitions value is first demanded to WHNF. An
+`ObjectComposedDefs` partial is treated as an inspectable composition recipe,
+flattened prior-before-extension, and each resulting mixin is applied through
+the same resumable phases. This is necessary for object-source closure: the
+generic saturated-builtin source would otherwise restart the composition
+after a mixin lambda returned deferred function-call work.
+
 ####### W3B.2b.4 — Object source closure
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Force suspension in spec demand, name conversion, dependency chunks, nested
 dependency specs, and both mixin applications. Preserve the existing C3,
 identity, anonymous-ordering, and result fixtures. Remove object fixpoints
 from `produce_lazy_source_in` and the recursive construction export after its
 last source caller is gone.
+
+Forced-order fixtures cover the original spec, computed name, deferred
+dependency chunk, nested dependency spec, and each of the two mixin
+applications. The recursive compatibility implementation and its export are
+removed. The full-suite ordering exposed one adjacent scheduler defect: an
+exactly claimed deferred producer could become dormant after a cooperative
+yield before its parent published the dependency. Exact live-demand claims
+now preserve queued demand across yields, with a direct coordinator fixture
+for that ordering. A composed-mixin fixture also latches the case where the
+final extension call produces a lazy function-call result; it must resume
+inside the object owner rather than recreate child work.
 
 ##### W3B.3 — Saturated function-call and net bridge
 
@@ -1373,8 +1403,9 @@ middle-chunk fixture resumes at that chunk and preserves the completed prefix.
 
 ##### W3C.3 — Lazy list chunks and list-backed projections
 
-Status: pending; its substrate is pulled before W3C.2 because recursive key
-conversion and `PathIndex` are themselves list clients.
+Status: complete on 2026-09-13 through W3C.3a-W3C.3c. Its substrate was pulled
+before W3C.2 because recursive key conversion and `PathIndex` are themselves
+list clients.
 
 ###### W3C.3a — Non-forcing logical front decomposition
 
@@ -1463,19 +1494,23 @@ production family with an inspectable list-effect recipe and pollable owner.
 
 ##### W3D.2 — Explicit list-effect source work
 
-Status: partitioned into W3D.2a-W3D.2c on 2026-09-13.
+Status: complete on 2026-09-13 through W3D.2a-W3D.2c.
 
 ###### W3D.2a — Inspectable list-effect recipe
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Replace the function pointer plus capture array with a closed core recipe for
 run, sequence, cut, and fix. Each variant exposes its exact managed edges to
 the existing compatibility tracer without an opaque callback.
 
+`ListEffectComputation` is a closed core recipe with those four variants.
+Its compatibility-edge implementation reports operation, result-list,
+continuation, and fix-handle values directly.
+
 ###### W3D.2b — Pollable list-effect source owner
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Interpret the recipe with explicit phases, rooted operands, ordinary WHNF
 subcomputations, application state, and W3B.2b.1 list-front work. A yielded or
@@ -1483,21 +1518,66 @@ blocked run resumes after the exact completed effect/application/list prefix.
 Promise publication for fix remains outside a retained managed-access region
 and occurs once.
 
+`ListEffectSourceMachine` owns run phases and reuses `ListFrontMachine` for
+sequence, cut, and fix. Sequence preserves the lazy child application and
+recursive tail as two inspectable recipe-backed thunks; observing the next
+logical result still demands them in source order. Fix publication occurs
+only after its front result is available and after managed access closes.
+
 ###### W3D.2c — List-effect source verification and retirement
 
-Status: pending.
+Status: complete on 2026-09-13.
 
 Force dependencies at every recipe boundary, preserve lazy sequence/cut/fix
 behavior and failures, then remove production `SemanticComputation`. Test-only
 synthetic work is addressed separately by W3D.3.
 
+Forced dependencies cover run input, sequence continuation, cut input, and
+fix input. Existing syntax/integration fixtures retain sequence, alternative,
+cut, fix, mismatch, and failure behavior. Production construction and source
+dispatch no longer use `SemanticComputation`.
+
 ##### W3D.3 — Opaque fixture policy and W3 closure audit
 
-Status: pending.
+Status: complete on 2026-09-13.
+
+`SemanticComputation`, its operation pointer, constructors, dispatch arm, and
+edge adapter are all test-only. `SemanticThunk` likewise remains a test-only
+compatibility fixture. Some scheduler and ownership tests deliberately use
+these opaque fixtures to inject a precise halt or callback, but neither type
+is accepted as evidence that production source work is resumable. Replacing
+the broad synthetic test harness would add a parallel test-only machine
+vocabulary without closing a production boundary, so it is deferred rather
+than misreported as production work.
+
+The production closure census leaves the generic saturated `Builtin` source
+as the declared W6 compatibility family and reflection/host work as W4A/W4B.
+Net computation, function calls, and the reusable net driver have already
+moved through the reordered W4C prerequisites. No production object or
+list-effect source retains an opaque Rust continuation.
+
+W3 closeout also exposed two scheduler handoff defects which the smaller
+machines made easier to reach. Exact demand published while a deferred
+producer was running could be lost when that producer yielded; the producer
+now latches such demand through release. Separately, the temporary
+one-ordinary-machine-per-demand-session admission rule could make a target
+with a broad observation look stably blocked while another machine in the
+same runtime owned relevant progress. That state is now `Busy`, and patient
+evaluation waits for the owning quantum. A genuinely quiescent reflection gate still
+returns a retryable blocked result. Forced-order tests cover both boundaries,
+including publication between `NoProgress` and its immediate recheck;
+repetition is not used as evidence.
+
+The per-session admission rule is compatibility containment, not a semantic
+serialization guarantee. Revisit and preferably remove it after W6 retires
+generic recursive builtin source evaluation. Exact nested demands already
+bypass it, and sparks remain independently schedulable.
 
 ### Phase W4 — External and Existing Pollable Boundaries
 
 #### W4A — Reflection lazy sources
+
+Status: partitioned into W4A.0-W4A.2 on 2026-09-13 by the post-W3 review.
 
 Split reflection-source recognition/target projection from reservation,
 activation, polling, acknowledgement, and failure propagation. Retain the
@@ -1508,7 +1588,30 @@ returned value. A completed gate delegates to its existing target; a returned
 value delegates to the task result. Neither path creates a replacement
 reflection computation.
 
+##### W4A.0 — Reflection source and reservation inventory
+
+Reconcile gate and returned-value forms with `ReflectionTaskReservation`, the
+first-observer permit, acknowledgement, and failure paths. Record the exact
+roots and scalar identities which survive each returned poll before changing
+representation.
+
+##### W4A.1 — Explicit reflection source owner
+
+Move recognition, target projection, reservation, activation, and result
+delegation into a typed pollable source owner. Preserve the distinction
+between gate completion and a returned value, and never reserve or activate
+one reflection computation twice.
+
+##### W4A.2 — Reflection ordering verification and retirement
+
+Force reservation-before-activation, completion-before-subscription,
+activation races, returned lazy values, acknowledgement, cancellation, and
+structured failure. Remove reflection from source-time compatibility
+evaluation only after those orderings are latched.
+
 #### W4B — Host-call sources
+
+Status: partitioned into W4B.0-W4B.2 on 2026-09-13 by the post-W3 review.
 
 Preserve `HostCallRootBundle` as the callback handoff. Package source progress,
 close managed access, invoke exactly once, validate the returned runtime, and
@@ -1517,6 +1620,25 @@ never replayed merely because its result is lazy or because evaluation yields.
 
 Opaque host callbacks remain nonsuspendable Rust calls; making them
 asynchronous is deferred work.
+
+##### W4B.0 — Host-call ownership and callback inventory
+
+Reconcile `HostCallProducer`, `HostCallRootBundle`, external-owner retirement,
+runtime validation, and callback failure. Identify the existing exactly-once
+state rather than adding a parallel callback lifecycle.
+
+##### W4B.1 — Explicit host-call source owner
+
+Give the lazy source a typed before-call/after-call state. Package and root the
+handoff, close managed access, invoke once, validate provenance, and install
+the rooted result into ordinary WHNF work before demanding it.
+
+##### W4B.2 — Host-call ordering verification and retirement
+
+Force yield immediately before and after callback invocation, a lazy returned
+value, callback failure, runtime mismatch, cancellation, and external-owner
+retirement. Prove one callback invocation under every forced schedule before
+removing the host source compatibility mode.
 
 #### W4C — Net construction and net computation
 
@@ -1566,7 +1688,10 @@ contention. Contended cursor/active-pair work is requeued before handoff; the
 same driver observes the forced publication afterward. The semantic fixture
 publishes `Blocked` first, retains the exact request root and active pair, and
 resumes only after the exact wait is completed. Both assert that no claim or
-normalization scope crosses the returned boundary.
+normalization scope crosses the returned boundary. W3 closeout added the
+missing equivalent for contention while *admitting* a normalization batch:
+the uninspected work item is restored before returning the contention token,
+and a forced leader/follower schedule resumes that same persistent driver.
 
 ###### W4C.1c — Net-WHNF source owner
 
@@ -1604,6 +1729,8 @@ when its terminal result is already the lazy result.
 
 #### W4D — Boundary verification
 
+Status: partitioned into W4D.1-W4D.2 on 2026-09-13 by the post-W3 review.
+
 Force callback-before/after-yield, reflection activation races, net operator
 dependency, and net-construction suspension. Verify exactly-once callback and
 reservation counts, stable net work identities, and collection between every
@@ -1611,6 +1738,20 @@ handoff.
 
 Mandatory post-W4 review: verify that the pure submachine has not absorbed
 effect-handler or interaction-net lifecycle policy.
+
+##### W4D.1 — Combined external-boundary closure
+
+Run the W4A/W4B forced-order matrices beside the completed W4C driver matrix.
+Re-run the source census and exact-root inventories, and prove that
+`produce_lazy_source_in` retains only the declared W6 builtin compatibility
+family plus test-only fixtures.
+
+##### W4D.2 — Post-W4 implementation and drift review
+
+Audit callback/reservation ownership, interaction-net lifecycle containment,
+scheduler handoffs, future W5-W8 assumptions, and verification cost. Record
+intentional phase-order drift and every remaining compatibility boundary
+before beginning reflection-machine integration.
 
 ### Phase W5 — Reflection Machine Integration
 

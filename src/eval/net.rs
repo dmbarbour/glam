@@ -332,6 +332,7 @@ fn drive_net_driver_work_in(
     driver: &mut NetDriver,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
+        let retained_work = work.clone();
         let outcome = context.with_value_access(|values| {
             let work_runtime = work.runtime(values.values());
             let access = values.net(&work_runtime);
@@ -341,7 +342,13 @@ fn drive_net_driver_work_in(
         });
         let outcome = match outcome {
             Ok(outcome) => outcome?,
-            Err(contention) => return Ok(NetDriverOutcome::Contended(contention)),
+            Err(contention) => {
+                // The batch admission did not inspect or change this item.
+                // Retain it before handing contention back to the scheduler,
+                // just as item-level cursor and active-pair contention does.
+                driver.worklist.push(retained_work);
+                return Ok(NetDriverOutcome::Contended(contention));
+            }
         };
         match outcome {
             NetBatchOutcome::Continue => {}
@@ -1954,6 +1961,67 @@ mod driver_tests {
             runtime.active_normalization_batch(&crate::core::test_value_factory()),
             None
         );
+    }
+
+    #[test]
+    fn persistent_driver_retains_work_across_batch_admission_contention() {
+        let context = test_context();
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let data = builder.data(context.values().unit());
+        let runtime = instantiate(builder.finish(data));
+        let interface = runtime.test_with(context.values(), |net| net.exposed());
+
+        let leader_values = context.values().clone();
+        let leader_root =
+            leader_values.with_runtime_value_access(|access| runtime.root_in(&access));
+        let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let leader = std::thread::spawn(move || {
+            leader_values.with_runtime_value_access(|access| {
+                let runtime = CoreRuntimeNet::from_root(&leader_root, &access);
+                runtime
+                    .access(&access)
+                    .with_normalization_batch(|_| {
+                        leader_ready_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .expect("test must release the normalization owner");
+                    })
+                    .expect("the forced leader must acquire the normalization batch");
+            });
+        });
+        leader_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the normalization owner must publish acquisition");
+
+        let request = normalization_request(&runtime, interface);
+        let mut driver = NetDriver::new(&request);
+        let contention =
+            crate::eval::with_direct_evaluator(
+                &context,
+                |evaluator| match drive_net_driver_work_in(evaluator, &mut driver)? {
+                    NetDriverOutcome::Contended(contention) => Ok::<_, EvaluationHalt>(contention),
+                    _ => panic!("the forced batch owner must cause a contention handoff"),
+                },
+            )
+            .expect("batch admission contention is not an evaluation failure");
+        assert_eq!(
+            driver.worklist.items.len(),
+            1,
+            "batch admission must retain the exact uninspected work item"
+        );
+
+        release_tx.send(()).unwrap();
+        leader.join().expect("normalization owner must finish");
+        contention.wait_for_disturbance();
+        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+            drive_net_driver_work_in(evaluator, &mut driver)
+        })
+        .expect("the retained work item must resume after publication");
+        assert!(matches!(
+            outcome,
+            NetDriverOutcome::Root(InterfaceDemand::Data)
+        ));
     }
 
     #[test]

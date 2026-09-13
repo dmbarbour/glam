@@ -5,9 +5,11 @@
 //! compose into those exact managed leaves. I6-I8 may retire an adapter only
 //! when an audited managed replacement reports the same edges.
 
+#[cfg(test)]
+use super::super::SemanticComputation;
 use super::super::{
     BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
-    LazySource, MetadataCarrier, ReflectionComputation, SemanticComputation, Value,
+    LazySource, ListEffectComputation, MetadataCarrier, ReflectionComputation, Value,
 };
 
 /// Reports every direct semantic `Value` edge held by one compatibility
@@ -118,9 +120,29 @@ impl CompatibilityValueEdges for FixpointComputation {
     }
 }
 
+#[cfg(test)]
 impl CompatibilityValueEdges for SemanticComputation {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         visit_values(&self.captures, visit);
+    }
+}
+
+impl CompatibilityValueEdges for ListEffectComputation {
+    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
+        match self {
+            Self::Run { effect } | Self::Cut { operation: effect } => visit(effect),
+            Self::Sequence {
+                results,
+                continuation,
+            } => {
+                results.visit_compatibility_value_edges(visit);
+                visit(continuation);
+            }
+            Self::Fix { operation, handle } => {
+                visit(operation);
+                visit(handle);
+            }
+        }
     }
 }
 
@@ -147,7 +169,11 @@ impl CompatibilityValueEdges for LazySource {
             Self::ComputedFixpoint(computation) => {
                 computation.visit_compatibility_value_edges(visit);
             }
+            #[cfg(test)]
             Self::SemanticComputation(computation) => {
+                computation.visit_compatibility_value_edges(visit);
+            }
+            Self::ListEffectComputation(computation) => {
                 computation.visit_compatibility_value_edges(visit);
             }
             #[cfg(test)]

@@ -352,6 +352,7 @@ pub(super) fn pump_demand(
     if !target.belongs_to(&context.session) {
         return EvaluationPumpOutcome::NoProgress;
     }
+    let mut yielded_exact = None;
     loop {
         if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
@@ -363,12 +364,22 @@ pub(super) fn pump_demand(
         if coordinator.target_has_running_producer(target) {
             return EvaluationPumpOutcome::Busy;
         }
-        let prioritized = prioritized_task_for(coordinator, target);
+        let prioritized = yielded_exact
+            .take()
+            .or_else(|| prioritized_task_for(coordinator, target));
         let claimed = prioritized
             .and_then(|task| coordinator.claim_task(task))
             .or_else(|| coordinator.claim_ready_task_for_session(session));
         let Some(work) = claimed else {
             if coordinator.target_has_running_producer(target) {
+                return EvaluationPumpOutcome::Busy;
+            }
+            if coordinator.demand_session_has_running_machine(session) {
+                return EvaluationPumpOutcome::Busy;
+            }
+            if coordinator.dependency_observes_runtime(target)
+                && coordinator.runtime_has_running_machine()
+            {
                 return EvaluationPumpOutcome::Busy;
             }
             if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
@@ -377,13 +388,23 @@ pub(super) fn pump_demand(
             return EvaluationPumpOutcome::NoProgress;
         };
 
+        let task = work.task();
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
         let quantum = step_budget.min(TASK_POLL_QUANTUM);
         step_budget -= quantum;
         let poll = claimed.poll(quantum);
+        let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
+        }
+        if yielded {
+            // An exact, dormant producer can consume a quantum immediately
+            // before publishing the dependency it discovered. Preserve that
+            // continuation only in this bounded demand pump. Globally queuing
+            // it would turn speculative demand from an abandoned alternative
+            // into unbounded eager evaluation by background workers.
+            yielded_exact = Some(task);
         }
     }
 }
@@ -622,13 +643,15 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    pub(super) fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) {
+    pub(super) fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) -> bool {
         let mut claimed = ClaimedTask::new(self.clone(), work);
         let poll = claimed.poll(TASK_POLL_QUANTUM);
+        let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
         }
+        yielded
     }
 
     #[cfg(test)]

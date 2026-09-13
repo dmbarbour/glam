@@ -3182,6 +3182,85 @@ fn patient_claimed_task_wait_releases_mutator() {
 }
 
 #[test]
+fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
+    struct CompleteAfterObservation {
+        context: EvalContext,
+        observed: RuntimeObservationEpoch,
+    }
+
+    impl EvaluationTaskMachine for CompleteAfterObservation {
+        fn poll(
+            &mut self,
+            context: &EvaluationPollContext,
+            _step_budget: usize,
+        ) -> EvaluationMachinePoll {
+            if self.context.current_observation_epoch() == self.observed {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: None,
+                    observed_epoch: Some(self.observed),
+                    error: None,
+                })
+            } else {
+                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+            }
+        }
+    }
+
+    let fixture = SameRuntimeFixture::new();
+    let session = fixture
+        .runtime
+        .new_evaluation_session()
+        .expect("patient evaluation session should build");
+    let progress_barrier = Arc::new(Barrier::new(2));
+    let context = EvalContext::patient_with_task_profile(
+        &session,
+        session.demand.default_reflection_profile.clone(),
+    )
+    .with_observed_progress_wait_barrier(progress_barrier.clone());
+    let coordinator = context
+        .coordinator()
+        .expect("patient wait should retain its coordinator");
+    let observed = context.current_observation_epoch();
+    let lazy = inert_lazy_for(context.values(), "observed patient dependency");
+    context
+        .lazy_task(&lazy, {
+            let context = context.clone();
+            move |_, _| Box::new(CompleteAfterObservation { context, observed })
+        })
+        .expect("observed deferred dependency should register");
+
+    let (result_sender, result_receiver) = mpsc::channel();
+    let evaluation_context = context.clone();
+    let evaluated_lazy = lazy.clone();
+    let evaluation = std::thread::spawn(move || {
+        result_sender
+            .send(crate::eval::eval_value(
+                &evaluation_context,
+                &Value::Lazy(evaluated_lazy),
+            ))
+            .expect("patient result receiver should remain live");
+    });
+
+    progress_barrier.wait();
+    assert!(
+        result_receiver.try_recv().is_err(),
+        "a patient evaluator must not expose a block whose wake is already racing publication"
+    );
+
+    coordinator.publish_runtime_observation();
+    progress_barrier.wait();
+    assert_eq!(
+        result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the already-published disturbance should resume the patient evaluator"),
+        Ok(context.values().unit())
+    );
+    evaluation
+        .join()
+        .expect("patient evaluator should not panic");
+}
+
+#[test]
 fn terminal_reflection_machines_drop_after_releasing_runtime_locks() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
@@ -4279,8 +4358,8 @@ fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
 
 #[test]
 fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
-    let context = EvalContext::standalone();
-    let lazy = inert_lazy("mixed lazy");
+    let context = isolated_standalone_context();
+    let lazy = inert_lazy_for(context.values(), "mixed lazy");
     let lazy_wait_slot = Arc::new(OnceLock::new());
     let reflection = context
         .schedule_task({
@@ -4324,7 +4403,9 @@ fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
 
 #[test]
 fn pump_and_quiescence_do_not_repoll_an_unchanged_block() {
-    let context = EvalContext::standalone();
+    // Quiescence is runtime-wide. Use a private value domain so unrelated
+    // parallel fixtures cannot legitimately make the broad observation busy.
+    let context = isolated_standalone_context();
     let polls = Arc::new(Mutex::new(0));
     let target = context
         .schedule_task({
@@ -4839,7 +4920,7 @@ fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
 
 #[test]
 fn run_until_quiescent_drains_tasks_spawned_during_the_run() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     context
         .schedule_task(|task_context| {
             Ok(Box::new(SpawnOnce {
@@ -4859,7 +4940,7 @@ fn run_until_quiescent_drains_tasks_spawned_during_the_run() {
 
 #[test]
 fn run_until_quiescent_collects_failures_without_short_circuiting() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let failed = context.schedule_task(|_| Ok(Box::new(Fail))).unwrap();
     context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
 
@@ -4882,7 +4963,7 @@ fn run_until_quiescent_collects_failures_without_short_circuiting() {
 
 #[test]
 fn run_until_quiescent_reports_stable_blocked_tasks() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let task = context
         .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
         .unwrap();
@@ -4999,7 +5080,7 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
 
 #[test]
 fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let promise = PromisedValue::new(context.values(), "reported resolver promise");
     let promise_root = promise.root(context.values());
     let follower = context
@@ -5068,7 +5149,7 @@ fn exact_demand_can_poll_a_same_runtime_cross_session_dependency() {
 
 #[test]
 fn exact_dependency_chain_retains_a_broad_observation_wake() {
-    let context = EvalContext::standalone();
+    let context = isolated_standalone_context();
     let observed = context
         .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
         .expect("observed dependency should schedule");

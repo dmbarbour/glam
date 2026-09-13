@@ -146,13 +146,11 @@ impl Diagnostic {
     pub fn apply_updates(values: &Values, message: &Value, updates: Value) -> Result<Value, Error> {
         message.require_runtime(values.runtime)?;
         updates.require_runtime(values.runtime)?;
-        crate::diagnostic::apply_emission_updates(
-            &values.core,
-            values.clone_core(message)?,
-            values.clone_core(&updates)?,
-        )
-        .map(|value| values.wrap(value))
-        .map_err(|error| Error::from_eval(&values.core, error))
+        let message = values.clone_core(message)?;
+        let updates = values.clone_core(&updates)?;
+        crate::diagnostic::apply_emission_updates(&values.core, message, updates)
+            .map(|value| values.wrap(value))
+            .map_err(|error| Error::from_eval(&values.core, error))
     }
 
     /// Prepends one structured frame describing why this diagnostic was

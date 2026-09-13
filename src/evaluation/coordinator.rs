@@ -442,6 +442,13 @@ impl ClaimedTaskWork {
             Self::Deferred(work) => &work.demand,
         }
     }
+
+    pub(in crate::evaluation) fn task(&self) -> EvaluationTaskId {
+        match self {
+            Self::Reflection(work) => work.task,
+            Self::Deferred(work) => work.task,
+        }
+    }
 }
 
 pub(super) struct SessionClosureWork {
@@ -968,6 +975,33 @@ impl EvaluationWorkCoordinator {
                 .get(id)
                 .is_some_and(|record| record.demand_session == session)
         })
+    }
+
+    pub(super) fn has_executor_workers(&self) -> bool {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .spark_workers
+            != 0
+    }
+
+    pub(super) fn demand_session_has_running_machine(&self, session: EvaluationSessionId) -> bool {
+        session_has_running_machine(
+            &self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned"),
+            session,
+        )
+    }
+
+    pub(super) fn runtime_has_running_machine(&self) -> bool {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .work
+            .values()
+            .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
     }
 
     pub(super) fn select(&self) -> CoordinatorSelection {
@@ -1889,12 +1923,31 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.ready_tasks.retain(|candidate| *candidate != id);
 }
 
+fn session_has_running_machine(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
+    state
+        .work_by_session
+        .get(&session)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.work.get(id))
+        .any(|record| {
+            matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+                && !matches!(record.kind, WorkKind::Spark(_))
+        })
+}
+
 fn claim_ready_task(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
     session: Option<EvaluationSessionId>,
 ) -> Option<ClaimedTaskWork> {
     loop {
+        let eligible = |id: &EvaluationWorkId| {
+            state
+                .work
+                .get(id)
+                .is_some_and(|record| !session_has_running_machine(state, record.demand_session))
+        };
         let position = match session {
             Some(session) => state
                 .ready_tasks
@@ -1903,6 +1956,7 @@ fn claim_ready_task(
                     state.work.get(id).is_some_and(|record| {
                         record.demand_session == session
                             && matches!(record.kind, WorkKind::Reflection(_))
+                            && eligible(id)
                     })
                 })
                 .or_else(|| {
@@ -1910,10 +1964,10 @@ fn claim_ready_task(
                         state
                             .work
                             .get(id)
-                            .is_some_and(|record| record.demand_session == session)
+                            .is_some_and(|record| record.demand_session == session && eligible(id))
                     })
                 })?,
-            None => 0,
+            None => state.ready_tasks.iter().position(eligible)?,
         };
         let id = state.ready_tasks.remove(position)?;
         state.ready_task_set.remove(&id);

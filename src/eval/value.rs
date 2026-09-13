@@ -17,10 +17,10 @@ use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessMachinePoll};
 use super::application::apply_values_in;
-use super::builtins::{
-    NetConstructionMachine, apply_builtin_in, construct_fixpoint_object, is_undefined_value,
-};
+use super::builtins::{NetConstructionMachine, apply_builtin_in, is_undefined_value};
+use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
+use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
 use super::sequence::list_to_key_items_in;
 
 pub(crate) fn failure_diagnostic_value_in(
@@ -193,6 +193,8 @@ enum LazyTaskWork {
         failure_context: Option<&'static str>,
     },
     Access(Box<AccessMachine>),
+    ObjectFixpoint(Box<ObjectFixpointMachine>),
+    ListEffect(Box<ListEffectSourceMachine>),
     HostCall(Arc<crate::core::HostCallProducer>),
     NetConstruction(Box<NetConstructionMachine>),
 }
@@ -204,10 +206,6 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn lazy(&self, context: &EvaluatorStepContext<'_>) -> LazyValue {
-        context.with_value_access(|access| LazyValue::from_root(&self.lazy, access.values()))
-    }
-
     fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
         let value = EvaluatedValue::try_from(value)
             .expect("WHNF demand must eliminate the outer deferred variant");
@@ -322,11 +320,21 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             });
                             LazyTaskWork::Whnf(computation)
                         }
-                        FixpointComputation::ObjectInstance(_) => {
-                            LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
-                                self.lazy.clone(),
-                                durable_context.values().runtime_id(),
-                            ))
+                        FixpointComputation::ObjectInstance(spec) => {
+                            let (spec, marker) = context.with_value_access(|access| {
+                                let spec = access
+                                    .values()
+                                    .root_runtime_value(access.values().duplicate_value(spec));
+                                let marker = access.values().root_runtime_value(Value::Lazy(
+                                    LazyValue::from_root(&self.lazy, access.values()),
+                                ));
+                                (spec, marker)
+                            });
+                            LazyTaskWork::ObjectFixpoint(Box::new(ObjectFixpointMachine::new(
+                                self.lazy.id(),
+                                spec,
+                                marker,
+                            )))
                         }
                     },
                     LazySource::FunctionCall {
@@ -354,6 +362,13 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             )),
                             failure_context: Some("net_computation"),
                         }
+                    }
+                    LazySource::ListEffectComputation(recipe) => {
+                        LazyTaskWork::ListEffect(Box::new(ListEffectSourceMachine::new(
+                            context,
+                            self.lazy.id(),
+                            &recipe,
+                        )))
                     }
                     LazySource::Access { path, arguments }
                         if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
@@ -460,6 +475,44 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 };
             }
 
+            if let LazyTaskWork::ObjectFixpoint(machine) = &mut self.work {
+                return match machine.poll(poll_context, context, &durable_context, step_budget) {
+                    ObjectFixpointPoll::Ready(value) => {
+                        self.complete(context, context.project_root(&value))
+                    }
+                    ObjectFixpointPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    ObjectFixpointPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    ObjectFixpointPoll::Failed(failure) => {
+                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                    }
+                };
+            }
+
+            if let LazyTaskWork::ListEffect(machine) = &mut self.work {
+                return match machine.poll(poll_context, context, &durable_context, step_budget) {
+                    ListEffectSourcePoll::Ready(value) => {
+                        self.complete(context, context.project_root(&value))
+                    }
+                    ListEffectSourcePoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    ListEffectSourcePoll::Yielded => EvaluationMachinePoll::Yielded,
+                    ListEffectSourcePoll::Failed(failure) => {
+                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                    }
+                };
+            }
+
             let source_pending = matches!(
                 &self.work,
                 LazyTaskWork::Whnf(computation) if computation.source_root().is_some()
@@ -470,7 +523,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 let Some(source) = source else {
                     return self.cached_poll(context);
                 };
-                match produce_lazy_source_in(context, &self.lazy(context), &source) {
+                match produce_lazy_source_in(context, &source) {
                     Ok(value) => {
                         let LazyTaskWork::Whnf(computation) = &mut self.work else {
                             unreachable!("source work must retain its WHNF computation")
@@ -699,6 +752,11 @@ fn await_deferred_task(
                 return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
             }
             EvaluationPumpOutcome::NoProgress => {
+                if context.context().waits_for_claimed_tasks()
+                    && context.context().retry_after_no_progress(&wait)
+                {
+                    continue;
+                }
                 return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
             }
             EvaluationPumpOutcome::BudgetExhausted => {}
@@ -743,7 +801,6 @@ fn deferred_task_failure(
 
 fn produce_lazy_source_in(
     context: &EvaluatorStepContext<'_>,
-    lazy: &LazyValue,
     source: &LazySource,
 ) -> Result<Value, EvaluationHalt> {
     match source {
@@ -751,15 +808,18 @@ fn produce_lazy_source_in(
             "initialized lazy errors must be returned from their result cache",
         )),
         LazySource::ComputedFixpoint(fixpoint) => match fixpoint.as_ref() {
-            FixpointComputation::ObjectInstance(spec) => {
-                let marker = Value::Lazy(lazy.clone());
-                construct_fixpoint_object(context, spec, marker)
+            FixpointComputation::ObjectInstance(_) => {
+                unreachable!("object fixpoints retain one pollable construction owner")
             }
             FixpointComputation::Function(_) => {
                 unreachable!("function fixpoints retain typed WHNF application work")
             }
         },
+        #[cfg(test)]
         LazySource::SemanticComputation(computation) => computation.evaluate(context),
+        LazySource::ListEffectComputation(_) => {
+            unreachable!("list effects retain one pollable source owner")
+        }
         #[cfg(test)]
         LazySource::SemanticThunk(thunk) => thunk(context),
         LazySource::HostCall(_) => {
@@ -1138,6 +1198,12 @@ mod ownership_tests {
             }
             LazyTaskWork::Access(machine) => {
                 let _: &AccessMachine = machine;
+            }
+            LazyTaskWork::ObjectFixpoint(machine) => {
+                let _: &ObjectFixpointMachine = machine;
+            }
+            LazyTaskWork::ListEffect(machine) => {
+                let _: &ListEffectSourceMachine = machine;
             }
             LazyTaskWork::HostCall(producer) => {
                 let _: &Arc<crate::core::HostCallProducer> = producer;

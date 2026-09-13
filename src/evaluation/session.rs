@@ -566,6 +566,8 @@ pub(crate) struct EvalContext {
     claimed_task_wait_probe: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(test)]
     deferred_pump_pause: Option<Arc<DeferredPumpPause>>,
+    #[cfg(test)]
+    observed_progress_wait_barrier: Option<Arc<ObservedProgressWaitPause>>,
 }
 
 #[cfg(test)]
@@ -573,6 +575,13 @@ pub(crate) struct EvalContext {
 struct DeferredPumpPause {
     state: AtomicU8,
     observed: std::sync::mpsc::Sender<EvaluationWaitToken>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ObservedProgressWaitPause {
+    armed: AtomicBool,
+    barrier: Arc<std::sync::Barrier>,
 }
 
 /// Direct client ownership for an isolated demand context.
@@ -629,6 +638,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -646,6 +657,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -666,6 +679,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -685,6 +700,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -718,6 +735,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -742,6 +761,8 @@ impl EvalContext {
             claimed_task_wait_probe: None,
             #[cfg(test)]
             deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
         }
     }
 
@@ -945,6 +966,13 @@ impl EvalContext {
             if let Some(result) = handle.poll() {
                 return terminal_client_demand_result(result);
             }
+            if coordinator.has_executor_workers() {
+                let generation = coordinator.work_generation();
+                if handle.poll().is_none() && coordinator.work_generation() == generation {
+                    coordinator.wait_for_change(generation);
+                }
+                continue;
+            }
             if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
                 coordinator.poll_claimed_client_demand(claimed);
                 continue;
@@ -970,9 +998,14 @@ impl EvalContext {
                 } => {
                     if let Some(wait) = dependency.producer_wait() {
                         if let Some(task) = prioritized_task_for(&coordinator, &wait)
-                            && let Some(work) = coordinator.claim_task(task)
+                            && let Some(mut work) = coordinator.claim_task(task)
                         {
-                            coordinator.poll_claimed_task(work);
+                            while coordinator.poll_claimed_task(work) {
+                                let Some(next) = coordinator.claim_task(task) else {
+                                    break;
+                                };
+                                work = next;
+                            }
                             continue;
                         }
                         if coordinator.target_has_running_producer(&wait) {
@@ -1033,6 +1066,18 @@ impl EvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_observed_progress_wait_barrier(
+        mut self,
+        barrier: Arc<std::sync::Barrier>,
+    ) -> Self {
+        self.observed_progress_wait_barrier = Some(Arc::new(ObservedProgressWaitPause {
+            armed: AtomicBool::new(true),
+            barrier,
+        }));
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_claimed_task_wait_probe(
         mut self,
         probe: std::sync::mpsc::Sender<()>,
@@ -1088,8 +1133,9 @@ impl EvalContext {
         true
     }
 
-    /// Waits for one scheduler change only while the target has a producer
-    /// claimed by another thread.
+    /// Waits for one scheduler change while the target producer, the
+    /// temporary serialized slot for its demand session, or runtime work able
+    /// to disturb its broad observation is claimed by another thread.
     ///
     /// Rechecking against the runtime work generation prevents a producer
     /// release between [`Self::pump_wait`] and this call from becoming a lost
@@ -1102,7 +1148,11 @@ impl EvalContext {
             return;
         };
         let generation = coordinator.work_generation();
-        if !coordinator.target_has_running_producer(target) {
+        if !coordinator.target_has_running_producer(target)
+            && !coordinator.demand_session_has_running_machine(self.session.id)
+            && !(coordinator.dependency_observes_runtime(target)
+                && coordinator.runtime_has_running_machine())
+        {
             return;
         }
         #[cfg(test)]
@@ -1112,7 +1162,8 @@ impl EvalContext {
         coordinator.wait_for_change(generation);
     }
 
-    /// Waits for one scheduler transition when an exact dependency chain ends
+    /// Retries when progress appeared after a caller's `NoProgress` sample, or
+    /// waits for one scheduler transition when an exact dependency chain ends
     /// at a task with a coordinator-indexed broad observation.
     ///
     /// This is narrower than treating every live task as future progress: a
@@ -1122,6 +1173,9 @@ impl EvalContext {
         &self,
         target: &EvaluationWaitToken,
     ) -> bool {
+        if self.retry_after_no_progress(target) {
+            return true;
+        }
         let Some(coordinator) = self.coordinator() else {
             return false;
         };
@@ -1133,6 +1187,32 @@ impl EvalContext {
             coordinator.wait_for_change(generation);
         }
         true
+    }
+
+    /// Rechecks a dependency after a caller has already observed
+    /// `NoProgress`. This catches publication between that observation and
+    /// the recheck, but deliberately does not wait for a future broad runtime
+    /// disturbance. Pure patient evaluation must still expose a genuinely
+    /// quiescent reflection gate as a retryable halt.
+    pub(crate) fn retry_after_no_progress(&self, target: &EvaluationWaitToken) -> bool {
+        #[cfg(test)]
+        if let Some(pause) = &self.observed_progress_wait_barrier
+            && pause.armed.swap(false, Ordering::AcqRel)
+        {
+            pause.barrier.wait();
+            pause.barrier.wait();
+        }
+        let Some(coordinator) = self.coordinator() else {
+            return false;
+        };
+        let generation = coordinator.work_generation();
+        if target.terminal_poll().is_some()
+            || prioritized_task_for(&coordinator, target).is_some()
+            || coordinator.target_has_running_producer(target)
+        {
+            return true;
+        }
+        coordinator.work_generation() != generation
     }
 
     pub(crate) fn observes_as_task(&self, task: EvaluationTaskId) -> bool {
@@ -1257,6 +1337,7 @@ impl EvalContext {
             originating_task: None,
             claimed_task_wait_probe: None,
             deferred_pump_pause: None,
+            observed_progress_wait_barrier: None,
         };
         let task = context.task_id()?;
         Ok(Self {

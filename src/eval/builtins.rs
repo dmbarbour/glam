@@ -20,7 +20,6 @@ pub(super) use annotation::is_undefined_value;
 pub(super) use net::NetConstructionMachine;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
-pub(super) use object::construct_fixpoint_object;
 #[cfg(test)]
 pub(crate) use strategy::demand as demand_strategy_value;
 pub(crate) use strategy::demand_in as demand_strategy_value_in;

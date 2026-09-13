@@ -1,6 +1,5 @@
 //! Core value evaluation and interaction-net integration.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -28,7 +27,10 @@ mod access_inventory;
 mod access_machine;
 mod application;
 mod builtins;
+mod list_effect_machine;
+mod list_machine;
 mod net;
+mod object_machine;
 mod operator;
 mod sequence;
 #[cfg(test)]

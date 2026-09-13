@@ -66,6 +66,19 @@ fn cached_value(lazy: &LazyValue) -> Value {
         .into_value()
 }
 
+fn list_return_effect(value: Value) -> Value {
+    effect_value(closed_function_value(
+        1,
+        TestExpr::Apply(
+            Arc::new(TestExpr::Access(
+                Arc::new(TestExpr::Local(0)),
+                Arc::from([TestKey::Key((*keys::R).clone())]),
+            )),
+            Arc::new(TestExpr::Value(value)),
+        ),
+    ))
+}
+
 #[test]
 fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
     let context = test_context();
@@ -1013,16 +1026,7 @@ fn deferred_list_effect_work_blocks_and_resumes() {
         .expect_err("observing the list should block on its unresolved effect");
     assert!(blocked.blocked_on().is_some());
 
-    let return_effect = effect_value(closed_function_value(
-        1,
-        TestExpr::Apply(
-            Arc::new(TestExpr::Access(
-                Arc::new(TestExpr::Local(0)),
-                Arc::from([TestKey::Key((*keys::R).clone())]),
-            )),
-            Arc::new(TestExpr::Value(n(42))),
-        ),
-    ));
+    let return_effect = list_return_effect(n(42));
     set_promise(&session, &promise, return_effect).unwrap();
 
     assert_eq!(
@@ -1030,6 +1034,83 @@ fn deferred_list_effect_work_blocks_and_resumes() {
             .expect("the list effect should resume after its operation is assigned"),
         vec![n(42)]
     );
+}
+
+#[test]
+fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
+    let session = test_context();
+
+    let (continuation, _continuation_task, _continuation_owner) = session
+        .task_owned_promise(Arc::from("list effect sequence continuation"))
+        .unwrap();
+    let Value::List(sequence) = apply_values(
+        &session,
+        Value::Builtin(Builtin::ListEffectSeq),
+        vec![
+            list_return_effect(n(1)),
+            Value::Promised(continuation.clone()),
+        ],
+    )
+    .expect("sequence construction should remain lazy") else {
+        panic!("list effect sequence must construct a list")
+    };
+    assert!(
+        list_to_value_items(&session, &sequence)
+            .expect_err("sequence must wait at its continuation application")
+            .blocked_on()
+            .is_some()
+    );
+    set_promise(
+        &session,
+        &continuation,
+        closed_function_value(1, TestExpr::Value(list_return_effect(n(42)))),
+    )
+    .expect("the sequence continuation should accept its assignment");
+    assert_eq!(list_to_value_items(&session, &sequence).unwrap(), [n(42)]);
+
+    let (cut_operation, _cut_task, _cut_owner) = session
+        .task_owned_promise(Arc::from("list effect cut operation"))
+        .unwrap();
+    let Value::List(cut) = apply_values(
+        &session,
+        Value::Builtin(Builtin::ListEffectCut),
+        vec![Value::Promised(cut_operation.clone())],
+    )
+    .expect("cut construction should remain lazy") else {
+        panic!("list effect cut must construct a list")
+    };
+    assert!(
+        list_to_value_items(&session, &cut)
+            .expect_err("cut must wait for its operation")
+            .blocked_on()
+            .is_some()
+    );
+    set_promise(&session, &cut_operation, list_return_effect(n(43)))
+        .expect("the cut operation should accept its assignment");
+    assert_eq!(list_to_value_items(&session, &cut).unwrap(), [n(43)]);
+
+    let (fix_operation, _fix_task, _fix_owner) = session
+        .task_owned_promise(Arc::from("list effect fix operation"))
+        .unwrap();
+    let fix_function =
+        closed_function_value(1, TestExpr::Value(Value::Promised(fix_operation.clone())));
+    let Value::List(fixed) = apply_values(
+        &session,
+        Value::Builtin(Builtin::ListEffectFix),
+        vec![fix_function],
+    )
+    .expect("fix construction should remain lazy") else {
+        panic!("list effect fix must construct a list")
+    };
+    assert!(
+        list_to_value_items(&session, &fixed)
+            .expect_err("fix must wait for its operation")
+            .blocked_on()
+            .is_some()
+    );
+    set_promise(&session, &fix_operation, list_return_effect(n(44)))
+        .expect("the fix operation should accept its assignment");
+    assert_eq!(list_to_value_items(&session, &fixed).unwrap(), [n(44)]);
 }
 
 #[test]

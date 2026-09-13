@@ -1892,15 +1892,252 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
     assert!(release.made_progress);
     assert!(!release.remains_blocked);
+    assert!(
+        coordinator
+            .claim_ready_task_for_session(session.demand.id)
+            .is_none(),
+        "a completed dependency subscription must not make later yields globally eager"
+    );
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
-        .expect("a yielded queued demand should remain ready")
+        .claim_task(task)
+        .expect("the local exact demand may resume the yielded producer")
     else {
-        panic!("the yielded producer should preserve its deferred kind")
+        panic!("the exact producer should preserve its deferred kind")
     };
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
     assert!(release.terminal);
     settle_test_deferred(&coordinator, work);
+}
+
+#[test]
+fn exact_deferred_demand_remains_local_across_a_cooperative_yield() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(
+        &session.demand.values,
+        "exact demand cooperative yield",
+        |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
+    );
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait,
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh deferred work should reserve a canonical record")
+    };
+
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_task(task)
+        .expect("an exact live demand should claim its dormant producer")
+    else {
+        panic!("the exact producer should preserve its deferred kind")
+    };
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
+    assert!(release.made_progress);
+    assert!(!release.remains_blocked);
+
+    assert!(
+        coordinator
+            .claim_ready_task_for_session(session.demand.id)
+            .is_none(),
+        "an exact dormant demand must not become globally eager after yielding"
+    );
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_task(task)
+        .expect("the local demand pump must be able to resume its yielded producer")
+    else {
+        panic!("the exact producer should preserve its deferred kind")
+    };
+    let work = claimed.id();
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    settle_test_deferred(&coordinator, work);
+}
+
+#[test]
+fn dependency_published_while_deferred_runs_survives_its_yield() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(
+        &session.demand.values,
+        "running dependency publication",
+        |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
+    );
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh deferred work should reserve a canonical record")
+    };
+
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_task(task)
+        .expect("an exact demand should claim its dormant producer")
+    else {
+        panic!("the exact producer should preserve its deferred kind")
+    };
+    assert!(
+        coordinator.promote_deferred_wait(&wait),
+        "publishing a dependency against a running producer must latch demand"
+    );
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
+    assert!(release.made_progress);
+    assert!(!release.remains_blocked);
+
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_ready_task_for_session(session.demand.id)
+        .expect("the running producer's latched demand must survive its yield")
+    else {
+        panic!("the requeued producer should preserve its deferred kind")
+    };
+    let work = claimed.id();
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    settle_test_deferred(&coordinator, work);
+}
+
+#[test]
+fn ready_selection_serializes_machine_polls_within_one_session() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let mut tasks = Vec::new();
+    for label in ["first session machine", "second session machine"] {
+        let task = super::super::allocate_task_id(&session.demand.values)
+            .expect("deferred task identity should allocate");
+        let wait = super::super::allocate_wait_token(&session.demand, task)
+            .expect("deferred wait identity should allocate");
+        let lazy = LazyValue::semantic_thunk(&session.demand.values, label, |_| {
+            panic!("coordinator lifecycle test never evaluates its synthetic lazy")
+        });
+        let DeferredWorkReservation::New = coordinator
+            .reserve_deferred(
+                &session.demand,
+                task,
+                wait.clone(),
+                DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+                Box::new(TestTaskMachine),
+            )
+            .expect("open test session should reserve deferred work")
+        else {
+            panic!("fresh deferred work should reserve a canonical record")
+        };
+        assert!(coordinator.promote_deferred_wait(&wait));
+        tasks.push(task);
+    }
+
+    let first = coordinator
+        .claim_ready_task_for_session(session.demand.id)
+        .expect("one ready session machine should be selected");
+    assert!(
+        coordinator
+            .claim_ready_task_for_session(session.demand.id)
+            .is_none(),
+        "global selection must not poll two machines from one session concurrently"
+    );
+
+    let remaining = tasks
+        .into_iter()
+        .find(|task| coordinator.task_is_claimable(*task))
+        .expect("the unselected task must remain queued");
+    let exact = coordinator
+        .claim_task(remaining)
+        .expect("nested exact demand may still advance a same-session dependency");
+    let ClaimedTaskWork::Deferred(exact) = exact else {
+        panic!("the exact producer should preserve its deferred kind")
+    };
+    let exact_work = exact.id();
+    assert!(
+        coordinator
+            .release_deferred(exact, DeferredWorkPoll::Terminal)
+            .terminal
+    );
+    settle_test_deferred(&coordinator, exact_work);
+
+    let ClaimedTaskWork::Deferred(first) = first else {
+        panic!("the ready producer should preserve its deferred kind")
+    };
+    let first_work = first.id();
+    assert!(
+        coordinator
+            .release_deferred(first, DeferredWorkPoll::Terminal)
+            .terminal
+    );
+    settle_test_deferred(&coordinator, first_work);
+}
+
+#[test]
+fn running_runtime_owner_makes_a_broad_dependency_busy_not_stable() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let running_session = TestDemand::new(&coordinator);
+
+    let target_task = super::super::allocate_task_id(&session.demand.values)
+        .expect("target task identity should allocate");
+    let target_wait = super::super::allocate_wait_token(&session.demand, target_task)
+        .expect("target wait identity should allocate");
+    let target_work = coordinator
+        .reserve_reflection(&session.demand, target_task, target_wait.clone())
+        .expect("target reflection work should reserve");
+    activate_test_reflection(&coordinator, target_work);
+    let target = claim_ready_test_reflection(&coordinator, session.demand.id);
+    assert!(
+        coordinator
+            .release_reflection(
+                target,
+                ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                    dependency: None,
+                    observed_epoch: Some(coordinator.current_observation_epoch()),
+                    error: None,
+                }),
+            )
+            .remains_blocked
+    );
+
+    let (_, running_work) = reserve_ready_test_reflection(&coordinator, &running_session);
+    let running = claim_ready_test_reflection(&coordinator, running_session.demand.id);
+    assert_eq!(
+        super::super::pump::pump_demand(
+            &coordinator,
+            session.demand.id,
+            &session.context(),
+            &target_wait,
+            256,
+        ),
+        super::super::EvaluationPumpOutcome::Busy,
+        "a running runtime owner can disturb a broad dependency and is not quiescence"
+    );
+
+    let release = coordinator.release_reflection(running, ReflectionWorkPoll::Terminal);
+    drop(release.machine);
+    settle_test_reflection(&coordinator, running_work);
+    assert_eq!(
+        coordinator.request_reflection_cancellation(target_work),
+        ReflectionCancellation::Terminalize
+    );
+    settle_test_reflection(&coordinator, target_work);
 }
 
 #[test]

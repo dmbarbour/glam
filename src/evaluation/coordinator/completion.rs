@@ -246,7 +246,6 @@ impl CompletionSubscriptions {
         true
     }
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.registrations
             .lock()

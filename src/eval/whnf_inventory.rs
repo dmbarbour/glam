@@ -358,6 +358,7 @@ fn method_signal(path: &Path, name: &str) -> Option<Signal> {
         | "pump_wait"
         | "wait_for_claimed_task"
         | "wait_for_observed_dependency_progress"
+        | "retry_after_no_progress"
         | "lazy_task"
         | "promise_task"
         | "promise_root_task" => Some(Signal::CoordinatorBoundary),
@@ -630,36 +631,36 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // Filled from W0B's deliberately failing initial AST scan. The per-signal
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
-const EXPECTED_OCCURRENCES: usize = 303;
-const EXPECTED_FINGERPRINT: u64 = 13_728_712_202_552_276_263;
+const EXPECTED_OCCURRENCES: usize = 294;
+const EXPECTED_FINGERPRINT: u64 = 15_657_132_995_284_888_333;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 104),
+    (Signal::EvalValue, 95),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
-    (Signal::ApplyValue, 19),
+    (Signal::ApplyValue, 15),
     (Signal::ApplyValues, 8),
     (Signal::ProduceLazySource, 1),
     (Signal::ReflectionEvaluate, 17),
     (Signal::RetryableWait, 11),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 17),
+    (Signal::CoordinatorBoundary, 19),
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 22),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 28),
-    (Signal::UserSizedLoop, 61),
+    (Signal::StructuralRecursion, 33),
+    (Signal::UserSizedLoop, 58),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 153),
+    (WorkShape::DemandThenInspect, 145),
     (WorkShape::OrderedOperands, 4),
-    (WorkShape::CollectionWalk, 45),
+    (WorkShape::CollectionWalk, 42),
     (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 23),
     (WorkShape::AccessPath, 15),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 49),
+    (WorkShape::OrchestrationHandoff, 51),
 ];
 
 #[test]

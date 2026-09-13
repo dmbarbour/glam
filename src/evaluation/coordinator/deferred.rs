@@ -66,6 +66,7 @@ impl EvaluationWorkCoordinator {
                         producer,
                         machine: machine.take(),
                         block: None,
+                        demand_while_running: false,
                     }),
                 };
                 assert!(state.work.insert(id, record).is_none());
@@ -130,32 +131,26 @@ impl EvaluationWorkCoordinator {
     #[cfg(test)]
     pub(in crate::evaluation) fn promote_deferred_wait(&self, wait: &EvaluationWaitToken) -> bool {
         let mutation = self.admission.mutation_guard();
-        let promoted = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let Some(id) = state.deferred.by_wait.get(wait).copied() else {
-                return false;
-            };
-            let next = state.work.get(&id).map(|record| record.state);
-            match next {
-                Some(WorkState::Dormant) => {
-                    state
-                        .work
-                        .get_mut(&id)
-                        .expect("dormant deferred work must remain registered")
-                        .state = WorkState::Queued;
-                    queue_deferred(&mut state, id);
-                    state.work_generation = state.work_generation.wrapping_add(1);
-                    true
-                }
-                _ => false,
-            }
-        };
+        let promoted = self.promote_deferred_wait_guarded(&mutation, wait);
         drop(mutation);
         if promoted {
             self.work_available.notify_all();
+        }
+        promoted
+    }
+
+    pub(super) fn promote_deferred_wait_guarded(
+        &self,
+        _mutation: &dyn crate::runtime::RuntimeMutationAuthority,
+        wait: &EvaluationWaitToken,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let promoted = promote_deferred_wait_locked(&mut state, wait);
+        if promoted {
+            state.work_generation = state.work_generation.wrapping_add(1);
         }
         promoted
     }
@@ -167,6 +162,7 @@ impl EvaluationWorkCoordinator {
         mut claimed: ClaimedDeferredWork,
         poll: DeferredWorkPoll,
     ) -> DeferredWorkRelease {
+        let had_exact_demand = claimed.wait.has_exact_subscriptions();
         let mut machine = Some(
             claimed
                 .machine
@@ -179,7 +175,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            {
+            let demand_while_running = {
                 let record = state
                     .work
                     .get_mut(&claimed.id)
@@ -194,7 +190,8 @@ impl EvaluationWorkCoordinator {
                     "running deferred work must have detached its machine"
                 );
                 deferred.machine = machine.take();
-            }
+                std::mem::take(&mut deferred.demand_while_running)
+            };
 
             let abandoned = state.work.get(&claimed.id).is_some_and(|record| {
                 matches!(
@@ -206,7 +203,10 @@ impl EvaluationWorkCoordinator {
                 (WorkState::Terminalizing, None, true, false, true)
             } else {
                 match poll {
-                    DeferredWorkPoll::Yielded if claimed.requeue_on_yield => {
+                    DeferredWorkPoll::Yielded
+                        if (claimed.requeue_on_yield && had_exact_demand)
+                            || demand_while_running =>
+                    {
                         (WorkState::Queued, None, true, false, false)
                     }
                     DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
@@ -234,21 +234,6 @@ impl EvaluationWorkCoordinator {
             };
             if matches!(state_after, WorkState::Queued) {
                 queue_deferred(&mut state, claimed.id);
-            }
-
-            if matches!(state_after, WorkState::Blocked)
-                && let Some(wait) = deferred_work(
-                    state
-                        .work
-                        .get(&claimed.id)
-                        .expect("blocked deferred work must remain registered"),
-                )
-                .block
-                .as_ref()
-                .and_then(|block| block.dependency.as_ref())
-                .and_then(WorkDependency::producer_wait)
-            {
-                promote_deferred_wait_locked(&mut state, &wait);
             }
 
             let cycle = if matches!(state_after, WorkState::Blocked) {
@@ -285,6 +270,9 @@ impl EvaluationWorkCoordinator {
                 exact_subscription,
             )
         };
+        let promoted_wait = exact_subscription
+            .as_ref()
+            .and_then(|(dependency, _)| dependency.producer_wait());
         if release.remains_blocked
             && exact_subscription.is_some_and(|(dependency, registration)| {
                 self.subscribe_dependency_guarded(&mutation, dependency, registration)
@@ -292,6 +280,9 @@ impl EvaluationWorkCoordinator {
         {
             release.made_progress = true;
             release.remains_blocked = false;
+        }
+        if let Some(wait) = promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, &wait);
         }
         if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
             release.made_progress = true;
@@ -415,6 +406,10 @@ pub(super) struct DeferredWork {
     pub(super) producer: DeferredProducer,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
     pub(super) block: Option<EvaluationTaskBlock>,
+    /// A dependency was published while this producer's machine was detached.
+    /// Release consumes the latch so a cooperative yield cannot lose that
+    /// already-authoritative demand.
+    pub(super) demand_while_running: bool,
 }
 
 #[derive(Default)]
@@ -427,6 +422,7 @@ pub(super) struct DeferredIndexes {
 pub(in crate::evaluation) struct ClaimedDeferredWork {
     pub(super) id: EvaluationWorkId,
     pub(super) task: EvaluationTaskId,
+    pub(super) wait: EvaluationWaitToken,
     pub(super) demand: ClaimedDemandSession,
     pub(super) producer: DeferredValueId,
     pub(super) prior_block: Option<EvaluationTaskBlock>,
@@ -539,23 +535,27 @@ pub(super) fn claim_deferred(
 ) -> Option<ClaimedDeferredWork> {
     let demand_session = state.work.get(&id)?.demand_session;
     let demand = ClaimedDemandSession::registered(state, demand_session, runtime)?;
-    let (task, producer, prior_block, machine) = {
+    let (task, wait, producer, prior_block, machine, requeue_on_yield) = {
         let record = state.work.get_mut(&id)?;
         if !matches!(record.kind, WorkKind::Deferred(_))
             || !matches!(record.state, WorkState::Dormant | WorkState::Queued)
         {
             return None;
         }
+        let was_queued = matches!(record.state, WorkState::Queued);
         record.state = WorkState::Running;
         let deferred = deferred_work_mut(record);
+        let demand_while_running = std::mem::take(&mut deferred.demand_while_running);
         (
             deferred.task,
+            deferred.wait.clone(),
             deferred.producer.id(),
             deferred.block.take(),
             deferred
                 .machine
                 .take()
                 .expect("claimable deferred work must retain its machine"),
+            requeue_on_yield || was_queued || demand_while_running,
         )
     };
     state.observation_waiters.remove(&id);
@@ -563,6 +563,7 @@ pub(super) fn claim_deferred(
     Some(ClaimedDeferredWork {
         id,
         task,
+        wait,
         demand,
         producer,
         prior_block,
@@ -586,6 +587,16 @@ pub(super) fn promote_deferred_wait_locked(
                 .expect("dormant deferred work must remain registered")
                 .state = WorkState::Queued;
             queue_deferred(state, id);
+            true
+        }
+        Some(WorkState::Running) => {
+            deferred_work_mut(
+                state
+                    .work
+                    .get_mut(&id)
+                    .expect("running deferred work must remain registered"),
+            )
+            .demand_while_running = true;
             true
         }
         _ => false,

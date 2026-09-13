@@ -817,13 +817,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        723,
+        729,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     assert_eq!(
         occurrence_fingerprint(actual),
-        6_473_371_483_398_578_614,
+        12_990_065_117_250_189_618,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -868,9 +868,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 154),
+            ((SourceScope::Production, EdgeSurface::Typed), 157),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 519),
+            ((SourceScope::Test, EdgeSurface::Typed), 522),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -924,7 +924,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         .iter()
         .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
         .collect::<Vec<_>>();
-    assert_eq!(defects.len(), 69);
+    assert_eq!(defects.len(), 70);
     assert!(defects.iter().all(|occurrence| matches!(
         occurrence.kind,
         OccurrenceKind::TraitDependency | OccurrenceKind::PointerIdentity
@@ -947,7 +947,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         BTreeMap::from([
             (RemainingDefectOwner::P4CollectorTraitCutover, 5),
             (RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent, 13),
-            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 51),
+            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 52),
         ])
     );
 }
@@ -1022,6 +1022,10 @@ fn parent_raw_value_compatibility_interlocks_are_exact() {
     );
     expected.insert(
         "src/core.rs::FixpointComputation".to_owned(),
+        traits(&["Clone"]),
+    );
+    expected.insert(
+        "src/core.rs::ListEffectComputation".to_owned(),
         traits(&["Clone"]),
     );
     expected.insert("src/core.rs::LazySource".to_owned(), traits(&["Clone"]));

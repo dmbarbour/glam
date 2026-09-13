@@ -339,6 +339,39 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W3C.2-W3C.3"
     ),
     closed_durable!(
+        "src/eval/list_machine.rs",
+        "logical-list-front source progress",
+        "canonical RuntimeValueRoot current-list and deferred-suffix fields plus one child WhnfComputation",
+        "yielded or dependency-blocked list traversal",
+        "source-list publication and deferred-chunk discovery",
+        "front completion, failure, cancellation, or enclosing source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W3B.2b"
+    ),
+    closed_durable!(
+        "src/eval/object_machine.rs",
+        "object-fixpoint, C3-linearization, and mix progress",
+        "canonical RuntimeValueRoot object/spec/mixin fields plus child WHNF and list-front machines",
+        "yielded or dependency-blocked object source evaluation",
+        "object recipe admission and bounded child-result publication",
+        "object completion, failure, cancellation, or lazy-owner retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W3B.2b"
+    ),
+    closed_durable!(
+        "src/eval/list_effect_machine.rs",
+        "list-effect recipe progress",
+        "canonical RuntimeValueRoot continuation/effect/list fields, one managed promise root, and child WHNF/list-front machines",
+        "yielded or dependency-blocked list-effect source evaluation",
+        "typed recipe admission and bounded child-result publication",
+        "list-effect completion, failure, cancellation, or lazy-owner retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W3D.2"
+    ),
+    closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
         "managed lazy owner plus one source-oriented WhnfComputation; PromiseFollower delegates ownership to one WhnfComputation",
@@ -796,10 +829,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 144;
+const DECLARATION_BASELINE_COUNT: usize = 153;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([111, 90, 1, 13, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_373_872_872_234_710_362;
+    DeclarationSignals::new([113, 108, 1, 13, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_022_680_505_428_395_969;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -924,6 +957,12 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
+    } else if declaration.starts_with("src/eval/list_machine.rs::") {
+        "logical-list-front source progress"
+    } else if declaration.starts_with("src/eval/object_machine.rs::") {
+        "object-fixpoint, C3-linearization, and mix progress"
+    } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
+        "list-effect recipe progress"
     } else if declaration == "src/eval/value.rs::LazyTaskWork" {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
     } else if matches!(

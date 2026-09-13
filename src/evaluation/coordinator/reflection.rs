@@ -6,14 +6,13 @@ use std::sync::Arc;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
-use super::deferred::promote_deferred_wait_locked;
 use super::{
     ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
     EvaluationWorkId, ExitIntent, ObservationRegistration, ProducerSettlementObligation,
     RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
-    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
-    WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
+    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord,
+    WorkState, demand_session_is_closed, prune_closed_session_registration,
     publish_task_block_locked, queue_task, remove_ready_task,
 };
 
@@ -537,20 +536,6 @@ impl EvaluationWorkCoordinator {
             if matches!(state_after, WorkState::Queued) {
                 queue_reflection(&mut state, id);
             }
-            if matches!(state_after, WorkState::Blocked)
-                && let Some(wait) = reflection_work(
-                    state
-                        .work
-                        .get(&id)
-                        .expect("blocked reflection work must remain registered"),
-                )
-                .block
-                .as_ref()
-                .and_then(|block| block.dependency.as_ref())
-                .and_then(WorkDependency::producer_wait)
-            {
-                promote_deferred_wait_locked(&mut state, &wait);
-            }
             state.work_generation = state.work_generation.wrapping_add(1);
             (
                 ReflectionWorkRelease {
@@ -565,6 +550,9 @@ impl EvaluationWorkCoordinator {
                 exact_subscription,
             )
         };
+        let promoted_wait = exact_subscription
+            .as_ref()
+            .and_then(|(dependency, _)| dependency.producer_wait());
         if release.remains_blocked
             && exact_subscription.is_some_and(|(dependency, registration)| {
                 self.subscribe_dependency_guarded(&mutation, dependency, registration)
@@ -572,6 +560,9 @@ impl EvaluationWorkCoordinator {
         {
             release.made_progress = true;
             release.remains_blocked = false;
+        }
+        if let Some(wait) = promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, &wait);
         }
         if release.remains_blocked && self.recheck_observation_wait(id) {
             release.made_progress = true;

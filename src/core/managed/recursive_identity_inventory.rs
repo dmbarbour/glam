@@ -384,6 +384,27 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "retryable halt retains only its exact registered promise root"
     ),
     owner!(
+        "src/eval/list_effect_machine.rs::ListEffectState",
+        [0, 1, 0],
+        DurableRoot,
+        None,
+        "poll-spanning list-effect fix state retains its result promise"
+    ),
+    owner!(
+        "src/eval/whnf.rs::DurableWhnfState",
+        [0, 1, 0],
+        DurableRoot,
+        None,
+        "poll-spanning WHNF state retains its optional source-cycle promise as a registered root"
+    ),
+    owner!(
+        "src/eval/whnf.rs::RegionalWhnfWork",
+        [0, 1, 0],
+        BoundedAccess,
+        None,
+        "regional WHNF state may inspect its source-cycle promise only beneath matching evaluator access"
+    ),
+    owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyCell",
         [1, 0, 0],
         ExactManagedEdge,
@@ -670,7 +691,12 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for SemanticComputation {",
-        reason: "function pointer plus immutable explicit captures",
+        reason: "test-only function pointer plus immutable explicit captures",
+    },
+    CompatibilityAdapterEntry {
+        path: "src/core/managed/payload_edges.rs",
+        declaration: "impl CompatibilityValueEdges for ListEffectComputation {",
+        reason: "closed typed recipe with explicit immutable effect, list, continuation, and fix-handle edges",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
@@ -772,7 +798,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 21, 9],
+        [13, 23, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
@@ -808,7 +834,7 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
         );
     }
 
-    assert_eq!(COMPATIBILITY_ADAPTER_INVENTORY.len(), 13);
+    assert_eq!(COMPATIBILITY_ADAPTER_INVENTORY.len(), 14);
 }
 
 #[test]

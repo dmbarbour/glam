@@ -455,13 +455,15 @@ fn assert_lazy_source_active_destruction_paths(source: &LazySource) {
     match source {
         LazySource::Error
         | LazySource::ComputedFixpoint(_)
-        | LazySource::SemanticComputation(_)
+        | LazySource::ListEffectComputation(_)
         | LazySource::Access { .. }
         | LazySource::Application(_)
         | LazySource::Builtin(_)
         | LazySource::NetConstruction(_)
         | LazySource::NetComputation(_)
         | LazySource::FunctionCall { .. } => {}
+        #[cfg(test)]
+        LazySource::SemanticComputation(_) => {}
         #[cfg(test)]
         LazySource::SemanticThunk(_) => {}
         LazySource::HostCall(producer) => assert_host_call_fields(producer),

@@ -6,7 +6,6 @@ use crate::core::Value;
 use crate::runtime::RuntimeValueRoot;
 
 use super::super::EvaluationDemandState;
-use super::deferred::promote_deferred_wait_locked;
 use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
     WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
@@ -274,24 +273,18 @@ impl EvaluationWorkCoordinator {
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             };
-            if state
-                .work
-                .get(&claimed.id)
-                .is_some_and(|record| matches!(record.state, WorkState::Blocked))
-                && let Some(wait) = state
-                    .work
-                    .get(&claimed.id)
-                    .and_then(|record| spark_work(record).dependency.as_ref())
-                    .and_then(WorkDependency::producer_wait)
-            {
-                promote_deferred_wait_locked(&mut state, &wait);
-            }
             state.work_generation = state.work_generation.wrapping_add(1);
             (retired, obsolete_dependency, exact_subscription)
         };
 
+        let promoted_wait = exact_subscription
+            .as_ref()
+            .and_then(|(dependency, _)| dependency.producer_wait());
         if let Some((dependency, registration)) = exact_subscription {
             self.subscribe_dependency_guarded(&mutation, dependency, registration);
+        }
+        if let Some(wait) = promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, &wait);
         }
         drop(mutation);
         self.work_available.notify_all();

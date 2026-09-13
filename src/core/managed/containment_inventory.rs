@@ -72,11 +72,6 @@ const INVENTORY: &[InventoryEntry] = &[
         owner: "I4B non-value compilation provenance",
     },
     InventoryEntry {
-        path: "src/eval/builtins/list_effect/implementation.rs",
-        counts: ContainmentCounts::new([0, 1, 0, 0, 0]),
-        owner: "I4B explicit semantic value captures",
-    },
-    InventoryEntry {
         path: "src/eval/builtins/net/construction.rs",
         counts: ContainmentCounts::new([0, 0, 0, 1, 1]),
         owner: "I4B edge-free construction-local port token",

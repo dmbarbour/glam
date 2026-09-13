@@ -216,8 +216,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list_effect/implementation.rs",
-        [15, 0],
-        "I3B.1 list-effect construction; I4B explicit semantic computation"
+        [10, 0],
+        "I3B.1 list-effect construction; W3D inspectable recipe construction"
     ),
     context_entry!(
         "src/eval/builtins/net.rs",
@@ -246,8 +246,18 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/object/implementation.rs",
-        [16, 0],
-        "I3B.1 scoped object construction and linearization"
+        [10, 0],
+        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction"
+    ),
+    context_entry!(
+        "src/eval/list_effect_machine.rs",
+        [9, 1],
+        "W3D pollable list-effect recipe owner"
+    ),
+    context_entry!(
+        "src/eval/list_machine.rs",
+        [2, 1],
+        "W3B.2b shared resumable logical-list-front owner"
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",
@@ -266,8 +276,13 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/net.rs",
-        [20, 6],
+        [19, 6],
         "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner"
+    ),
+    context_entry!(
+        "src/eval/object_machine.rs",
+        [14, 3],
+        "W3B.2b explicit C3, composed-definition, and object-mixin source owner"
     ),
     context_entry!(
         "src/eval/operator.rs",
@@ -281,7 +296,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [20, 10],
+        [19, 10],
         "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper"
     ),
 ];
@@ -419,16 +434,10 @@ fn lazy_producer_roles_are_explicit_and_complete() {
             (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
         })
         .collect::<BTreeMap<_, _>>();
-    let expected = [
-        (
-            PathBuf::from("src/compiler.rs"),
-            LazyProducerCounts::new(0, 0, 2),
-        ),
-        (
-            PathBuf::from("src/eval/builtins/list_effect/implementation.rs"),
-            LazyProducerCounts::new(0, 1, 0),
-        ),
-    ]
+    let expected = [(
+        PathBuf::from("src/compiler.rs"),
+        LazyProducerCounts::new(0, 0, 2),
+    )]
     .into_iter()
     .collect::<BTreeMap<_, _>>();
 

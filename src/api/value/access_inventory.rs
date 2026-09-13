@@ -135,12 +135,36 @@ const INVENTORY: &[InventoryEntry] = &[
         "W3C.2-W3C.3 rooted source progress"
     ),
     entry!(
-        "src/eval/value.rs",
+        "src/eval/list_effect_machine.rs",
+        0,
+        0,
+        9,
+        "pollable list-effect recipes and their lazy sequencing/fixpoint handoffs",
+        "W3D.2 inspectable list-effect source owner"
+    ),
+    entry!(
+        "src/eval/list_machine.rs",
         0,
         0,
         1,
-        "computed-access source arguments published before entering the poll-spanning owner",
-        "W3C.2 source handoff"
+        "shared pollable logical-list-front reconstruction",
+        "W3B.2b resumable list traversal"
+    ),
+    entry!(
+        "src/eval/object_machine.rs",
+        0,
+        0,
+        4,
+        "pollable C3 traversal, composed-definition expansion, and object-mixin completion",
+        "W3B.2b explicit object-fixpoint source owner"
+    ),
+    entry!(
+        "src/eval/value.rs",
+        0,
+        0,
+        3,
+        "computed-access and object-fixpoint source arguments published before entering poll-spanning owners",
+        "W3B.2b and W3C.2 source handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -408,6 +432,14 @@ impl RootPublicationOccurrence {
                 | "src/eval/access_machine.rs::classify_key_value"
                 | "src/eval/access_machine.rs::select_dict_member"
                 | "src/eval/access_machine.rs::value_as_list_root"
+                | "src/eval/list_effect_machine.rs::effect_function"
+                | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
+                | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
+                | "src/eval/list_effect_machine.rs::publish_fix_result"
+                | "src/eval/list_machine.rs::combine_chunk_and_suffix"
+                | "src/eval/object_machine.rs::composed_defs_parts"
+                | "src/eval/object_machine.rs::finish_object"
+                | "src/eval/object_machine.rs::spec_member_root"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
                 | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
@@ -656,11 +688,27 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/access_machine.rs::classify_key_value#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::value_as_list_root#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#3|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#4|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#5|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::publish_fix_result#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::publish_fix_result#2|surface=access-publication|scope=production",
+    "src/eval/list_machine.rs::combine_chunk_and_suffix#1|surface=access-publication|scope=production",
+    "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",
+    "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
+    "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
+    "src/eval/object_machine.rs::spec_member_root#1|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#3|surface=access-publication|scope=production",
