@@ -1164,6 +1164,37 @@ net attachment, or fixpoint marker is rebuilt after resumption.
 
 Status: pending.
 
+###### W3B.1a — Typed application frame and direct callable families
+
+Status: pending.
+
+Replace the generic application placeholder with typed durable/regional
+argument state. Demand the current function once, then advance builtin,
+partial-builtin, and function application without re-entering the original
+source. Saturated builtins and functions produce their existing memoized lazy
+work; extra arguments remain in the frame and apply only after that result is
+demanded. Preserve a narrow explicit compatibility disposition for dictionary
+application until W3B.1b rather than hiding its semantic-undefined recursion
+inside the regional reducer.
+
+###### W3B.1b — Dictionary applicability
+
+Status: pending.
+
+Represent `eff` tagged-payload recognition, recursive semantic-undefined
+checks, and `apply` member demand as typed application phases. Remove the
+dictionary compatibility disposition after equal success, mismatch, failure,
+and retryable-wait behavior is established.
+
+###### W3B.1c — Application phase verification
+
+Status: pending.
+
+Force a yield or dependency after function demand, partial application,
+saturation, and each extra argument. Assert exact argument order, one stage
+attachment or saturated-call allocation per completed prefix, and unchanged
+structured non-callable failures.
+
 ##### W3B.2 — Function and object fixpoints
 
 Status: pending.
