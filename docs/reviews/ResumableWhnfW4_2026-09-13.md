@@ -188,7 +188,7 @@ dependencies.
 It is not yet established whether the increased net work represents replay,
 an infinite computation, a different but finite demand order, or a mixture
 with scheduler amplification. The parent plan's W4E checkpoint therefore
-requires switchable committed-reduction accounting, a deterministic
+requires statically enabled committed-reduction accounting, a deterministic
 source-shaped work budget, and an identity/counter probe before choosing a
 repair. The invariant per-rule reduction signature is compared with the
 last-known-good implementation; cursor/driver observations are tracked

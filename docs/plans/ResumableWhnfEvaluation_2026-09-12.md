@@ -1904,17 +1904,25 @@ with the semantic reduction signature.
 
 The accounting sink is shared by all core nets in one `EvaluationRuntime` so
 function-stage copies and nested nets contribute to one whole-evaluation
-snapshot. Make enablement an explicit runtime-profile option. The bootstrap
-CLI may map a debug configuration switch to that option and render a compact
-summary after the runtime becomes stable; tests inspect the typed Rust
-snapshot directly rather than parsing logger output. The profile is
-non-semantic and must not be configurable from evaluated Glam code.
+snapshot. Enable the tool statically with a dedicated Cargo feature such as
+`interaction-net-profiling`, analogous to compiling a profiling build. In
+that build every runtime carries counters; this is not a dynamic
+`EvaluationRuntime` profile option and cannot be configured from evaluated
+Glam code.
 
-When disabled, the reduction path performs at most one predictable absent-
-sink branch and no atomic increment, allocation, formatting, callback, or
-value inspection. When enabled, fixed atomic counters are acceptable for the
-initial tool. Do not attach an opaque callback to every reduction or force
-data carried by a `Data` node merely to classify its rule.
+Compile the fields and update hooks out entirely when the feature is absent:
+the ordinary reduction path has no observer pointer, absent-sink branch,
+atomic operation, allocation, formatting, callback, or value inspection. In a
+profiling build, fixed atomic counters are acceptable for the initial tool.
+Do not attach an opaque callback to every reduction or force data carried by a
+`Data` node merely to classify its rule.
+
+Expose the typed snapshots through a profiling-only Rust API. The bootstrap
+binary built with the feature may render one compact summary after the runtime
+becomes stable; no additional runtime switch is necessary. Tests inspect the
+typed snapshot directly rather than parsing that text. Keep presentation at
+the binary boundary so the interaction-net and evaluator layers contain only
+structured counts.
 
 Verification for the tool itself must establish:
 
@@ -1925,8 +1933,9 @@ Verification for the tool itself must establish:
   signatures but may produce different driver signatures;
 - counts aggregate across nested/copied core nets in one runtime and remain
   isolated between runtimes; and
-- enabling the profile leaves the result, structured failures, and scheduling
-  decisions unchanged.
+- ordinary builds contain no accounting state or calls, while profiling
+  builds leave the result, structured failures, and scheduling decisions
+  unchanged.
 
 For the W4E comparison, apply the same accounting patch to `7fed99e` and
 current head. Capture the last-known-good exact signature for the successful
@@ -1961,8 +1970,8 @@ Add test-only, read-only counters at the authoritative owners for:
 
 Counters must not use semantic values as identities, force lazy operands, or
 alter queue selection. Scope them to an explicit test probe or fixture-owned
-observer so ordinary and release builds pay nothing, except for W4E.0's
-explicit disabled-profile branch. Record stable producer, task, and net
+observer so ordinary builds pay nothing. W4E.0 counters exist only in an
+`interaction-net-profiling` build. Record stable producer, task, and net
 identities only where the runtime already exposes such an identity.
 
 Drive the fixture with a deterministic limit on scheduler polls and net work,
