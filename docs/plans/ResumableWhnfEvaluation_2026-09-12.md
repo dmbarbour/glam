@@ -1870,6 +1870,72 @@ increased net-reduction count must not be dismissed as constant-factor
 scheduling overhead. W4E determines that distinction before selecting a
 repair.
 
+##### W4E.0 — Switchable interaction-net accounting
+
+Build a reusable reduction-accounting tool before adding fixture-specific
+counters. For a fixed closed net, demanded interface, and sequence of external
+semantic results, reaching the same result must have the same committed
+interaction-net reduction signature regardless of reduction order. Use that
+property as the primary replay oracle.
+
+Define a stable `NetReductionCounts`-like snapshot with one count for each
+committed rule family currently represented by `ReductionKind`:
+
+- bind/bind join;
+- same-identity fan join and different-identity fan commute;
+- fan/data, fan/bind, and fan/operator;
+- erase;
+- bind/data call;
+- operator/data call; and
+- committed remote-cursor materialization or join.
+
+Keep terminal stuck-pair observations and remote-cursor blocking separate
+from successful reductions. A recognized `Call`, `OperatorCall`, or
+`RemoteCursor` claim is not sufficient evidence of a committed reduction: it
+may block, be released, or be retried. Increment the semantic counters only at
+the authoritative runtime-net transition which makes the rewrite durable.
+
+Maintain a second `NetDriverCounts`-like snapshot for order-sensitive
+orchestration activity, including interface polls, cursor steps and
+dependencies, claim attempts, blocked retries, contention, disturbance,
+request-root restarts, and driver work items. These counts explain scheduling
+cost but are not expected to be reduction-order invariant. Do not combine them
+with the semantic reduction signature.
+
+The accounting sink is shared by all core nets in one `EvaluationRuntime` so
+function-stage copies and nested nets contribute to one whole-evaluation
+snapshot. Make enablement an explicit runtime-profile option. The bootstrap
+CLI may map a debug configuration switch to that option and render a compact
+summary after the runtime becomes stable; tests inspect the typed Rust
+snapshot directly rather than parsing logger output. The profile is
+non-semantic and must not be configurable from evaluated Glam code.
+
+When disabled, the reduction path performs at most one predictable absent-
+sink branch and no atomic increment, allocation, formatting, callback, or
+value inspection. When enabled, fixed atomic counters are acceptable for the
+initial tool. Do not attach an opaque callback to every reduction or force
+data carried by a `Data` node merely to classify its rule.
+
+Verification for the tool itself must establish:
+
+- exact per-rule counts on one small fixture for every rule family;
+- calls and cursors count only at commit, not recognition, block, release, or
+  retry;
+- two deterministically forced valid reduction orders produce equal semantic
+  signatures but may produce different driver signatures;
+- counts aggregate across nested/copied core nets in one runtime and remain
+  isolated between runtimes; and
+- enabling the profile leaves the result, structured failures, and scheduling
+  decisions unchanged.
+
+For the W4E comparison, apply the same accounting patch to `7fed99e` and
+current head. Capture the last-known-good exact signature for the successful
+and duplicate-symbol fixtures. If current head exceeds any completed baseline
+rule count before reaching the same public-operation prefix, the computation
+has performed duplicated semantic work; there is no need to wait for it to
+terminate. An intentional future topology or lowering change may update a
+latched signature only with an explicit explanation of the changed rules.
+
 ##### W4E.1 — Deterministic reproducer and measurement surface
 
 First reproduce the mismatch with a source-shaped in-process fixture which
@@ -1889,15 +1955,15 @@ Add test-only, read-only counters at the authoritative owners for:
   depth;
 - ready-queue candidates examined and session-work records visited by running
   admission checks;
-- `NetDriver` work items, request-root restarts, and reductions by broad kind;
+- the W4E.0 semantic reduction and driver-accounting snapshots;
 - committed public direct-assembly operation dispatches in exact order; and
 - terminal lazy caches and the final duplicate-publication diagnostic.
 
 Counters must not use semantic values as identities, force lazy operands, or
 alter queue selection. Scope them to an explicit test probe or fixture-owned
-observer so ordinary and release builds pay nothing. Record stable producer,
-task, and net identities only where the runtime already exposes such an
-identity.
+observer so ordinary and release builds pay nothing, except for W4E.0's
+explicit disabled-profile branch. Record stable producer, task, and net
+identities only where the runtime already exposes such an identity.
 
 Drive the fixture with a deterministic limit on scheduler polls and net work,
 not a wall-clock timeout. A scheduler-only limit is insufficient: the current
@@ -1969,6 +2035,7 @@ resolve the regression, so a larger quantum alone is not an accepted repair.
 The repaired source-shaped fixture must deterministically:
 
 - terminate within the latched poll and net-work budgets;
+- reproduce the last-known-good per-rule reduction signature;
 - select each function-call source and publish each terminal cache once;
 - emit exactly one duplicate-symbol diagnostic with unchanged structured
   context;
