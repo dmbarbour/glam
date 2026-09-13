@@ -1070,6 +1070,57 @@ owner and dependency graph.
 
 `HostCall` and `NetConstruction` remain explicit outer modes until W4.
 
+##### W3A.0 — Source-family drift and checkpoint partition
+
+Status: complete on 2026-09-13.
+
+The post-W2 implementation still has the intended outer split: host callbacks
+and net construction are explicit `LazyTaskMachine` modes, while every other
+source passes through `Produce` and then a specialized rooted `Follow` value.
+The generic `{kind, cursor, retained}` frame placeholder is not, however, a
+safe final encoding for source progress. Application, access, key conversion,
+and list walks need typed phase state so an invalid cursor/retained-value
+combination cannot be manufactured accidentally.
+
+Use one `WhnfComputation` enum with a source-entry checkpoint and the existing
+rooted value-demand checkpoint. W3A first transfers an ordinary lazy owner
+into that computation, records the source result as a rooted demand
+checkpoint, and removes `LazyTaskWork::Follow`. W3B-W3D then replace each
+recursive source entry with typed durable/regional source states. This
+temporary source-entry state may replay a source after a dependency, exactly
+as `Produce` does today; no source family is considered migrated until its
+typed phase state prevents that replay.
+
+Partition the rest of W3 as follows:
+
+1. W3A.1 installs the source-entry/value-demand computation shape and cuts
+   over `LazyTaskMachine` without moving host or net-construction modes.
+2. W3A.2 latches cache publication, deferred-result delegation, yield, and
+   failure behavior at the new owner boundary.
+3. W3B.1 converts ordinary application; W3B.2 converts function and object
+   fixpoints; W3B.3 handles saturated `FunctionCall` construction. Before
+   W3B.3, review whether retaining net normalization progress requires a
+   narrow W4C bridge rather than rebuilding the attached net.
+4. W3C.1 converts access-path progress; W3C.2 converts recursive key/path
+   conversion; W3C.3 converts lazy list chunks and list-backed projections;
+   W3C.4 closes their structured-error and forced-yield matrix.
+5. W3D.1 inventories the remaining production `SemanticComputation`
+   operations; W3D.2 replaces the list-effect operations with explicit typed
+   work; W3D.3 classifies or removes the test-only opaque thunk and performs
+   the ordinary-source closure audit.
+
+This ordering is provisional at the W3B.3/W4C seam. Stop there if preserving
+one attached net cannot be expressed without prematurely absorbing the net
+driver into the WHNF machine.
+
+##### W3A.1 — Source-entry ownership and lazy-task cutover
+
+Status: pending.
+
+##### W3A.2 — Lazy cache and delegation verification
+
+Status: pending.
+
 #### W3B — Application and computed fixpoint sources
 
 Convert `LazySource::Application`, `FunctionCall`, and `ComputedFixpoint` into
@@ -1080,6 +1131,18 @@ and the rule that only saturation creates memoized function work.
 Add a forced suspension after every phase and assert no function application,
 net attachment, or fixpoint marker is rebuilt after resumption.
 
+##### W3B.1 — Ordinary application
+
+Status: pending.
+
+##### W3B.2 — Function and object fixpoints
+
+Status: pending.
+
+##### W3B.3 — Saturated function-call and net bridge
+
+Status: pending; review the W4C seam before implementation.
+
 #### W3C — Access and key/list source work
 
 Convert dynamic path evaluation, intermediate dictionary demand, recursive
@@ -1087,6 +1150,22 @@ key conversion, lazy list chunks, and sequence projections. Retain explicit
 path/collection indices and accumulators. Missing dictionary members remain
 `{}`; type mismatches and index errors retain their current structured
 contexts.
+
+##### W3C.1 — Access-path progress
+
+Status: pending.
+
+##### W3C.2 — Recursive key and computed-path conversion
+
+Status: pending.
+
+##### W3C.3 — Lazy list chunks and list-backed projections
+
+Status: pending.
+
+##### W3C.4 — Source-family suspension and diagnostics closure
+
+Status: pending.
 
 #### W3D — Semantic computation representation
 
@@ -1101,6 +1180,18 @@ with explicit synthetic work.
 
 Exit: ordinary lazy production no longer depends on a Rust-stack continuation
 across deferred children.
+
+##### W3D.1 — Production operation inventory
+
+Status: pending.
+
+##### W3D.2 — Explicit list-effect source work
+
+Status: pending.
+
+##### W3D.3 — Opaque fixture policy and W3 closure audit
+
+Status: pending.
 
 ### Phase W4 — External and Existing Pollable Boundaries
 
