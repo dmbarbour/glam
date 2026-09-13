@@ -374,7 +374,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
-        "managed lazy owner plus one source-oriented WhnfComputation; PromiseFollower delegates ownership to one WhnfComputation",
+        "managed lazy owner plus one typed source owner or source-oriented WhnfComputation; host work retains one rooted callback result after invocation, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
         "yielded or dependency-blocked evaluator task",
         "root publication within the producing evaluator step or existing promise-root ownership",
         "lazy/promise completion, failure, cancellation, or machine retirement",
@@ -829,10 +829,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 153;
+const DECLARATION_BASELINE_COUNT: usize = 155;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([113, 108, 1, 13, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_022_680_505_428_395_969;
+    DeclarationSignals::new([114, 109, 1, 14, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_068_747_568_769_805_323;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -963,7 +963,10 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
         "list-effect recipe progress"
-    } else if declaration == "src/eval/value.rs::LazyTaskWork" {
+    } else if matches!(
+        declaration,
+        "src/eval/value.rs::LazyTaskWork" | "src/eval/value.rs::HostCallSourceState"
+    ) {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
     } else if matches!(
         declaration,

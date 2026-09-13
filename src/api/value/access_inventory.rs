@@ -709,6 +709,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
+    "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#3|surface=access-publication|scope=production",

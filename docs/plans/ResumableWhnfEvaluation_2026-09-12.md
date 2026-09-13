@@ -1575,9 +1575,11 @@ bypass it, and sparks remain independently schedulable.
 
 ### Phase W4 — External and Existing Pollable Boundaries
 
+Status: complete on 2026-09-13.
+
 #### W4A — Reflection lazy sources
 
-Status: partitioned into W4A.0-W4A.2 on 2026-09-13 by the post-W3 review.
+Status: complete on 2026-09-13 through W4A.0-W4A.2.
 
 Split reflection-source recognition/target projection from reservation,
 activation, polling, acknowledgement, and failure propagation. Retain the
@@ -1643,7 +1645,7 @@ owner retirement.
 
 #### W4B — Host-call sources
 
-Status: partitioned into W4B.0-W4B.2 on 2026-09-13 by the post-W3 review.
+Status: complete on 2026-09-13 through W4B.0-W4B.2.
 
 Preserve `HostCallRootBundle` as the callback handoff. Package source progress,
 close managed access, invoke exactly once, validate the returned runtime, and
@@ -1790,7 +1792,7 @@ when its terminal result is already the lazy result.
 
 #### W4D — Boundary verification
 
-Status: partitioned into W4D.1-W4D.2 on 2026-09-13 by the post-W3 review.
+Status: complete on 2026-09-13 through W4D.1-W4D.2.
 
 Force callback-before/after-yield, reflection activation races, net operator
 dependency, and net-construction suspension. Verify exactly-once callback and
@@ -1802,17 +1804,38 @@ effect-handler or interaction-net lifecycle policy.
 
 ##### W4D.1 — Combined external-boundary closure
 
+Status: complete on 2026-09-13.
+
 Run the W4A/W4B forced-order matrices beside the completed W4C driver matrix.
 Re-run the source census and exact-root inventories, and prove that
 `produce_lazy_source_in` retains only the declared W6 builtin compatibility
 family plus test-only fixtures.
 
+The combined host/reflection/net matrices pass with collection between every
+new W4 handoff. The exact WHNF census records removal of one recursive
+application call and one retryable-halt construction from the reflection
+path. Durable-owner, runtime-root, persistent-edge, raw-value, and evaluator
+access inventories are reconciled. Production execution through
+`produce_lazy_source_in` is now limited to saturated builtin compatibility;
+`Error` is an invariant check, all migrated families are unreachable arms,
+and the only other executable arms are the two `cfg(test)` fixtures.
+
 ##### W4D.2 — Post-W4 implementation and drift review
+
+Status: complete on 2026-09-13.
 
 Audit callback/reservation ownership, interaction-net lifecycle containment,
 scheduler handoffs, future W5-W8 assumptions, and verification cost. Record
 intentional phase-order drift and every remaining compatibility boundary
 before beginning reflection-machine integration.
+
+See
+[`ResumableWhnfW4_2026-09-13.md`](../reviews/ResumableWhnfW4_2026-09-13.md).
+The review found no blocking defect or unresolved semantic decision. W5 still
+owns reflection-effect-machine integration; W4 moved only the lazy reflection
+source boundary. W6 retains the sole production source compatibility family
+and the temporary per-session admission policy. W7-W8 remain correctly
+ordered after those migrations.
 
 ### Phase W5 — Reflection Machine Integration
 
