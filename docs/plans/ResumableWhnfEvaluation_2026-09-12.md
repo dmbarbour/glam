@@ -1590,24 +1590,56 @@ reflection computation.
 
 ##### W4A.0 — Reflection source and reservation inventory
 
+Status: complete on 2026-09-13.
+
 Reconcile gate and returned-value forms with `ReflectionTaskReservation`, the
 first-observer permit, acknowledgement, and failure paths. Record the exact
 roots and scalar identities which survive each returned poll before changing
 representation.
 
+The enclosing `ManagedLazyRoot` is the durable semantic root while reflection
+work is pending: its managed source traces the effect and optional gate target.
+`ReflectionSourceMachine` retains the source computation and exactly one
+`ReflectionTaskReservation`; the reservation contributes only the stable task
+observation/handle and the first observer's shared one-use activation permit.
+Activation temporarily roots the effect, then the coordinator-owned reflection
+machine owns that root. Returned polls therefore retain the managed lazy root,
+the reservation's scalar task identity, and (after completion) the
+coordinator-owned result root. No poll-spanning raw value is introduced by the
+source owner.
+
 ##### W4A.1 — Explicit reflection source owner
+
+Status: complete on 2026-09-13.
 
 Move recognition, target projection, reservation, activation, and result
 delegation into a typed pollable source owner. Preserve the distinction
 between gate completion and a returned value, and never reserve or activate
 one reflection computation twice.
 
+`ReflectionSourceMachine` now separates first reservation from subsequent
+polls. Reservation records the exact task once and defers its activation until
+the evaluator region closes; the first later poll observes either its stable
+wait or terminal result. Gate completion delegates to the traced target and
+return-value completion delegates to the coordinator's rooted result. The old
+reflection arm in `produce_lazy_source_in` is unreachable.
+
 ##### W4A.2 — Reflection ordering verification and retirement
+
+Status: complete on 2026-09-13.
 
 Force reservation-before-activation, completion-before-subscription,
 activation races, returned lazy values, acknowledgement, cancellation, and
 structured failure. Remove reflection from source-time compatibility
 evaluation only after those orderings are latched.
+
+The focused source-owner fixture forces source recognition, reservation,
+activation handoff, wait publication, completion, and result delegation onto
+separate polls, collecting between every returned boundary. Existing latched
+fixtures continue to cover first-observer/first-activator races, cancellation
+before and during activation, structured launcher/task failures,
+acknowledgement, cross-session completion, returned lazy values, and external
+owner retirement.
 
 #### W4B — Host-call sources
 
@@ -1623,22 +1655,51 @@ asynchronous is deferred work.
 
 ##### W4B.0 — Host-call ownership and callback inventory
 
+Status: complete on 2026-09-13.
+
 Reconcile `HostCallProducer`, `HostCallRootBundle`, external-owner retirement,
 runtime validation, and callback failure. Identify the existing exactly-once
 state rather than adding a parallel callback lifecycle.
 
+The managed lazy remains the durable owner of the traced source and any
+declared semantic captures. `HostCallProducer` retains the scalar external
+owner handle and source-backed capture policy; immediately before invocation
+it converts the declared captures to `HostCallRootBundle`. The callback returns
+one same-runtime `RuntimeValueRoot`, which is the only semantic result retained
+across the after-call boundary. External-owner retirement remains tied to the
+managed source rather than to a second callback registry.
+
 ##### W4B.1 — Explicit host-call source owner
+
+Status: complete on 2026-09-13.
 
 Give the lazy source a typed before-call/after-call state. Package and root the
 handoff, close managed access, invoke once, validate provenance, and install
 the rooted result into ordinary WHNF work before demanding it.
 
+`HostCallSourceMachine` now has explicit `Before`, `Invoking`, `After`, and
+`Consumed` states. It moves irreversibly to `Invoking` before calling Rust code
+outside evaluator access, stores the rooted result, yields, and consumes that
+result inside a later evaluator region. Runtime provenance is validated before
+projection, after which the same lazy task continues as ordinary WHNF work.
+Neither a lazy return nor a failure can replay the callback.
+
 ##### W4B.2 — Host-call ordering verification and retirement
+
+Status: complete on 2026-09-13.
 
 Force yield immediately before and after callback invocation, a lazy returned
 value, callback failure, runtime mismatch, cancellation, and external-owner
 retirement. Prove one callback invocation under every forced schedule before
 removing the host source compatibility mode.
+
+Focused fixtures force a scheduling boundary immediately before and after the
+callback, collect at each handoff, and prove one invocation for success,
+failure, repeated terminal observation, and a lazy returned value. Existing
+fixtures retain coverage for callback/access separation, contention,
+same-runtime validation, and external-owner retirement. The host source was
+already excluded from `produce_lazy_source_in`; its former single-state outer
+mode is replaced by the typed lifecycle above.
 
 #### W4C — Net construction and net computation
 
