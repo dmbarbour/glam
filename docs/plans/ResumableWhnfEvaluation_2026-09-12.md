@@ -3280,7 +3280,7 @@ Partition the remaining migration as follows:
 1. **W5C.5c.1 — Net and token preparation.** Split into:
    - **W5C.5c.1a — Complete (2026-09-14): Net construction.** Migrate copy counts and sequential
      construction ports. Raw construction data remains non-demanding.
-   - **W5C.5c.1b — Token parsing.** Migrate token text/regex inputs while
+   - **W5C.5c.1b — Complete (2026-09-14): Token parsing.** Migrate token text/regex inputs while
      zero-argument token operations remain non-demanding.
 2. **W5C.5c.2 — Macro preparation.** Migrate environment traversal,
    severity/message handling, and text/regex inputs while retaining exact

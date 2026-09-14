@@ -1,11 +1,10 @@
 use glam::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization,
+    EffectRequestSpec, RequestContext, RequestResult, SpecializationRequestInput,
+    SpecializationRequestPoll, SpecializationRequestWork, TaskHalt, TaskSpecialization,
 };
 use glam::{TextPattern, Value, Values};
 
 use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
-use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
-
 #[derive(Clone, Copy)]
 pub(super) struct TokenEffects;
 
@@ -18,10 +17,23 @@ pub(in crate::command_line) enum TokenRequest {
     End,
 }
 
+pub(super) enum TokenRequestWork {
+    Immediate {
+        request: TokenRequest,
+        arguments: Vec<Value>,
+    },
+    TextStart {
+        request: TokenRequest,
+        arguments: Vec<Value>,
+    },
+    TextValue(TokenRequest),
+    Poisoned,
+}
+
 impl TaskSpecialization for TokenEffects {
     type Host = TokenHost;
     type Request = TokenRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = TokenRequestWork;
     type Snapshot = super::TokenSnapshot;
     type Journal = TokenJournal;
 
@@ -34,25 +46,84 @@ impl TaskSpecialization for TokenEffects {
     }
 
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
+        match request {
+            TokenRequest::Text | TokenRequest::Regex => {
+                TokenRequestWork::TextStart { request, arguments }
+            }
+            request => TokenRequestWork::Immediate { request, arguments },
+        }
     }
 }
 
-impl SynchronousTaskSpecialization for TokenEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<Value>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
-        match request {
-            TokenRequest::Text => text(arguments, context),
-            TokenRequest::Regex => regex_span(arguments, context),
-            TokenRequest::TextSpan => text_span(arguments, context),
-            TokenRequest::Any => any(arguments, context),
-            TokenRequest::End => end(arguments, context),
+impl SpecializationRequestWork<TokenEffects> for TokenRequestWork {
+    fn poll(
+        &mut self,
+        _specialization: &TokenEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, TokenEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        let work = std::mem::replace(self, Self::Poisoned);
+        match work {
+            Self::Immediate { request, arguments } => {
+                assert!(
+                    input.is_none(),
+                    "immediate token request cannot have demand input"
+                );
+                let result = match request {
+                    TokenRequest::TextSpan => text_span(arguments, context),
+                    TokenRequest::Any => any(arguments, context),
+                    TokenRequest::End => end(arguments, context),
+                    TokenRequest::Text | TokenRequest::Regex => {
+                        unreachable!("text token requests use durable preparation")
+                    }
+                }?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::TextStart { request, arguments } => {
+                assert!(input.is_none(), "new token text request cannot have input");
+                let name = token_text_request_name(request);
+                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new(format!("`.{name}` received the wrong number of arguments"))
+                })?;
+                *self = Self::TextValue(request);
+                Ok(SpecializationRequestPoll::Demand(value))
+            }
+            Self::TextValue(request) => {
+                let value = match input.expect("resumed token text request must have input") {
+                    SpecializationRequestInput::Value(value) => value,
+                    SpecializationRequestInput::Failed(error) => return Err(error),
+                };
+                let text = evaluated_text(value, token_text_request_name(request))?;
+                let result = match request {
+                    TokenRequest::Text => text_literal(text, context),
+                    TokenRequest::Regex => regex_pattern(text, context),
+                    TokenRequest::TextSpan | TokenRequest::Any | TokenRequest::End => {
+                        unreachable!("only text token requests await values")
+                    }
+                }?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::Poisoned => panic!("completed token request work was polled again"),
         }
     }
+}
+
+fn token_text_request_name(request: TokenRequest) -> &'static str {
+    match request {
+        TokenRequest::Text => "token.text",
+        TokenRequest::Regex => "token.regex",
+        TokenRequest::TextSpan | TokenRequest::Any | TokenRequest::End => {
+            unreachable!("request does not consume text")
+        }
+    }
+}
+
+fn evaluated_text(value: glam::EvaluatedValue, request: &str) -> Result<String, TaskHalt> {
+    let bytes = value
+        .as_bytes()?
+        .ok_or_else(|| TaskHalt::new(format!(".{request} requires text")))?;
+    String::from_utf8(bytes.into())
+        .map_err(|_| TaskHalt::new(format!(".{request} requires UTF-8 text")))
 }
 
 pub(in crate::command_line) fn request_specs() -> Vec<EffectRequestSpec<TokenRequest>> {
@@ -74,14 +145,10 @@ fn request(name: &str, arity: usize, request: TokenRequest) -> EffectRequestSpec
     )
 }
 
-fn text(
-    arguments: Vec<Value>,
+fn text_literal(
+    literal: String,
     context: &mut RequestContext<'_, TokenEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [literal]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.token.text` received the wrong number of arguments"))?;
-    let literal = text_value(context, literal, "`.token.text`")?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("token reader escaped its isolated transaction"))?;
@@ -119,14 +186,10 @@ fn text(
     }
 }
 
-fn regex_span(
-    arguments: Vec<Value>,
+fn regex_pattern(
+    pattern: String,
     context: &mut RequestContext<'_, TokenEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [pattern]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.token.regex` received the wrong number of arguments"))?;
-    let pattern = text_value(context, pattern, "`.token.regex`")?;
     let matcher = TextPattern::parse(&pattern)
         .map_err(|error| TaskHalt::new(format!("invalid `.token.regex` pattern: {error}")))?;
     let values = context.values();
@@ -238,19 +301,6 @@ fn end(
         record_expectation(journal, journal.cursor, "end of token");
         Ok(RequestResult::Fail)
     }
-}
-
-fn text_value(
-    context: &RequestContext<'_, TokenEffects>,
-    value: Value,
-    request: &str,
-) -> Result<String, TaskHalt> {
-    let value = context.evaluate(&value)?;
-    let bytes = value
-        .as_bytes()?
-        .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
-    String::from_utf8(bytes.into())
-        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
 
 fn common_prefix_bytes(left: &str, right: &str) -> usize {
