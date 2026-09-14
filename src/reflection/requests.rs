@@ -53,6 +53,8 @@ enum ReflectionRequestOperation {
     Eval(EvalRequestWork),
     Inspection(InspectionRequestWork),
     Log(LogRequestWork),
+    TaskCreate(Vec<Value>),
+    TaskControl(TaskControlRequestWork),
     Synchronous {
         request: ReflectionRequest,
         arguments: Vec<Value>,
@@ -143,6 +145,20 @@ enum PreparationPoll<T> {
     Ready(T),
 }
 
+enum TaskControlRequestWork {
+    Start {
+        request: TaskControlRequest,
+        arguments: Vec<Value>,
+    },
+    Awaiting(TaskControlRequest),
+}
+
+#[derive(Clone, Copy)]
+enum TaskControlRequest {
+    AcknowledgeError,
+    Cancel,
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
@@ -166,6 +182,19 @@ impl ReflectionRequestWork {
             }
             ReflectionRequest::Log => {
                 ReflectionRequestOperation::Log(LogRequestWork::Start(arguments))
+            }
+            ReflectionRequest::TaskNew => ReflectionRequestOperation::TaskCreate(arguments),
+            ReflectionRequest::TaskAcknowledgeError => {
+                ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
+                    request: TaskControlRequest::AcknowledgeError,
+                    arguments,
+                })
+            }
+            ReflectionRequest::TaskCancel => {
+                ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
+                    request: TaskControlRequest::Cancel,
+                    arguments,
+                })
             }
             request => ReflectionRequestOperation::Synchronous { request, arguments },
         };
@@ -365,6 +394,34 @@ where
                     RequestResult::ReturnUnit,
                 ))
             }
+            ReflectionRequestOperation::TaskCreate(arguments) => {
+                assert!(input.is_none(), "task creation cannot have demand input");
+                let result = create_task(arguments, context)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
+                request,
+                arguments,
+            }) => {
+                assert!(input.is_none(), "new task control cannot have demand input");
+                let name = task_control_name(request);
+                let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new(format!("`.{name}` received the wrong number of arguments"))
+                })?;
+                self.operation = ReflectionRequestOperation::TaskControl(
+                    TaskControlRequestWork::Awaiting(request),
+                );
+                Ok(SpecializationRequestPoll::Demand(handle))
+            }
+            ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Awaiting(request)) => {
+                let handle = demand_value(input, "resumed task control")?;
+                let handle = evaluated_task_handle(context, &handle, task_control_name(request))?;
+                ensure_runtime_task(context.eval_context(), &handle)?;
+                apply_task_control(context, request, handle)?;
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
+            }
             ReflectionRequestOperation::Synchronous { request, arguments } => {
                 assert!(
                     input.is_none(),
@@ -378,6 +435,160 @@ where
             }
         }
     }
+}
+
+fn task_control_name(request: TaskControlRequest) -> &'static str {
+    match request {
+        TaskControlRequest::AcknowledgeError => "task.ack_error",
+        TaskControlRequest::Cancel => "task.cancel",
+    }
+}
+
+fn evaluated_task_handle<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
+    handle: &crate::api::EvaluatedValue,
+    request: &str,
+) -> Result<Arc<TaskHandleCell>, TaskHalt> {
+    handle.with_core(|value| {
+        let CoreValue::Opaque(handle) = value else {
+            return Err(TaskHalt::new(format!(
+                "`.{request}` requires a reflection task handle"
+            )));
+        };
+        handle
+            .downcast::<TaskHandleCell>(context.eval_context().values())
+            .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
+    })?
+}
+
+fn apply_task_control<S>(
+    context: &mut RequestContext<'_, S>,
+    request: TaskControlRequest,
+    handle: Arc<TaskHandleCell>,
+) -> Result<(), TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Journal: ReflectionTransaction,
+{
+    if let Some(mut transaction) = context.transaction() {
+        transaction
+            .parts()
+            .1
+            .reflection_journal()
+            .updates
+            .push(match request {
+                TaskControlRequest::AcknowledgeError => {
+                    ReflectionUpdate::AcknowledgeError(handle.task.clone())
+                }
+                TaskControlRequest::Cancel => ReflectionUpdate::Cancel(handle.task.clone()),
+            });
+    } else {
+        match request {
+            TaskControlRequest::AcknowledgeError => {
+                handle.task.acknowledge_failure();
+                context.committed();
+            }
+            TaskControlRequest::Cancel => {
+                if matches!(handle.task.cancel(), EvaluationTaskCancellation::Requested) {
+                    context.committed();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_task<S>(
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let [effect]: [Value; 1] = arguments
+        .try_into()
+        .map_err(|_| TaskHalt::new("`.task.new` received the wrong number of arguments"))?;
+    let eval_context = context.eval_context().clone();
+    let query_writer = context.host().query_writer().ok_or_else(|| {
+        TaskHalt::new("current reflection host does not support task status queries")
+    })?;
+    let values = context.values();
+    let effect = values.clone_core(&effect)?;
+    let launched = values.wrap(task_status_query_value(
+        &values,
+        EvaluationTaskStatus::Launched,
+    ));
+    let handle = if let Some(mut transaction) = context.transaction() {
+        let result = transaction
+            .store()
+            .reserve_query_with(launched.clone())
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let pending = eval_context
+            .reserve_reflection_task(effect)
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let handle = Arc::new(TaskHandleCell {
+            runtime: eval_context.values().runtime_id(),
+            task: pending.handle().clone(),
+            status: result.clone(),
+        });
+        let publisher = task_status_publisher(query_writer, result, eval_context.values().clone());
+        transaction
+            .parts()
+            .1
+            .reflection_journal()
+            .updates
+            .push(ReflectionUpdate::Launch {
+                task: pending,
+                publisher,
+            });
+        handle
+    } else {
+        let snapshot = context.host().snapshot();
+        let mut store = StoreJournal::new(snapshot.store().clone());
+        let result = store
+            .reserve_query_with(launched)
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let pending = eval_context
+            .reserve_reflection_task(effect)
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let handle = Arc::new(TaskHandleCell {
+            runtime: eval_context.values().runtime_id(),
+            task: pending.handle().clone(),
+            status: result.clone(),
+        });
+        let publisher = task_status_publisher(query_writer, result, eval_context.values().clone());
+        let mut journal = S::Journal::default();
+        journal
+            .reflection_journal()
+            .updates
+            .push(ReflectionUpdate::Launch {
+                task: pending,
+                publisher,
+            });
+        match context
+            .host()
+            .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
+        {
+            CommitResult::Committed => context.committed(),
+            CommitResult::Conflict => {
+                return Err(TaskHalt::new("fresh task reservation conflicted"));
+            }
+            CommitResult::MissingVolume(volume) => {
+                return Err(TaskHalt::new(format!(
+                    "private query volume {} is unavailable",
+                    volume.get()
+                )));
+            }
+            CommitResult::Closed => return Ok(RequestResult::Cancelled),
+        }
+        handle
+    };
+    Ok(RequestResult::Return(task_handle_value(
+        context.eval_context(),
+        handle,
+    )))
 }
 
 impl ValuePathRequestWork {

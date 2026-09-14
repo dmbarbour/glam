@@ -3244,10 +3244,15 @@ Partition this work as follows:
      completed prefix or host emission.
    - **W5C.5b.2c — Complete (2026-09-14): Environment traversal.** Migrate key-path conversion and
      value-path selection as resumable recursive preparation.
-4. **W5C.5b.3 — Task request family.** Migrate task-handle preparation, query
-   lookup/state decoding, acknowledgement/cancellation, and task join. Query
-   observation must precede its owned value-path demand; join must use an
-   explicit dependency transition rather than a blocked callback error.
+4. **W5C.5b.3 — Task request family.** Split into:
+   - **W5C.5b.3a — Complete (2026-09-14): Creation and control.** Migrate non-demanding task creation
+     plus resumable task-handle preparation for acknowledgement and
+     cancellation.
+   - **W5C.5b.3b — Query requests.** Migrate query lookup and state decoding.
+     Query observation must precede its owned value demand and must not repeat
+     after suspension.
+   - **W5C.5b.3c — Join.** Migrate task join using an explicit shared-completion
+     transition rather than a blocked callback error.
 5. **W5C.5b.4 — Reusable closure.** Relatch request activity, retry, structured
    failure, and runtime-root inventories. Remove the reusable family's access
    to the transitional adapter.
