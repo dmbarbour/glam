@@ -644,8 +644,11 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/net_lowering.rs::lower_resolved_expr#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/lifecycle.rs::combine_composed_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine.rs::impl Branch < S >::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::control_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine.rs::impl EffectTask < S >::deliver_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::start_fixpoint#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::reset_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::shift_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/protocol.rs::root_inventory_tests::public_context_roots_a_bounded_evaluation_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/protocol.rs::root_inventory_tests::structured_api_error_preserves_its_runtime_root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::impl RuntimeFailureRoot::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -856,6 +859,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // diagnostic region after child settlement has completed.
         ("src/reflection/lifecycle.rs", GatewayCounts::new(1, 0)),
         ("src/reflection/machine.rs", GatewayCounts::new(3, 0)),
+        // W5C.4's control fixtures construct request effects and retain exact
+        // reset-stack roots within three bounded test-only regions.
+        ("src/reflection/machine/tests.rs", GatewayCounts::new(3, 0)),
         // Structured halt fixtures and production conversion now construct
         // their raw payloads only within explicit regions.
         ("src/reflection/protocol.rs", GatewayCounts::new(2, 0)),

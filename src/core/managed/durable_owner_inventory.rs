@@ -829,10 +829,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 161;
+const DECLARATION_BASELINE_COUNT: usize = 166;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([109, 126, 1, 14, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_845_559_797_990_238_446;
+    DeclarationSignals::new([109, 140, 1, 14, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_433_044_218_840_445_170;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1006,7 +1006,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "macro invocation/work/journal logical source state"
     } else if declaration.starts_with("src/reflection/lifecycle.rs::") {
         "EffectRun lifecycle state"
-    } else if declaration.starts_with("src/reflection/machine.rs::") {
+    } else if declaration.starts_with("src/reflection/machine.rs::")
+        || declaration.starts_with("src/reflection/machine/reset_stack.rs::")
+    {
         "EffectTask frames, requests, continuations, fixpoints, branches, and task blocks"
     } else if declaration.starts_with("src/reflection/protocol.rs::") {
         "reflection protocol requests, results, snapshots, transactions, and failures"

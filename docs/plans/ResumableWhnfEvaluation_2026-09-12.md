@@ -2691,6 +2691,8 @@ Remediation checkpoints:
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
+**Status: complete (2026-09-14).**
+
 **Review record (2026-09-14).** The semantic scope remains correct, but the
 original two-checkpoint split predates the concrete W3--W5 machine shapes and
 is too coarse. Reset-stack decoding is still concentrated in the synchronous
@@ -3067,6 +3069,8 @@ removed; only the test-only legacy comparator remains until closure.
 
 ####### W5C.4b.8 — Control integration closure
 
+**Status: complete (2026-09-14).**
+
 Run the existing reset/shift, task-locality, root-state replacement, fixpoint,
 cut, and continuation-reuse suites alongside a forced-boundary matrix. For
 each applicable control disposition cover uninterrupted execution, one-step
@@ -3080,6 +3084,19 @@ execution. Update the source/root inventories after each migration checkpoint;
 retire `value_key_in` and the reset-specific synchronous helpers as their last
 W5C.4 callers move. Leave the shared `evaluate_in` retirement and the final
 no-unowned-demand census to W5C.6 after W5C.5 closes.
+
+Completion record: all reset-stack semantic reads now pass through
+`ResetStackMachine`; the old recursive key/stack/frame helper family is absent
+from production source, while encoding is explicitly named and performs no
+demand. Forced promise/lazy fixtures cover request key, structural stack and
+frame phases, recursive key/numeric fields, captured installation, initial and
+restarted fixpoints, both delivery orderings, and restore success/failure.
+Existing task-locality, state replacement, cut, fixpoint, and continuation
+suites provide the uninterrupted reference behavior. The final lifecycle
+audit found and fixed stale `ControlWork` surviving retry wakes and terminal
+task cleanup; a deterministic fixture forces both disposal paths. Task-level
+work inventories remain exhaustive, and strict versus one-step polling reaches
+the same control outcomes without replaying completed decoder prefixes.
 
 ##### W5C.5 — Specialization callback boundary
 

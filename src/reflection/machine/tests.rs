@@ -1798,34 +1798,24 @@ type ControlRootInventoryFn =
     fn(&Control, &Continuation, &Delimiter, &CapturedContinuation, &ResetFrame, &CapturedLayer);
 
 #[test]
-fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
+fn reset_stack_synchronous_helpers_are_retired_after_control_migration() {
     let source = include_str!("../machine.rs");
-    let expected = [
-        ("value_key_in", 2),
-        ("reset_stack_value_in", 0),
-        ("reset_frames_in", 0),
-        ("reset_frames_from_value_in", 1),
-        ("with_reset_frames_in", 0),
-        ("replace_reset_frames", 6),
-        ("with_reset_stack_value_in", 0),
-    ];
-
-    for (name, expected) in expected {
-        let needle = format!("{name}(");
-        let actual = source
-            .match_indices(&needle)
-            .filter(|(index, _)| {
-                source[..*index]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|prior| !prior.is_ascii_alphanumeric() && prior != '_')
-            })
-            .count();
-        assert_eq!(
-            actual, expected,
-            "reset-stack helper `{name}` changed; update W5C.4's migration inventory"
+    for helper in [
+        "value_key_in(",
+        "reset_stack_value_in(",
+        "reset_frames_in(",
+        "reset_frames_from_value_in(",
+        "with_reset_frames_in(",
+        "replace_reset_frames(",
+        "with_reset_stack_value_in(",
+    ] {
+        assert!(
+            !source.contains(helper),
+            "legacy synchronous helper `{helper}` returned after W5C.4"
         );
     }
+    assert!(source.contains("ResetStackMachine"));
+    assert!(source.contains("encode_reset_frames_in_state("));
 }
 
 fn drive_reset_stack_decoder(
@@ -2160,49 +2150,6 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
         .expect("published scope should resume decoding");
     assert_eq!(decoded.frames[0].scope_depth, 4);
     assert_eq!(decoded.frames[0].order, 1);
-}
-
-#[test]
-fn reset_stack_decoder_matches_legacy_strict_decoding() {
-    let values = crate::core::test_value_factory();
-    let context = EvalContext::isolated(values.clone());
-    let serialized = values.construct_runtime_value_root(|_| {
-        Value::List(List::from_values(vec![
-            serialized_reset_frame(
-                Value::binary_from_text("outer"),
-                Value::Number(10.into()),
-                1,
-                2,
-            ),
-            serialized_reset_frame(
-                Value::List(List::from_values(vec![Value::binary_from_text("inner")])),
-                Value::Number(20.into()),
-                3,
-                4,
-            ),
-        ]))
-    });
-    let decoded =
-        drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized.clone()), &context)
-            .expect("new decoder should accept a strict stack");
-    let evaluator = EvaluatorStepContext::for_direct_compatibility(&context);
-    let strict = evaluator.project_root(&serialized);
-    let legacy = reset_frames_from_value_in(&evaluator, &strict)
-        .expect("legacy decoder should accept the same strict stack");
-    evaluator.finish();
-
-    assert_eq!(decoded.frames.len(), legacy.len());
-    for (decoded, legacy) in decoded.frames.iter().zip(&legacy) {
-        assert_eq!(decoded.key, legacy.key);
-        assert_eq!(decoded.scope_depth, legacy.scope_depth);
-        assert_eq!(decoded.order, legacy.order);
-        EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-            assert_eq!(
-                evaluator.project_root(&decoded.continuation),
-                evaluator.project_root(&legacy.continuation)
-            );
-        });
-    }
 }
 
 #[test]
@@ -2912,6 +2859,10 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
         scope_depth: 0,
         order: 1,
     });
+    branch.retry = Some(RetryCheckpoint {
+        generation: Some(0),
+        branch: Box::new(branch.clone()),
+    });
     let current = values.construct_runtime_value_root(|_| Value::List(List::empty()));
     let delivered = values.construct_runtime_value_root(|_| Value::binary_from_text("unused"));
     task.execution.work = MachineWork::Outcome {
@@ -2920,10 +2871,27 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
     };
     task.execution.controlling = Some(ControlWork::delivery(current, delivered, branch, 0));
 
-    let error = match task.run() {
-        Ok(_) => panic!("malformed saved stack should fail"),
-        Err(error) => error,
+    let blocked = loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {
+                assert_eq!(
+                    task.execution
+                        .active_branch()
+                        .expect("in-progress restore should retain its branch")
+                        .control
+                        .delimiters
+                        .len(),
+                    1,
+                    "restore must not publish a control mutation before validation"
+                );
+            }
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            _ => panic!("malformed saved stack should remain retryable"),
+        }
     };
+    let error = blocked
+        .error
+        .expect("malformed retryable restore should retain its error");
     assert!(
         error
             .to_string()
@@ -2939,6 +2907,47 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
             .len(),
         1
     );
+}
+
+#[test]
+fn retry_wake_and_terminalization_discard_blocked_control_work() {
+    fn blocked_reset_task(values: &CoreValueFactory) -> EffectTask<TestEffects> {
+        let tags = Tags::new();
+        let key = PromisedValue::new(values, "discarded reset key");
+        let mut task = EffectTask::new(
+            values,
+            reset_request_effect(values, &tags, &key),
+            TestEffects,
+            Arc::new(TestHost::with_values(values.clone())),
+        )
+        .expect("blocked-control fixture should construct");
+        loop {
+            match task.poll(1) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Blocked(_) => return task,
+                _ => panic!("unfulfilled reset key did not block"),
+            }
+        }
+    }
+
+    let values = crate::core::test_value_factory();
+    let mut retried = blocked_reset_task(&values);
+    let replacement = MachineWork::Drive {
+        branch: retried
+            .execution
+            .active_branch()
+            .expect("blocked control should retain its branch")
+            .clone(),
+        scope_depth: retried.execution.active_scope_depth(),
+    };
+    retried.apply_wake(WakeAction::ReplaceWork(Box::new(replacement)));
+    assert!(retried.execution.controlling.is_none());
+    assert!(matches!(retried.execution.work, MachineWork::Drive { .. }));
+
+    let mut terminal = blocked_reset_task(&values);
+    terminal.finish(TaskTerminal::Cancelled);
+    assert!(terminal.execution.controlling.is_none());
+    assert!(matches!(terminal.terminal, Some(TaskTerminal::Cancelled)));
 }
 
 fn assert_fixpoint_root_inventory(

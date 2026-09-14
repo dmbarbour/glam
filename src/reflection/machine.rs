@@ -1063,7 +1063,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             });
                             let state = context.evaluate(&self.eval_context, |evaluator| {
                                 let state = evaluator.project_root(&branch.state);
-                                replace_reset_frames(
+                                encode_reset_frames_in_state(
                                     evaluator,
                                     state,
                                     &self.tags.continuation_state,
@@ -1111,7 +1111,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 };
                             let state = context.evaluate(&self.eval_context, |evaluator| {
                                 let state = evaluator.project_root(&branch.state);
-                                replace_reset_frames(
+                                encode_reset_frames_in_state(
                                     evaluator,
                                     state,
                                     &self.tags.continuation_state,
@@ -1228,7 +1228,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     });
                     let state = context.evaluate(&self.eval_context, |evaluator| {
                         let state = evaluator.project_root(&branch.state);
-                        replace_reset_frames(
+                        encode_reset_frames_in_state(
                             evaluator,
                             state,
                             &self.tags.continuation_state,
@@ -1291,7 +1291,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let mut branch = controlling.branch;
                     let state = context.evaluate(&self.eval_context, |evaluator| {
                         let state = evaluator.project_root(&branch.state);
-                        replace_reset_frames(evaluator, state, &self.tags.continuation_state, &[])
+                        encode_reset_frames_in_state(
+                            evaluator,
+                            state,
+                            &self.tags.continuation_state,
+                            &[],
+                        )
                     });
                     let order = match self.allocate_control_order() {
                         Ok(order) => order,
@@ -1395,7 +1400,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             let frame = resets.pop().expect("reset order came from a frame");
                             let state = context.evaluate(&self.eval_context, |evaluator| {
                                 let state = evaluator.project_root(&branch.state);
-                                replace_reset_frames(
+                                encode_reset_frames_in_state(
                                     evaluator,
                                     state,
                                     &self.tags.continuation_state,
@@ -3142,6 +3147,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
+        self.execution.controlling = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
@@ -3153,6 +3159,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
+        self.execution.controlling = None;
         self.execution.cuts.clear();
         let mut root = self
             .search
@@ -3169,6 +3176,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
+        self.execution.controlling = None;
         self.execution.cuts.truncate(index + 1);
         let mut frame = self
             .execution
@@ -3205,6 +3213,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
+        self.execution.controlling = None;
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
@@ -5229,12 +5238,6 @@ fn missing_volume_error(volume: VolumeId) -> TaskHalt {
     ))
 }
 
-#[cfg(test)]
-fn value_key_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Key, TaskHalt> {
-    Key::from_value(&evaluate_in(context, value)?)
-        .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
-}
-
 fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|access| {
         if path.is_empty() {
@@ -5269,57 +5272,7 @@ fn reset_stack_root_in(
     ))
 }
 
-#[cfg(test)]
-fn reset_frames_from_value_in(
-    context: &EvaluatorStepContext<'_>,
-    stack: &Value,
-) -> Result<Vec<ResetFrame>, TaskHalt> {
-    let Value::List(stack) = evaluate_in(context, stack.clone())? else {
-        return Err(TaskHalt::new(
-            "reflection continuation state must be a list",
-        ));
-    };
-    eval::list_to_value_items_in(context, &stack)
-        .map_err(task_eval_error)?
-        .into_iter()
-        .map(|frame| {
-            let Value::List(frame) = evaluate_in(context, frame)? else {
-                return Err(TaskHalt::new(
-                    "reflection continuation frame must be a list",
-                ));
-            };
-            let [key, continuation, scope_depth, order]: [Value; 4] =
-                eval::list_to_value_items_in(context, &frame)
-                    .map_err(task_eval_error)?
-                    .try_into()
-                    .map_err(|_| {
-                        TaskHalt::new("reflection continuation frame has the wrong size")
-                    })?;
-            let Value::Number(scope_depth) = scope_depth else {
-                return Err(TaskHalt::new(
-                    "reflection continuation frame has an invalid scope",
-                ));
-            };
-            let Value::Number(order) = order else {
-                return Err(TaskHalt::new(
-                    "reflection continuation frame has an invalid order",
-                ));
-            };
-            Ok(ResetFrame {
-                key: value_key_in(context, key)?,
-                continuation: context.root_value(continuation),
-                scope_depth: scope_depth.to_usize_if_integer().ok_or_else(|| {
-                    TaskHalt::new("reflection continuation frame has an invalid scope")
-                })?,
-                order: order.to_usize_if_integer().ok_or_else(|| {
-                    TaskHalt::new("reflection continuation frame has an invalid order")
-                })?,
-            })
-        })
-        .collect()
-}
-
-fn reset_frames_value(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame]) -> Value {
+fn encode_reset_frames(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame]) -> Value {
     Value::List(List::from_values(
         frames
             .iter()
@@ -5335,7 +5288,7 @@ fn reset_frames_value(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame])
     ))
 }
 
-fn replace_reset_frames(
+fn encode_reset_frames_in_state(
     context: &EvaluatorStepContext<'_>,
     state: Value,
     continuation_state: &Key,
@@ -5351,7 +5304,7 @@ fn replace_reset_frames(
     };
     Value::Dict(state.insert(
         continuation_state.clone(),
-        reset_frames_value(context, frames),
+        encode_reset_frames(context, frames),
     ))
 }
 
