@@ -2758,6 +2758,8 @@ states; their semantic and verification checkpoints remain separate.
 
 ####### W5C.4a.1 — Stack shell and logical frame-list traversal
 
+**Status: complete (2026-09-14).**
+
 Add `ResetStackMachine` with an explicit source-WHNF phase. Require a list
 after that demand, then consume its logical front through `ListFrontMachine`
 so a lazy chunk suspends with the exact remaining suffix rather than replaying
@@ -2770,7 +2772,16 @@ interpretation belongs to the next checkpoint. Verify strict, empty,
 source-lazy, source-promise, and lazy-list-chunk cases with a one-step budget
 and counted producers.
 
+Completion record: `ResetStackMachine` now owns the exact serialized stack,
+demands its shell through `WhnfComputation`, and advances logical list fronts
+through `ListFrontMachine`. A one-step driver verifies strict and deferred
+stack shells and list chunks without replay. Resolver-promise suspension is
+also retained as an explicit `WorkDependency` rather than being converted to
+a synchronous evaluator wait.
+
 ####### W5C.4a.2 — Frame shell, logical field traversal, and arity
+
+**Status: complete (2026-09-14).**
 
 For each extracted frame, demand its outer shell, require a list, and consume
 exactly four logical fields through a nested list-front owner. Detect an
@@ -2783,7 +2794,15 @@ Keep the existing non-list-frame and wrong-size diagnostics. Add fixtures for
 zero through five fields, a deferred frame shell, a deferred chunk before each
 field boundary, and a deferred tail needed only to establish exact arity.
 
+Completion record: each extracted frame has a nested durable owner for shell
+demand and logical field traversal. The decoder retains completed fields,
+rejects a non-list frame, rejects fewer than four fields at the observed end,
+and rejects an observed fifth field without walking the remaining surplus.
+Deferred frame shells and field chunks are counted and evaluated once.
+
 ####### W5C.4a.3 — Ordered field conversion
+
+**Status: complete (2026-09-14).**
 
 Decode fields in their serialized order:
 
@@ -2804,6 +2823,14 @@ recursive deferred composite key. Verify that a deferred continuation remains
 undemanded during decoding and is demanded exactly once only by later control
 application. Preserve the existing invalid-key, invalid-scope, and
 invalid-order diagnostics after WHNF is reached.
+
+Completion record: ordered conversion now reuses `KeyConversionMachine`,
+retains the continuation as an undemanded runtime root, and demands the scope
+and order through separate resumable WHNF computations. The invalid-key text
+is deliberately normalized to the canonical key-conversion diagnostic rather
+than preserving the reset helper's private wording. Counted recursive key and
+numeric fixtures demonstrate exact resumption, while a lazy continuation
+remains untouched by stack decoding.
 
 ####### W5C.4a.4 — Standalone decoder closure
 

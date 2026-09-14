@@ -64,7 +64,7 @@ pub(crate) use value::{
     halt_diagnostic_value,
 };
 
-pub(crate) use access_machine::{ConversionPoll, KeyListMachine};
+pub(crate) use access_machine::{ConversionPoll, KeyConversionMachine, KeyListMachine};
 pub(crate) use application::*;
 #[cfg(test)]
 use builtins::apply_builtin;

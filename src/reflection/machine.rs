@@ -37,6 +37,12 @@ use crate::runtime::RuntimeValueRoot;
 #[cfg(test)]
 use super::protocol::HostSnapshot;
 
+#[allow(
+    dead_code,
+    reason = "W5C.4a builds the standalone decoder before W5C.4b migrates its production callers"
+)]
+mod reset_stack;
+
 #[derive(Clone)]
 struct Tags {
     r: Key,

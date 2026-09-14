@@ -52,7 +52,7 @@ pub(crate) enum ConversionPoll<T> {
     Failed(RuntimeFailureRoot),
 }
 
-pub(super) struct KeyConversionMachine {
+pub(crate) struct KeyConversionMachine {
     state: KeyConversionState,
     source_owner: Option<LazyId>,
 }
@@ -238,14 +238,14 @@ impl AccessMachine {
 }
 
 impl KeyConversionMachine {
-    pub(super) fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
+    pub(crate) fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
             state: KeyConversionState::Demand(owned_whnf(value, source_owner)),
             source_owner,
         }
     }
 
-    pub(super) fn poll(
+    pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,

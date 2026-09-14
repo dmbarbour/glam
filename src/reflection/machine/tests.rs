@@ -3,6 +3,7 @@ use std::sync::{Mutex, Weak};
 
 use bytes::Bytes;
 
+use super::reset_stack::{DecodedResetStack, ResetStackMachine, ResetStackPoll};
 use super::*;
 use crate::Severity;
 use crate::api::{
@@ -1752,6 +1753,340 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
             "reset-stack helper `{name}` changed; update W5C.4's migration inventory"
         );
     }
+}
+
+fn drive_reset_stack_decoder(
+    decoder: &mut ResetStackMachine,
+    context: &EvalContext,
+) -> Result<DecodedResetStack, TaskHalt> {
+    let poll_context = EvaluationPollContext::for_context(context);
+    for _ in 0..512 {
+        match decoder.poll(&poll_context, context, 1) {
+            ResetStackPoll::Ready(stack) => return Ok(stack),
+            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Pending(WorkDependency::Wait(wait)) => {
+                assert!(matches!(
+                    context.pump_wait(&wait, 4_096),
+                    crate::evaluation::EvaluationPumpOutcome::TargetReady
+                        | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted
+                ));
+            }
+            ResetStackPoll::Pending(WorkDependency::Promise(_)) => {
+                panic!("reset-stack fixture unexpectedly exposed a resolver promise")
+            }
+            ResetStackPoll::Pending(WorkDependency::Test(_)) => {
+                panic!("reset-stack fixture unexpectedly exposed a test dependency")
+            }
+            ResetStackPoll::Failed(error) => return Err(error),
+        }
+    }
+    panic!("bounded reset-stack decoder fixture did not terminate")
+}
+
+fn serialized_reset_frame(
+    key: Value,
+    continuation: Value,
+    scope_depth: usize,
+    order: usize,
+) -> Value {
+    Value::List(List::from_values(vec![
+        key,
+        continuation,
+        Value::Number(Number::from_usize(scope_depth)),
+        Value::Number(Number::from_usize(order)),
+    ]))
+}
+
+#[test]
+fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let serialized = values.construct_runtime_value_root(|_| {
+        Value::List(List::from_values(vec![
+            serialized_reset_frame(
+                Value::binary_from_text("first"),
+                Value::Number(11.into()),
+                1,
+                2,
+            ),
+            serialized_reset_frame(
+                Value::binary_from_text("second"),
+                Value::Number(22.into()),
+                3,
+                4,
+            ),
+        ]))
+    });
+    let mut decoder = ResetStackMachine::new(serialized.clone());
+    super::reset_stack::assert_machine_shape(&decoder);
+
+    let decoded = drive_reset_stack_decoder(&mut decoder, &context)
+        .expect("strict reset stack should decode");
+    assert_eq!(decoded.serialized.runtime_id(), serialized.runtime_id());
+    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+        assert_eq!(
+            evaluator.project_root(&decoded.serialized),
+            evaluator.project_root(&serialized)
+        );
+    });
+    assert_eq!(decoded.frames.len(), 2);
+    assert_eq!(decoded.frames[0].key, Key::binary_from_text("first"));
+    assert_eq!(decoded.frames[0].scope_depth, 1);
+    assert_eq!(decoded.frames[0].order, 2);
+    assert_eq!(decoded.frames[1].key, Key::binary_from_text("second"));
+    assert_eq!(decoded.frames[1].scope_depth, 3);
+    assert_eq!(decoded.frames[1].order, 4);
+    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+        assert_eq!(
+            evaluator.project_root(&decoded.frames[0].continuation),
+            Value::Number(11.into())
+        );
+        assert_eq!(
+            evaluator.project_root(&decoded.frames[1].continuation),
+            Value::Number(22.into())
+        );
+    });
+}
+
+#[test]
+fn reset_stack_decoder_rejects_non_list_and_wrong_arity() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let cases = [
+        (
+            Value::Number(1.into()),
+            "reflection continuation state must be a list",
+        ),
+        (
+            Value::List(List::from_values(vec![Value::List(List::from_values(
+                vec![Value::Number(1.into())],
+            ))])),
+            "reflection continuation frame has the wrong size",
+        ),
+        (
+            Value::List(List::from_values(vec![Value::List(List::from_values(
+                vec![
+                    Value::Number(1.into()),
+                    Value::Number(2.into()),
+                    Value::Number(3.into()),
+                    Value::Number(4.into()),
+                    Value::Number(5.into()),
+                ],
+            ))])),
+            "reflection continuation frame has the wrong size",
+        ),
+    ];
+
+    for (stack, expected) in cases {
+        let stack = values.construct_runtime_value_root(|_| stack);
+        let error = match drive_reset_stack_decoder(&mut ResetStackMachine::new(stack), &context) {
+            Ok(_) => panic!("malformed reset stack should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn reset_stack_decoder_resumes_each_lazy_field_once_and_leaves_continuation_lazy() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let key_evaluations = Arc::new(AtomicUsize::new(0));
+    let scope_evaluations = Arc::new(AtomicUsize::new(0));
+    let order_evaluations = Arc::new(AtomicUsize::new(0));
+    let continuation_evaluations = Arc::new(AtomicUsize::new(0));
+
+    let serialized = values.construct_runtime_value_root(|access| {
+        let continuation_evaluations = continuation_evaluations.clone();
+        let continuation = Value::Lazy(LazyValue::semantic_thunk_in(
+            access,
+            "reset continuation",
+            move |_| {
+                continuation_evaluations.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::Number(99.into()))
+            },
+        ));
+        let key_evaluations = key_evaluations.clone();
+        let key = Value::List(List::from_values(vec![Value::Lazy(
+            LazyValue::semantic_thunk_in(access, "reset key element", move |_| {
+                key_evaluations.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::binary_from_text("key"))
+            }),
+        )]));
+        let scope_evaluations = scope_evaluations.clone();
+        let scope = Value::Lazy(LazyValue::semantic_thunk_in(
+            access,
+            "reset scope",
+            move |_| {
+                scope_evaluations.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::Number(2.into()))
+            },
+        ));
+        let order_evaluations = order_evaluations.clone();
+        let order = Value::Lazy(LazyValue::semantic_thunk_in(
+            access,
+            "reset order",
+            move |_| {
+                order_evaluations.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::Number(3.into()))
+            },
+        ));
+        Value::List(List::from_values(vec![Value::List(List::from_values(
+            vec![key, continuation, scope, order],
+        ))]))
+    });
+
+    let decoded = drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized), &context)
+        .expect("fully deferred reset stack should decode");
+    assert_eq!(decoded.frames.len(), 1);
+    assert_eq!(
+        decoded.frames[0].key,
+        Key::List(vec![Key::binary_from_text("key")].into())
+    );
+    assert_eq!(decoded.frames[0].scope_depth, 2);
+    assert_eq!(decoded.frames[0].order, 3);
+    for (label, count) in [
+        ("key", &key_evaluations),
+        ("scope", &scope_evaluations),
+        ("order", &order_evaluations),
+    ] {
+        assert_eq!(count.load(Ordering::Acquire), 1, "{label} replayed");
+    }
+    assert_eq!(
+        continuation_evaluations.load(Ordering::Acquire),
+        0,
+        "reset-stack decoding must not demand the continuation"
+    );
+}
+
+#[test]
+fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
+    enum Layer {
+        StackShell,
+        StackChunk,
+        FrameShell,
+        FrameChunk,
+    }
+
+    for layer in [
+        Layer::StackShell,
+        Layer::StackChunk,
+        Layer::FrameShell,
+        Layer::FrameChunk,
+    ] {
+        let values = crate::core::test_value_factory();
+        let context = EvalContext::isolated(values.clone());
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let serialized = values.construct_runtime_value_root(|access| match layer {
+            Layer::StackShell => {
+                let evaluations = evaluations.clone();
+                Value::Lazy(LazyValue::semantic_thunk_in(
+                    access,
+                    "reset stack shell",
+                    move |_| {
+                        evaluations.fetch_add(1, Ordering::AcqRel);
+                        Ok(Value::List(List::from_values(vec![
+                            serialized_reset_frame(
+                                Value::binary_from_text("key"),
+                                Value::Number(8.into()),
+                                2,
+                                3,
+                            ),
+                        ])))
+                    },
+                ))
+            }
+            Layer::StackChunk => {
+                let evaluations = evaluations.clone();
+                let chunk = LazyValue::semantic_thunk_in(access, "reset stack chunk", move |_| {
+                    evaluations.fetch_add(1, Ordering::AcqRel);
+                    Ok(Value::List(List::from_values(vec![
+                        serialized_reset_frame(
+                            Value::binary_from_text("key"),
+                            Value::Number(8.into()),
+                            2,
+                            3,
+                        ),
+                    ])))
+                });
+                Value::List(List::from_thunk(chunk.into()))
+            }
+            Layer::FrameShell => {
+                let evaluations = evaluations.clone();
+                let deferred =
+                    LazyValue::semantic_thunk_in(access, "reset frame shell", move |_| {
+                        evaluations.fetch_add(1, Ordering::AcqRel);
+                        Ok(serialized_reset_frame(
+                            Value::binary_from_text("key"),
+                            Value::Number(8.into()),
+                            2,
+                            3,
+                        ))
+                    });
+                Value::List(List::from_values(vec![Value::Lazy(deferred)]))
+            }
+            Layer::FrameChunk => {
+                let evaluations = evaluations.clone();
+                let fields = LazyValue::semantic_thunk_in(access, "reset frame chunk", move |_| {
+                    evaluations.fetch_add(1, Ordering::AcqRel);
+                    Ok(Value::List(List::from_values(vec![
+                        Value::binary_from_text("key"),
+                        Value::Number(8.into()),
+                        Value::Number(2.into()),
+                        Value::Number(3.into()),
+                    ])))
+                });
+                Value::List(List::from_values(vec![Value::List(List::from_thunk(
+                    fields.into(),
+                ))]))
+            }
+        });
+
+        let decoded = drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized), &context)
+            .expect("deferred structural layer should decode");
+        assert_eq!(decoded.frames.len(), 1);
+        assert_eq!(
+            decoded.frames[0].continuation.runtime_id(),
+            values.runtime_id()
+        );
+        assert_eq!(evaluations.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn reset_stack_decoder_resumes_a_promised_numeric_field() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let promised = PromisedValue::new(&values, "reset scope promise");
+    let serialized = values.construct_runtime_value_root(|access| {
+        Value::List(List::from_values(vec![Value::List(List::from_values(
+            vec![
+                Value::binary_from_text("key"),
+                Value::Number(7.into()),
+                Value::Promised(promised.duplicate_in(access)),
+                Value::Number(1.into()),
+            ],
+        ))]))
+    });
+    let mut decoder = ResetStackMachine::new(serialized);
+    let poll_context = EvaluationPollContext::for_context(&context);
+    let dependency = loop {
+        match decoder.poll(&poll_context, &context, 1) {
+            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Pending(WorkDependency::Promise(dependency)) => break dependency,
+            ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
+            ResetStackPoll::Ready(_) => panic!("promised scope completed before publication"),
+            ResetStackPoll::Failed(error) => panic!("promised scope failed: {error}"),
+        }
+    };
+    assert_eq!(dependency.id(), promised.id(&values));
+    crate::core::set_test_promise(&values, &promised, Value::Number(4.into()))
+        .expect("promise should publish once");
+
+    let decoded = drive_reset_stack_decoder(&mut decoder, &context)
+        .expect("published scope should resume decoding");
+    assert_eq!(decoded.frames[0].scope_depth, 4);
+    assert_eq!(decoded.frames[0].order, 1);
 }
 
 fn assert_fixpoint_root_inventory(
