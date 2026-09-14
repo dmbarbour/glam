@@ -1659,7 +1659,7 @@ mod tests {
                     "src/evaluation/access.rs::EvaluatorStepContext::construct_promise",
                     "src/reflection/machine.rs::EffectTask::deliver_step",
                     "src/reflection/machine.rs::replace_reset_frames",
-                    "src/reflection/machine.rs::set_state_path_in",
+                    "src/reflection/machine.rs::EffectTask::state_path_step",
                 ],
             ),
             (

@@ -297,6 +297,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 },
                 decoding: None,
                 demanding: None,
+                pathing: None,
                 cuts: Vec::new(),
             },
             blocked: None,
@@ -682,6 +683,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         MachineStep::Demand(_) => {
                             unreachable!("one scalar completion cannot immediately demand another")
                         }
+                        MachineStep::StatePath(_) => {
+                            unreachable!("one scalar completion cannot begin a state path")
+                        }
                         MachineStep::Blocked(blocked) => {
                             self.blocked = Some(blocked);
                             return self.blocked_poll();
@@ -709,6 +713,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     ScalarDemandStep::Failed(demanding, error) => {
                         self.execution.demanding = Some(demanding);
+                        return self.handle_step_error(error);
+                    }
+                }
+                continue;
+            }
+            if let Some(pathing) = self.execution.pathing.take() {
+                match self.state_path_step(context, pathing, steps) {
+                    StatePathStep::Continue(pathing) => self.execution.pathing = Some(pathing),
+                    StatePathStep::Complete(work) => self.execution.work = work,
+                    StatePathStep::Blocked(pathing, dependency) => {
+                        self.execution.pathing = Some(pathing);
+                        self.blocked =
+                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
+                        return self.blocked_poll();
+                    }
+                    StatePathStep::Yielded(pathing) => {
+                        self.execution.pathing = Some(pathing);
+                        return EffectTaskPoll::Yielded;
+                    }
+                    StatePathStep::Failed(pathing, error) => {
+                        self.execution.pathing = Some(pathing);
                         return self.handle_step_error(error);
                     }
                 }
@@ -753,6 +778,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         scope_depth: 0,
                     };
                     self.execution.demanding = Some(demanding);
+                }
+                Ok(MachineStep::StatePath(pathing)) => {
+                    self.execution.work = MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth: 0,
+                    };
+                    self.execution.pathing = Some(*pathing);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
@@ -1002,6 +1034,155 @@ impl<S: TaskSpecialization> EffectTask<S> {
         ScalarDemandStep::Complete(step)
     }
 
+    fn state_path_step(
+        &mut self,
+        context: &EvaluationPollContext,
+        mut pathing: StatePathWork<S>,
+        step_budget: usize,
+    ) -> StatePathStep<S> {
+        match &mut pathing.operation {
+            StatePathOperation::Keys { machine, after } => {
+                let poll = context.evaluate(&self.eval_context, |evaluator| {
+                    machine.poll(context, evaluator, &self.eval_context, step_budget.max(1))
+                });
+                match poll {
+                    eval::ConversionPoll::Ready(keys) => {
+                        let after = after
+                            .take()
+                            .expect("key path continuation must remain owned");
+                        pathing.operation = match after {
+                            StatePathAfterKeys::Get { state } => StatePathOperation::Get(
+                                ValuePathMachine::new(state, Arc::from(keys)),
+                            ),
+                            StatePathAfterKeys::Set { state, value } => {
+                                let path: Arc<[Key]> = Arc::from(keys);
+                                let focus = if path.is_empty() {
+                                    value.clone()
+                                } else {
+                                    state
+                                };
+                                StatePathOperation::SetBase {
+                                    computation: WhnfComputation::from_root(focus),
+                                    path,
+                                    value,
+                                }
+                            }
+                        };
+                        StatePathStep::Continue(pathing)
+                    }
+                    eval::ConversionPoll::Pending(dependency) => {
+                        StatePathStep::Blocked(pathing, dependency)
+                    }
+                    eval::ConversionPoll::Yielded => StatePathStep::Yielded(pathing),
+                    eval::ConversionPoll::Failed(failure) => {
+                        StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
+                    }
+                }
+            }
+            StatePathOperation::Get(machine) => {
+                match machine.poll(context, &self.eval_context, step_budget.max(1)) {
+                    ValuePathPoll::Ready(value) => StatePathStep::Complete(
+                        MachineWork::deliver_root(value, pathing.branch, pathing.scope_depth),
+                    ),
+                    ValuePathPoll::Pending(dependency) => {
+                        StatePathStep::Blocked(pathing, dependency)
+                    }
+                    ValuePathPoll::Yielded => StatePathStep::Yielded(pathing),
+                    ValuePathPoll::Failed(error) => StatePathStep::Failed(pathing, error),
+                }
+            }
+            StatePathOperation::SetBase {
+                computation,
+                path,
+                value,
+            } => match poll_whnf_computation(
+                computation,
+                context,
+                &self.eval_context,
+                step_budget.max(1),
+            ) {
+                WhnfOwnerPoll::Ready(base) => {
+                    let is_dict = context.evaluate(&self.eval_context, |evaluator| {
+                        matches!(evaluator.project_root(&base), Value::Dict(_))
+                    });
+                    if !is_dict {
+                        return StatePathStep::Failed(
+                            pathing,
+                            TaskHalt::new("reflection user state must be a dictionary"),
+                        );
+                    }
+                    if path.is_empty() {
+                        pathing.branch.state = base;
+                        return StatePathStep::Complete(MachineWork::deliver(
+                            self.eval_context.values(),
+                            self.eval_context.values().unit(),
+                            pathing.branch,
+                            pathing.scope_depth,
+                        ));
+                    }
+                    let update = context.evaluate(&self.eval_context, |evaluator| {
+                        let path = Value::List(List::from_values(
+                            path.iter()
+                                .map(|key| key.to_value_with(self.eval_context.values()))
+                                .collect(),
+                        ));
+                        let value = evaluator.project_root(value);
+                        let base = evaluator.project_root(&base);
+                        let update = evaluator.construct_lazy_value(|access| {
+                            Value::builtin_call_in(
+                                access,
+                                Builtin::DictUpdate,
+                                vec![path, value, base],
+                            )
+                        });
+                        evaluator.root_value(update)
+                    });
+                    pathing.operation =
+                        StatePathOperation::SetUpdate(WhnfComputation::from_root(update));
+                    StatePathStep::Continue(pathing)
+                }
+                WhnfOwnerPoll::Pending(dependency) => StatePathStep::Blocked(pathing, dependency),
+                WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
+                WhnfOwnerPoll::Failed(failure) => {
+                    StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
+                }
+                WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
+                    pathing,
+                    TaskHalt::new(format!(
+                        "reflection state path reached an unsupported {boundary:?} boundary"
+                    )),
+                ),
+            },
+            StatePathOperation::SetUpdate(computation) => match poll_whnf_computation(
+                computation,
+                context,
+                &self.eval_context,
+                step_budget.max(1),
+            ) {
+                WhnfOwnerPoll::Ready(state) => {
+                    pathing.branch.state = state;
+                    StatePathStep::Complete(MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        pathing.branch,
+                        pathing.scope_depth,
+                    ))
+                }
+                WhnfOwnerPoll::Pending(dependency) => StatePathStep::Blocked(pathing, dependency),
+                WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
+                WhnfOwnerPoll::Failed(failure) => {
+                    StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
+                }
+                WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
+                    pathing,
+                    TaskHalt::new(format!(
+                        "reflection state update reached an unsupported {boundary:?} boundary"
+                    )),
+                ),
+            },
+        }
+    }
+
     fn complete_decode_phase(
         &mut self,
         context: &EvaluationPollContext,
@@ -1178,29 +1359,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return self.finish_fused_delivery(context, branch, value, scope_depth);
                 }
                 Request::Get(path) => {
-                    let value = context.evaluate(&self.eval_context, |evaluator| {
-                        let path_value = evaluator.project_root(&path);
-                        let path = eval::eval_key_path_list_in(evaluator, &path_value)
-                            .map_err(task_eval_error)?;
-                        let state = evaluator.project_root(&branch.state);
-                        get_value_path_in(evaluator, &state, &path)
-                            .map(|value| evaluator.root_value(value))
-                    })?;
-                    return self.finish_fused_delivery(context, branch, value, scope_depth);
+                    #[cfg(test)]
+                    self.record_phase(EffectMachinePhase::InterpreterEntered);
+                    return Ok(MachineStep::StatePath(Box::new(StatePathWork::get(
+                        path,
+                        branch,
+                        scope_depth,
+                    ))));
                 }
                 Request::Set(path, value) => {
-                    branch.state = context.evaluate(&self.eval_context, |evaluator| {
-                        let state = evaluator.project_root(&branch.state);
-                        let path = evaluator.project_root(&path);
-                        let value = evaluator.project_root(&value);
-                        set_state_path_in(evaluator, state, &path, value)
-                            .map(|state| evaluator.root_value(state))
-                    })?;
-                    let unit = self
-                        .eval_context
-                        .values()
-                        .construct_runtime_value_root(|_| self.eval_context.values().unit());
-                    return self.finish_fused_delivery(context, branch, unit, scope_depth);
+                    #[cfg(test)]
+                    self.record_phase(EffectMachinePhase::InterpreterEntered);
+                    return Ok(MachineStep::StatePath(Box::new(StatePathWork::set(
+                        path,
+                        value,
+                        branch,
+                        scope_depth,
+                    ))));
                 }
                 request => {
                     return self.interpret_request(context, request, branch, scope_depth);
@@ -1306,30 +1481,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 )));
             }
             Request::Get(path) => {
-                let value = context.evaluate(&self.eval_context, |evaluator| {
-                    let path_value = evaluator.project_root(&path);
-                    let path = eval::eval_key_path_list_in(evaluator, &path_value)
-                        .map_err(task_eval_error)?;
-                    let state = evaluator.project_root(&branch.state);
-                    get_value_path_in(evaluator, &state, &path)
-                        .map(|value| evaluator.root_value(value))
-                })?;
-                MachineWork::deliver_root(value, branch, scope_depth)
-            }
-            Request::Set(path, value) => {
-                branch.state = context.evaluate(&self.eval_context, |evaluator| {
-                    let state = evaluator.project_root(&branch.state);
-                    let path = evaluator.project_root(&path);
-                    let value = evaluator.project_root(&value);
-                    set_state_path_in(evaluator, state, &path, value)
-                        .map(|state| evaluator.root_value(state))
-                })?;
-                MachineWork::deliver(
-                    self.eval_context.values(),
-                    self.eval_context.values().unit(),
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::get(
+                    path,
                     branch,
                     scope_depth,
-                )
+                ))));
+            }
+            Request::Set(path, value) => {
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::set(
+                    path,
+                    value,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::HeapGet(path) => {
                 let path = context.evaluate(&self.eval_context, |evaluator| {
@@ -2486,6 +2650,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
         self.execution.decoding = None;
         self.execution.demanding = None;
+        self.execution.pathing = None;
         self.execution.work = MachineWork::Outcome {
             outcome: BranchOutcome::Cancelled,
             scope_depth: 0,
@@ -2507,6 +2672,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn apply_wake(&mut self, wake: WakeAction<S>) {
         self.execution.decoding = None;
         self.execution.demanding = None;
+        self.execution.pathing = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
@@ -2517,6 +2683,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn restart_search(&mut self) {
         self.execution.decoding = None;
         self.execution.demanding = None;
+        self.execution.pathing = None;
         self.execution.cuts.clear();
         let mut root = self
             .search
@@ -2532,6 +2699,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn restart_cut(&mut self, index: usize) {
         self.execution.decoding = None;
         self.execution.demanding = None;
+        self.execution.pathing = None;
         self.execution.cuts.truncate(index + 1);
         let mut frame = self
             .execution
@@ -2567,6 +2735,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.eval_context.fail_local_promises(unfinished_failure);
         self.execution.decoding = None;
         self.execution.demanding = None;
+        self.execution.pathing = None;
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
@@ -2811,6 +2980,7 @@ struct TaskExecution<S: TaskSpecialization> {
     work: MachineWork<S>,
     decoding: Option<EffectDecodeWork<S>>,
     demanding: Option<ScalarDemandWork<S>>,
+    pathing: Option<StatePathWork<S>>,
     cuts: Vec<CutFrame<S>>,
 }
 
@@ -2819,6 +2989,7 @@ impl<S: TaskSpecialization> TaskExecution<S> {
         self.demanding
             .as_ref()
             .map(|work| &work.branch)
+            .or_else(|| self.pathing.as_ref().map(|work| &work.branch))
             .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
             .or_else(|| self.work.branch())
     }
@@ -2827,6 +2998,7 @@ impl<S: TaskSpecialization> TaskExecution<S> {
         self.demanding
             .as_ref()
             .map(|work| work.scope_depth)
+            .or_else(|| self.pathing.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.decoding.as_ref().map(|work| work.scope_depth))
             .unwrap_or_else(|| self.work.scope_depth())
     }
@@ -2964,6 +3136,148 @@ enum ScalarDemandStep<S: TaskSpecialization> {
     Blocked(ScalarDemandWork<S>, WorkDependency),
     Yielded(ScalarDemandWork<S>),
     Failed(ScalarDemandWork<S>, TaskHalt),
+}
+
+struct StatePathWork<S: TaskSpecialization> {
+    operation: StatePathOperation,
+    branch: Branch<S>,
+    scope_depth: usize,
+}
+
+enum StatePathOperation {
+    Keys {
+        machine: Box<eval::KeyListMachine>,
+        after: Option<StatePathAfterKeys>,
+    },
+    Get(ValuePathMachine),
+    SetBase {
+        computation: WhnfComputation,
+        path: Arc<[Key]>,
+        value: RuntimeValueRoot,
+    },
+    SetUpdate(WhnfComputation),
+}
+
+enum StatePathAfterKeys {
+    Get {
+        state: RuntimeValueRoot,
+    },
+    Set {
+        state: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+    },
+}
+
+impl<S: TaskSpecialization> StatePathWork<S> {
+    fn get(path: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
+        let state = branch.state.clone();
+        Self {
+            operation: StatePathOperation::Keys {
+                machine: Box::new(eval::KeyListMachine::unowned(path)),
+                after: Some(StatePathAfterKeys::Get { state }),
+            },
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn set(
+        path: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        let state = branch.state.clone();
+        Self {
+            operation: StatePathOperation::Keys {
+                machine: Box::new(eval::KeyListMachine::unowned(path)),
+                after: Some(StatePathAfterKeys::Set { state, value }),
+            },
+            branch,
+            scope_depth,
+        }
+    }
+}
+
+enum StatePathStep<S: TaskSpecialization> {
+    Continue(StatePathWork<S>),
+    Complete(MachineWork<S>),
+    Blocked(StatePathWork<S>, WorkDependency),
+    Yielded(StatePathWork<S>),
+    Failed(StatePathWork<S>, TaskHalt),
+}
+
+struct ValuePathMachine {
+    path: Arc<[Key]>,
+    next: usize,
+    current: RuntimeValueRoot,
+    demand: Option<WhnfComputation>,
+}
+
+impl ValuePathMachine {
+    fn new(current: RuntimeValueRoot, path: Arc<[Key]>) -> Self {
+        Self {
+            path,
+            next: 0,
+            current,
+            demand: None,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvalContext,
+        step_budget: usize,
+    ) -> ValuePathPoll {
+        if self.next == self.path.len() {
+            return ValuePathPoll::Ready(self.current.clone());
+        }
+        let demand = self
+            .demand
+            .get_or_insert_with(|| WhnfComputation::from_root(self.current.clone()));
+        let current = match poll_whnf_computation(demand, poll_context, context, step_budget) {
+            WhnfOwnerPoll::Ready(current) => current,
+            WhnfOwnerPoll::Pending(dependency) => return ValuePathPoll::Pending(dependency),
+            WhnfOwnerPoll::Yielded => return ValuePathPoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => {
+                return ValuePathPoll::Failed(TaskHalt::rooted_failure(failure));
+            }
+            WhnfOwnerPoll::External(boundary) => {
+                return ValuePathPoll::Failed(TaskHalt::new(format!(
+                    "reflection value path reached an unsupported {boundary:?} boundary"
+                )));
+            }
+        };
+        let key = &self.path[self.next];
+        let selected = poll_context.evaluate(context, |evaluator| {
+            let current = evaluator.project_root(&current);
+            let Value::Dict(dict) = current else {
+                return Err(TaskHalt::new("state path traverses a non-dictionary value"));
+            };
+            Ok(evaluator.root_value(
+                dict.get(key)
+                    .cloned()
+                    .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+            ))
+        });
+        match selected {
+            Ok(selected) => {
+                self.current = selected;
+                self.next += 1;
+                self.demand = None;
+                ValuePathPoll::Yielded
+            }
+            Err(error) => ValuePathPoll::Failed(error),
+        }
+    }
+}
+
+enum ValuePathPoll {
+    Ready(RuntimeValueRoot),
+    Pending(WorkDependency),
+    Yielded,
+    Failed(TaskHalt),
 }
 
 #[derive(Clone)]
@@ -3154,6 +3468,7 @@ enum MachineStep<S: TaskSpecialization> {
     Continue(MachineWork<S>),
     Decode(EffectDecodeWork<S>),
     Demand(ScalarDemandWork<S>),
+    StatePath(Box<StatePathWork<S>>),
     Blocked(BlockedExecution<S>),
     Exit(ExitIntent),
     Terminal(TaskTerminal),
@@ -4175,24 +4490,6 @@ fn value_key_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Key,
         .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
 }
 
-fn get_value_path_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-    path: &[Key],
-) -> Result<Value, TaskHalt> {
-    let mut current = value.clone();
-    for key in path {
-        let Value::Dict(dict) = evaluate_in(context, current)? else {
-            return Err(TaskHalt::new("state path traverses a non-dictionary value"));
-        };
-        current = dict
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
-    }
-    Ok(current)
-}
-
 fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|access| {
         if path.is_empty() {
@@ -4209,34 +4506,6 @@ fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> Ru
             Arc::from([value]),
         ))
     })
-}
-
-fn set_state_path_in(
-    context: &EvaluatorStepContext<'_>,
-    state: Value,
-    path: &Value,
-    value: Value,
-) -> Result<Value, TaskHalt> {
-    let path = eval::eval_key_path_list_in(context, path).map_err(task_eval_error)?;
-    if path.is_empty() {
-        return require_state_dict_in(context, value);
-    }
-    let path = Value::List(List::from_values(
-        path.into_iter()
-            .map(|key| key.to_value_with(context.context().values()))
-            .collect(),
-    ));
-    let state = require_state_dict_in(context, state)?;
-    evaluate_in(
-        context,
-        context.construct_lazy_value(|access| {
-            Value::builtin_call_in(
-                access,
-                crate::core::Builtin::DictUpdate,
-                vec![path, value, state],
-            )
-        }),
-    )
 }
 
 fn require_state_dict_in(

@@ -257,7 +257,7 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/machine.rs",
         0,
-        10,
+        9,
         2,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
@@ -795,7 +795,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine.rs::impl Branch < S >::set_state#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::interpret_decoded_drive#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::interpret_request#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::lazy_value_path_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",

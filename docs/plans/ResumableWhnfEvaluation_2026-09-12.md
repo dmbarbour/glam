@@ -2390,18 +2390,42 @@ both generic and contextual endpoint policies.
 
 ###### W5C.3a — Reusable key-path and value-path work
 
+**Status: complete (2026-09-14).**
+
 Introduce or reuse resumable work for key conversion, path-list traversal,
 and intermediate dictionary WHNF. Preserve the distinction between an absent
 member, which produces the language's undefined value, and a non-dictionary
 intermediate, which is an evaluation failure. The final selected value remains
 lazy unless the caller explicitly demands it.
 
+Completion record: the evaluator's existing resumable key and path-list
+conversion now accepts either a containing lazy owner or an explicitly
+unowned reflection computation. `ValuePathMachine` retains the current rooted
+member, exact next key, and intermediate WHNF computation. It demands only
+values which must be dictionaries to continue traversal; an empty path and
+the final selected member are returned without demand. Missing members still
+select `{}`, while a demanded non-dictionary intermediate retains the existing
+structured failure.
+
 ###### W5C.3b — Task-local `.get` and `.set`
+
+**Status: complete (2026-09-14).**
 
 Move task-local state lookup, update, and dictionary validation onto the path
 work. Retain the original branch and state until the complete replacement
 state is ready, then publish it once. Cover empty paths, missing members,
 lazy intermediates, lazy keys, and a suspending dictionary update.
+
+Completion record: fused and generic task-local requests now transfer their
+branch into `StatePathWork`. Key conversion completes before either operation,
+and `.set` retains the prior branch state until its replacement dictionary or
+lazy `dict_update` result reaches WHNF. Empty-path replacement retains its
+dictionary requirement; nonempty lookup preserves lazy final members. Counted
+reflection-gate fixtures suspend the path, an intermediate dictionary, and an
+empty-path replacement in both dispatch modes, proving one activation per
+source. Separate semantic coverage latches empty paths, absent members, and
+non-dictionary intermediates. The exact WHNF and durable-owner inventories
+were updated at this checkpoint.
 
 ###### W5C.3c — Heap and volume transaction boundaries
 

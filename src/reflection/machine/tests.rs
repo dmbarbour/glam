@@ -990,11 +990,13 @@ fn assert_execution_root_inventory(
         work,
         decoding,
         demanding,
+        pathing,
         cuts,
     } = execution;
     let _: &MachineWork<TestEffects> = work;
     let _: &Option<EffectDecodeWork<TestEffects>> = decoding;
     let _: &Option<ScalarDemandWork<TestEffects>> = demanding;
+    let _: &Option<StatePathWork<TestEffects>> = pathing;
     let _: &Vec<CutFrame<TestEffects>> = cuts;
 
     let EffectDecodeWork {
@@ -1365,6 +1367,96 @@ fn assert_effect_decode_step_inventory(step: &EffectDecodeStep<TestEffects>) {
     }
 }
 
+fn assert_state_path_root_inventory(
+    work: &StatePathWork<TestEffects>,
+    after: &StatePathAfterKeys,
+    value_path: &ValuePathMachine,
+    poll: &ValuePathPoll,
+    step: &StatePathStep<TestEffects>,
+) {
+    let StatePathWork {
+        operation,
+        branch,
+        scope_depth,
+    } = work;
+    let _: &StatePathOperation = operation;
+    let _: &Branch<TestEffects> = branch;
+    let _: &usize = scope_depth;
+
+    match operation {
+        StatePathOperation::Keys { machine, after } => {
+            let _: &crate::eval::KeyListMachine = machine;
+            let _: &Option<StatePathAfterKeys> = after;
+        }
+        StatePathOperation::Get(machine) => {
+            let _: &ValuePathMachine = machine;
+        }
+        StatePathOperation::SetBase {
+            computation,
+            path,
+            value,
+        } => {
+            let _: &crate::eval::whnf::WhnfComputation = computation;
+            let _: &Arc<[Key]> = path;
+            let _: &RuntimeValueRoot = value;
+        }
+        StatePathOperation::SetUpdate(computation) => {
+            let _: &crate::eval::whnf::WhnfComputation = computation;
+        }
+    }
+
+    match after {
+        StatePathAfterKeys::Get { state } => {
+            let _: &RuntimeValueRoot = state;
+        }
+        StatePathAfterKeys::Set { state, value } => {
+            let _: &RuntimeValueRoot = state;
+            let _: &RuntimeValueRoot = value;
+        }
+    }
+
+    let ValuePathMachine {
+        path,
+        next,
+        current,
+        demand,
+    } = value_path;
+    let _: &Arc<[Key]> = path;
+    let _: &usize = next;
+    let _: &RuntimeValueRoot = current;
+    let _: &Option<crate::eval::whnf::WhnfComputation> = demand;
+
+    match poll {
+        ValuePathPoll::Ready(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        ValuePathPoll::Pending(dependency) => {
+            let _: &WorkDependency = dependency;
+        }
+        ValuePathPoll::Yielded => {}
+        ValuePathPoll::Failed(error) => {
+            let _: &TaskHalt = error;
+        }
+    }
+
+    match step {
+        StatePathStep::Continue(work) | StatePathStep::Yielded(work) => {
+            let _: &StatePathWork<TestEffects> = work;
+        }
+        StatePathStep::Complete(work) => {
+            let _: &MachineWork<TestEffects> = work;
+        }
+        StatePathStep::Blocked(work, dependency) => {
+            let _: &StatePathWork<TestEffects> = work;
+            let _: &WorkDependency = dependency;
+        }
+        StatePathStep::Failed(work, error) => {
+            let _: &StatePathWork<TestEffects> = work;
+            let _: &TaskHalt = error;
+        }
+    }
+}
+
 type ExecutionRootInventoryFn = fn(
     &TaskExecution<TestEffects>,
     &EffectDecodeWork<TestEffects>,
@@ -1581,6 +1673,9 @@ fn assert_protocol_handoff_inventory(
         MachineStep::Demand(demanding) => {
             let _: &ScalarDemandWork<TestEffects> = demanding;
         }
+        MachineStep::StatePath(pathing) => {
+            let _: &StatePathWork<TestEffects> = pathing;
+        }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
         }
@@ -1688,6 +1783,13 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
     let _: fn(&EffectDecodeStep<TestEffects>) = assert_effect_decode_step_inventory;
+    let _: fn(
+        &StatePathWork<TestEffects>,
+        &StatePathAfterKeys,
+        &ValuePathMachine,
+        &ValuePathPoll,
+        &StatePathStep<TestEffects>,
+    ) = assert_state_path_root_inventory;
     let _: ControlRootInventoryFn = assert_control_root_inventory;
     let _: FixpointRootInventoryFn = assert_fixpoint_root_inventory;
     let _: RequestHandoffInventoryFn = assert_request_handoff_inventory;
@@ -2209,6 +2311,99 @@ fn scoped_close_unit_demand_resumes_without_replaying_close() {
         builds.load(Ordering::Acquire),
         1,
         "scoped close demand must retain one nested reflection activation"
+    );
+}
+
+#[test]
+fn task_state_get_resumes_lazy_paths_and_intermediates_without_replay() {
+    for force_unfused in [false, true] {
+        let (assembler, effect) = compile_effect(
+            ".set [] { outer:(anno { refl:(.r ()) } { inner:\"value\" }) } =>> .get (anno { refl:(.r ()) } ['outer, 'inner])",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let context = EvalContext::isolated(assembler.core_values());
+        let builds = Arc::new(AtomicUsize::new(0));
+        context
+            .install_reflection_launcher(Arc::new(CountingLauncher {
+                inner: task_launcher(TestEffects, host.clone()),
+                builds: builds.clone(),
+            }))
+            .expect("fresh state-path fixture should accept a launcher");
+        let mut task = EffectTask::new_owned_in_context(
+            effect.clone_core_for_test(),
+            TestEffects,
+            host,
+            context,
+        )
+        .expect("state-path fixture should build");
+        if force_unfused {
+            task = task.forcing_unfused();
+        }
+
+        let TaskOutcome::Complete(value) = task.run().expect("state get should resume") else {
+            panic!("state-path fixture should complete")
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"value".as_slice());
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            2,
+            "the lazy path and intermediate dictionary must each activate once"
+        );
+    }
+}
+
+#[test]
+fn task_state_set_publishes_only_after_lazy_path_and_replacement_complete() {
+    for force_unfused in [false, true] {
+        let (assembler, effect) = compile_effect(
+            ".set [] { old:\"kept\" } =>> .set (anno { refl:(.r ()) } []) (anno { refl:(.r ()) } { new:\"ready\" }) =>> .get ['new]",
+        );
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let context = EvalContext::isolated(assembler.core_values());
+        let builds = Arc::new(AtomicUsize::new(0));
+        context
+            .install_reflection_launcher(Arc::new(CountingLauncher {
+                inner: task_launcher(TestEffects, host.clone()),
+                builds: builds.clone(),
+            }))
+            .expect("fresh state-update fixture should accept a launcher");
+        let mut task = EffectTask::new_owned_in_context(
+            effect.clone_core_for_test(),
+            TestEffects,
+            host,
+            context,
+        )
+        .expect("state-update fixture should build");
+        if force_unfused {
+            task = task.forcing_unfused();
+        }
+
+        let TaskOutcome::Complete(value) = task.run().expect("state set should resume") else {
+            panic!("state-update fixture should complete")
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            2,
+            "the lazy path and replacement dictionary must each activate once"
+        );
+    }
+}
+
+#[test]
+fn task_state_paths_preserve_empty_missing_and_non_dictionary_semantics() {
+    let (assembler, value) = completed(
+        ".set [] { present:\"value\" } =>> .get [] >>= (\\whole -> (whole == { present:\"value\" }) =>> .get ['missing] >>= (\\missing -> (missing == {}) =>> .r \"ok\"))",
+    );
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"ok".as_slice());
+
+    let (assembler, effect) = compile_effect(".set [] { outer:42 } =>> .get ['outer, 'inner]");
+    let error = run_standard_test(&assembler, &effect)
+        .expect_err("a non-dictionary intermediate must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("state path traverses a non-dictionary value")
     );
 }
 

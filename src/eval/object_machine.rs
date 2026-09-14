@@ -201,7 +201,7 @@ impl ObjectLinearizationMachine {
                         };
                         self.top_state(LinearizationState::ConvertName {
                             spec,
-                            conversion: KeyConversionMachine::new(name, self.source_owner),
+                            conversion: KeyConversionMachine::new(name, Some(self.source_owner)),
                         });
                         LinearizationPoll::Yielded
                     }

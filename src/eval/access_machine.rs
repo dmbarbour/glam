@@ -45,7 +45,7 @@ enum AccessConversion {
     Path(Box<KeyListMachine>),
 }
 
-pub(super) enum ConversionPoll<T> {
+pub(crate) enum ConversionPoll<T> {
     Ready(T),
     Pending(crate::evaluation::WorkDependency),
     Yielded,
@@ -54,7 +54,7 @@ pub(super) enum ConversionPoll<T> {
 
 pub(super) struct KeyConversionMachine {
     state: KeyConversionState,
-    source_owner: LazyId,
+    source_owner: Option<LazyId>,
 }
 
 enum KeyConversionState {
@@ -77,14 +77,14 @@ struct DictConversion {
     child: Option<Box<KeyConversionMachine>>,
 }
 
-struct KeyListMachine {
+pub(crate) struct KeyListMachine {
     source: Option<WhnfComputation>,
     lists: Vec<RuntimeValueRoot>,
     chunk: Option<WhnfComputation>,
     chunk_suffix: Option<RuntimeValueRoot>,
     child: Option<Box<KeyConversionMachine>>,
     converted: Vec<Key>,
-    source_owner: LazyId,
+    source_owner: Option<LazyId>,
 }
 
 impl AccessMachine {
@@ -202,14 +202,14 @@ impl AccessMachine {
                 let argument = self.next_dynamic_argument();
                 self.conversion = Some(AccessConversion::Key(KeyConversionMachine::new(
                     argument,
-                    self.source_owner,
+                    Some(self.source_owner),
                 )));
             }
             CoreDataKey::PathIndex => {
                 let argument = self.next_dynamic_argument();
                 self.conversion = Some(AccessConversion::Path(Box::new(KeyListMachine::new(
                     argument,
-                    self.source_owner,
+                    Some(self.source_owner),
                 ))));
             }
         }
@@ -238,11 +238,9 @@ impl AccessMachine {
 }
 
 impl KeyConversionMachine {
-    pub(super) fn new(value: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    pub(super) fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
-            state: KeyConversionState::Demand(
-                WhnfComputation::from_root(value).with_source_owner(source_owner),
-            ),
+            state: KeyConversionState::Demand(owned_whnf(value, source_owner)),
             source_owner,
         }
     }
@@ -340,9 +338,9 @@ impl KeyConversionMachine {
 }
 
 impl KeyListMachine {
-    fn new(value: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
-            source: Some(WhnfComputation::from_root(value).with_source_owner(source_owner)),
+            source: Some(owned_whnf(value, source_owner)),
             lists: Vec::new(),
             chunk: None,
             chunk_suffix: None,
@@ -352,7 +350,7 @@ impl KeyListMachine {
         }
     }
 
-    fn from_ready(value: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    fn from_ready(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
             source: None,
             lists: vec![value],
@@ -364,7 +362,11 @@ impl KeyListMachine {
         }
     }
 
-    fn poll(
+    pub(crate) fn unowned(value: RuntimeValueRoot) -> Self {
+        Self::new(value, None)
+    }
+
+    pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
@@ -469,14 +471,19 @@ impl KeyListMachine {
                 ConversionPoll::Yielded
             }
             ListFrontStep::Deferred { deferred, suffix } => {
-                self.chunk = Some(
-                    WhnfComputation::from_root(context.root_value(deferred))
-                        .with_source_owner(self.source_owner),
-                );
+                self.chunk = Some(owned_whnf(context.root_value(deferred), self.source_owner));
                 self.chunk_suffix = Some(context.root_value(Value::List(suffix)));
                 ConversionPoll::Yielded
             }
         }
+    }
+}
+
+fn owned_whnf(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> WhnfComputation {
+    let computation = WhnfComputation::from_root(value);
+    match source_owner {
+        Some(source_owner) => computation.with_source_owner(source_owner),
+        None => computation,
     }
 }
 
