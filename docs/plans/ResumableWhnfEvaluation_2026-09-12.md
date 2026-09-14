@@ -2066,6 +2066,14 @@ in call/operator/cursor topology even though its total driver work remains
 comparable. The minimized fixture's exact semantic signature is the regression
 contract; changing it requires an explicit lowering/topology explanation.
 
+The new application lazy also establishes the correct diagnostic boundary.
+The surrounding net computation has completed successfully once it exposes
+that lazy; a later application failure therefore does not inherit an
+`eval:{op:'net_computation}` frame. Existing reflection fixtures which had
+latched the former synchronous implementation boundary now expect only the
+explicit task or log-demand contexts. Net normalization failures themselves
+continue to receive the net-computation frame.
+
 ##### W4E.3 — Scheduler amplification repair
 
 **Status:** reassessment required as of 2026-09-14.

@@ -11,7 +11,7 @@ pub(crate) mod profiling;
 mod runtime;
 
 pub(crate) use builder::{NetBuildError, NetBuilder};
-#[cfg(test)]
+#[cfg(all(test, feature = "interaction-net-profiling"))]
 pub(crate) use model::FanIdentity;
 pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,

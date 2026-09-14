@@ -132,12 +132,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     );
 
     let code = lower_test_function_code_in(context.values(), 0, expression);
-    let computation = context.values().with_runtime_value_access(|access| {
-        Value::Lazy(LazyValue::from_net_computation_in(
-            &access,
-            NetValue::new(code.duplicate_runtime_in(&access)),
-        ))
-    });
+    let computation = Value::Lazy(LazyValue::from_net_computation(
+        context.values(),
+        NetValue::new(code.runtime().duplicate_for_test(context.values())),
+    ));
 
     assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
     #[cfg(feature = "interaction-net-profiling")]

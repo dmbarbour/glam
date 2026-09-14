@@ -286,7 +286,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/operator.rs",
-        [3, 0],
+        [2, 0],
         "I3D.4 scoped core-net operator application"
     ),
     context_entry!(

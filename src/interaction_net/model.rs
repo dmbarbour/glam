@@ -86,7 +86,7 @@ impl FanIdentity {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
     pub(crate) fn for_test(site: u64) -> Self {
         Self::root(FanSite::from_raw(site))
     }

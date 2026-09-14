@@ -4412,11 +4412,7 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
     };
     assert_eq!(
         eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
-        [
-            crate::diagnostic::evaluation_context_frame("net_computation"),
-            Value::binary_from_text("child dispatch"),
-            crate::diagnostic::evaluation_context_frame("net_computation"),
-        ]
+        [Value::binary_from_text("child dispatch")]
     );
 }
 
@@ -4985,10 +4981,7 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
     .unwrap_err();
     assert_eq!(
         task_halt_contexts(&message_assembler, &message_error),
-        [
-            crate::diagnostic::evaluation_context_frame("log_message"),
-            crate::diagnostic::evaluation_context_frame("net_computation"),
-        ]
+        [crate::diagnostic::evaluation_context_frame("log_message")]
     );
 
     let (severity_assembler, severity_effect) = compile_effect(
@@ -5002,10 +4995,7 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
     .unwrap_err();
     assert_eq!(
         task_halt_contexts(&severity_assembler, &severity_error),
-        [
-            crate::diagnostic::evaluation_context_frame("log_severity"),
-            crate::diagnostic::evaluation_context_frame("net_computation"),
-        ]
+        [crate::diagnostic::evaluation_context_frame("log_severity")]
     );
 }
 
