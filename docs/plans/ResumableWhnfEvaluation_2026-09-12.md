@@ -2271,6 +2271,8 @@ those differences behind one increasingly general reflection-purpose enum.
 
 ##### W5C.0 — Remaining-demand census and work vocabulary
 
+**Status: complete (2026-09-14).**
+
 Latch every production reflection demand which can reach lazy, promise, net,
 or reflection work. The W5B baseline includes the remaining local
 `machine::evaluate_in` calls, the direct loops in `RequestContext`, and helper
@@ -2282,6 +2284,27 @@ whether any semantic or host action precedes the demand, and the smallest
 resumable work form which can represent its completed prefix. Select separate
 completion purposes for the families below and extend the compile-exhaustive
 machine inventory before migrating behavior.
+
+Completion record: the exact W0B source fingerprint already latches the
+production call sites, while this checkpoint assigns their reflection
+completion roles. `reflection::machine` retains fourteen calls to its local
+recursive `evaluate_in`: two in request payload/ID decoding, six in
+continuation or terminal-value delivery, four below key/path/state helpers,
+and two in reset-stack traversal. Eight direct key-path evaluations and the
+request-list and reset-list projections add composite demand beneath those
+entry points. `RequestContext` separately retains its recursive WHNF and
+value-path loops plus key-path delegation; those run inside arbitrary
+`TaskSpecialization::handle_request` callbacks and therefore belong to W5C.5,
+not to the machine-local conversions.
+
+The selected state families are request decoding, scalar WHNF completion,
+path/access work, reset-stack collection work, and specialization-request
+preparation. All are owned by the reflection task record but have distinct
+result dispositions. W5C may share the common `WhnfComputation`, key
+conversion, access, and list-front machinery; it must not merge the durable
+reflection continuations merely because those child evaluators share a poll
+type. Host snapshots, observations, edits, commits, and callbacks remain after
+the corresponding demand owner completes.
 
 ##### W5C.1 — Request payload and identity decoding
 
