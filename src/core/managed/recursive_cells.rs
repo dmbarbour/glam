@@ -1630,7 +1630,7 @@ mod tests {
                     "src/compiler.rs::CompileContext::new",
                     "src/evaluation/session.rs::EvalContext::compose_builtin",
                     "src/g_syntax/compiler_values.rs::run_pure_match_resolved",
-                    "src/reflection/machine.rs::EffectTask::interpret_prepared_drive",
+                    "src/reflection/machine.rs::EffectTask::interpret_request",
                     "src/reflection/machine.rs::lazy_value_path_root",
                     "src/reflection/store.rs::apply_edit",
                 ],

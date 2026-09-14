@@ -2227,12 +2227,38 @@ the computation cloneable. W5B activates this owner for effect decoding.
 
 #### W5B — Effect request decoding phases
 
+**Status: complete (2026-09-14).**
+
 Split effect-object, function, application-result, and request parsing into
 explicit reflection phases. Preserve the existing structured
 `effect_dispatch` contexts for `function`, `application`, and `request`.
 
 Applying `eff` may produce a lazy, but the application occurs once. Request
 parsing begins only after that same lazy produces WHNF.
+
+Completion record: reflection effect dispatch now advances one non-cloneable
+decoder through explicit `EffectObject`, `Function`, and `ApplicationResult`
+WHNF purposes. The successful function phase applies `eff` exactly once,
+roots that exact application result, and transfers it to the request-purpose
+computation; only its completed WHNF is parsed and handed to rooted
+`MachineWork::Interpret`. A suspension therefore retains the original
+application lazy instead of reconstructing it. Structured failures retain the
+`effect_dispatch` function, application, and request frames, with dedicated
+tests for all three boundaries.
+
+The scheduled-machine surface publishes exact lazy or promise dependencies to
+the coordinator. The older direct-poll and isolated-search conveniences pump
+locally runnable wait tokens without hiding a genuinely unavailable
+dependency. Standard-request fusion now begins from the rooted parsed request;
+it retains result equivalence and its lower handoff-root count. Payload parsing
+still uses its local recursive helper and may replay only that parse phase;
+W5C owns the remaining payload, continuation, and assertion demand sites.
+
+The forced-suspension regression now asserts that the first application-lazy
+identity occurs exactly once across resumption. A cancellation fixture now
+uses a deliberately pending child rather than racing cancellation against an
+already-returning child; W5's additional cooperative boundaries correctly do
+not promise which runnable task wins that unrelated race.
 
 #### W5C — Remaining reflection demand sites
 

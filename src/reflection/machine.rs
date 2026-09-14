@@ -26,7 +26,8 @@ use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExitIntent, WorkDependency,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExitIntent, WhnfOwnerPoll,
+    WorkDependency, poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -653,7 +654,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let context = EvaluationPollContext::for_context(&self.eval_context);
-        self.poll_with_context(&context, steps)
+        for _ in 0..steps.max(1) {
+            let poll = self.poll_with_context(&context, steps);
+            let EffectTaskPoll::Blocked(blocked) = &poll else {
+                return poll;
+            };
+            let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
+                return poll;
+            };
+            match self.eval_context.pump_wait(wait, steps.max(1)) {
+                EvaluationPumpOutcome::TargetReady => {}
+                EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::Yielded,
+                EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => return poll,
+            }
+        }
+        EffectTaskPoll::Yielded
     }
 
     pub(super) fn poll_with_context(
@@ -673,9 +688,39 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         for _ in 0..steps {
+            if let Some(decoding) = self.execution.decoding.take() {
+                match self.decode_step(context, decoding, steps) {
+                    EffectDecodeStep::Continue(decoding) => {
+                        self.execution.decoding = Some(decoding);
+                    }
+                    EffectDecodeStep::Complete(work) => self.execution.work = work,
+                    EffectDecodeStep::Blocked(decoding, dependency) => {
+                        self.execution.decoding = Some(decoding);
+                        self.blocked =
+                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
+                        return self.blocked_poll();
+                    }
+                    EffectDecodeStep::Yielded(decoding) => {
+                        self.execution.decoding = Some(decoding);
+                        return EffectTaskPoll::Yielded;
+                    }
+                    EffectDecodeStep::Failed(decoding, error) => {
+                        self.execution.decoding = Some(decoding);
+                        return self.handle_step_error(error);
+                    }
+                }
+                continue;
+            }
             let work = self.execution.work.clone();
             match self.step(context, work) {
                 Ok(MachineStep::Continue(work)) => self.execution.work = work,
+                Ok(MachineStep::Decode(decoding)) => {
+                    self.execution.work = MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth: 0,
+                    };
+                    self.execution.decoding = Some(decoding);
+                }
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
                     return self.blocked_poll();
@@ -690,25 +735,191 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.exit = Some(exit);
                     return EffectTaskPoll::Exit(poll);
                 }
-                Err(error) => {
-                    if let Some(wait) = error.blocked_on() {
-                        self.blocked = Some(self.waiting_block(WorkDependency::Wait(wait.clone())));
-                        return self.blocked_poll();
-                    }
-                    if let Some(retry) = self.retry_wake() {
-                        self.blocked = Some(BlockedExecution::evaluation_error(
-                            error,
-                            retry,
-                            self.eval_context.values(),
-                        ));
-                        return self.blocked_poll();
-                    }
-                    self.finish(TaskTerminal::Failed(error));
-                    return self.terminal.as_ref().expect("terminal set above").poll();
-                }
+                Err(error) => return self.handle_step_error(error),
             }
         }
         EffectTaskPoll::Yielded
+    }
+
+    fn handle_step_error(&mut self, error: TaskHalt) -> EffectTaskPoll {
+        if let Some(wait) = error.blocked_on() {
+            self.blocked = Some(self.waiting_block(WorkDependency::Wait(wait.clone())));
+            return self.blocked_poll();
+        }
+        if let Some(retry) = self.retry_wake() {
+            self.blocked = Some(BlockedExecution::evaluation_error(
+                error,
+                retry,
+                self.eval_context.values(),
+            ));
+            return self.blocked_poll();
+        }
+        self.finish(TaskTerminal::Failed(error));
+        self.terminal.as_ref().expect("terminal set above").poll()
+    }
+
+    fn decode_step(
+        &mut self,
+        context: &EvaluationPollContext,
+        mut decoding: EffectDecodeWork<S>,
+        step_budget: usize,
+    ) -> EffectDecodeStep<S> {
+        match poll_whnf_computation(
+            &mut decoding.computation,
+            context,
+            &self.eval_context,
+            step_budget.max(1),
+        ) {
+            WhnfOwnerPoll::Pending(dependency) => {
+                #[cfg(test)]
+                if matches!(decoding.purpose, EffectDecodePurpose::ApplicationResult)
+                    && let WorkDependency::Wait(wait) = &dependency
+                {
+                    self.eval_context.pause_deferred_pump(wait);
+                }
+                EffectDecodeStep::Blocked(decoding, dependency)
+            }
+            WhnfOwnerPoll::Yielded => EffectDecodeStep::Yielded(decoding),
+            WhnfOwnerPoll::External(boundary) => {
+                let error = decoding.contextualize(TaskHalt::new(format!(
+                    "reflection effect decoding reached an unsupported {boundary:?} boundary"
+                )));
+                EffectDecodeStep::Failed(decoding, error)
+            }
+            WhnfOwnerPoll::Failed(failure) => {
+                let error = decoding.contextualize(TaskHalt::rooted_failure(failure));
+                EffectDecodeStep::Failed(decoding, error)
+            }
+            WhnfOwnerPoll::Ready(value) => self.complete_decode_phase(context, decoding, value),
+        }
+    }
+
+    fn complete_decode_phase(
+        &mut self,
+        context: &EvaluationPollContext,
+        decoding: EffectDecodeWork<S>,
+        value: RuntimeValueRoot,
+    ) -> EffectDecodeStep<S> {
+        let EffectDecodeWork {
+            purpose,
+            branch,
+            scope_depth,
+            ..
+        } = decoding;
+        match purpose {
+            EffectDecodePurpose::EffectObject => {
+                let function = context.evaluate(&self.eval_context, |evaluator| {
+                    let effect = evaluator.project_root(&value);
+                    let Value::Dict(effect) = effect else {
+                        return Err(TaskHalt::new(format!(
+                            "reflection task requires an effect object, got {effect:?}"
+                        )));
+                    };
+                    effect
+                        .get(&*keys::EFF)
+                        .cloned()
+                        .map(|function| evaluator.root_value(function))
+                        .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))
+                });
+                match function {
+                    Ok(function) => EffectDecodeStep::Continue(EffectDecodeWork::from_root(
+                        function,
+                        EffectDecodePurpose::Function,
+                        branch,
+                        scope_depth,
+                    )),
+                    Err(error) => EffectDecodeStep::Failed(
+                        EffectDecodeWork::from_root(
+                            value,
+                            EffectDecodePurpose::EffectObject,
+                            branch,
+                            scope_depth,
+                        ),
+                        error,
+                    ),
+                }
+            }
+            EffectDecodePurpose::Function => {
+                let request = context.evaluate(&self.eval_context, |evaluator| {
+                    let function = evaluator.project_root(&value);
+                    let api = evaluator.project_root(&self.api);
+                    apply_in(evaluator, function, vec![api])
+                        .map(|request| evaluator.root_value(request))
+                        .map_err(|halt| {
+                            halt.with_core_context(effect_dispatch_context("application"))
+                        })
+                });
+                match request {
+                    Ok(request) => {
+                        #[cfg(test)]
+                        context.evaluate(&self.eval_context, |evaluator| {
+                            let request_value = evaluator.project_root(&request);
+                            if let Some(probe) = &self.phase_probe {
+                                probe.record_application_lazy(evaluator, &request_value);
+                            }
+                        });
+                        #[cfg(test)]
+                        self.eval_context.arm_deferred_pump_pause();
+                        EffectDecodeStep::Continue(EffectDecodeWork::from_root(
+                            request,
+                            EffectDecodePurpose::ApplicationResult,
+                            branch,
+                            scope_depth,
+                        ))
+                    }
+                    Err(error) => EffectDecodeStep::Failed(
+                        EffectDecodeWork::from_root(
+                            value,
+                            EffectDecodePurpose::Function,
+                            branch,
+                            scope_depth,
+                        ),
+                        error,
+                    ),
+                }
+            }
+            EffectDecodePurpose::ApplicationResult => {
+                let request = context.evaluate(&self.eval_context, |evaluator| {
+                    let request = evaluator.project_root(&value);
+                    parse_request_values_in(
+                        evaluator,
+                        request,
+                        &self.tags,
+                        &self.specialized_requests,
+                    )
+                    .map(|request| {
+                        request.map_values(|value| {
+                            if self.fusion_enabled() {
+                                evaluator.root_value(value)
+                            } else {
+                                self.root_request_value(evaluator, value)
+                            }
+                        })
+                    })
+                    .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))
+                });
+                match request {
+                    Ok(request) => {
+                        #[cfg(test)]
+                        self.record_phase(EffectMachinePhase::RequestParsed);
+                        EffectDecodeStep::Complete(MachineWork::Interpret {
+                            request,
+                            branch,
+                            scope_depth,
+                        })
+                    }
+                    Err(error) => EffectDecodeStep::Failed(
+                        EffectDecodeWork::from_root(
+                            value,
+                            EffectDecodePurpose::ApplicationResult,
+                            branch,
+                            scope_depth,
+                        ),
+                        error,
+                    ),
+                }
+            }
+        }
     }
 
     fn step(
@@ -748,6 +959,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 }))
             }
+            MachineWork::Interpret {
+                request,
+                branch,
+                scope_depth,
+            } => self.interpret_decoded_drive(context, request, branch, scope_depth),
             MachineWork::Outcome {
                 outcome,
                 scope_depth,
@@ -755,144 +971,107 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn prepare_drive_in(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        branch: &mut Branch<S>,
-    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
-        if !self.fusion_enabled() {
-            return self
-                .effect_request_in(context, branch.effect_in(context))
-                .map(|request| PreparedDrive::Request { request });
-        }
-
-        for _ in 0..EFFECT_FUSION_BUDGET {
-            let request = self.effect_request_values_in(context, branch.effect_in(context))?;
-            match self.classify_fused_request(branch, request) {
-                FusedRequestAction::Continue => continue,
-                FusedRequestAction::Deliver(value) => {
-                    return self.finish_fused_delivery_in(context, branch, value);
-                }
-                FusedRequestAction::Get(path) => {
-                    let path =
-                        eval::eval_key_path_list_in(context, &path).map_err(task_eval_error)?;
-                    let state = context.project_root(&branch.state);
-                    let value = get_value_path_in(context, &state, &path)?;
-                    return self.finish_fused_delivery_in(context, branch, value);
-                }
-                FusedRequestAction::Set(path, value) => {
-                    let state = set_state_path_in(context, branch.state_in(context), &path, value)?;
-                    branch.set_state(self.eval_context.values(), state);
-                    return self.finish_fused_delivery_in(
-                        context,
-                        branch,
-                        self.eval_context.values().unit(),
-                    );
-                }
-                FusedRequestAction::Boundary(request) => {
-                    return Ok(self.finish_fused_request(context, request));
-                }
-            }
-        }
-
-        Ok(PreparedDrive::Continue)
-    }
-
-    fn classify_fused_request(
-        &self,
-        branch: &mut Branch<S>,
-        request: Request<S::Request, Value>,
-    ) -> FusedRequestAction<S::Request> {
-        match request {
-            Request::Seq(operation, continuation) => {
-                self.record_fused_request();
-                branch.control.sequence.push(Continuation::Glam(
-                    branch.root_value(self.eval_context.values(), continuation),
-                ));
-                branch.set_effect(self.eval_context.values(), operation);
-                FusedRequestAction::Continue
-            }
-            Request::Return(value) => FusedRequestAction::Deliver(value),
-            Request::Get(path) => FusedRequestAction::Get(path),
-            Request::Set(path, value) => FusedRequestAction::Set(path, value),
-            request => FusedRequestAction::Boundary(request),
-        }
-    }
-
-    fn finish_fused_delivery_in(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        branch: &mut Branch<S>,
-        value: Value,
-    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
-        if let Some(effect) = fuse_glam_delivery_in(context, branch, value.clone())? {
-            self.record_fused_request();
-            return Ok(self.finish_fused_continue(branch, effect));
-        }
-        Ok(self.finish_fused_request(context, Request::Return(value)))
-    }
-
-    fn finish_fused_request(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        request: Request<S::Request, Value>,
-    ) -> PreparedDrive<S::Request> {
-        PreparedDrive::Request {
-            request: request.map_values(|value| self.root_request_value(context, value)),
-        }
-    }
-
-    fn finish_fused_continue(
-        &self,
-        branch: &mut Branch<S>,
-        effect: Value,
-    ) -> PreparedDrive<S::Request> {
-        branch.set_effect(self.eval_context.values(), effect);
-        PreparedDrive::Continue
-    }
-
     fn drive_step(
         &mut self,
+        _context: &EvaluationPollContext,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskHalt> {
+        Ok(MachineStep::Decode(EffectDecodeWork::new(
+            branch,
+            scope_depth,
+        )))
+    }
+
+    fn interpret_decoded_drive(
+        &mut self,
         context: &EvaluationPollContext,
+        request: Request<S::Request>,
         mut branch: Branch<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
-        let prepared = self.prepare_drive(context, &mut branch)?;
-        #[cfg(test)]
-        self.record_phase(EffectMachinePhase::RequestParsed);
-        self.interpret_prepared_drive(context, prepared, branch, scope_depth)
+        if self.fusion_enabled() {
+            match request {
+                Request::Seq(operation, continuation) => {
+                    self.record_fused_request();
+                    branch
+                        .control
+                        .sequence
+                        .push(Continuation::Glam(continuation));
+                    branch.set_effect_root(operation);
+                    return Ok(MachineStep::Decode(EffectDecodeWork::new(
+                        branch,
+                        scope_depth,
+                    )));
+                }
+                Request::Return(value) => {
+                    return self.finish_fused_delivery(context, branch, value, scope_depth);
+                }
+                Request::Get(path) => {
+                    let value = context.evaluate(&self.eval_context, |evaluator| {
+                        let path_value = evaluator.project_root(&path);
+                        let path = eval::eval_key_path_list_in(evaluator, &path_value)
+                            .map_err(task_eval_error)?;
+                        let state = evaluator.project_root(&branch.state);
+                        get_value_path_in(evaluator, &state, &path)
+                            .map(|value| evaluator.root_value(value))
+                    })?;
+                    return self.finish_fused_delivery(context, branch, value, scope_depth);
+                }
+                Request::Set(path, value) => {
+                    branch.state = context.evaluate(&self.eval_context, |evaluator| {
+                        let state = evaluator.project_root(&branch.state);
+                        let path = evaluator.project_root(&path);
+                        let value = evaluator.project_root(&value);
+                        set_state_path_in(evaluator, state, &path, value)
+                            .map(|state| evaluator.root_value(state))
+                    })?;
+                    let unit = self
+                        .eval_context
+                        .values()
+                        .construct_runtime_value_root(|_| self.eval_context.values().unit());
+                    return self.finish_fused_delivery(context, branch, unit, scope_depth);
+                }
+                request => {
+                    return self.interpret_request(context, request, branch, scope_depth);
+                }
+            }
+        }
+        self.interpret_request(context, request, branch, scope_depth)
     }
 
-    fn prepare_drive(
-        &self,
-        context: &EvaluationPollContext,
-        branch: &mut Branch<S>,
-    ) -> Result<PreparedDrive<S::Request>, TaskHalt> {
-        context.evaluate(&self.eval_context, |evaluator| {
-            self.prepare_drive_in(evaluator, branch)
-        })
-    }
-
-    fn interpret_prepared_drive(
+    fn finish_fused_delivery(
         &mut self,
         context: &EvaluationPollContext,
-        prepared: PreparedDrive<S::Request>,
+        mut branch: Branch<S>,
+        value: RuntimeValueRoot,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskHalt> {
+        let effect = context.evaluate(&self.eval_context, |evaluator| {
+            let value = evaluator.project_root(&value);
+            fuse_glam_delivery_in(evaluator, &mut branch, value)
+                .map(|effect| effect.map(|effect| evaluator.root_value(effect)))
+        })?;
+        if let Some(effect) = effect {
+            self.record_fused_request();
+            branch.set_effect_root(effect);
+            return Ok(MachineStep::Decode(EffectDecodeWork::new(
+                branch,
+                scope_depth,
+            )));
+        }
+        self.interpret_request(context, Request::Return(value), branch, scope_depth)
+    }
+
+    fn interpret_request(
+        &mut self,
+        context: &EvaluationPollContext,
+        request: Request<S::Request>,
         mut branch: Branch<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
         #[cfg(test)]
         self.record_phase(EffectMachinePhase::InterpreterEntered);
-        let request = match prepared {
-            PreparedDrive::Request { request } => request,
-            PreparedDrive::Continue => {
-                #[cfg(test)]
-                self.record_phase(EffectMachinePhase::ContinuationDelivered);
-                return Ok(MachineStep::Continue(MachineWork::Drive {
-                    branch,
-                    scope_depth,
-                }));
-            }
-        };
         let work = match request {
             Request::Return(value) => MachineWork::deliver_root(value, branch, scope_depth),
             Request::Seq(operation, continuation) => {
@@ -2240,45 +2419,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.exit = None;
         self.terminal = Some(terminal);
     }
-
-    fn effect_request_in(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        effect: Value,
-    ) -> Result<Request<S::Request>, TaskHalt> {
-        self.effect_request_values_in(context, effect)
-            .map(|request| request.map_values(|value| self.root_request_value(context, value)))
-    }
-
-    fn effect_request_values_in(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        effect: Value,
-    ) -> Result<Request<S::Request, Value>, TaskHalt> {
-        let effect = evaluate_in(context, effect)?;
-        let Value::Dict(effect) = effect else {
-            return Err(TaskHalt::new(format!(
-                "reflection task requires an effect object, got {effect:?}"
-            )));
-        };
-        let function = effect
-            .get(&*keys::EFF)
-            .cloned()
-            .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))?;
-        let function = evaluate_in(context, function)
-            .map_err(|halt| halt.with_core_context(effect_dispatch_context("function")))?;
-        let request = apply_in(context, function, vec![context.project_root(&self.api)])
-            .map_err(|halt| halt.with_core_context(effect_dispatch_context("application")))?;
-        #[cfg(test)]
-        if let Some(probe) = &self.phase_probe {
-            probe.record_application_lazy(context, &request);
-        }
-        #[cfg(test)]
-        context.context().arm_deferred_pump_pause();
-        let request = evaluate_in(context, request)
-            .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))?;
-        parse_request_values_in(context, request, &self.tags, &self.specialized_requests)
-    }
 }
 
 fn effect_dispatch_context(stage: &str) -> Value {
@@ -2461,22 +2601,9 @@ impl<S: TaskSpecialization> Branch<S> {
         branch
     }
 
-    fn effect_in(&self, context: &EvaluatorStepContext<'_>) -> Value {
-        context.project_root(&self.effect)
-    }
-
-    fn set_effect(&mut self, values: &CoreValueFactory, effect: Value) {
-        debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
-        self.effect = values.construct_runtime_value_root(|_| effect);
-    }
-
     fn set_effect_root(&mut self, effect: RuntimeValueRoot) {
         debug_assert_eq!(effect.runtime_id(), self.effect.runtime_id());
         self.effect = effect;
-    }
-
-    fn state_in(&self, context: &EvaluatorStepContext<'_>) -> Value {
-        context.project_root(&self.state)
     }
 
     fn set_state(&mut self, values: &CoreValueFactory, state: Value) {
@@ -2552,7 +2679,6 @@ impl<S: TaskSpecialization> TaskExecution<S> {
 /// Sole owner of one resumable WHNF request while the reflection machine is
 /// decoding an effect. Unlike ordinary [`MachineWork`], this state is never
 /// cloned to preserve a retry checkpoint.
-#[allow(dead_code, reason = "W5B activates the W5A decoder owner")]
 struct EffectDecodeWork<S: TaskSpecialization> {
     computation: WhnfComputation,
     purpose: EffectDecodePurpose,
@@ -2560,9 +2686,52 @@ struct EffectDecodeWork<S: TaskSpecialization> {
     scope_depth: usize,
 }
 
-#[allow(dead_code, reason = "W5B activates the W5A decoder owner")]
 enum EffectDecodePurpose {
     EffectObject,
+    Function,
+    ApplicationResult,
+}
+
+impl<S: TaskSpecialization> EffectDecodeWork<S> {
+    fn new(branch: Branch<S>, scope_depth: usize) -> Self {
+        Self::from_root(
+            branch.effect.clone(),
+            EffectDecodePurpose::EffectObject,
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn from_root(
+        value: RuntimeValueRoot,
+        purpose: EffectDecodePurpose,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            computation: WhnfComputation::from_root(value),
+            purpose,
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn contextualize(&self, halt: TaskHalt) -> TaskHalt {
+        let stage = match self.purpose {
+            EffectDecodePurpose::EffectObject => return halt,
+            EffectDecodePurpose::Function => "function",
+            EffectDecodePurpose::ApplicationResult => "request",
+        };
+        halt.with_core_context(effect_dispatch_context(stage))
+    }
+}
+
+enum EffectDecodeStep<S: TaskSpecialization> {
+    Continue(EffectDecodeWork<S>),
+    Complete(MachineWork<S>),
+    Blocked(EffectDecodeWork<S>, WorkDependency),
+    Yielded(EffectDecodeWork<S>),
+    Failed(EffectDecodeWork<S>, TaskHalt),
 }
 
 #[derive(Clone)]
@@ -2579,6 +2748,11 @@ enum MachineWork<S: TaskSpecialization> {
     Apply {
         function: RuntimeValueRoot,
         arguments: Vec<RuntimeValueRoot>,
+        branch: Branch<S>,
+        scope_depth: usize,
+    },
+    Interpret {
+        request: Request<S::Request>,
         branch: Branch<S>,
         scope_depth: usize,
     },
@@ -2652,7 +2826,8 @@ impl<S: TaskSpecialization> MachineWork<S> {
         match self {
             Self::Drive { branch, .. }
             | Self::Deliver { branch, .. }
-            | Self::Apply { branch, .. } => Some(branch),
+            | Self::Apply { branch, .. }
+            | Self::Interpret { branch, .. } => Some(branch),
             Self::Outcome { outcome, .. } => outcome.branch(),
         }
     }
@@ -2661,7 +2836,8 @@ impl<S: TaskSpecialization> MachineWork<S> {
         match self {
             Self::Drive { branch, .. }
             | Self::Deliver { branch, .. }
-            | Self::Apply { branch, .. } => Some(branch),
+            | Self::Apply { branch, .. }
+            | Self::Interpret { branch, .. } => Some(branch),
             Self::Outcome { outcome, .. } => outcome.branch_mut(),
         }
     }
@@ -2671,6 +2847,7 @@ impl<S: TaskSpecialization> MachineWork<S> {
             Self::Drive { scope_depth, .. }
             | Self::Deliver { scope_depth, .. }
             | Self::Apply { scope_depth, .. }
+            | Self::Interpret { scope_depth, .. }
             | Self::Outcome { scope_depth, .. } => *scope_depth,
         }
     }
@@ -2734,20 +2911,8 @@ impl<S: TaskSpecialization> CutFrame<S> {
     }
 }
 
+#[cfg(test)]
 const EFFECT_FUSION_BUDGET: usize = 32;
-
-enum FusedRequestAction<R> {
-    Continue,
-    Deliver(Value),
-    Get(Value),
-    Set(Value, Value),
-    Boundary(Request<R, Value>),
-}
-
-enum PreparedDrive<R> {
-    Request { request: Request<R> },
-    Continue,
-}
 
 // This value is short-lived on the Rust stack. Boxing `Continue` would add an
 // allocation to every cooperative machine transition merely to shrink the two
@@ -2755,6 +2920,7 @@ enum PreparedDrive<R> {
 #[allow(clippy::large_enum_variant)]
 enum MachineStep<S: TaskSpecialization> {
     Continue(MachineWork<S>),
+    Decode(EffectDecodeWork<S>),
     Blocked(BlockedExecution<S>),
     Exit(ExitIntent),
     Terminal(TaskTerminal),

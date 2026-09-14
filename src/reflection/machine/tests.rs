@@ -989,7 +989,9 @@ fn assert_execution_root_inventory(
     } = supplied_decoding;
     let _: &crate::eval::whnf::WhnfComputation = computation;
     match purpose {
-        EffectDecodePurpose::EffectObject => {}
+        EffectDecodePurpose::EffectObject
+        | EffectDecodePurpose::Function
+        | EffectDecodePurpose::ApplicationResult => {}
     }
     let _: &Branch<TestEffects> = branch;
     let _: &usize = scope_depth;
@@ -1019,6 +1021,15 @@ fn assert_execution_root_inventory(
         } => {
             let _: &RuntimeValueRoot = function;
             let _: &Vec<RuntimeValueRoot> = arguments;
+            let _: &Branch<TestEffects> = branch;
+            let _: &usize = scope_depth;
+        }
+        MachineWork::Interpret {
+            request,
+            branch,
+            scope_depth,
+        } => {
+            assert_request_inventory(request);
             let _: &Branch<TestEffects> = branch;
             let _: &usize = scope_depth;
         }
@@ -1077,6 +1088,25 @@ fn assert_execution_root_inventory(
             let _: &usize = index;
         }
         WakeAction::RestartSearch => {}
+    }
+}
+
+fn assert_effect_decode_step_inventory(step: &EffectDecodeStep<TestEffects>) {
+    match step {
+        EffectDecodeStep::Continue(decoding) | EffectDecodeStep::Yielded(decoding) => {
+            let _: &EffectDecodeWork<TestEffects> = decoding;
+        }
+        EffectDecodeStep::Complete(work) => {
+            let _: &MachineWork<TestEffects> = work;
+        }
+        EffectDecodeStep::Blocked(decoding, dependency) => {
+            let _: &EffectDecodeWork<TestEffects> = decoding;
+            let _: &WorkDependency = dependency;
+        }
+        EffectDecodeStep::Failed(decoding, error) => {
+            let _: &EffectDecodeWork<TestEffects> = decoding;
+            let _: &TaskHalt = error;
+        }
     }
 }
 
@@ -1259,36 +1289,17 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
 fn assert_request_handoff_inventory(
     rooted: &Request<TestRequest>,
     bounded: &Request<TestRequest, Value>,
-    fused: &FusedRequestAction<TestRequest>,
 ) {
     assert_request_inventory(rooted);
     assert_request_inventory(bounded);
-
-    match fused {
-        FusedRequestAction::Continue => {}
-        FusedRequestAction::Deliver(value) | FusedRequestAction::Get(value) => {
-            let _: &Value = value;
-        }
-        FusedRequestAction::Set(path, value) => {
-            let _: &Value = path;
-            let _: &Value = value;
-        }
-        FusedRequestAction::Boundary(request) => assert_request_inventory(request),
-    }
 }
 
-fn assert_prepared_handoff_inventory(
-    prepared: &PreparedDrive<TestRequest>,
+fn assert_protocol_handoff_inventory(
     specialized: &SpecializedRequest<TestRequest>,
     volume_operation: &VolumeOperation,
     volume_request: &VolumeRequestIdentity,
     step: &MachineStep<TestEffects>,
 ) {
-    match prepared {
-        PreparedDrive::Request { request } => assert_request_inventory(request),
-        PreparedDrive::Continue => {}
-    }
-
     let SpecializedRequest {
         tag,
         arity,
@@ -1308,6 +1319,9 @@ fn assert_prepared_handoff_inventory(
         MachineStep::Continue(work) => {
             let _: &MachineWork<TestEffects> = work;
         }
+        MachineStep::Decode(decoding) => {
+            let _: &EffectDecodeWork<TestEffects> = decoding;
+        }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
         }
@@ -1320,11 +1334,9 @@ fn assert_prepared_handoff_inventory(
     }
 }
 
-type RequestHandoffInventoryFn =
-    fn(&Request<TestRequest>, &Request<TestRequest, Value>, &FusedRequestAction<TestRequest>);
+type RequestHandoffInventoryFn = fn(&Request<TestRequest>, &Request<TestRequest, Value>);
 
-type PreparedHandoffInventoryFn = fn(
-    &PreparedDrive<TestRequest>,
+type ProtocolHandoffInventoryFn = fn(
     &SpecializedRequest<TestRequest>,
     &VolumeOperation,
     &VolumeRequestIdentity,
@@ -1416,10 +1428,11 @@ fn outer_machine_root_inventory_is_complete() {
     let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
+    let _: fn(&EffectDecodeStep<TestEffects>) = assert_effect_decode_step_inventory;
     let _: ControlRootInventoryFn = assert_control_root_inventory;
     let _: FixpointRootInventoryFn = assert_fixpoint_root_inventory;
     let _: RequestHandoffInventoryFn = assert_request_handoff_inventory;
-    let _: PreparedHandoffInventoryFn = assert_prepared_handoff_inventory;
+    let _: ProtocolHandoffInventoryFn = assert_protocol_handoff_inventory;
 }
 
 #[test]
@@ -2282,13 +2295,22 @@ fn completed_effect_root_is_not_recreated_after_scope() {
 fn poll_machine_exit(
     machine: &mut dyn EvaluationTaskMachine,
     poll_context: &crate::evaluation::EvaluationPollContext,
+    context: &EvalContext,
 ) -> EvaluationExitBlock {
     loop {
         match machine.poll(poll_context, 256) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Exit(exit) => return exit,
+            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Wait(wait)),
+                ..
+            }) => match context.pump_wait(&wait, 4096) {
+                crate::evaluation::EvaluationPumpOutcome::TargetReady
+                | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
+                outcome => panic!("exit fixture dependency made no progress: {outcome:?}"),
+            },
             EvaluationMachinePoll::Blocked(_) => {
-                panic!("exit fixture unexpectedly blocked")
+                panic!("exit fixture unexpectedly blocked without local work")
             }
             EvaluationMachinePoll::Complete(_) => {
                 panic!("exit fixture unexpectedly completed")
@@ -2314,7 +2336,7 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
             effect.clone_core_for_test(),
             TestEffects,
             Arc::new(TestHost::with_values(assembler.core_values())),
-            context,
+            context.clone(),
         )
         .expect("internal exit task should initialize");
         let mut machine: Box<dyn EvaluationTaskMachine> = if require_unit {
@@ -2323,7 +2345,7 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
             Box::new(ValueEffectTask(task))
         };
 
-        let exit = poll_machine_exit(machine.as_mut(), &poll_context);
+        let exit = poll_machine_exit(machine.as_mut(), &poll_context, &context);
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
         assert!(matches!(
@@ -2347,12 +2369,12 @@ fn internal_exit_error_forces_and_roots_its_message() {
         effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
-        context,
+        context.clone(),
     )
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &poll_context);
+    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
     let ExitIntent::Error(message) = exit.intent else {
         panic!("error exit should retain its message")
     };
@@ -2377,7 +2399,7 @@ fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
         effect.clone_core_for_test(),
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
-        context,
+        context.clone(),
     )
     .expect("internal exit task should initialize");
 
@@ -2424,12 +2446,12 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
         effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
-        context,
+        context.clone(),
     )
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &poll_context);
+    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
     assert_eq!(exit.intent, ExitIntent::Success);
     assert_eq!(exit.observed_epoch, None);
     assert!(
@@ -2460,12 +2482,12 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
         effect.clone_core_for_test(),
         TestEffects,
         host.clone(),
-        context,
+        context.clone(),
     )
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let first = poll_machine_exit(&mut machine, &poll_context);
+    let first = poll_machine_exit(&mut machine, &poll_context, &context);
     assert_eq!(first.intent, ExitIntent::Success);
     assert!(first.observed_epoch.is_some());
     assert!(
@@ -2494,8 +2516,16 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
         match machine.poll(&poll_context, 256) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Complete(value) => break value,
+            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Wait(wait)),
+                ..
+            }) => match context.pump_wait(&wait, 4096) {
+                crate::evaluation::EvaluationPumpOutcome::TargetReady
+                | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
+                outcome => panic!("disturbed exit dependency made no progress: {outcome:?}"),
+            },
             EvaluationMachinePoll::Blocked(_) => {
-                panic!("disturbed exit retry unexpectedly blocked")
+                panic!("disturbed exit retry unexpectedly blocked without local work")
             }
             EvaluationMachinePoll::Exit(_) => {
                 panic!("disturbed exit did not restart its transaction")
@@ -3483,7 +3513,7 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
 }
 
 #[test]
-fn coarse_reflection_work_replays_a_forced_application_lazy_after_resumption() {
+fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() {
     let (assembler, effect) =
         compile_effect(".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
@@ -3513,13 +3543,15 @@ fn coarse_reflection_work_replays_a_forced_application_lazy_after_resumption() {
         })
         .expect("replay fixture should schedule");
 
-    assert_eq!(
-        context.pump_wait(task.wait(), 1),
-        crate::evaluation::EvaluationPumpOutcome::BudgetExhausted,
-        "one parent poll must stop at the forced application-lazy boundary"
-    );
-    let application_wait = pause_receiver
-        .recv()
+    let application_wait = (0..16)
+        .find_map(|_| {
+            assert_eq!(
+                context.pump_wait(task.wait(), 1),
+                crate::evaluation::EvaluationPumpOutcome::BudgetExhausted,
+                "bounded parent polls must stop at the forced application-lazy boundary"
+            );
+            pause_receiver.try_recv().ok()
+        })
         .expect("the forced boundary must report its exact application-lazy wait");
     let first_attempt = probe.application_lazies();
     assert_eq!(
@@ -3552,13 +3584,13 @@ fn coarse_reflection_work_replays_a_forced_application_lazy_after_resumption() {
         panic!("the resumed reflection task should complete")
     };
     let application_lazies = probe.application_lazies();
-    assert!(
-        application_lazies.len() >= 2,
-        "coarse reflection work must visibly replay the application after resumption"
-    );
-    assert_ne!(
-        application_lazies[0], application_lazies[1],
-        "the current replay constructs a fresh application lazy instead of consuming the first"
+    assert_eq!(
+        application_lazies
+            .iter()
+            .filter(|lazy| **lazy == first_attempt[0])
+            .count(),
+        1,
+        "resumable request decoding must consume the original application result exactly once"
     );
     assert_eq!(
         builds.load(Ordering::Acquire),
@@ -3600,8 +3632,12 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     )
     .unwrap();
 
-    let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
-        panic!("eval should suspend on its value's pending dependency");
+    let blocked = loop {
+        match task.poll(256) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            _ => panic!("eval should suspend on its value's pending dependency"),
+        }
     };
     assert!(blocked.dependency.is_some());
 
@@ -4546,6 +4582,33 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
 }
 
 #[test]
+fn effect_dispatch_preserves_application_and_request_stage_contexts() {
+    for (source, stage, message) in [
+        ("{eff:42}", "application", "requires a function value"),
+        (
+            "{eff:\\_api -> anno 'error {msg:{text:\"request failed\"}}}",
+            "request",
+            "request failed",
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let halt = run_standard_test(&assembler, &effect)
+            .expect_err("the selected effect-dispatch phase should fail");
+        let diagnostic = halt.diagnostic(&assembler.values());
+        assert!(
+            diagnostic.message().contains(message),
+            "unexpected {stage} failure: {}",
+            diagnostic.message()
+        );
+        assert_eq!(
+            task_halt_contexts(&assembler, &halt).first(),
+            Some(&effect_dispatch_context(stage)),
+            "the {stage} boundary should prepend its structured dispatch context"
+        );
+    }
+}
+
+#[test]
 fn failed_and_cancelled_joins_retain_retryable_errors() {
     for (source, expected) in [
         (
@@ -4553,7 +4616,7 @@ fn failed_and_cancelled_joins_retain_retryable_errors() {
             "failed permanently",
         ),
         (
-            ".task.new (.r ()) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
+            ".task.new (.read_log) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
             "was cancelled",
         ),
     ] {
@@ -4764,16 +4827,18 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
     )
     .unwrap();
 
-    let blocked = match task.poll(512) {
-        EffectTaskPoll::Blocked(blocked) => blocked,
-        EffectTaskPoll::Yielded => panic!("task exhausted an unexpectedly large poll budget"),
-        EffectTaskPoll::Complete(value) => panic!(
-            "annotation dependency completed early with {:?}",
-            assembler.to_binary(&value)
-        ),
-        EffectTaskPoll::Failed(error) => panic!("annotation dependency failed: {error}"),
-        EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
-        EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
+    let blocked = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            EffectTaskPoll::Complete(value) => panic!(
+                "annotation dependency completed early with {:?}",
+                assembler.to_binary(&value)
+            ),
+            EffectTaskPoll::Failed(error) => panic!("annotation dependency failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
+        }
     };
     let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
         panic!("lazy suspension should retain its wait token")
@@ -4818,8 +4883,12 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     )
     .unwrap();
 
-    let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
-        panic!("right alternative should retain the failed queue observation")
+    let blocked = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            _ => panic!("right alternative should retain the failed queue observation"),
+        }
     };
     assert!(blocked.dependency.is_some());
     assert!(blocked.observed_generation.is_some());
