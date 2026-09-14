@@ -3239,7 +3239,7 @@ Partition this work as follows:
    across every sequential demand, split into:
    - **W5C.5b.2a — Complete (2026-09-14): Dictionary and metadata inspection.** Migrate the two
      single-demand projection requests first.
-   - **W5C.5b.2b — Logging preparation.** Migrate message, optional message
+   - **W5C.5b.2b — Complete (2026-09-14): Logging preparation.** Migrate message, optional message
      interface, and severity demand in established order without repeating a
      completed prefix or host emission.
    - **W5C.5b.2c — Environment traversal.** Migrate key-path conversion and

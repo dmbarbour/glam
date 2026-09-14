@@ -50,6 +50,7 @@ pub struct ReflectionRequestWork {
 enum ReflectionRequestOperation {
     Eval(EvalRequestWork),
     Inspection(InspectionRequestWork),
+    Log(LogRequestWork),
     Synchronous {
         request: ReflectionRequest,
         arguments: Vec<Value>,
@@ -76,6 +77,20 @@ enum InspectionRequest {
     Metadata,
 }
 
+enum LogRequestWork {
+    Start(Vec<Value>),
+    Message {
+        severity: Value,
+    },
+    MessageInterface {
+        severity: Value,
+        message: crate::api::EvaluatedValue,
+    },
+    Severity {
+        message: Value,
+    },
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
@@ -93,6 +108,9 @@ impl ReflectionRequestWork {
                     request: InspectionRequest::Metadata,
                     arguments,
                 })
+            }
+            ReflectionRequest::Log => {
+                ReflectionRequestOperation::Log(LogRequestWork::Start(arguments))
             }
             request => ReflectionRequestOperation::Synchronous { request, arguments },
         };
@@ -177,6 +195,65 @@ where
                 };
                 Ok(SpecializationRequestPoll::Complete(result))
             }
+            ReflectionRequestOperation::Log(LogRequestWork::Start(arguments)) => {
+                assert!(input.is_none(), "new `.log` work cannot have demand input");
+                let [severity, message]: [Value; 2] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
+                self.operation =
+                    ReflectionRequestOperation::Log(LogRequestWork::Message { severity });
+                Ok(SpecializationRequestPoll::Demand(message))
+            }
+            ReflectionRequestOperation::Log(LogRequestWork::Message { severity }) => {
+                let message = contextual_demand_value(input, "log_message")?;
+                let interface = message.with_core(|value| {
+                    let CoreValue::Dict(message) = value else {
+                        return Err(TaskHalt::new("`.log` message must evaluate to an object"));
+                    };
+                    Ok(message.get(&*keys::MSG).cloned())
+                })??;
+                if let Some(interface) = interface {
+                    let interface = context.values().wrap(interface);
+                    self.operation =
+                        ReflectionRequestOperation::Log(LogRequestWork::MessageInterface {
+                            severity,
+                            message,
+                        });
+                    Ok(SpecializationRequestPoll::Demand(interface))
+                } else {
+                    let message = message.into_value();
+                    self.operation =
+                        ReflectionRequestOperation::Log(LogRequestWork::Severity { message });
+                    Ok(SpecializationRequestPoll::Demand(severity))
+                }
+            }
+            ReflectionRequestOperation::Log(LogRequestWork::MessageInterface {
+                severity,
+                message,
+            }) => {
+                let interface = contextual_demand_value(input, "log_message")?;
+                let values = context.values();
+                let message = message.with_core(|value| {
+                    let CoreValue::Dict(message) = value else {
+                        unreachable!("validated log message must remain a dictionary")
+                    };
+                    Ok::<_, TaskHalt>(values.wrap(CoreValue::Dict(message.insert(
+                        (*keys::MSG).clone(),
+                        values.clone_core(interface.as_value())?,
+                    ))))
+                })??;
+                self.operation =
+                    ReflectionRequestOperation::Log(LogRequestWork::Severity { message });
+                Ok(SpecializationRequestPoll::Demand(severity))
+            }
+            ReflectionRequestOperation::Log(LogRequestWork::Severity { message }) => {
+                let severity = contextual_demand_value(input, "log_severity")?;
+                let severity = parse_evaluated_severity(&severity)?;
+                emit_log(context, severity, message)?;
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
+            }
             ReflectionRequestOperation::Synchronous { request, arguments } => {
                 assert!(
                     input.is_none(),
@@ -199,6 +276,62 @@ fn demand_value(
     match input.expect(resumed) {
         SpecializationRequestInput::Value(value) => Ok(value),
         SpecializationRequestInput::Failed(error) => Err(error),
+    }
+}
+
+fn contextual_demand_value(
+    input: Option<SpecializationRequestInput>,
+    operation: &str,
+) -> Result<crate::api::EvaluatedValue, TaskHalt> {
+    demand_value(input, "resumed log preparation").map_err(|error| {
+        error.with_core_context(crate::diagnostic::evaluation_context_frame(operation))
+    })
+}
+
+fn emit_log<S>(
+    context: &mut RequestContext<'_, S>,
+    severity: Severity,
+    message: Value,
+) -> Result<(), TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let diagnostic = Diagnostic::from_emission(&context.values(), severity, message)
+        .map_err(|error| TaskHalt::new(error.to_string()))?;
+    if let Some(mut transaction) = context.transaction() {
+        transaction
+            .parts()
+            .1
+            .reflection_journal()
+            .diagnostics
+            .push(diagnostic);
+    } else {
+        context.host().emit_diagnostic(diagnostic);
+        context.committed();
+    }
+    Ok(())
+}
+
+fn parse_evaluated_severity(value: &crate::api::EvaluatedValue) -> Result<Severity, TaskHalt> {
+    let (info, warn, error) = value.with_core(|value| {
+        (
+            severity_matches(value, "info", &keys::INFO),
+            severity_matches(value, "warn", &keys::WARN),
+            severity_matches(value, "error", &keys::ERROR),
+        )
+    })?;
+    if info {
+        Ok(Severity::Info)
+    } else if warn {
+        Ok(Severity::Warning)
+    } else if error {
+        Ok(Severity::Error)
+    } else {
+        Err(TaskHalt::new(
+            "`.log` severity must be `'info`, `'warn`, or `'error`",
+        ))
     }
 }
 
@@ -505,23 +638,8 @@ where
                 .try_into()
                 .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
             let message = prepare_message(context, message)?;
-            let diagnostic = Diagnostic::from_emission(
-                &context.values(),
-                parse_severity(context, severity)?,
-                message,
-            )
-            .map_err(|error| TaskHalt::new(error.to_string()))?;
-            if let Some(mut transaction) = context.transaction() {
-                transaction
-                    .parts()
-                    .1
-                    .reflection_journal()
-                    .diagnostics
-                    .push(diagnostic);
-            } else {
-                context.host().emit_diagnostic(diagnostic);
-                context.committed();
-            }
+            let severity = parse_severity(context, severity)?;
+            emit_log(context, severity, message)?;
             Ok(RequestResult::ReturnUnit)
         }
         ReflectionRequest::TaskNew => {
