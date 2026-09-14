@@ -3103,6 +3103,8 @@ collection reusing one retained pointer as a different managed family.
 
 ##### W5C.5 — Specialization callback boundary
 
+**Status: complete (2026-09-14).**
+
 W5C5-001 pulls the protocol decision and the diagnostic/test specialization
 slice ahead of W5C.4 because the known deadlock compromises routine suite
 verification. Its completion does not imply that the full callback inventory
@@ -3293,9 +3295,9 @@ Partition the remaining migration as follows:
    operands raw. The nested token search remains behaviorally unchanged; only
    its explanatory text is demanded by the outer request owner.
 4. **W5C.5c.4 — Logger, tests, and compatibility closure.** Split into:
-   - **W5C.5c.4a — Logger request work.** Migrate `.write_stderr` binary
-     preparation and keep `.read_log` as an immediate transactional FIFO
-     operation. Preserve abandoned-choice output behavior.
+   - **W5C.5c.4a — Complete (2026-09-14): Logger request work.** Migrate
+     `.write_stderr` binary preparation and keep `.read_log` as an immediate
+     transactional FIFO operation. Preserve abandoned-choice output behavior.
    - **W5C.5c.4b — Standard and test request work.** Split into:
      - **W5C.5c.4b.1 — Complete (2026-09-14): Uninhabited request work.** Use
        `Infallible` itself for the standard specialization and the two
@@ -3310,9 +3312,10 @@ Partition the remaining migration as follows:
      explicitly authored retryable cut. Runtime FIFO fixtures separately force
      tail append, unrelated-endpoint publication, and competing-consumer
      commit order.
-   - **W5C.5c.4d — Compatibility closure.** Migrate the remaining uninhabited
-     test fixtures, remove both synchronous adapters and every
-     `RequestContext` demand method, and latch the closed source inventory.
+   - **W5C.5c.4d — Complete (2026-09-14): Compatibility closure.** Migrate the
+     remaining uninhabited test fixtures, remove both synchronous adapters and
+     every `RequestContext` demand method, and latch the closed source
+     inventory.
 
 Close the compatibility surface rather than leaving two different suspension
 contracts under the same trait.
@@ -3328,6 +3331,16 @@ publication, an append at the observed empty boundary, and a competing
 consumer: the FIFO cursor must decide which events conflict while the broad
 generation merely schedules revalidation. Retain an end-to-end configured
 logger case beside the machine-level control fixture.
+
+Completion record: all eleven specialization implementations now construct
+owned request work directly. `RequestContext` no longer carries a poll context
+or offers nested semantic evaluation, and neither the library nor executable
+contains a synchronous specialization adapter. The updated WHNF census records
+the removal of those evaluator and orchestration boundaries; durable-owner and
+raw-value inventories record the explicit request states and their regional
+evaluated-value access. Behavioral fixtures cover ordered alternatives,
+macros, configured CLI parsing, logger output, request resumption, and FIFO
+retry/conflict order.
 
 ##### W5C.6 — Recursive helper retirement and focused verification
 

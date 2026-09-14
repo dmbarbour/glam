@@ -940,18 +940,6 @@ impl TaskHost<ReflectionEffects> for TestHost {
     }
 }
 
-fn value_bytes(values: &CoreValueFactory, value: &Value) -> Result<Bytes, TaskHalt> {
-    let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
-    match poll.evaluate(&context, |evaluator| evaluate_in(evaluator, value.clone()))? {
-        Value::Binary(bytes) => Ok(bytes),
-        Value::List(list) => eval::list_output_bytes(&context, &list)
-            .map(Bytes::from)
-            .map_err(TaskHalt::from),
-        _ => Err(TaskHalt::new("test stderr request requires binary data")),
-    }
-}
-
 fn run_log_test(
     assembler: &Assembler,
     effect: &PublicValue,

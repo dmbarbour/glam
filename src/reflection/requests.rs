@@ -940,7 +940,7 @@ fn classify_key_value(
 ) -> Result<ClassifiedRequestKey, TaskHalt> {
     value
         .with_core(|value| match value {
-            CoreValue::Atom(atom) => ClassifiedRequestKey::Ready(Key::Atom(atom.clone())),
+            CoreValue::Atom(atom) => ClassifiedRequestKey::Ready(Key::Atom(*atom)),
             CoreValue::Number(number) => ClassifiedRequestKey::Ready(Key::Number(number.clone())),
             CoreValue::Binary(bytes) => ClassifiedRequestKey::Ready(Key::Binary(bytes.clone())),
             CoreValue::List(_) => ClassifiedRequestKey::List,

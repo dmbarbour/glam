@@ -15,8 +15,8 @@ use crate::core::{CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key
 use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationWaitToken};
-use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
+use crate::evaluation::{EvalContext, EvaluationWaitToken};
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot};
 
 /// One additional effect constructor contributed by a task specialization.
 pub struct EffectRequestSpec<R> {
@@ -248,63 +248,6 @@ pub enum SpecializationRequestPoll {
     Demand(PublicValue),
     Wait(SpecializationRequestWait),
     Complete(RequestResult),
-}
-
-/// Temporary in-crate adapter for request implementations not yet migrated to
-/// explicit request work. Its presence is source-latched and ends in
-/// W5C.5c.4; it is deliberately unavailable to embedding clients.
-pub struct SynchronousRequestWork<S: TaskSpecialization> {
-    request: Option<S::Request>,
-    arguments: Option<Vec<PublicValue>>,
-}
-
-impl<S: TaskSpecialization> SynchronousRequestWork<S> {
-    pub(crate) fn new(request: S::Request, arguments: Vec<PublicValue>) -> Self {
-        Self {
-            request: Some(request),
-            arguments: Some(arguments),
-        }
-    }
-}
-
-pub(crate) trait SynchronousTaskSpecialization: TaskSpecialization {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<PublicValue>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt>;
-}
-
-impl<S> SpecializationRequestWork<S> for SynchronousRequestWork<S>
-where
-    S: SynchronousTaskSpecialization,
-{
-    fn poll(
-        &mut self,
-        specialization: &S,
-        input: Option<SpecializationRequestInput>,
-        context: &mut RequestContext<'_, S>,
-    ) -> Result<SpecializationRequestPoll, TaskHalt> {
-        assert!(
-            input.is_none(),
-            "synchronous request work cannot receive a demand completion"
-        );
-        let request = self
-            .request
-            .as_ref()
-            .expect("synchronous request work must retain its request")
-            .clone();
-        let arguments = self
-            .arguments
-            .as_ref()
-            .expect("synchronous request work must retain its arguments")
-            .clone();
-        let result = specialization.handle_request(request, arguments, context)?;
-        self.request = None;
-        self.arguments = None;
-        Ok(SpecializationRequestPoll::Complete(result))
-    }
 }
 
 impl<S: TaskSpecialization> SpecializationRequestWork<S> for Infallible {
@@ -802,7 +745,6 @@ impl<S: TaskSpecialization> Transaction<S> {
 /// Restricted access to the host and current transaction for extra effects.
 pub struct RequestContext<'a, S: TaskSpecialization> {
     pub(super) eval_context: &'a EvalContext,
-    pub(super) poll_context: &'a EvaluationPollContext,
     pub(super) host: &'a Arc<S::Host>,
     pub(super) transaction: Option<&'a mut Transaction<S>>,
     pub(super) activity: &'a mut RequestActivity,
@@ -816,32 +758,6 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     /// Returns runtime-local value construction for this effect request.
     pub fn values(&self) -> Values {
         Values::from_core_factory(self.eval_context.values().clone())
-    }
-
-    /// Demands the outer weak-head normal form of a request argument.
-    pub fn evaluate(&self, value: &PublicValue) -> Result<EvaluatedValue, TaskHalt> {
-        let value = self.evaluate_root(value)?;
-        let values = Values::from_core_factory(self.eval_context.values().clone());
-        Ok(EvaluatedValue::from_whnf(
-            &values,
-            PublicValue::from_runtime_root(value),
-        ))
-    }
-
-    /// Evaluates one path expression entirely inside a bounded evaluator
-    /// phase. The resulting keys contain no managed value authority and may
-    /// safely cross back into the request interpreter.
-    fn evaluate_root(&self, value: &PublicValue) -> Result<RuntimeValueRoot, TaskHalt> {
-        let value = self.values().clone_core(value)?;
-        self.poll_context
-            .evaluate(self.eval_context, |evaluator| {
-                let mut value = value;
-                while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-                    value = eval::eval_value_in(evaluator, &value)?;
-                }
-                Ok(evaluator.root_value(value))
-            })
-            .map_err(task_eval_error)
     }
 
     /// Starts a nested isolated search in the current evaluation session.
@@ -1072,12 +988,11 @@ mod root_inventory_tests {
     ) {
         let RequestContext {
             eval_context,
-            poll_context,
             host,
             transaction,
             activity,
         } = request;
-        let _ = (eval_context, poll_context, host, transaction, activity);
+        let _ = (eval_context, host, transaction, activity);
         let TransactionContext { transaction } = transaction_context;
         let _ = transaction;
     }
@@ -1132,7 +1047,7 @@ mod root_inventory_tests {
     }
 
     #[test]
-    fn every_specialization_declares_owned_request_work_during_migration() {
+    fn every_specialization_declares_owned_request_work_without_sync_adapters() {
         let sources = [
             include_str!("protocol.rs"),
             include_str!("machine/tests.rs"),
@@ -1156,17 +1071,11 @@ mod root_inventory_tests {
         // One declaration belongs to the trait; every implementation supplies
         // the remaining eleven constructors.
         assert_eq!(count(concat!("fn start", "_request(")), 12);
-        // Nine implementations still use the deliberately temporary bridge
-        // for specialization-specific requests. Reusable reflection arms in
-        // the three composed handlers already use durable pollable work, and
-        // the external embedding fixture is fully pollable.
-        // Six use it directly; two composed associated types contain the same
-        // substring while delegating only their non-reflection arms.
-        assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 8);
-        assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 9);
+        assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 0);
+        assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 0);
         assert_eq!(
             count(concat!("ReflectionOrSynchronous", "RequestWork<Self>")),
-            2
+            0
         );
         assert_eq!(count(concat!("type Request", "Work = TestRequestWork;")), 2);
 

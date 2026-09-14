@@ -906,7 +906,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             specializing.input.take(),
             &mut RequestContext {
                 eval_context: &self.eval_context,
-                poll_context: context,
                 host: &self.host,
                 transaction: specializing.branch.transaction.as_mut(),
                 activity: &mut activity,
@@ -5399,15 +5398,6 @@ fn apply_in(
     arguments: Vec<Value>,
 ) -> Result<Value, TaskHalt> {
     eval::apply_values_in(context, function, arguments).map_err(task_eval_error)
-}
-
-#[cfg(test)]
-fn evaluate_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Value, TaskHalt> {
-    let mut value = value;
-    while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        value = eval::eval_value_in(context, &value).map_err(task_eval_error)?;
-    }
-    Ok(value)
 }
 
 pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {

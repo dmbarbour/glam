@@ -1128,13 +1128,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        566,
+        567,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        9_147_042_228_998_442_418,
+        8_941_178_144_771_175_349,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1145,7 +1145,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 97),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 98),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 25),
         ((ApiKind::Function, ApiDisposition::Violation), 434),
         (

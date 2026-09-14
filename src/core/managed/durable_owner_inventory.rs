@@ -829,10 +829,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 168;
+const DECLARATION_BASELINE_COUNT: usize = 184;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([110, 140, 2, 14, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_202_165_552_474_890_878;
+    DeclarationSignals::new([142, 140, 5, 14, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 7_676_065_153_881_662_658;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

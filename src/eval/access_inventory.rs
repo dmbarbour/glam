@@ -512,8 +512,13 @@ fn net_construction_callbacks_have_no_direct_compatibility_entry() {
         );
     }
     assert!(
-        source.contains("context.evaluate(value)"),
-        "construction callbacks must use RequestContext's bounded evaluator service"
+        !source.contains("context.evaluate("),
+        "construction callbacks must own semantic demand as resumable request work"
+    );
+    assert!(
+        source.contains("SpecializationRequestPoll::Demand(outputs)")
+            && source.contains("Self::WireRight { left }"),
+        "copy and ordered wire preparation must remain explicit request-work phases"
     );
     assert!(
         source.contains("fn construction_port_in(\n    context: &EvaluatorStepContext"),
