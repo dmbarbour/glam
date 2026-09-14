@@ -1862,7 +1862,7 @@ fn serialized_reset_frame(
 
 #[test]
 fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let serialized = values.construct_runtime_value_root(|_| {
         Value::List(List::from_values(vec![
@@ -1913,7 +1913,7 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
 
 #[test]
 fn reset_stack_decoder_rejects_non_list_and_wrong_arity() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let cases = [
         (
@@ -1952,7 +1952,7 @@ fn reset_stack_decoder_rejects_non_list_and_wrong_arity() {
 
 #[test]
 fn reset_stack_decoder_resumes_each_lazy_field_once_and_leaves_continuation_lazy() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let key_evaluations = Arc::new(AtomicUsize::new(0));
     let scope_evaluations = Arc::new(AtomicUsize::new(0));
@@ -2037,7 +2037,7 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
         Layer::FrameShell,
         Layer::FrameChunk,
     ] {
-        let values = crate::core::test_value_factory();
+        let values = Assembler::default().core_values();
         let context = EvalContext::isolated(values.clone());
         let evaluations = Arc::new(AtomicUsize::new(0));
         let serialized = values.construct_runtime_value_root(|access| match layer {
@@ -2118,7 +2118,7 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
 
 #[test]
 fn reset_stack_decoder_resumes_a_promised_numeric_field() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let promised = PromisedValue::new(&values, "reset scope promise");
     let serialized = values.construct_runtime_value_root(|access| {
@@ -2154,7 +2154,7 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
 
 #[test]
 fn reset_stack_decoder_checks_every_fixed_frame_arity() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     for arity in 0..=5 {
         let serialized = values.construct_runtime_value_root(|_| {
@@ -2184,7 +2184,7 @@ fn reset_stack_decoder_checks_every_fixed_frame_arity() {
 
 #[test]
 fn reset_stack_decoder_rejects_each_invalid_frame_field() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let invalid = [
         (
@@ -2232,7 +2232,7 @@ fn reset_stack_decoder_rejects_each_invalid_frame_field() {
 
 #[test]
 fn reset_stack_decoder_propagates_a_deferred_failure() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let serialized = values.construct_runtime_value_root(|access| {
         Value::Lazy(LazyValue::error_in(access, "reset stack fixture failed"))
@@ -2305,7 +2305,7 @@ fn shift_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedVa
 
 #[test]
 fn reset_control_work_does_not_publish_before_its_key_resolves() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let tags = Tags::new();
     let key = PromisedValue::new(&values, "reset request key");
     let effect = reset_request_effect(&values, &tags, &key);
@@ -2367,7 +2367,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
 
 #[test]
 fn shift_control_work_does_not_capture_before_its_key_resolves() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let tags = Tags::new();
     let key = PromisedValue::new(&values, "shift request key");
     let effect = shift_request_effect(&values, &tags, &key);
@@ -2425,7 +2425,7 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
 
 #[test]
 fn captured_control_installation_waits_before_publishing_its_resume_layer() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let stack = PromisedValue::new(&values, "captured caller reset stack");
     let mut task = EffectTask::new(
         &values,
@@ -2657,7 +2657,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
 #[test]
 fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
     for reset_wins in [false, true] {
-        let values = crate::core::test_value_factory();
+        let values = Assembler::default().core_values();
         let stack = PromisedValue::new(&values, "delivery reset stack");
         let mut task = EffectTask::new(
             &values,
@@ -2746,7 +2746,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
 
 #[test]
 fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let saved = PromisedValue::new(&values, "saved restore stack");
     let mut task = EffectTask::new(
         &values,
@@ -2836,7 +2836,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
 
 #[test]
 fn malformed_restore_stack_fails_before_popping_the_delimiter() {
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let mut task = EffectTask::new(
         &values,
         eval::constant_effect(
@@ -2930,7 +2930,7 @@ fn retry_wake_and_terminalization_discard_blocked_control_work() {
         }
     }
 
-    let values = crate::core::test_value_factory();
+    let values = Assembler::default().core_values();
     let mut retried = blocked_reset_task(&values);
     let replacement = MachineWork::Drive {
         branch: retried

@@ -3096,7 +3096,10 @@ suites provide the uninterrupted reference behavior. The final lifecycle
 audit found and fixed stale `ControlWork` surviving retry wakes and terminal
 task cleanup; a deterministic fixture forces both disposal paths. Task-level
 work inventories remain exhaustive, and strict versus one-step polling reaches
-the same control outcomes without replaying completed decoder prefixes.
+the same control outcomes without replaying completed decoder prefixes. Every
+W5C.4 fixture with durable managed state owns a private value domain; a
+parallel reflection-suite run previously reproduced process-global test-heap
+collection reusing one retained pointer as a different managed family.
 
 ##### W5C.5 — Specialization callback boundary
 
