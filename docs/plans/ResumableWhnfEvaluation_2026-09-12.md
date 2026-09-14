@@ -2369,11 +2369,22 @@ tail to continue; repetition is not used as concurrency evidence.
 
 ###### W5C.2b — Unit assertions and scoped close
 
+**Status: complete (2026-09-14).**
+
 Migrate `RequireUnit`, `AssertUnit`, and `RestoreScopedValue`. Construct an
 assertion computation once, preserve its diagnostic context across
 suspension, and mutate the control stack only after success. Verify success,
 structured permanent failure, lazy and promise suspension, cancellation, and
 scope-close restoration without replay.
+
+Completion record: the shared scalar owner now distinguishes generic unit
+checking, provider-contextual `AssertUnit`, and scoped-close restoration.
+`AssertUnit` constructs its assertion lazy once before handing it to WHNF
+work; all three paths retain their control entry until successful completion.
+A test-only scoped request exercises close activity followed by a suspended
+unit result, proving that the close is committed once and the operation's
+saved result is restored only afterward. Separate counted-gate fixtures cover
+both generic and contextual endpoint policies.
 
 ##### W5C.3 — Keys, paths, and state operations
 

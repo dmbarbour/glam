@@ -944,6 +944,59 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ))
                 }
             }
+            ScalarDemandPurpose::RequireUnit => {
+                let checked = context.evaluate(&self.eval_context, |evaluator| {
+                    let value = evaluator.project_root(&value);
+                    if value != self.eval_context.values().unit() {
+                        return Err(TaskHalt::new(format!(
+                            "effect task returned {}; expected unit",
+                            value.diagnostic_kind_name()
+                        )));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = checked {
+                    return ScalarDemandStep::Failed(
+                        ScalarDemandWork::new(
+                            value,
+                            ScalarDemandPurpose::RequireUnit,
+                            branch,
+                            scope_depth,
+                        ),
+                        error,
+                    );
+                }
+                branch.control.sequence.pop();
+                MachineStep::Continue(MachineWork::deliver_root(value, branch, scope_depth))
+            }
+            ScalarDemandPurpose::AssertUnit => {
+                branch.control.sequence.pop();
+                MachineStep::Continue(MachineWork::deliver_root(value, branch, scope_depth))
+            }
+            ScalarDemandPurpose::RestoreScopedValue { scoped_value } => {
+                let checked = context.evaluate(&self.eval_context, |evaluator| {
+                    let value = evaluator.project_root(&value);
+                    if value != self.eval_context.values().unit() {
+                        return Err(TaskHalt::new(format!(
+                            "scoped effect close must return unit, got {value:?}"
+                        )));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = checked {
+                    return ScalarDemandStep::Failed(
+                        ScalarDemandWork::new(
+                            value,
+                            ScalarDemandPurpose::RestoreScopedValue { scoped_value },
+                            branch,
+                            scope_depth,
+                        ),
+                        error,
+                    );
+                }
+                branch.control.sequence.pop();
+                MachineStep::Continue(MachineWork::deliver_root(scoped_value, branch, scope_depth))
+            }
             ScalarDemandPurpose::ExitError => MachineStep::Exit(ExitIntent::Error(value)),
         };
         ScalarDemandStep::Complete(step)
@@ -1748,26 +1801,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch,
                     scope_depth,
                 ))),
-                Continuation::RequireUnit => {
-                    let value = context.evaluate(&self.eval_context, |evaluator| {
-                        let value = evaluate_in(evaluator, evaluator.project_root(&value))?;
-                        if value != self.eval_context.values().unit() {
-                            return Err(TaskHalt::new(format!(
-                                "effect task returned {}; expected unit",
-                                value.diagnostic_kind_name()
-                            )));
-                        }
-                        Ok(evaluator.root_value(value))
-                    })?;
-                    branch.control.sequence.pop();
-                    Ok(MachineStep::Continue(MachineWork::deliver_root(
-                        value,
-                        branch,
-                        scope_depth,
-                    )))
-                }
+                Continuation::RequireUnit => Ok(MachineStep::Demand(ScalarDemandWork::new(
+                    value,
+                    ScalarDemandPurpose::RequireUnit,
+                    branch,
+                    scope_depth,
+                ))),
                 Continuation::AssertUnit(diagnostic_context) => {
-                    let value = context.evaluate(&self.eval_context, |evaluator| {
+                    let assertion = context.evaluate(&self.eval_context, |evaluator| {
                         let diagnostic_context = evaluator.project_root(&diagnostic_context);
                         let value = evaluator.project_root(&value);
                         let assertion = evaluator.construct_lazy_value(|access| {
@@ -1777,11 +1818,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 vec![diagnostic_context, value, self.eval_context.values().unit()],
                             )
                         });
-                        evaluate_in(evaluator, assertion).map(|value| evaluator.root_value(value))
-                    })?;
-                    branch.control.sequence.pop();
-                    Ok(MachineStep::Continue(MachineWork::deliver_root(
-                        value,
+                        evaluator.root_value(assertion)
+                    });
+                    Ok(MachineStep::Demand(ScalarDemandWork::new(
+                        assertion,
+                        ScalarDemandPurpose::AssertUnit,
                         branch,
                         scope_depth,
                     )))
@@ -1831,18 +1872,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }))
                 }
                 Continuation::RestoreScopedValue(scoped_value) => {
-                    context.evaluate(&self.eval_context, |evaluator| {
-                        let value = evaluate_in(evaluator, evaluator.project_root(&value))?;
-                        if value != self.eval_context.values().unit() {
-                            return Err(TaskHalt::new(format!(
-                                "scoped effect close must return unit, got {value:?}"
-                            )));
-                        }
-                        Ok(())
-                    })?;
-                    branch.control.sequence.pop();
-                    Ok(MachineStep::Continue(MachineWork::deliver_root(
-                        scoped_value,
+                    Ok(MachineStep::Demand(ScalarDemandWork::new(
+                        value,
+                        ScalarDemandPurpose::RestoreScopedValue { scoped_value },
                         branch,
                         scope_depth,
                     )))
@@ -2902,6 +2934,11 @@ enum ScalarDemandPurpose {
     ApplyContinuation {
         argument: RuntimeValueRoot,
         fused: bool,
+    },
+    RequireUnit,
+    AssertUnit,
+    RestoreScopedValue {
+        scoped_value: RuntimeValueRoot,
     },
     ExitError,
 }

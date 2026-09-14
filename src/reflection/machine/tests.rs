@@ -120,6 +120,7 @@ enum TestRequest {
     WriteStderr,
     Alternatives,
     Evaluate,
+    Scoped,
 }
 
 #[derive(Clone)]
@@ -176,6 +177,12 @@ impl TaskSpecialization for TestEffects {
                     1,
                     TestRequest::Evaluate,
                 ),
+                EffectRequestSpec::new(
+                    "scoped",
+                    ["reflection_test", "request", "scoped"],
+                    2,
+                    TestRequest::Scoped,
+                ),
             ])
             .collect()
     }
@@ -227,6 +234,12 @@ impl TaskSpecialization for TestEffects {
                 Ok(RequestResult::Return(
                     context.evaluate(&value)?.into_value(),
                 ))
+            }
+            TestRequest::Scoped => {
+                let [operation, close]: [PublicValue; 2] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("test scoped request received the wrong arity"))?;
+                Ok(RequestResult::Scoped { operation, close })
             }
         }
     }
@@ -1017,6 +1030,10 @@ fn assert_execution_root_inventory(
         ScalarDemandPurpose::ApplyContinuation { argument, fused } => {
             let _: &RuntimeValueRoot = argument;
             let _: &bool = fused;
+        }
+        ScalarDemandPurpose::RequireUnit | ScalarDemandPurpose::AssertUnit => {}
+        ScalarDemandPurpose::RestoreScopedValue { scoped_value } => {
+            let _: &RuntimeValueRoot = scoped_value;
         }
         ScalarDemandPurpose::ExitError => {}
     }
@@ -2121,6 +2138,78 @@ fn continuation_function_demand_resumes_without_replay_in_both_delivery_paths() 
             "continuation demand must retain one nested reflection activation"
         );
     }
+}
+
+#[test]
+fn unit_result_demands_resume_without_replaying_the_assertion() {
+    for contextual in [false, true] {
+        let (assembler, effect) = compile_effect(".r (anno { refl:(.r ()) } ())");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let context = EvalContext::isolated(assembler.core_values());
+        let builds = Arc::new(AtomicUsize::new(0));
+        context
+            .install_reflection_launcher(Arc::new(CountingLauncher {
+                inner: task_launcher(TestEffects, host.clone()),
+                builds: builds.clone(),
+            }))
+            .expect("fresh unit fixture should accept a launcher");
+        let task = EffectTask::new_owned_in_context(
+            effect.clone_core_for_test(),
+            TestEffects,
+            host,
+            context,
+        )
+        .expect("unit fixture should build");
+        let mut task = if contextual {
+            task.asserting_unit_result(Arc::from("unit fixture"))
+        } else {
+            task.requiring_unit_result()
+        };
+
+        assert!(matches!(
+            task.run().expect("unit demand should resume"),
+            TaskOutcome::Complete(_)
+        ));
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            1,
+            "unit assertion demand must retain one nested reflection activation"
+        );
+    }
+}
+
+#[test]
+fn scoped_close_unit_demand_resumes_without_replaying_close() {
+    let (assembler, effect) = compile_effect(
+        ".scoped (.r \"kept\") ((.write_stderr \"close\") =>> .r (anno { refl:(.r ()) } ()))",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        }))
+        .expect("fresh scoped fixture should accept a launcher");
+    let mut task = EffectTask::new_owned_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        context,
+    )
+    .expect("scoped fixture should build");
+
+    let TaskOutcome::Complete(value) = task.run().expect("scoped close should resume") else {
+        panic!("scoped fixture should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"kept".as_slice());
+    assert_eq!(host.stderr(), [Bytes::from_static(b"close")]);
+    assert_eq!(
+        builds.load(Ordering::Acquire),
+        1,
+        "scoped close demand must retain one nested reflection activation"
+    );
 }
 
 #[test]
