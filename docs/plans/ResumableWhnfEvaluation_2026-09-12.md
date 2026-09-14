@@ -2961,6 +2961,8 @@ and repeated successful installation.
 
 ####### W5C.4b.4 — Initial fixpoint setup
 
+**Status: complete (2026-09-14).**
+
 Move the initial `.fix` path onto control work. Decode and preserve the
 original reset stack, then encode the hidden empty stack before allocating the
 control order, fixpoint promise, marker, active-fix entry, `Continuation::Fix`,
@@ -2971,6 +2973,16 @@ Verify that a reset outside a fixpoint is hidden while the fixpoint body runs,
 that the exact original serialized stack remains owned by the restore
 delimiter, and that completing the body restores it before subsequent
 `.shift` dispatch.
+
+Completion record: initial `.fix` now preserves its `FixRoot`, original
+serialized stack, entry branch, and empty choice history in control work. It
+validates the complete stack before hiding it, allocating an order or managed
+fixpoint promise, or installing active-fix/continuation/restore records. The
+terminal transition retains the exact serialized stack in `Delimiter::Restore`
+and encodes the hidden empty stack without another demand. A promised-stack
+fixture latches the empty control/fixpoint state and unchanged order counter
+before publication, then verifies normal restoration and completion after the
+promise resolves.
 
 ####### W5C.4b.5 — Fixpoint restart paths
 

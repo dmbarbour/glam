@@ -1196,6 +1196,15 @@ fn assert_execution_root_inventory(
                 let _: &CapturedContinuation = captured;
                 let _: &RuntimeValueRoot = value;
             }
+            ControlOperation::StartFixpoint {
+                stack,
+                root,
+                choices,
+            } => {
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &Arc<FixRoot<TestEffects>> = root;
+                let _: &Vec<FixChoice> = choices;
+            }
             ControlOperation::Poisoned => {}
         }
     }
@@ -1784,7 +1793,7 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
         ("reset_frames_in", 2),
         ("reset_frames_from_value_in", 4),
         ("with_reset_frames_in", 2),
-        ("replace_reset_frames", 5),
+        ("replace_reset_frames", 6),
         ("with_reset_stack_value_in", 3),
     ];
 
@@ -2527,6 +2536,65 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
     assert_eq!(
         result.clone_core_for_test(),
         Value::binary_from_text("resumed")
+    );
+    assert_eq!(task.next_control_order, 2);
+}
+
+#[test]
+fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
+    let (assembler, effect) = compile_effect(".fix (\\_loop -> .r \"fixed\")");
+    let values = assembler.core_values();
+    let stack = PromisedValue::new(&values, "fixpoint reset stack");
+    let mut task = EffectTask::new(
+        &values,
+        effect.clone_core_for_test(),
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("fixpoint control fixture should construct");
+    let continuation_state = task.tags.continuation_state.clone();
+    let branch = task
+        .execution
+        .work
+        .branch_mut()
+        .expect("fresh task should retain its branch");
+    branch.state = values.construct_runtime_value_root(|access| {
+        Value::Dict(Dict::new_sync().insert(
+            continuation_state,
+            Value::Promised(stack.duplicate_in(access)),
+        ))
+    });
+
+    loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                assert!(matches!(
+                    blocked.dependency,
+                    Some(WorkDependency::Promise(_))
+                ));
+                break;
+            }
+            _ => panic!("unfulfilled fixpoint stack did not block"),
+        }
+    }
+    assert_eq!(task.next_control_order, 1);
+    let branch = task
+        .execution
+        .active_branch()
+        .expect("blocked fixpoint should retain its branch");
+    assert!(branch.active_fixes.is_empty());
+    assert!(branch.control.delimiters.is_empty());
+    assert!(branch.control.sequence.is_empty());
+
+    crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
+        .expect("fixpoint stack should publish once");
+    let TaskOutcome::Complete(result) = task.run().expect("fixpoint should resume") else {
+        panic!("fixpoint should complete")
+    };
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::binary_from_text("fixed")
     );
     assert_eq!(task.next_control_order, 2);
 }

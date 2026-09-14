@@ -1325,6 +1325,103 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Failed(controlling, error)
                 }
             },
+            ControlOperation::StartFixpoint {
+                mut stack,
+                root,
+                choices,
+            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                ResetStackPoll::Ready(decoded) => {
+                    let reset_stack::DecodedResetStack {
+                        serialized: reset_stack,
+                        frames: _,
+                    } = decoded;
+                    let mut branch = controlling.branch;
+                    let state = context.evaluate(&self.eval_context, |evaluator| {
+                        let state = evaluator.project_root(&branch.state);
+                        replace_reset_frames(evaluator, state, &self.tags.continuation_state, &[])
+                    });
+                    let order = match self.allocate_control_order() {
+                        Ok(order) => order,
+                        Err(error) => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(branch, root.scope_depth),
+                                error,
+                            );
+                        }
+                    };
+                    let handle = match PromisedValue::fixpoint(
+                        &self.eval_context,
+                        "reflection effect fixpoint",
+                    ) {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(branch, root.scope_depth),
+                                TaskHalt::new(error.as_ref()),
+                            );
+                        }
+                    };
+                    let marker = branch
+                        .root_value(self.eval_context.values(), Value::Promised(handle.clone()));
+                    let outer_control = std::mem::take(&mut branch.control);
+                    branch.set_state(self.eval_context.values(), state);
+                    let handle = self
+                        .eval_context
+                        .values()
+                        .with_runtime_value_access(|access| handle.root_in(&access));
+                    branch.active_fixes.push(ActiveFix {
+                        root: root.clone(),
+                        choices,
+                        next_choice: 0,
+                        handle: handle.clone(),
+                    });
+                    branch.control.sequence.push(Continuation::Fix(handle));
+                    branch.control.delimiters.push(Delimiter::Restore {
+                        outer: Box::new(outer_control),
+                        reset_stack,
+                        scope_depth: root.scope_depth,
+                        order,
+                    });
+                    ControlStep::Complete(MachineWork::apply_roots(
+                        root.function.clone(),
+                        vec![marker],
+                        branch,
+                        root.scope_depth,
+                    ))
+                }
+                ResetStackPoll::Continue => {
+                    controlling.operation = ControlOperation::StartFixpoint {
+                        stack,
+                        root,
+                        choices,
+                    };
+                    ControlStep::Continue(controlling)
+                }
+                ResetStackPoll::Pending(dependency) => {
+                    controlling.operation = ControlOperation::StartFixpoint {
+                        stack,
+                        root,
+                        choices,
+                    };
+                    ControlStep::Blocked(controlling, dependency)
+                }
+                ResetStackPoll::Yielded => {
+                    controlling.operation = ControlOperation::StartFixpoint {
+                        stack,
+                        root,
+                        choices,
+                    };
+                    ControlStep::Yielded(controlling)
+                }
+                ResetStackPoll::Failed(error) => {
+                    controlling.operation = ControlOperation::StartFixpoint {
+                        stack,
+                        root,
+                        choices,
+                    };
+                    ControlStep::Failed(controlling, error)
+                }
+            },
             ControlOperation::Poisoned => {
                 unreachable!("failed control work cannot be resumed before error handling")
             }
@@ -2109,7 +2206,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     entry: branch,
                     scope_depth,
                 });
-                self.start_fixpoint(context, root, Vec::new())?
+                let stack = context.evaluate(&self.eval_context, |evaluator| {
+                    reset_stack_root_in(evaluator, &root.entry.state, &self.tags.continuation_state)
+                })?;
+                return Ok(MachineStep::Control(Box::new(ControlWork::start_fixpoint(
+                    stack,
+                    root,
+                    Vec::new(),
+                ))));
             }
             Request::Specialized(request, arguments) => {
                 let checkpoint = branch.retry_candidate();
@@ -3469,12 +3573,12 @@ enum ScalarDemandStep<S: TaskSpecialization> {
 /// state is being decoded. Like the other task work owners, it retains the
 /// exact branch and scope needed to resume after a yield or dependency.
 struct ControlWork<S: TaskSpecialization> {
-    operation: ControlOperation,
+    operation: ControlOperation<S>,
     branch: Branch<S>,
     scope_depth: usize,
 }
 
-enum ControlOperation {
+enum ControlOperation<S: TaskSpecialization> {
     Key {
         key: eval::KeyConversionMachine,
         stack: ResetStackMachine,
@@ -3489,6 +3593,11 @@ enum ControlOperation {
         stack: ResetStackMachine,
         captured: CapturedContinuation,
         value: RuntimeValueRoot,
+    },
+    StartFixpoint {
+        stack: ResetStackMachine,
+        root: Arc<FixRoot<S>>,
+        choices: Vec<FixChoice>,
     },
     Poisoned,
 }
@@ -3558,6 +3667,22 @@ impl<S: TaskSpecialization> ControlWork<S> {
             },
             branch,
             scope_depth,
+        }
+    }
+
+    fn start_fixpoint(
+        stack: RuntimeValueRoot,
+        root: Arc<FixRoot<S>>,
+        choices: Vec<FixChoice>,
+    ) -> Self {
+        Self {
+            operation: ControlOperation::StartFixpoint {
+                stack: ResetStackMachine::new(stack),
+                root: root.clone(),
+                choices,
+            },
+            branch: root.entry.clone(),
+            scope_depth: root.scope_depth,
         }
     }
 }
