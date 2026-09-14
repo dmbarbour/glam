@@ -356,7 +356,7 @@ fn compilation_execution_drain_reports_detached_failure_and_deadlock() {
             "failed",
         ),
         (
-            "anno refl:(.task.new (.heap.get '.never >>= (\\_ -> .fail)) >>= (\\_ -> .r ())) (.r ())",
+            "anno refl:(.task.new (.cut (.heap.get '.never >>= (\\_ -> .fail))) >>= (\\_ -> .r ())) (.r ())",
             "deadlocked",
         ),
     ] {

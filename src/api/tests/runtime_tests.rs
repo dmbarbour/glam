@@ -571,6 +571,47 @@ fn append_conflicts_after_a_fifo_reader_observes_the_tail_empty() {
 }
 
 #[test]
+fn forked_runtime_event_journals_share_reads_but_not_input_claims() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let endpoint = runtime
+        .input_endpoint(integer_converter(&runtime))
+        .expect("input endpoint should register");
+
+    let (_, store, snapshot) = runtime.transaction_snapshot();
+    let mut failed = RuntimeEventJournal::new(snapshot);
+    let winner = failed.clone();
+    assert!(failed.read(&endpoint.reader()).unwrap().is_none());
+    endpoint
+        .sender()
+        .admit(1)
+        .expect("input should admit after the failed alternative's read");
+    assert_eq!(
+        runtime.try_commit_transaction(&crate::reflection::StoreJournal::new(store), &winner),
+        crate::reflection::StoreCommitResult::Conflict,
+        "the winning sibling must retain the failed sibling's empty-tail observation"
+    );
+
+    let (_, store, snapshot) = runtime.transaction_snapshot();
+    let mut failed = RuntimeEventJournal::new(snapshot);
+    let winner = failed.clone();
+    assert!(failed.read(&endpoint.reader()).unwrap().is_some());
+    assert_eq!(
+        runtime.try_commit_transaction(&crate::reflection::StoreJournal::new(store), &winner),
+        crate::reflection::StoreCommitResult::Committed,
+        "a failed sibling's input claim must not become the winner's edit"
+    );
+    let (_, mut current) = input_transaction(&runtime);
+    assert_eq!(
+        current
+            .read(&endpoint.reader())
+            .unwrap()
+            .and_then(|value| value_i64(&runtime, &value)),
+        Some(1),
+        "the branch-local claim must remain uncommitted"
+    );
+}
+
+#[test]
 fn competing_runtime_input_consumers_conflict_but_independent_ones_commit() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let left = runtime

@@ -531,7 +531,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .module(["blocked_error"])
         .script(
             "g",
-            "language g0\nimport 'std\nrefl.error = .heap.get ['observed] >>= (\\_ -> anno context:\"retry context\" (anno 'error {msg:{text:\"structured retryable failure\"}, detail:7}))\nvalue = \"value\"\n",
+            "language g0\nimport 'std\nrefl.error = .cut (.heap.get ['observed] >>= (\\_ -> anno context:\"retry context\" (anno 'error {msg:{text:\"structured retryable failure\"}, detail:7})))\nvalue = \"value\"\n",
         )
         .build()
         .expect("reflection fixture should compile");

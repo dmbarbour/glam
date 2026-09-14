@@ -5,8 +5,8 @@ use bytes::Bytes;
 use glam::reflection::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReflectionJournal, ReflectionQueryWriter,
     ReflectionRequest, ReflectionServices, ReflectionTransaction, RequestContext, RequestResult,
-    TaskCommit, TaskEnvironment, TaskHost, TaskSpecialization, handle_reflection_request,
-    reflection_request_specs,
+    TaskCommit, TaskEnvironment, TaskHost, TaskSpecialization, TaskValidation, ValidationResult,
+    handle_reflection_request, reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
@@ -63,6 +63,13 @@ impl TaskSpecialization for MainEffects {
     type Request = MainRequest;
     type Snapshot = MainSnapshot;
     type Journal = MainJournal;
+
+    fn begin_journal(snapshot: &Self::Snapshot) -> Self::Journal {
+        MainJournal {
+            reflection: ReflectionJournal::default(),
+            events: Some(RuntimeEventJournal::new(snapshot.clone())),
+        }
+    }
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
         reflection_request_specs()
@@ -352,6 +359,28 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
     fn snapshot(&self) -> HostSnapshot<MainEffects> {
         let (generation, store, input) = self.resources.transaction_snapshot();
         HostSnapshot::new(generation, store, input)
+    }
+
+    fn validate(&self, validation: TaskValidation<'_, MainEffects>) -> ValidationResult {
+        let empty_events;
+        let events = if let Some(events) = validation.extra().events.as_ref() {
+            events
+        } else {
+            empty_events = RuntimeEventJournal::new(validation.extra_snapshot().clone());
+            &empty_events
+        };
+        let (result, generation) = self
+            .resources
+            .validate_transaction(validation.store(), events);
+        match result {
+            glam::reflection::StoreCommitResult::Committed => {
+                ValidationResult::Current { generation }
+            }
+            glam::reflection::StoreCommitResult::Conflict => ValidationResult::Conflict,
+            glam::reflection::StoreCommitResult::MissingVolume(volume) => {
+                ValidationResult::MissingVolume(volume)
+            }
+        }
     }
 
     fn commit(&self, commit: TaskCommit<MainEffects>) -> CommitResult {

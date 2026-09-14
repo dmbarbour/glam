@@ -175,6 +175,16 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
         true
     }
 
+    /// Creates the specialization journal for one optimistic transaction.
+    ///
+    /// A journal clone made while exploring alternatives must preserve any
+    /// specialization-owned, cut-wide read observations while keeping
+    /// speculative edits branch-local. Most specializations have no such
+    /// state and can use the default value.
+    fn begin_journal(_snapshot: &Self::Snapshot) -> Self::Journal {
+        Self::Journal::default()
+    }
+
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
 
     fn handle_request(
@@ -280,6 +290,31 @@ pub struct TaskCommit<S: TaskSpecialization> {
     extra: S::Journal,
 }
 
+/// Borrowed optimistic-transaction state used for read-only revalidation.
+///
+/// Hosts must inspect this state under the same authoritative lock and apply
+/// the same conflict rules used by [`TaskHost::commit`], but must not publish
+/// any edits or specialization effects.
+pub struct TaskValidation<'a, S: TaskSpecialization> {
+    store: &'a StoreJournal,
+    extra_snapshot: &'a S::Snapshot,
+    extra: &'a S::Journal,
+}
+
+impl<'a, S: TaskSpecialization> TaskValidation<'a, S> {
+    pub fn store(&self) -> &StoreJournal {
+        self.store
+    }
+
+    pub fn extra_snapshot(&self) -> &S::Snapshot {
+        self.extra_snapshot
+    }
+
+    pub fn extra(&self) -> &S::Journal {
+        self.extra
+    }
+}
+
 impl<S: TaskSpecialization> TaskCommit<S> {
     pub fn new(store: StoreJournal, extra_snapshot: S::Snapshot, extra: S::Journal) -> Self {
         Self {
@@ -311,6 +346,23 @@ pub enum CommitResult {
     Closed,
 }
 
+/// Result of checking a retained transaction without applying it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationResult {
+    /// The transaction remains current. The generation is the host wake
+    /// baseline paired with that validation. It must be sampled before the
+    /// authoritative state is inspected, or while the same lock excludes
+    /// mutation through the end of validation. A mutation after validation
+    /// must therefore advance beyond this baseline so subscribe-and-recheck
+    /// cannot lose it.
+    Current {
+        generation: u64,
+    },
+    Conflict,
+    MissingVolume(VolumeId),
+    Closed,
+}
+
 /// Supplies the immutable environment owned by a task's reasoning host.
 /// Reflection code can read it through `.env`, but cannot replace it.
 pub trait TaskEnvironment: Send + Sync {
@@ -319,6 +371,11 @@ pub trait TaskEnvironment: Send + Sync {
 
 pub trait TaskHost<S: TaskSpecialization>: TaskEnvironment + Send + Sync {
     fn snapshot(&self) -> HostSnapshot<S>;
+    /// Revalidates retained observations without publishing journal edits.
+    /// Implementations must apply the same conflict rules and authoritative
+    /// locking used by `commit`, and must obey [`ValidationResult::Current`]'s
+    /// generation-ordering contract.
+    fn validate(&self, validation: TaskValidation<'_, S>) -> ValidationResult;
     fn commit(&self, commit: TaskCommit<S>) -> CommitResult;
 
     /// Identifies the reasoning scope accepted by private volume capability
@@ -601,11 +658,20 @@ pub(super) struct Transaction<S: TaskSpecialization> {
 impl<S: TaskSpecialization> Transaction<S> {
     pub(super) fn new(snapshot: HostSnapshot<S>) -> Self {
         let store = StoreJournal::new(snapshot.store().clone());
+        let journal = S::begin_journal(snapshot.extra());
         Self {
             snapshot,
             store,
-            journal: S::Journal::default(),
+            journal,
             observed: false,
+        }
+    }
+
+    pub(super) fn validation(&self) -> TaskValidation<'_, S> {
+        TaskValidation {
+            store: &self.store,
+            extra_snapshot: self.snapshot.extra(),
+            extra: &self.journal,
         }
     }
 }

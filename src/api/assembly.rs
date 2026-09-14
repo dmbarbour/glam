@@ -288,6 +288,24 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
         HostSnapshot::new(generation, store, ())
     }
 
+    fn validate(
+        &self,
+        validation: crate::reflection::TaskValidation<'_, ReflectionEffects>,
+    ) -> crate::reflection::ValidationResult {
+        let (result, generation) = self.resources.validate_reflection(validation.store());
+        match result {
+            crate::reflection::StoreCommitResult::Committed => {
+                crate::reflection::ValidationResult::Current { generation }
+            }
+            crate::reflection::StoreCommitResult::Conflict => {
+                crate::reflection::ValidationResult::Conflict
+            }
+            crate::reflection::StoreCommitResult::MissingVolume(volume) => {
+                crate::reflection::ValidationResult::MissingVolume(volume)
+            }
+        }
+    }
+
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _extra_snapshot, extra) = commit.into_parts();
         match self.resources.commit_reflection(&store) {

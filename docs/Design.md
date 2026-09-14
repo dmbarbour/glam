@@ -545,7 +545,9 @@ Reflection is expressed effectfully, i.e. `eff:(\api -> ...)`. To keep implement
 
 Reflection may be triggered by compilers (`refl.*`), configurations (`conf.log` and `conf.ide`), or anonymous term annotations (`anno refl:(.log Msg) Term`). In the general case, reflection tasks run concurrently and interact through shared state. An annotation runs its reflection task to completion before exposing `Expr`, and may observe `Expr` (triggering evaluation) or further annotate `Expr`, but does not alter the observable value of `Expr`. 
 
-To control concurrency, the reflection API shall support software-transactional memory (STM), with transaction per scoped 'cut'. A failed computation is retried when it observed state that may have changed; failure without observations is permanent. The `cut` establishes choice and transaction scope, but is not itself an observation or a source of retryability.
+To control concurrency, the reflection API shall support software-transactional memory (STM), with one transaction per scoped `cut`. Every alternative in one cut attempt shares a monotone read set: reads made by an earlier failed alternative remain part of the serializability proof for a later winner. Speculative edits, local state, input claims, and buffered outputs remain branch-local and roll back with the alternative.
+
+A broad host change is only a wake signal. A suspended transaction is retried only when read-only validation of its configured exact, fingerprint, coarse, and specialization-owned observations proves a conflict. A non-conflicting wake retains the same divergence or exact dependency. A successful heap or volume read outside a transaction is instead an atomic committed snapshot; a later failure does not retroactively make that read retryable. The `cut` establishes choice and transaction scope, but is not itself an observation or a source of retryability.
 
 Reflection is not reproducible. Between resource and scheduling variability, caching, timestamps, user interactions, etc. it's infeasible to reproduce the exact same log messages. It's left to users to ensure a reflection-based typechecker is confluent and doesn't depend on timestamps. A critical constraint on the reflection API is that it shall not observably influence pure computations. Thus, assembly 'result' remains robustly reproducible.
 
@@ -700,7 +702,11 @@ attaching histories to ordinary values.
 Logging participates in reflection transactions. A `.log` inside `.cut` becomes
 visible only when the surrounding transaction commits; failed alternatives
 discard it. Queue reads observe committed host state only, never writes from
-their own transaction, and fail immediately when no input is available.
+their own transaction. Input claims roll back per alternative, while the
+observed FIFO prefix or empty tail remains cut-wide. An empty read fails the
+current attempt; an API such as `.read_log` may define that absence as a
+retryable wait on the observed tail rather than as permission to advance an
+unrelated alternative.
 Ordering between concurrently produced messages is host policy and must not
 influence pure assembly results.
 

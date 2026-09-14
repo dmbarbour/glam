@@ -1097,7 +1097,7 @@ fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
     let output = glam_command()
         .arg("--script.g")
         .arg(
-            "language g0\nrefl.deadlock = .heap.get ['never] >>= (\\_ -> .fail)\nasm.result = \"ok\"\n",
+            "language g0\nrefl.deadlock = .cut (.heap.get ['never] >>= (\\_ -> .fail))\nasm.result = \"ok\"\n",
         )
         .output()
         .expect("failed to run glam");
@@ -1112,7 +1112,7 @@ fn retryable_reflection_errors_are_reported_with_deadlocks() {
     let output = glam_command()
         .arg("--script.g")
         .arg(
-            "language g0\nrefl.error = .heap.get ['observed] >>= (\\_ -> 1 2)\nasm.result = \"ok\"\n",
+            "language g0\nrefl.error = .cut (.heap.get ['observed] >>= (\\_ -> 1 2))\nasm.result = \"ok\"\n",
         )
         .output()
         .expect("failed to run glam");

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
@@ -208,7 +208,7 @@ impl RuntimeEventState {
         if journal.snapshot.runtime != journal.runtime {
             return false;
         }
-        let inputs_valid = journal.cursors.iter().all(|(endpoint, cursor)| {
+        let valid_input = |endpoint: &RuntimeInputEndpointId, cursor: &RuntimeInputCursor| {
             let Some(input) = self.inputs.get(endpoint) else {
                 return false;
             };
@@ -216,8 +216,18 @@ impl RuntimeEventState {
                 && cursor.next.get().saturating_sub(cursor.start.get())
                     <= input.admitted.len() as u64
                 && (!cursor.observed_empty || input.next_sequence == cursor.next)
-        });
-        inputs_valid
+        };
+        let observations = journal
+            .observations
+            .lock()
+            .expect("runtime input observation mutex should not be poisoned");
+        observations
+            .iter()
+            .all(|(endpoint, cursor)| valid_input(endpoint, cursor))
+            && journal
+                .cursors
+                .iter()
+                .all(|(endpoint, cursor)| valid_input(endpoint, cursor))
             && journal.outputs.iter().all(|intent| {
                 self.outputs
                     .ready_by_endpoint
@@ -360,6 +370,9 @@ struct RuntimeInputCursor {
 pub struct RuntimeEventJournal {
     pub(super) runtime: EvaluationRuntimeId,
     snapshot: RuntimeEventSnapshot,
+    /// Monotone input observations shared by every alternative forked from
+    /// this transaction. Input claims and output intents remain branch-local.
+    observations: Arc<Mutex<BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>>>,
     cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
     outputs: Vec<RuntimeOutputIntent>,
 }
@@ -370,6 +383,7 @@ impl RuntimeEventJournal {
         Self {
             runtime: snapshot.runtime,
             snapshot,
+            observations: Arc::new(Mutex::new(BTreeMap::new())),
             cursors: BTreeMap::new(),
             outputs: Vec::new(),
         }
@@ -393,21 +407,38 @@ impl RuntimeEventJournal {
                 next: snapshot.head_sequence,
                 observed_empty: false,
             });
-        if cursor.next == snapshot.next_sequence {
+        let result = if cursor.next == snapshot.next_sequence {
             cursor.observed_empty = true;
-            return Ok(None);
-        }
-        let offset = cursor.next.get() - snapshot.head_sequence.get();
-        let record = snapshot
-            .admitted
-            .get(offset as usize)
-            .expect("the snapshot sequence range and admitted roots agree");
-        debug_assert_eq!(record.sequence, cursor.next);
-        cursor.next = cursor
-            .next
-            .checked_next()
-            .expect("an admitted input always has a successor boundary");
-        Ok(Some(record.payload.value(self.runtime)))
+            None
+        } else {
+            let offset = cursor.next.get() - snapshot.head_sequence.get();
+            let record = snapshot
+                .admitted
+                .get(offset as usize)
+                .expect("the snapshot sequence range and admitted roots agree");
+            debug_assert_eq!(record.sequence, cursor.next);
+            cursor.next = cursor
+                .next
+                .checked_next()
+                .expect("an admitted input always has a successor boundary");
+            Some(record.payload.value(self.runtime))
+        };
+        let observation = cursor.clone();
+        let mut observations = self
+            .observations
+            .lock()
+            .expect("runtime input observation mutex should not be poisoned");
+        observations
+            .entry(input.endpoint)
+            .and_modify(|prior| {
+                debug_assert_eq!(prior.start, observation.start);
+                if observation.next > prior.next {
+                    prior.next = observation.next;
+                }
+                prior.observed_empty |= observation.observed_empty;
+            })
+            .or_insert(observation);
+        Ok(result)
     }
 
     /// Buffers an external output intent in this transaction. The delivery ID

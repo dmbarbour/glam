@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::protocol::{
     CommitResult, EffectRequestSpec, RequestActivity, RequestContext, RequestResult, TaskCommit,
-    TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, Transaction, request_value,
+    TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, Transaction, ValidationResult,
+    request_value,
 };
 use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, VolumeId};
@@ -2345,12 +2346,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .map(|transaction| transaction.snapshot.generation())
             .unwrap_or_else(|| self.host.snapshot().generation());
+        let validation = failed.transaction.clone();
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
         Ok(MachineStep::Blocked(BlockedExecution::exhausted(
             RetryWake {
                 observed_generation: generation,
+                validation,
                 action: WakeAction::RestartCut(index),
             },
         )))
@@ -2390,6 +2393,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Ok(MachineStep::Blocked(BlockedExecution::exhausted(
                     RetryWake {
                         observed_generation: generation,
+                        validation: failed.transaction.clone(),
                         action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                             branch: *checkpoint.branch,
                             scope_depth,
@@ -2465,6 +2469,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Ok(MachineStep::Blocked(BlockedExecution::exhausted(
                     RetryWake {
                         observed_generation: generation,
+                        validation: failed.transaction.clone(),
                         action: WakeAction::RestartSearch,
                     },
                 )))
@@ -2518,14 +2523,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .and_then(|branch| branch.transaction.as_ref())
                 .is_some_and(|transaction| transaction.observed);
             if frame_observed || branch_observed {
-                let generation = self.execution.cuts[index]
-                    .outer
-                    .transaction
+                let validation = self
+                    .execution
+                    .active_branch()
+                    .and_then(|branch| branch.transaction.clone())
+                    .or_else(|| self.execution.cuts[index].outer.transaction.clone());
+                let generation = validation
                     .as_ref()
                     .map(|transaction| transaction.snapshot.generation());
                 if let Some(generation) = generation {
                     return Some(RetryWake {
                         observed_generation: generation,
+                        validation,
                         action: WakeAction::RestartCut(index),
                     });
                 }
@@ -2540,6 +2549,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         {
             return Some(RetryWake {
                 observed_generation: transaction.snapshot.generation(),
+                validation: Some(transaction.clone()),
                 action: WakeAction::RestartSearch,
             });
         }
@@ -2548,6 +2558,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let observed_generation = checkpoint.generation?;
         Some(RetryWake {
             observed_generation,
+            validation: branch.transaction.clone(),
             action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                 branch: (*checkpoint.branch).clone(),
                 scope_depth: self.execution.active_scope_depth(),
@@ -2556,18 +2567,55 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
-        let blocked = self.blocked.as_ref()?;
-        if let Some(retry) = &blocked.retry
-            && self.host.snapshot().generation() != retry.observed_generation
-        {
-            let retry = self
-                .blocked
-                .take()
-                .and_then(|blocked| blocked.retry)
-                .expect("changed retry generation must retain its wake action");
-            self.apply_wake(retry.action);
-            return None;
+        let retry_validation = self.blocked.as_ref()?.retry.as_ref().and_then(|retry| {
+            retry
+                .validation
+                .as_ref()
+                .map(|transaction| self.host.validate(transaction.validation()))
+        });
+        match retry_validation {
+            Some(ValidationResult::Current { generation }) => {
+                self.blocked
+                    .as_mut()
+                    .and_then(|blocked| blocked.retry.as_mut())
+                    .expect("validated blocked work must retain its retry capsule")
+                    .observed_generation = generation;
+            }
+            Some(ValidationResult::Conflict) => {
+                let retry = self
+                    .blocked
+                    .take()
+                    .and_then(|blocked| blocked.retry)
+                    .expect("conflicting blocked work must retain its wake action");
+                self.apply_wake(retry.action);
+                return None;
+            }
+            Some(ValidationResult::MissingVolume(volume)) => {
+                self.finish(TaskTerminal::Failed(missing_volume_error(volume)));
+                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+            }
+            Some(ValidationResult::Closed) => {
+                self.finish(TaskTerminal::Cancelled);
+                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+            }
+            None => {
+                let changed = self.blocked.as_ref().is_some_and(|blocked| {
+                    blocked.retry.as_ref().is_some_and(|retry| {
+                        self.host.snapshot().generation() != retry.observed_generation
+                    })
+                });
+                if changed {
+                    let retry = self
+                        .blocked
+                        .take()
+                        .and_then(|blocked| blocked.retry)
+                        .expect("changed retry generation must retain its wake action");
+                    self.apply_wake(retry.action);
+                    return None;
+                }
+            }
         }
+        let blocked = self.blocked.as_ref().expect("checked blocked state above");
         let BlockReason::WaitingOn(dependency) = &blocked.reason else {
             return Some(self.blocked_poll());
         };
@@ -2603,13 +2651,40 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn poll_exit(&mut self) -> Option<EffectTaskPoll> {
-        let exit = self.exit.as_ref()?;
-        let changed = exit
-            .restart
-            .as_ref()
-            .is_some_and(|retry| self.host.snapshot().generation() != retry.observed_generation);
-        if !changed {
-            return Some(EffectTaskPoll::Exit(exit.poll.clone()));
+        let validation = self.exit.as_ref()?.restart.as_ref().and_then(|retry| {
+            retry
+                .validation
+                .as_ref()
+                .map(|transaction| self.host.validate(transaction.validation()))
+        });
+        match validation {
+            Some(ValidationResult::Current { generation }) => {
+                let exit = self.exit.as_mut().expect("checked exit state above");
+                exit.restart
+                    .as_mut()
+                    .expect("validated exit must retain its retry capsule")
+                    .observed_generation = generation;
+                exit.poll.observed_generation = Some(generation);
+                return Some(EffectTaskPoll::Exit(exit.poll.clone()));
+            }
+            Some(ValidationResult::Conflict) => {}
+            Some(ValidationResult::MissingVolume(volume)) => {
+                self.finish(TaskTerminal::Failed(missing_volume_error(volume)));
+                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+            }
+            Some(ValidationResult::Closed) => {
+                self.finish(TaskTerminal::Cancelled);
+                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+            }
+            None => {
+                let exit = self.exit.as_ref().expect("checked exit state above");
+                let changed = exit.restart.as_ref().is_some_and(|retry| {
+                    self.host.snapshot().generation() != retry.observed_generation
+                });
+                if !changed {
+                    return Some(EffectTaskPoll::Exit(exit.poll.clone()));
+                }
+            }
         }
 
         let retry = self
@@ -3656,6 +3731,7 @@ enum BlockReason {
 
 struct RetryWake<S: TaskSpecialization> {
     observed_generation: u64,
+    validation: Option<Transaction<S>>,
     action: WakeAction<S>,
 }
 

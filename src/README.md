@@ -71,7 +71,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
 | `list.rs`, `number.rs` | Persistent list ropes, non-forcing logical list-part traversal and trace-work counters, and exact numbers |
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
-| `reflection.rs`, `reflection/protocol.rs` | Reflection facade, specialization/host transaction protocol, and bounded callback evaluation service |
+| `reflection.rs`, `reflection/protocol.rs` | Reflection facade, cut-wide observation/branch-local edit protocol, read-only host validation, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
 | `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, rooted request interpretation, bounded standard-effect fusion, and isolated search |
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |

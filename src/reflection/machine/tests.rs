@@ -11,16 +11,18 @@ use crate::api::{
 };
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
-    ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
+    EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher,
+    TaskStatusWake,
 };
 use crate::reflection::lifecycle::{run_composed_effect_task, task_launcher};
 use crate::reflection::{
-    EffectLifecycle, EffectLifecycleStatus, EffectLifecycleTerminal, EffectRun,
-    EvaluationQueryHandle, ExactConflictAnalysis, IsolatedEffectSearch, IsolatedSearchPoll,
-    ReasoningSessionId, ReflectionEffects, ReflectionHost, ReflectionJournal,
-    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionRequest, ReflectionServices,
-    ReflectionStore, ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment,
-    handle_reflection_request, reflection_request_specs,
+    CoarseConflictAnalysis, ConflictAnalysisStrategy, EffectLifecycle, EffectLifecycleStatus,
+    EffectLifecycleTerminal, EffectRun, EvaluationQueryHandle, ExactConflictAnalysis,
+    FingerprintConflictAnalysis, IsolatedEffectSearch, IsolatedSearchPoll, ReasoningSessionId,
+    ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionQueryMutation,
+    ReflectionQueryWriter, ReflectionRequest, ReflectionServices, ReflectionStore,
+    ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
+    ValidationResult, handle_reflection_request, reflection_request_specs,
 };
 
 fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
@@ -156,6 +158,7 @@ struct TestSnapshot {
 #[derive(Clone, Default)]
 struct TestJournal {
     reflection: ReflectionJournal,
+    observed_diagnostics: Arc<AtomicBool>,
     consumed_diagnostics: usize,
     stderr: Vec<Bytes>,
 }
@@ -277,6 +280,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
+        journal.observed_diagnostics.store(true, Ordering::Release);
         let Some(diagnostic) = snapshot.diagnostics.get(journal.consumed_diagnostics) else {
             return Ok(RequestResult::Fail);
         };
@@ -301,6 +305,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
             snapshot.extra().clone(),
             TestJournal {
                 reflection: ReflectionJournal::default(),
+                observed_diagnostics: Arc::new(AtomicBool::new(true)),
                 consumed_diagnostics: 1,
                 stderr: Vec::new(),
             },
@@ -337,9 +342,10 @@ struct TestHostState {
     stderr: Vec<Bytes>,
     wake_diagnostic: Option<Diagnostic>,
     wake_heap: Option<PublicValue>,
+    validation_write: Option<(Vec<Key>, PublicValue)>,
     wait_count: usize,
     callback_probe: bool,
-    callback_probe_counts: [usize; 3],
+    callback_probe_counts: [usize; 4],
     closed: bool,
 }
 
@@ -348,6 +354,7 @@ enum CallbackProbeKind {
     Snapshot = 0,
     Commit = 1,
     Specialization = 2,
+    Validation = 3,
 }
 
 impl Default for TestHostState {
@@ -363,9 +370,10 @@ impl Default for TestHostState {
             stderr: Vec::new(),
             wake_diagnostic: None,
             wake_heap: None,
+            validation_write: None,
             wait_count: 0,
             callback_probe: false,
-            callback_probe_counts: [0; 3],
+            callback_probe_counts: [0; 4],
             closed: false,
         }
     }
@@ -416,10 +424,17 @@ impl TestHost {
     }
 
     fn with_callback_probe(values: CoreValueFactory) -> Self {
+        Self::with_strategy_and_callback_probe(values, Arc::new(ExactConflictAnalysis))
+    }
+
+    fn with_strategy_and_callback_probe(
+        values: CoreValueFactory,
+        strategy: Arc<dyn ConflictAnalysisStrategy>,
+    ) -> Self {
         Self {
             reasoning_session: None,
             state: Arc::new(Mutex::new(TestHostState {
-                store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)),
+                store: ReflectionStore::new(values, strategy),
                 callback_probe: true,
                 ..TestHostState::default()
             })),
@@ -459,6 +474,30 @@ impl TestHost {
             state.generation += 1;
         }
         self.publish_runtime_observation();
+    }
+
+    fn set_heap_path(&self, path: Vec<Key>, value: PublicValue) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let mut journal = StoreJournal::new(state.store.snapshot());
+            journal.write(path, value);
+            assert_eq!(
+                state.store.try_commit(&journal),
+                StoreCommitResult::Committed
+            );
+            state.generation += 1;
+        }
+        self.publish_runtime_observation();
+    }
+
+    fn write_during_next_validation(&self, path: Vec<Key>, value: PublicValue) {
+        let replaced = self
+            .state
+            .lock()
+            .unwrap()
+            .validation_write
+            .replace((path, value));
+        assert!(replaced.is_none(), "validation write hook is single-use");
     }
 
     fn replace_volume(&self, volume: VolumeId, value: PublicValue) {
@@ -626,6 +665,52 @@ impl TaskHost<TestEffects> for TestHost {
         )
     }
 
+    fn validate(&self, validation: TaskValidation<'_, TestEffects>) -> ValidationResult {
+        self.probe_callback_boundary(CallbackProbeKind::Validation);
+        let (result, published) = {
+            let mut state = self.state.lock().unwrap();
+            let result = if state.closed {
+                ValidationResult::Closed
+            } else if (validation
+                .extra()
+                .observed_diagnostics
+                .load(Ordering::Acquire)
+                && state.extra_revision != validation.extra_snapshot().revision)
+                || state.diagnostics.len() < validation.extra().consumed_diagnostics
+            {
+                ValidationResult::Conflict
+            } else {
+                match state.store.validate(validation.store()) {
+                    StoreCommitResult::Committed => ValidationResult::Current {
+                        generation: state.generation,
+                    },
+                    StoreCommitResult::Conflict => ValidationResult::Conflict,
+                    StoreCommitResult::MissingVolume(volume) => {
+                        ValidationResult::MissingVolume(volume)
+                    }
+                }
+            };
+            let published = if matches!(result, ValidationResult::Current { .. }) {
+                state.validation_write.take().map(|(path, value)| {
+                    let mut journal = StoreJournal::new(state.store.snapshot());
+                    journal.write(path, value);
+                    assert_eq!(
+                        state.store.try_commit(&journal),
+                        StoreCommitResult::Committed
+                    );
+                    state.generation += 1;
+                })
+            } else {
+                None
+            };
+            (result, published.is_some())
+        };
+        if published {
+            self.publish_runtime_observation();
+        }
+        result
+    }
+
     fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
         self.probe_callback_boundary(CallbackProbeKind::Commit);
         let (store, snapshot, journal) = commit.into_parts();
@@ -634,7 +719,8 @@ impl TaskHost<TestEffects> for TestHost {
             if state.closed {
                 return CommitResult::Closed;
             }
-            if (journal.consumed_diagnostics != 0 && state.extra_revision != snapshot.revision)
+            if (journal.observed_diagnostics.load(Ordering::Acquire)
+                && state.extra_revision != snapshot.revision)
                 || state.diagnostics.len() < journal.consumed_diagnostics
             {
                 return CommitResult::Conflict;
@@ -673,6 +759,20 @@ impl TaskHost<StandardEffects> for TestHost {
         HostSnapshot::new(state.generation, state.store.snapshot(), ())
     }
 
+    fn validate(&self, validation: TaskValidation<'_, StandardEffects>) -> ValidationResult {
+        let state = self.state.lock().unwrap();
+        if state.closed {
+            return ValidationResult::Closed;
+        }
+        match state.store.validate(validation.store()) {
+            StoreCommitResult::Committed => ValidationResult::Current {
+                generation: state.generation,
+            },
+            StoreCommitResult::Conflict => ValidationResult::Conflict,
+            StoreCommitResult::MissingVolume(volume) => ValidationResult::MissingVolume(volume),
+        }
+    }
+
     fn commit(&self, commit: TaskCommit<StandardEffects>) -> CommitResult {
         let (store, _snapshot, _journal) = commit.into_parts();
         {
@@ -702,6 +802,20 @@ impl TaskHost<ReflectionEffects> for TestHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
         let state = self.state.lock().unwrap();
         HostSnapshot::new(state.generation, state.store.snapshot(), ())
+    }
+
+    fn validate(&self, validation: TaskValidation<'_, ReflectionEffects>) -> ValidationResult {
+        let state = self.state.lock().unwrap();
+        if state.closed {
+            return ValidationResult::Closed;
+        }
+        match state.store.validate(validation.store()) {
+            StoreCommitResult::Committed => ValidationResult::Current {
+                generation: state.generation,
+            },
+            StoreCommitResult::Conflict => ValidationResult::Conflict,
+            StoreCommitResult::MissingVolume(volume) => ValidationResult::MissingVolume(volume),
+        }
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
@@ -2079,6 +2193,7 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
         error,
         RetryWake {
             observed_generation: 1,
+            validation: None,
             action: WakeAction::RestartSearch,
         },
         &core,
@@ -4297,7 +4412,7 @@ fn effectful_metadata_update_observes_environment_and_commits_log_once() {
 #[test]
 fn effectful_metadata_update_retries_after_observed_state_changes() {
     let (assembler, effect) = compile_effect(
-        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .heap.get ['ready] >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
+        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .cut (.heap.get ['ready] >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready]))) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
     );
     let host = Arc::new(TestHost::with_wake_heap(
         assembler.core_values(),
@@ -5818,7 +5933,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
         )),
     );
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
     let mut task = EffectTask::new(
         &assembler.core_values(),
         effect.clone_core_for_test(),
@@ -5836,6 +5951,8 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     };
     assert!(blocked.dependency.is_some());
     assert!(blocked.observed_generation.is_some());
+    let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
+    let validations = host.callback_probe_count(CallbackProbeKind::Validation);
 
     host.emit_diagnostic(Diagnostic::new(
         &assembler.values(),
@@ -5855,6 +5972,366 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     assert_eq!(
         assembler.to_binary(&value).unwrap(),
         b"state won".as_slice()
+    );
+    assert!(
+        host.callback_probe_count(CallbackProbeKind::Validation) > validations,
+        "the broad wake must validate the retained specialization observation"
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots + 1,
+        "the conflicting specialization publication must restart the cut once"
+    );
+}
+
+struct SuspendedHeapTransaction {
+    assembler: Assembler,
+    host: Arc<TestHost>,
+    task: EffectTask<TestEffects>,
+    wait: EvaluationWaitToken,
+}
+
+fn suspend_heap_transaction(
+    strategy: Arc<dyn ConflictAnalysisStrategy>,
+) -> SuspendedHeapTransaction {
+    let (assembler, build_effect) = compile_effect(
+        "\\x -> .cut (.heap.get ['watched] >>= (\\_observed -> .r x >>= (\\value -> (value == \"done\") =>> .r value)))",
+    );
+    let gate = public_value(
+        &assembler.core_values(),
+        Value::Lazy(LazyValue::from_reflection_gate(
+            &assembler.core_values(),
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("done"),
+        )),
+    );
+    let effect = assembler.apply(&build_effect, [gate]).unwrap();
+    let host = Arc::new(TestHost::with_strategy_and_callback_probe(
+        assembler.core_values(),
+        strategy,
+    ));
+    host.set_heap_path(
+        vec![Key::atom_from_text("watched")],
+        public_record(
+            &assembler,
+            [(
+                "child",
+                public_value(&assembler.core_values(), Value::Number(Number::from(0))),
+            )],
+        ),
+    );
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+    )
+    .unwrap();
+    let wait = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
+                    panic!("transaction gate should expose its exact wait")
+                };
+                break wait;
+            }
+            EffectTaskPoll::Complete(_) => panic!("transaction gate completed early"),
+            EffectTaskPoll::Failed(error) => panic!("transaction gate failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("transaction gate was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("transaction gate unexpectedly voted to exit"),
+        }
+    };
+    SuspendedHeapTransaction {
+        assembler,
+        host,
+        task,
+        wait,
+    }
+}
+
+fn poll_suspended_transaction(task: &mut EffectTask<TestEffects>) -> TaskBlock {
+    loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => return blocked,
+            EffectTaskPoll::Complete(_) => panic!("transaction dependency completed early"),
+            EffectTaskPoll::Failed(error) => panic!("transaction failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("transaction was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("transaction unexpectedly voted to exit"),
+        }
+    }
+}
+
+#[test]
+fn suspended_transaction_revalidation_uses_the_configured_store_policy() {
+    for (policy, strategy, disjoint_restarts) in [
+        (
+            "exact",
+            Arc::new(ExactConflictAnalysis) as Arc<dyn ConflictAnalysisStrategy>,
+            false,
+        ),
+        (
+            "fingerprint",
+            Arc::new(FingerprintConflictAnalysis) as Arc<dyn ConflictAnalysisStrategy>,
+            false,
+        ),
+        (
+            "coarse",
+            Arc::new(CoarseConflictAnalysis) as Arc<dyn ConflictAnalysisStrategy>,
+            true,
+        ),
+    ] {
+        let mut fixture = suspend_heap_transaction(strategy);
+        let snapshots = fixture
+            .host
+            .callback_probe_count(CallbackProbeKind::Snapshot);
+        let validations = fixture
+            .host
+            .callback_probe_count(CallbackProbeKind::Validation);
+        fixture.host.set_heap_path(
+            vec![Key::atom_from_text("other")],
+            public_value(
+                &fixture.assembler.core_values(),
+                Value::Number(Number::from(1)),
+            ),
+        );
+        let blocked = poll_suspended_transaction(&mut fixture.task);
+        assert!(blocked.dependency.is_some(), "{policy} lost the exact wait");
+        assert!(
+            fixture
+                .host
+                .callback_probe_count(CallbackProbeKind::Validation)
+                > validations,
+            "{policy} did not validate after the broad wake"
+        );
+        assert_eq!(
+            fixture
+                .host
+                .callback_probe_count(CallbackProbeKind::Snapshot),
+            snapshots + usize::from(disjoint_restarts),
+            "{policy} selected the wrong conflict outcome for a disjoint write"
+        );
+
+        fixture.task.eval_context.complete_wait(&fixture.wait);
+        let value = loop {
+            match fixture.task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("{policy} did not resume its exact wait"),
+                EffectTaskPoll::Failed(error) => panic!("{policy} failed after resume: {error}"),
+                EffectTaskPoll::Cancelled => panic!("{policy} was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("{policy} unexpectedly voted to exit"),
+            }
+        };
+        assert_eq!(
+            fixture.assembler.to_binary(&value).unwrap(),
+            b"done".as_slice()
+        );
+    }
+}
+
+#[test]
+fn exact_transaction_revalidation_detects_same_ancestor_and_descendant_writes() {
+    for (case, path, value) in [
+        (
+            "same",
+            vec![Key::atom_from_text("watched")],
+            Value::Number(Number::from(1)),
+        ),
+        (
+            "ancestor",
+            Vec::new(),
+            Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("watched"),
+                Value::Dict(Dict::new_sync()),
+            )),
+        ),
+        (
+            "descendant",
+            vec![Key::atom_from_text("watched"), Key::atom_from_text("child")],
+            Value::Number(Number::from(2)),
+        ),
+    ] {
+        let mut fixture = suspend_heap_transaction(Arc::new(ExactConflictAnalysis));
+        let snapshots = fixture
+            .host
+            .callback_probe_count(CallbackProbeKind::Snapshot);
+        fixture
+            .host
+            .set_heap_path(path, public_value(&fixture.assembler.core_values(), value));
+        let blocked = poll_suspended_transaction(&mut fixture.task);
+        assert!(blocked.dependency.is_some(), "{case} lost the exact wait");
+        assert_eq!(
+            fixture
+                .host
+                .callback_probe_count(CallbackProbeKind::Snapshot),
+            snapshots + 1,
+            "the exact policy did not restart for the {case} overlap"
+        );
+    }
+}
+
+#[test]
+fn nonconflicting_store_publication_retains_a_specialization_dependency() {
+    let (assembler, build_effect) = compile_effect(
+        "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
+    );
+    let gate = public_value(
+        &assembler.core_values(),
+        Value::Lazy(LazyValue::from_reflection_gate(
+            &assembler.core_values(),
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("unused"),
+        )),
+    );
+    let effect = assembler.apply(&build_effect, [gate]).unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+    )
+    .unwrap();
+    let blocked = poll_suspended_transaction(&mut task);
+    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
+        panic!("right alternative should retain its exact gate dependency")
+    };
+    let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
+    let validations = host.callback_probe_count(CallbackProbeKind::Validation);
+
+    host.set_heap_path(
+        vec![Key::atom_from_text("unrelated")],
+        public_value(&assembler.core_values(), Value::Number(Number::from(1))),
+    );
+    let blocked = poll_suspended_transaction(&mut task);
+    assert!(blocked.dependency.is_some());
+    assert!(host.callback_probe_count(CallbackProbeKind::Validation) > validations);
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots,
+        "an unrelated store publication must not restart the specialization observation"
+    );
+
+    task.eval_context.complete_wait(&wait);
+    let value = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Complete(value) => break value,
+            EffectTaskPoll::Blocked(_) => panic!("completed specialization gate stayed blocked"),
+            EffectTaskPoll::Failed(error) => panic!("specialization task failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("specialization task was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("specialization task voted to exit"),
+        }
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"unused".as_slice());
+}
+
+#[test]
+fn retryable_divergence_revalidates_without_advancing_its_alternative() {
+    let (assembler, effect) = compile_effect(
+        ".cut (.alt (.heap.get ['watched] >>= (\\_observed -> (1 2))) (.r \"fallback\"))",
+    );
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+    )
+    .unwrap();
+    let blocked = poll_suspended_transaction(&mut task);
+    assert!(blocked.dependency.is_none());
+    assert!(blocked.error.is_some());
+    let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
+
+    let blocked = poll_suspended_transaction(&mut task);
+    assert!(
+        blocked.error.is_some(),
+        "absence of publication advanced `.alt`"
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots
+    );
+
+    host.set_heap_path(
+        vec![Key::atom_from_text("other")],
+        public_value(&assembler.core_values(), Value::Number(Number::from(1))),
+    );
+    let blocked = poll_suspended_transaction(&mut task);
+    assert!(blocked.error.is_some(), "a disjoint wake advanced `.alt`");
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots,
+        "a disjoint wake replayed retryable divergence"
+    );
+
+    host.set_heap_path(
+        vec![Key::atom_from_text("watched")],
+        public_value(&assembler.core_values(), Value::Number(Number::from(2))),
+    );
+    let blocked = poll_suspended_transaction(&mut task);
+    assert!(
+        blocked.error.is_some(),
+        "a conflicting retry advanced `.alt`"
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots + 1,
+        "a conflicting wake did not restart the cut exactly once"
+    );
+}
+
+#[test]
+fn publication_after_validation_before_registration_is_rechecked() {
+    let (assembler, build_effect) = compile_effect(
+        "\\x -> .cut (.heap.get ['watched] >>= (\\_observed -> .r x >>= (\\value -> (value == \"done\") =>> .r value)))",
+    );
+    let gate = public_value(
+        &assembler.core_values(),
+        Value::Lazy(LazyValue::from_reflection_gate(
+            &assembler.core_values(),
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("done"),
+        )),
+    );
+    let effect = assembler.apply(&build_effect, [gate]).unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
+    assert_eq!(
+        context.pump_wait(task.wait(), 16_384),
+        crate::evaluation::EvaluationPumpOutcome::NoProgress
+    );
+    let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
+    let validations = host.callback_probe_count(CallbackProbeKind::Validation);
+
+    host.write_during_next_validation(
+        vec![Key::atom_from_text("second_unrelated")],
+        public_value(&assembler.core_values(), Value::Number(Number::from(2))),
+    );
+    host.set_heap_path(
+        vec![Key::atom_from_text("first_unrelated")],
+        public_value(&assembler.core_values(), Value::Number(Number::from(1))),
+    );
+    assert_eq!(
+        context.pump_wait(task.wait(), 16_384),
+        crate::evaluation::EvaluationPumpOutcome::NoProgress
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Validation),
+        validations + 2,
+        "the publication between validation and blocked registration must force revalidation"
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        snapshots,
+        "both disjoint publications must retain the exact dependency"
     );
 }
 
@@ -6611,7 +7088,7 @@ fn malformed_nested_heap_updates_do_not_poison_unrelated_reads() {
 }
 
 #[test]
-fn only_heap_reads_make_later_failure_retryable() {
+fn standalone_heap_reads_do_not_make_later_failure_retryable() {
     let (assembler, heap_effect) =
         compile_effect(".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
     let ready_heap = public_record(&assembler, [("answer", assembler.values().text("ready"))]);
@@ -6619,13 +7096,9 @@ fn only_heap_reads_make_later_failure_retryable() {
         assembler.core_values(),
         ready_heap,
     ));
-    let TaskOutcome::Complete(value) =
-        run_standard_on(&assembler, &heap_effect, heap_host.clone()).unwrap()
-    else {
-        panic!("heap observation should retry after the heap changes")
-    };
-    assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
-    assert_eq!(heap_host.wait_count(), 1);
+    let error = run_standard_on(&assembler, &heap_effect, heap_host.clone()).unwrap_err();
+    assert!(error.to_string().contains("failed permanently"));
+    assert_eq!(heap_host.wait_count(), 0);
 
     let (local_assembler, local_effect) =
         compile_effect(".get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");

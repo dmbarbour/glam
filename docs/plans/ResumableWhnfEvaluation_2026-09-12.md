@@ -2429,7 +2429,7 @@ were updated at this checkpoint.
 
 ###### W5C.3c — Heap and volume transaction boundaries
 
-**Status: in progress.**
+**Status: complete (2026-09-14).**
 
 Use the same resumable path work for `.heap.*` and volume operations. Complete
 all path demand before observing a host snapshot, recording a transaction
@@ -2515,8 +2515,8 @@ Implementation checkpoints:
   by both disjoint and overlapping publication proves that heap and volume
   reads return the original value without replay; the child-task regression
   which exposed the coarse wake loop now completes.
-- **W5C.3c.2 — Pending: cut-wide observations and precise validation of
-  suspended transactions.** First latch and repair the loss of exact read
+- **W5C.3c.2 — Complete (2026-09-14): cut-wide observations and precise
+  validation of suspended transactions.** First latch and repair the loss of exact read
   observations across `.alt` branches while preserving branch-local rollback.
   Then add the read-only host validation boundary and make a broad wake
   restart only a genuinely conflicting cut attempt.
@@ -2527,12 +2527,18 @@ Implementation checkpoints:
     commit between a failed reader alternative and its winning sibling; it
     now conflicts, while the failed sibling's speculative edit remains absent
     from the winner.
-  - **W5C.3c.2b — Pending: specialization observations and read-only host
-    validation.** Audit specialization journals for the same observation/edit
-    ownership split, establish the generic validation boundary, and replace
-    broad-generation restart with validate-then-restart-or-resubscribe.
-- **W5C.3c.3 — Pending: matrix and documentation closeout.** Exercise exact,
-  fingerprint, coarse, specialization, retryable-divergence, and
+  - **W5C.3c.2b — Complete (2026-09-14): specialization observations and
+    read-only host validation.** `TaskSpecialization::begin_journal` now creates the one
+    journal shared by an optimistic attempt before alternatives fork. Runtime
+    FIFO journals share a monotone observation map while retaining branch-local
+    cursors and output intents; the test specialization applies the same split
+    to diagnostic reads. `TaskHost::validate` checks retained store and
+    specialization evidence without applying edits. A retry capsule now keeps
+    that transaction, and broad wakes validate before choosing restart or an
+    updated wake baseline. Isolated macro, CLI, token, and net-construction
+    searches have immutable snapshots and no mutable host-validation path.
+- **W5C.3c.3 — Complete (2026-09-14): matrix and documentation closeout.**
+  Exercise exact, fingerprint, coarse, specialization, retryable-divergence, and
   validation/re-registration orderings before marking W5C.3c complete.
 
 The primary forced-order verification matrix is:
@@ -2565,6 +2571,23 @@ observed by the existing epoch protocol. Cover retryable divergence both as an
 unresolved exact dependency and as an error after an optimistic observation;
 the latter must never select another `.alt` branch merely because it is an
 error.
+
+Completion record: forced-order machine fixtures distinguish validation from
+snapshot/restart calls. Exact and fingerprint policies retain a suspended
+dependency across a disjoint write, coarse policy restarts it, and exact
+same-path, ancestor, and descendant writes restart precisely once. Separate
+fixtures prove that an unrelated store write preserves a specialization-owned
+empty-queue observation, a diagnostic append conflicts with it, and an
+evaluation error after a transactional read remains on the same alternative
+until a conflicting write restarts the cut. Runtime-event coverage proves
+forked journals share empty-tail and prefix observations without sharing input
+claims. Finally, a single-use validation hook publishes between successful
+validation and blocked-work registration; the coordinator epoch recheck forces
+a second validation, latching the formerly vulnerable ordering directly.
+
+Standalone heap reads and the macro-drain/metadata fixtures were updated to
+make retry scope explicit: ordinary reads commit their snapshot immediately,
+while intended retry loops now contain the read and divergence in `.cut`.
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 

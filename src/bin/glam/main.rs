@@ -469,8 +469,8 @@ mod tests {
                     "(.read_log >>= (\\_message -> .r ())) ",
                     "(.exit.success))) =>> logger_object\n",
                     "  eff = logger_object.run.eff\n",
-                    "refl.effect = (.heap.get ['start] >>= ",
-                    "(\\start -> (start == 1) =>> .r ())) =>> logger\n",
+                    "refl.effect = (.cut (.heap.get ['start] >>= ",
+                    "(\\start -> (start == 1) =>> .r ()))) =>> logger\n",
                     "refl.start = .heap.set ['start] 1\n",
                 ),
             )

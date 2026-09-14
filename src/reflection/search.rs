@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use super::machine::{EffectTask, EffectTaskPoll, TaskTerminal};
 use super::protocol::{
-    CommitResult, HostSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
+    CommitResult, HostSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost,
+    TaskSpecialization, TaskValidation, ValidationResult,
 };
 use super::requests::ReflectionServices;
 use super::store::{ExactConflictAnalysis, ReflectionStore, StoreSnapshot};
@@ -74,6 +75,10 @@ where
 {
     fn snapshot(&self) -> HostSnapshot<S> {
         HostSnapshot::new(1, self.store.clone(), self.extra.clone())
+    }
+
+    fn validate(&self, _validation: TaskValidation<'_, S>) -> ValidationResult {
+        ValidationResult::Current { generation: 1 }
     }
 
     fn commit(&self, _commit: TaskCommit<S>) -> CommitResult {

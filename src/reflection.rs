@@ -21,7 +21,8 @@ pub(crate) use machine::{task_eval_error, volume_effects};
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,
     RequestContext, RequestResult, StandardEffects, TaskCommit, TaskEnvironment, TaskHalt,
-    TaskHost, TaskOutcome, TaskSpecialization, TransactionContext,
+    TaskHost, TaskOutcome, TaskSpecialization, TaskValidation, TransactionContext,
+    ValidationResult,
 };
 pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,

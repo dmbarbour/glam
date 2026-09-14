@@ -235,6 +235,33 @@ impl RuntimeSharedResources {
         result
     }
 
+    pub(in crate::api) fn validate_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        events: &RuntimeEventJournal,
+    ) -> (crate::reflection::StoreCommitResult, u64) {
+        // As with `transaction_snapshot`, reading the epoch first ensures a
+        // concurrent publisher is either included in validation or observed
+        // by the caller's subsequent subscribe-and-recheck.
+        let generation = self.observations.current().get();
+        if events.runtime != self.id {
+            return (crate::reflection::StoreCommitResult::Conflict, generation);
+        }
+        let state = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let result = state.reflection.validate(store);
+        if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
+            return (result, generation);
+        }
+        if !state.events.validate(events) {
+            return (crate::reflection::StoreCommitResult::Conflict, generation);
+        }
+        (crate::reflection::StoreCommitResult::Committed, generation)
+    }
+
     pub(super) fn commit_reflection(
         &self,
         journal: &crate::reflection::StoreJournal,
@@ -252,6 +279,21 @@ impl RuntimeSharedResources {
             self.publish_observation(mutation);
         }
         result
+    }
+
+    pub(super) fn validate_reflection(
+        &self,
+        journal: &crate::reflection::StoreJournal,
+    ) -> (crate::reflection::StoreCommitResult, u64) {
+        let generation = self.observations.current().get();
+        let result = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .reflection
+            .validate(journal);
+        (result, generation)
     }
 
     pub(super) fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
@@ -376,6 +418,15 @@ impl RuntimeTaskCapability {
         events: &RuntimeEventJournal,
     ) -> crate::reflection::StoreCommitResult {
         self.resources.try_commit_transaction(store, events)
+    }
+
+    #[doc(hidden)]
+    pub fn validate_transaction(
+        &self,
+        store: &crate::reflection::StoreJournal,
+        events: &RuntimeEventJournal,
+    ) -> (crate::reflection::StoreCommitResult, u64) {
+        self.resources.validate_transaction(store, events)
     }
 
     #[doc(hidden)]
