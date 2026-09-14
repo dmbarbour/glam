@@ -3300,9 +3300,9 @@ Partition the remaining migration as follows:
      - **W5C.5c.4b.1 — Complete (2026-09-14): Uninhabited request work.** Use
        `Infallible` itself for the standard specialization and the two
        root-inventory fixtures rather than manufacturing unreachable adapters.
-     - **W5C.5c.4b.2 — Test specialization.** Migrate the in-tree test
-       specialization's evaluate/stderr demands without changing its raw
-       alternatives/scoped operands.
+     - **W5C.5c.4b.2 — Complete (2026-09-14): Test specialization.** Migrate
+       the in-tree test specialization's evaluate/stderr demands without
+       changing its raw alternatives/scoped operands.
    - **W5C.5c.4c — Resumption and FIFO conformance.** Add a hostile machine
      which performs counted host activity, advances its state, requests a
      forced promise/lazy demand, and proves that resumption cannot re-enter the

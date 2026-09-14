@@ -7,7 +7,7 @@ use super::reset_stack::{DecodedResetStack, ResetStackMachine, ResetStackPoll};
 use super::*;
 use crate::Severity;
 use crate::api::{
-    Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluationRuntime,
+    Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, EvaluationRuntime,
     TestValueFacade, Values,
 };
 use crate::evaluation::{
@@ -152,7 +152,15 @@ enum TestRequest {
 
 enum TestRequestWork {
     Reflection(ReflectionRequestWork),
-    Synchronous(super::super::protocol::SynchronousRequestWork<TestEffects>),
+    EvaluateStart(Vec<PublicValue>),
+    EvaluateValue,
+    WriteStderrStart(Vec<PublicValue>),
+    WriteStderrValue,
+    Immediate {
+        request: TestRequest,
+        arguments: Vec<PublicValue>,
+    },
+    Poisoned,
 }
 
 impl SpecializationRequestWork<TestEffects> for TestRequestWork {
@@ -162,10 +170,79 @@ impl SpecializationRequestWork<TestEffects> for TestRequestWork {
         input: Option<SpecializationRequestInput>,
         context: &mut RequestContext<'_, TestEffects>,
     ) -> Result<SpecializationRequestPoll, TaskHalt> {
-        match self {
-            Self::Reflection(work) => work.poll(specialization, input, context),
-            Self::Synchronous(work) => work.poll(specialization, input, context),
+        match std::mem::replace(self, Self::Poisoned) {
+            Self::Reflection(mut work) => {
+                let result = work.poll(specialization, input, context)?;
+                *self = Self::Reflection(work);
+                Ok(result)
+            }
+            Self::EvaluateStart(arguments) => {
+                assert!(input.is_none(), "new test evaluation cannot have input");
+                context
+                    .host()
+                    .probe_callback_boundary(CallbackProbeKind::Specialization);
+                let [value]: [PublicValue; 1] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("test evaluate request received the wrong arity"))?;
+                *self = Self::EvaluateValue;
+                Ok(SpecializationRequestPoll::Demand(value))
+            }
+            Self::EvaluateValue => {
+                let value = completed_test_demand(input, "test evaluation")?;
+                Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
+                    value.into_value(),
+                )))
+            }
+            Self::WriteStderrStart(arguments) => {
+                assert!(input.is_none(), "new test stderr request cannot have input");
+                context
+                    .host()
+                    .probe_callback_boundary(CallbackProbeKind::Specialization);
+                let [value]: [PublicValue; 1] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("test stderr request received the wrong arity"))?;
+                let binary = context
+                    .values()
+                    .anno_binary(value)
+                    .map_err(TaskHalt::from)?;
+                *self = Self::WriteStderrValue;
+                Ok(SpecializationRequestPoll::Demand(binary))
+            }
+            Self::WriteStderrValue => {
+                let value = completed_test_demand(input, "test stderr request")?;
+                let bytes = value
+                    .as_bytes()?
+                    .ok_or_else(|| TaskHalt::new("test stderr request requires binary data"))?;
+                if let Some(mut transaction) = context.transaction() {
+                    transaction.parts().1.stderr.push(bytes);
+                } else {
+                    context.host().write_stderr(bytes);
+                    context.committed();
+                }
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
+            }
+            Self::Immediate { request, arguments } => {
+                assert!(input.is_none(), "immediate test request cannot have input");
+                context
+                    .host()
+                    .probe_callback_boundary(CallbackProbeKind::Specialization);
+                let result = handle_immediate_test_request(request, arguments, context)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::Poisoned => panic!("completed test request work was polled again"),
         }
+    }
+}
+
+fn completed_test_demand(
+    input: Option<SpecializationRequestInput>,
+    request: &str,
+) -> Result<EvaluatedValue, TaskHalt> {
+    match input.unwrap_or_else(|| panic!("resumed {request} must have input")) {
+        SpecializationRequestInput::Value(value) => Ok(value),
+        SpecializationRequestInput::Failed(error) => Err(error),
     }
 }
 
@@ -244,66 +321,39 @@ impl TaskSpecialization for TestEffects {
             TestRequest::Reflection(request) => {
                 TestRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
             }
-            request => TestRequestWork::Synchronous(
-                super::super::protocol::SynchronousRequestWork::new(request, arguments),
-            ),
+            TestRequest::Evaluate => TestRequestWork::EvaluateStart(arguments),
+            TestRequest::WriteStderr => TestRequestWork::WriteStderrStart(arguments),
+            request => TestRequestWork::Immediate { request, arguments },
         }
     }
 }
 
-impl super::super::protocol::SynchronousTaskSpecialization for TestEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<PublicValue>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
-        context
-            .host()
-            .probe_callback_boundary(CallbackProbeKind::Specialization);
-        match request {
-            TestRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
-            TestRequest::ReadLog => read_test_log(context),
-            TestRequest::WriteStderr => {
-                let [value]: [PublicValue; 1] = arguments
-                    .try_into()
-                    .map_err(|_| TaskHalt::new("test stderr request received the wrong arity"))?;
-                let bytes = value_bytes(
-                    context.eval_context().values(),
-                    &value.clone_core_for_test(),
-                )?;
-                if let Some(mut transaction) = context.transaction() {
-                    transaction.parts().1.stderr.push(bytes);
-                } else {
-                    context.host().write_stderr(bytes);
-                    context.committed();
-                }
-                Ok(RequestResult::ReturnUnit)
-            }
-            TestRequest::Alternatives => Ok(RequestResult::Alternatives(vec![
-                public_value(
-                    context.eval_context().values(),
-                    Value::binary_from_text("first"),
-                ),
-                public_value(
-                    context.eval_context().values(),
-                    Value::binary_from_text("second"),
-                ),
-            ])),
-            TestRequest::Evaluate => {
-                let [value]: [PublicValue; 1] = arguments
-                    .try_into()
-                    .map_err(|_| TaskHalt::new("test evaluate request received the wrong arity"))?;
-                Ok(RequestResult::Return(
-                    context.evaluate(&value)?.into_value(),
-                ))
-            }
-            TestRequest::Scoped => {
-                let [operation, close]: [PublicValue; 2] = arguments
-                    .try_into()
-                    .map_err(|_| TaskHalt::new("test scoped request received the wrong arity"))?;
-                Ok(RequestResult::Scoped { operation, close })
-            }
+fn handle_immediate_test_request(
+    request: TestRequest,
+    arguments: Vec<PublicValue>,
+    context: &mut RequestContext<'_, TestEffects>,
+) -> Result<RequestResult, TaskHalt> {
+    match request {
+        TestRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
+        TestRequest::ReadLog => read_test_log(context),
+        TestRequest::Alternatives => Ok(RequestResult::Alternatives(vec![
+            public_value(
+                context.eval_context().values(),
+                Value::binary_from_text("first"),
+            ),
+            public_value(
+                context.eval_context().values(),
+                Value::binary_from_text("second"),
+            ),
+        ])),
+        TestRequest::Scoped => {
+            let [operation, close]: [PublicValue; 2] = arguments
+                .try_into()
+                .map_err(|_| TaskHalt::new("test scoped request received the wrong arity"))?;
+            Ok(RequestResult::Scoped { operation, close })
+        }
+        TestRequest::WriteStderr | TestRequest::Evaluate => {
+            unreachable!("test demand request uses durable work")
         }
     }
 }
