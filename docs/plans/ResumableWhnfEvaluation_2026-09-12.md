@@ -2859,6 +2859,8 @@ simulated by this task-independent decoder.
 
 ####### W5C.4b.0 — Durable control-work owner
 
+**Status: complete (2026-09-14).**
+
 Add a `ControlWork<S>` family beside effect decoding, scalar demand, and state
 path work. It owns the original `Branch`, scope, reset-stack decoder, and the
 operation-specific roots needed to finish one control transition. Integrate it
@@ -2871,7 +2873,17 @@ do not combine all active work slots into a new general enum while control
 semantics are moving. W5C.6 may perform that mechanical consolidation after
 specialization work in W5C.5 establishes the final set of owners.
 
+Completion record: `TaskExecution` now has a distinct `ControlWork` slot ahead
+of its pre-existing demand/path/decode owners. It participates in active
+branch and scope projection, cooperative polling, dependency blocking,
+failure/retry handling, cancellation by ordinary task retirement, and the
+compile-exhaustive root/state inventory. The placeholder `MachineWork` is
+made inert while this slot owns the branch, matching the established
+single-active-owner convention without consolidating the work families.
+
 ####### W5C.4b.1 — `.reset` request entry
+
+**Status: complete (2026-09-14).**
 
 Decode the request key, preserving it while the current stack is decoded.
 Only after both complete may `.reset` allocate control order and continuation
@@ -2884,6 +2896,16 @@ Force suspension independently in the request key, stack shell, frame list,
 stored key, scope, and order. Latch that branch state, control sequence,
 continuation table, and allocation counters remain unchanged until the final
 validation succeeds, then change exactly once.
+
+Completion record: `.reset` now selects the current serialized stack without
+demand, then transfers the branch, request key, operation, and stack decoder
+to `ControlWork`. Canonical key conversion completes before stack decoding;
+only their joint completion allocates the order and continuation, encodes the
+new frame, publishes state, and starts the operation. A resolver-promise key
+fixture forces the blocked ordering and latches that the state, continuation
+table, and both allocation counters remain unchanged before publication; the
+existing reset semantics and fused/unfused control suites cover successful
+completion.
 
 ####### W5C.4b.2 — `.shift` request entry and capture
 

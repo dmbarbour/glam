@@ -37,11 +37,9 @@ use crate::runtime::RuntimeValueRoot;
 #[cfg(test)]
 use super::protocol::HostSnapshot;
 
-#[allow(
-    dead_code,
-    reason = "W5C.4a builds the standalone decoder before W5C.4b migrates its production callers"
-)]
 mod reset_stack;
+
+use reset_stack::{ResetStackMachine, ResetStackPoll};
 
 #[derive(Clone)]
 struct Tags {
@@ -305,6 +303,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 decoding: None,
                 demanding: None,
                 pathing: None,
+                controlling: None,
                 cuts: Vec::new(),
             },
             blocked: None,
@@ -676,6 +675,29 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         for _ in 0..steps {
+            if let Some(controlling) = self.execution.controlling.take() {
+                match self.control_step(context, controlling, steps) {
+                    ControlStep::Continue(controlling) => {
+                        self.execution.controlling = Some(controlling);
+                    }
+                    ControlStep::Complete(work) => self.execution.work = work,
+                    ControlStep::Blocked(controlling, dependency) => {
+                        self.execution.controlling = Some(controlling);
+                        self.blocked =
+                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
+                        return self.blocked_poll();
+                    }
+                    ControlStep::Yielded(controlling) => {
+                        self.execution.controlling = Some(controlling);
+                        return EffectTaskPoll::Yielded;
+                    }
+                    ControlStep::Failed(controlling, error) => {
+                        self.execution.controlling = Some(controlling);
+                        return self.handle_step_error(error);
+                    }
+                }
+                continue;
+            }
             if let Some(demanding) = self.execution.demanding.take() {
                 match self.scalar_demand_step(context, demanding, steps) {
                     ScalarDemandStep::Complete(step) => match step {
@@ -692,6 +714,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         }
                         MachineStep::StatePath(_) => {
                             unreachable!("one scalar completion cannot begin a state path")
+                        }
+                        MachineStep::Control(_) => {
+                            unreachable!("one scalar completion cannot begin control work")
                         }
                         MachineStep::Blocked(blocked) => {
                             self.blocked = Some(blocked);
@@ -792,6 +817,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         scope_depth: 0,
                     };
                     self.execution.pathing = Some(*pathing);
+                }
+                Ok(MachineStep::Control(controlling)) => {
+                    self.execution.work = MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth: 0,
+                    };
+                    self.execution.controlling = Some(*controlling);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
@@ -1039,6 +1071,153 @@ impl<S: TaskSpecialization> EffectTask<S> {
             ScalarDemandPurpose::ExitError => MachineStep::Exit(ExitIntent::Error(value)),
         };
         ScalarDemandStep::Complete(step)
+    }
+
+    fn control_step(
+        &mut self,
+        context: &EvaluationPollContext,
+        mut controlling: ControlWork<S>,
+        step_budget: usize,
+    ) -> ControlStep<S> {
+        let operation = std::mem::replace(&mut controlling.operation, ControlOperation::Poisoned);
+        match operation {
+            ControlOperation::ResetKey {
+                mut key,
+                stack,
+                operation,
+            } => {
+                let poll = context.evaluate(&self.eval_context, |evaluator| {
+                    key.poll(context, evaluator, &self.eval_context, step_budget.max(1))
+                });
+                match poll {
+                    eval::ConversionPoll::Ready(key) => {
+                        controlling.operation = ControlOperation::ResetStack {
+                            key,
+                            stack,
+                            operation,
+                        };
+                        ControlStep::Continue(controlling)
+                    }
+                    eval::ConversionPoll::Pending(dependency) => {
+                        controlling.operation = ControlOperation::ResetKey {
+                            key,
+                            stack,
+                            operation,
+                        };
+                        ControlStep::Blocked(controlling, dependency)
+                    }
+                    eval::ConversionPoll::Yielded => {
+                        controlling.operation = ControlOperation::ResetKey {
+                            key,
+                            stack,
+                            operation,
+                        };
+                        ControlStep::Yielded(controlling)
+                    }
+                    eval::ConversionPoll::Failed(failure) => {
+                        controlling.operation = ControlOperation::ResetKey {
+                            key,
+                            stack,
+                            operation,
+                        };
+                        ControlStep::Failed(controlling, TaskHalt::rooted_failure(failure))
+                    }
+                }
+            }
+            ControlOperation::ResetStack {
+                key,
+                mut stack,
+                operation,
+            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                ResetStackPoll::Ready(decoded) => {
+                    let reset_stack::DecodedResetStack {
+                        serialized,
+                        mut frames,
+                    } = decoded;
+                    drop(serialized);
+                    let mut branch = controlling.branch;
+                    let scope_depth = controlling.scope_depth;
+                    let order = match self.allocate_control_order() {
+                        Ok(order) => order,
+                        Err(error) => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(branch, scope_depth),
+                                error,
+                            );
+                        }
+                    };
+                    let continuation = match self.capture_continuation(CapturedContinuation {
+                        sequence: std::mem::take(&mut branch.control.sequence),
+                        delimiters: Vec::new(),
+                        reset_frames: Vec::new(),
+                    }) {
+                        Ok(continuation) => continuation,
+                        Err(error) => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(branch, scope_depth),
+                                error,
+                            );
+                        }
+                    };
+                    frames.push(ResetFrame {
+                        key,
+                        continuation,
+                        scope_depth,
+                        order,
+                    });
+                    let state = context.evaluate(&self.eval_context, |evaluator| {
+                        let state = evaluator.project_root(&branch.state);
+                        replace_reset_frames(
+                            evaluator,
+                            state,
+                            &self.tags.continuation_state,
+                            &frames,
+                        )
+                    });
+                    branch.set_state(self.eval_context.values(), state);
+                    branch.set_effect_root(operation);
+                    ControlStep::Complete(MachineWork::Drive {
+                        branch,
+                        scope_depth,
+                    })
+                }
+                ResetStackPoll::Continue => {
+                    controlling.operation = ControlOperation::ResetStack {
+                        key,
+                        stack,
+                        operation,
+                    };
+                    ControlStep::Continue(controlling)
+                }
+                ResetStackPoll::Pending(dependency) => {
+                    controlling.operation = ControlOperation::ResetStack {
+                        key,
+                        stack,
+                        operation,
+                    };
+                    ControlStep::Blocked(controlling, dependency)
+                }
+                ResetStackPoll::Yielded => {
+                    controlling.operation = ControlOperation::ResetStack {
+                        key,
+                        stack,
+                        operation,
+                    };
+                    ControlStep::Yielded(controlling)
+                }
+                ResetStackPoll::Failed(error) => {
+                    controlling.operation = ControlOperation::ResetStack {
+                        key,
+                        stack,
+                        operation,
+                    };
+                    ControlStep::Failed(controlling, error)
+                }
+            },
+            ControlOperation::Poisoned => {
+                unreachable!("failed control work cannot be resumed before error handling")
+            }
+        }
     }
 
     fn state_path_step(
@@ -1761,41 +1940,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 )));
             }
             Request::Reset(key, operation) => {
-                let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
-                    let key = evaluator.project_root(&key);
-                    let state = evaluator.project_root(&branch.state);
-                    Ok::<_, TaskHalt>((
-                        value_key_in(evaluator, key)?,
-                        reset_frames_in(evaluator, &state, &self.tags.continuation_state)?,
-                    ))
+                let stack = context.evaluate(&self.eval_context, |evaluator| {
+                    reset_stack_root_in(evaluator, &branch.state, &self.tags.continuation_state)
                 })?;
-                let order = self.allocate_control_order()?;
-                let continuation = self.capture_continuation(CapturedContinuation {
-                    sequence: std::mem::take(&mut branch.control.sequence),
-                    delimiters: Vec::new(),
-                    reset_frames: Vec::new(),
-                })?;
-                frames.push(ResetFrame {
+                return Ok(MachineStep::Control(Box::new(ControlWork::reset(
                     key,
-                    continuation,
-                    scope_depth,
-                    order,
-                });
-                let state = context.evaluate(&self.eval_context, |evaluator| {
-                    let state = evaluator.project_root(&branch.state);
-                    Ok::<_, TaskHalt>(replace_reset_frames(
-                        evaluator,
-                        state,
-                        &self.tags.continuation_state,
-                        &frames,
-                    ))
-                })?;
-                branch.set_state(self.eval_context.values(), state);
-                branch.set_effect_root(operation);
-                MachineWork::Drive {
+                    stack,
+                    operation,
                     branch,
                     scope_depth,
-                }
+                ))));
             }
             Request::Shift(key, function) => {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
@@ -3074,23 +3228,26 @@ struct TaskExecution<S: TaskSpecialization> {
     decoding: Option<EffectDecodeWork<S>>,
     demanding: Option<ScalarDemandWork<S>>,
     pathing: Option<StatePathWork<S>>,
+    controlling: Option<ControlWork<S>>,
     cuts: Vec<CutFrame<S>>,
 }
 
 impl<S: TaskSpecialization> TaskExecution<S> {
     fn active_branch(&self) -> Option<&Branch<S>> {
-        self.demanding
+        self.controlling
             .as_ref()
             .map(|work| &work.branch)
+            .or_else(|| self.demanding.as_ref().map(|work| &work.branch))
             .or_else(|| self.pathing.as_ref().map(|work| &work.branch))
             .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
             .or_else(|| self.work.branch())
     }
 
     fn active_scope_depth(&self) -> usize {
-        self.demanding
+        self.controlling
             .as_ref()
             .map(|work| work.scope_depth)
+            .or_else(|| self.demanding.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.pathing.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.decoding.as_ref().map(|work| work.scope_depth))
             .unwrap_or_else(|| self.work.scope_depth())
@@ -3229,6 +3386,65 @@ enum ScalarDemandStep<S: TaskSpecialization> {
     Blocked(ScalarDemandWork<S>, WorkDependency),
     Yielded(ScalarDemandWork<S>),
     Failed(ScalarDemandWork<S>, TaskHalt),
+}
+
+/// Owns one reset-stack-dependent transition while its serialized control
+/// state is being decoded. Like the other task work owners, it retains the
+/// exact branch and scope needed to resume after a yield or dependency.
+struct ControlWork<S: TaskSpecialization> {
+    operation: ControlOperation,
+    branch: Branch<S>,
+    scope_depth: usize,
+}
+
+enum ControlOperation {
+    ResetKey {
+        key: eval::KeyConversionMachine,
+        stack: ResetStackMachine,
+        operation: RuntimeValueRoot,
+    },
+    ResetStack {
+        key: Key,
+        stack: ResetStackMachine,
+        operation: RuntimeValueRoot,
+    },
+    Poisoned,
+}
+
+impl<S: TaskSpecialization> ControlWork<S> {
+    fn reset(
+        key: RuntimeValueRoot,
+        stack: RuntimeValueRoot,
+        operation: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            operation: ControlOperation::ResetKey {
+                key: eval::KeyConversionMachine::new(key, None),
+                stack: ResetStackMachine::new(stack),
+                operation,
+            },
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn poisoned(branch: Branch<S>, scope_depth: usize) -> Self {
+        Self {
+            operation: ControlOperation::Poisoned,
+            branch,
+            scope_depth,
+        }
+    }
+}
+
+enum ControlStep<S: TaskSpecialization> {
+    Continue(ControlWork<S>),
+    Complete(MachineWork<S>),
+    Blocked(ControlWork<S>, WorkDependency),
+    Yielded(ControlWork<S>),
+    Failed(ControlWork<S>, TaskHalt),
 }
 
 struct StatePathWork<S: TaskSpecialization> {
@@ -3669,6 +3885,7 @@ enum MachineStep<S: TaskSpecialization> {
     Decode(EffectDecodeWork<S>),
     Demand(ScalarDemandWork<S>),
     StatePath(Box<StatePathWork<S>>),
+    Control(Box<ControlWork<S>>),
     Blocked(BlockedExecution<S>),
     Exit(ExitIntent),
     Terminal(TaskTerminal),
@@ -4733,6 +4950,22 @@ fn reset_stack_value_in(
         .unwrap_or_else(|| Value::List(List::empty()));
     reset_frames_from_value_in(context, &stack)?;
     Ok(stack)
+}
+
+fn reset_stack_root_in(
+    context: &EvaluatorStepContext<'_>,
+    state: &RuntimeValueRoot,
+    continuation_state: &Key,
+) -> Result<RuntimeValueRoot, TaskHalt> {
+    let Value::Dict(state) = context.project_root(state) else {
+        return Err(TaskHalt::new("reflection user state must be a dictionary"));
+    };
+    Ok(context.root_value(
+        state
+            .get(continuation_state)
+            .cloned()
+            .unwrap_or_else(|| Value::List(List::empty())),
+    ))
 }
 
 fn reset_frames_in(

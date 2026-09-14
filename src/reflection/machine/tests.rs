@@ -1153,12 +1153,43 @@ fn assert_execution_root_inventory(
         decoding,
         demanding,
         pathing,
+        controlling,
         cuts,
     } = execution;
     let _: &MachineWork<TestEffects> = work;
     let _: &Option<EffectDecodeWork<TestEffects>> = decoding;
     let _: &Option<ScalarDemandWork<TestEffects>> = demanding;
     let _: &Option<StatePathWork<TestEffects>> = pathing;
+    if let Some(controlling) = controlling {
+        let ControlWork {
+            operation,
+            branch,
+            scope_depth,
+        } = controlling;
+        let _: &Branch<TestEffects> = branch;
+        let _: &usize = scope_depth;
+        match operation {
+            ControlOperation::ResetKey {
+                key,
+                stack,
+                operation,
+            } => {
+                let _: &eval::KeyConversionMachine = key;
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &RuntimeValueRoot = operation;
+            }
+            ControlOperation::ResetStack {
+                key,
+                stack,
+                operation,
+            } => {
+                let _: &Key = key;
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &RuntimeValueRoot = operation;
+            }
+            ControlOperation::Poisoned => {}
+        }
+    }
     let _: &Vec<CutFrame<TestEffects>> = cuts;
 
     let EffectDecodeWork {
@@ -1728,9 +1759,9 @@ type ControlRootInventoryFn =
 fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
     let source = include_str!("../machine.rs");
     let expected = [
-        ("value_key_in", 4),
+        ("value_key_in", 3),
         ("reset_stack_value_in", 3),
-        ("reset_frames_in", 5),
+        ("reset_frames_in", 4),
         ("reset_frames_from_value_in", 4),
         ("with_reset_frames_in", 3),
         ("replace_reset_frames", 4),
@@ -2250,6 +2281,84 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
         .expect("retired decoder roots must not obstruct collection");
 }
 
+fn reset_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedValue) -> Value {
+    values.with_runtime_value_access(|access| {
+        let operation = eval::constant_effect_in(
+            &access,
+            request_value(&tags.r, vec![Value::binary_from_text("done")]),
+        );
+        eval::constant_effect_in(
+            &access,
+            request_value(
+                &tags.reset,
+                vec![Value::Promised(key.duplicate_in(&access)), operation],
+            ),
+        )
+    })
+}
+
+#[test]
+fn reset_control_work_does_not_publish_before_its_key_resolves() {
+    let values = crate::core::test_value_factory();
+    let tags = Tags::new();
+    let key = PromisedValue::new(&values, "reset request key");
+    let effect = reset_request_effect(&values, &tags, &key);
+    let mut task = EffectTask::new(
+        &values,
+        effect,
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("reset control fixture should construct");
+
+    let blocked = loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            EffectTaskPoll::Complete(_) => panic!("unfulfilled reset key completed"),
+            EffectTaskPoll::Failed(error) => panic!("unfulfilled reset key failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("reset fixture was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("reset fixture voted to exit"),
+        }
+    };
+    assert!(matches!(
+        blocked.dependency,
+        Some(WorkDependency::Promise(_))
+    ));
+    assert_eq!(task.next_continuation, 1);
+    assert_eq!(task.next_control_order, 1);
+    assert!(task.continuations.is_empty());
+    let branch = task
+        .execution
+        .active_branch()
+        .expect("blocked control work should retain its branch");
+    EvaluationPollContext::for_context(&task.eval_context).evaluate(
+        &task.eval_context,
+        |evaluator| {
+            let Value::Dict(state) = evaluator.project_root(&branch.state) else {
+                panic!("reset branch state must remain a dictionary")
+            };
+            assert!(state.get(&tags.continuation_state).is_none());
+        },
+    );
+
+    crate::core::set_test_promise(&values, &key, Value::binary_from_text("prompt"))
+        .expect("reset key should publish once");
+    let TaskOutcome::Complete(result) = task.run().expect("resumed reset should finish") else {
+        panic!("resumed reset should complete")
+    };
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::binary_from_text("done")
+    );
+    assert_eq!(task.next_continuation, 2);
+    assert_eq!(
+        task.next_control_order, 3,
+        "reset capture and the subsequent effect application each allocate one order"
+    );
+    assert_eq!(task.continuations.len(), 1);
+}
+
 fn assert_fixpoint_root_inventory(
     root: &FixRoot<TestEffects>,
     active: &ActiveFix<TestEffects>,
@@ -2378,6 +2487,9 @@ fn assert_protocol_handoff_inventory(
         }
         MachineStep::StatePath(pathing) => {
             let _: &StatePathWork<TestEffects> = pathing;
+        }
+        MachineStep::Control(controlling) => {
+            let _: &ControlWork<TestEffects> = controlling;
         }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
