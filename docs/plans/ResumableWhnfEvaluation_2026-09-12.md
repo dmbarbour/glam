@@ -3011,6 +3011,8 @@ history/replay matrix.
 
 ####### W5C.4b.6 — Delivery-time reset selection
 
+**Status: complete (2026-09-14).**
+
 When the ordinary continuation sequence is empty, retain the delivered value
 and decode the current reset stack before comparing its innermost applicable
 frame with the innermost Rust-side delimiter. If a reset wins, encode the
@@ -3021,6 +3023,18 @@ Exercise suspension with both possible orderings of reset frame and delimiter,
 at nested scope depths, and with no applicable local layer. The comparison and
 selected transition must match uninterrupted execution and must not pop or
 rebase either side before decoding succeeds.
+
+Completion record: an empty Glam continuation sequence now transfers the
+delivered root and branch to a delivery control operation. It decodes the
+current stack before comparing the innermost applicable reset and delimiter,
+then either publishes the shortened reset stack, advances the selected
+delimiter, or completes. A promised-stack fixture forces both reset-wins and
+delimiter-wins orderings, observes the untouched delimiter before resolution,
+and inspects the exact `Apply` versus `Deliver` successor work. The migration
+retires the now-unused `reset_stack_value_in` and `reset_frames_in` helpers.
+While exercising the matrix, the standalone decoder-retirement GC fixture was
+also moved off the process-global test heap so parallel tests cannot collect
+one another's deliberately raw managed fixtures.
 
 ####### W5C.4b.7 — Delimiter restoration and stack replacement
 

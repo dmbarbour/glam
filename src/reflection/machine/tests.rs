@@ -1205,6 +1205,10 @@ fn assert_execution_root_inventory(
                 let _: &Arc<FixRoot<TestEffects>> = root;
                 let _: &Vec<FixChoice> = choices;
             }
+            ControlOperation::Delivery { stack, value } => {
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &RuntimeValueRoot = value;
+            }
             ControlOperation::Poisoned => {}
         }
     }
@@ -1789,9 +1793,9 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
     let source = include_str!("../machine.rs");
     let expected = [
         ("value_key_in", 2),
-        ("reset_stack_value_in", 2),
-        ("reset_frames_in", 2),
-        ("reset_frames_from_value_in", 4),
+        ("reset_stack_value_in", 0),
+        ("reset_frames_in", 0),
+        ("reset_frames_from_value_in", 2),
         ("with_reset_frames_in", 0),
         ("replace_reset_frames", 6),
         ("with_reset_stack_value_in", 2),
@@ -2286,7 +2290,9 @@ fn reset_stack_decoder_propagates_a_deferred_failure() {
 
 #[test]
 fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_the_promise() {
-    let values = crate::core::test_value_factory();
+    // This fixture triggers a real collection, so it must not share the
+    // process-global test value domain with concurrently running tests.
+    let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
     let promised = PromisedValue::new(&values, "abandoned reset stack");
     let serialized = values
@@ -2690,6 +2696,96 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         Value::binary_from_text("restarted")
     );
     assert_eq!(task.next_control_order, 2);
+}
+
+#[test]
+fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
+    for reset_wins in [false, true] {
+        let values = crate::core::test_value_factory();
+        let stack = PromisedValue::new(&values, "delivery reset stack");
+        let mut task = EffectTask::new(
+            &values,
+            eval::constant_effect(
+                &values,
+                request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+            ),
+            TestEffects,
+            Arc::new(TestHost::with_values(values.clone())),
+        )
+        .expect("delivery control fixture should construct");
+        let continuation = task
+            .capture_continuation(CapturedContinuation {
+                sequence: Vec::new(),
+                delimiters: Vec::new(),
+                reset_frames: Vec::new(),
+            })
+            .expect("fixture continuation should allocate");
+        let mut branch = task
+            .execution
+            .work
+            .branch()
+            .expect("fresh task should retain a branch")
+            .clone();
+        let delimiter_order = if reset_wins { 1 } else { 2 };
+        let reset_order = if reset_wins { 2 } else { 1 };
+        branch.control.delimiters.push(Delimiter::Resume {
+            outer_sequence: Vec::new(),
+            scope_depth: 0,
+            order: delimiter_order,
+        });
+        branch.state = values.construct_runtime_value_root(|access| {
+            Value::Dict(Dict::new_sync().insert(
+                task.tags.continuation_state.clone(),
+                Value::Promised(stack.duplicate_in(access)),
+            ))
+        });
+        let serialized = values
+            .construct_runtime_value_root(|access| Value::Promised(stack.duplicate_in(access)));
+        let delivered =
+            values.construct_runtime_value_root(|_| Value::binary_from_text("delivered"));
+        task.execution.work = MachineWork::Outcome {
+            outcome: BranchOutcome::Cancelled,
+            scope_depth: 0,
+        };
+        task.execution.controlling = Some(ControlWork::delivery(serialized, delivered, branch, 0));
+
+        loop {
+            match task.poll(1) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Blocked(_) => break,
+                _ => panic!("unfulfilled delivery stack did not block"),
+            }
+        }
+        assert_eq!(
+            task.execution
+                .active_branch()
+                .expect("blocked delivery should retain its branch")
+                .control
+                .delimiters
+                .len(),
+            1
+        );
+        let frame = values.with_runtime_value_access(|access| {
+            serialized_reset_frame(
+                Value::binary_from_text("prompt"),
+                continuation.clone_core_with(&access),
+                0,
+                reset_order,
+            )
+        });
+        crate::core::set_test_promise(&values, &stack, Value::List(List::from_values(vec![frame])))
+            .expect("delivery stack should publish once");
+        while task.execution.controlling.is_some() {
+            assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+        }
+        match (&task.execution.work, reset_wins) {
+            (MachineWork::Apply { .. }, true) => {}
+            (MachineWork::Deliver { branch, .. }, false) => {
+                assert!(branch.control.delimiters.is_empty());
+            }
+            _ => panic!("delivery selected the wrong innermost control layer"),
+        }
+    }
 }
 
 fn assert_fixpoint_root_inventory(

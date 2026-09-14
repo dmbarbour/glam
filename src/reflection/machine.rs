@@ -1375,6 +1375,106 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Failed(controlling, error)
                 }
             },
+            ControlOperation::Delivery { mut stack, value } => {
+                match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                    ResetStackPoll::Ready(decoded) => {
+                        let mut resets = decoded.frames;
+                        let mut branch = controlling.branch;
+                        let scope_depth = controlling.scope_depth;
+                        let reset_order = resets
+                            .last()
+                            .filter(|frame| frame.scope_depth >= scope_depth)
+                            .map(|frame| frame.order);
+                        let delimiter_order = branch
+                            .control
+                            .delimiters
+                            .last()
+                            .filter(|delimiter| delimiter.scope_depth() >= scope_depth)
+                            .map(Delimiter::order);
+                        if reset_order > delimiter_order {
+                            let frame = resets.pop().expect("reset order came from a frame");
+                            let state = context.evaluate(&self.eval_context, |evaluator| {
+                                let state = evaluator.project_root(&branch.state);
+                                replace_reset_frames(
+                                    evaluator,
+                                    state,
+                                    &self.tags.continuation_state,
+                                    &resets,
+                                )
+                            });
+                            branch.set_state(self.eval_context.values(), state);
+                            return ControlStep::Complete(MachineWork::apply_roots(
+                                frame.continuation,
+                                vec![value],
+                                branch,
+                                scope_depth,
+                            ));
+                        }
+                        let Some(_) = delimiter_order else {
+                            return ControlStep::Complete(MachineWork::Outcome {
+                                outcome: BranchOutcome::Complete(value, branch),
+                                scope_depth,
+                            });
+                        };
+                        match branch
+                            .control
+                            .delimiters
+                            .last()
+                            .cloned()
+                            .expect("delimiter order came from a delimiter")
+                        {
+                            Delimiter::Resume { outer_sequence, .. } => {
+                                branch.control.delimiters.pop();
+                                branch.control.sequence = outer_sequence;
+                            }
+                            Delimiter::Restore {
+                                outer, reset_stack, ..
+                            } => {
+                                let state = context.evaluate(&self.eval_context, |evaluator| {
+                                    let state = evaluator.project_root(&branch.state);
+                                    let reset_stack = evaluator.project_root(&reset_stack);
+                                    with_reset_stack_value_in(
+                                        evaluator,
+                                        state,
+                                        &self.tags.continuation_state,
+                                        reset_stack,
+                                    )
+                                    .map(|state| evaluator.root_value(state))
+                                });
+                                let state = match state {
+                                    Ok(state) => state,
+                                    Err(error) => {
+                                        return ControlStep::Failed(
+                                            ControlWork::poisoned(branch, scope_depth),
+                                            error,
+                                        );
+                                    }
+                                };
+                                branch.control.delimiters.pop();
+                                branch.state = state;
+                                branch.control = *outer;
+                            }
+                        }
+                        ControlStep::Complete(MachineWork::deliver_root(value, branch, scope_depth))
+                    }
+                    ResetStackPoll::Continue => {
+                        controlling.operation = ControlOperation::Delivery { stack, value };
+                        ControlStep::Continue(controlling)
+                    }
+                    ResetStackPoll::Pending(dependency) => {
+                        controlling.operation = ControlOperation::Delivery { stack, value };
+                        ControlStep::Blocked(controlling, dependency)
+                    }
+                    ResetStackPoll::Yielded => {
+                        controlling.operation = ControlOperation::Delivery { stack, value };
+                        ControlStep::Yielded(controlling)
+                    }
+                    ResetStackPoll::Failed(error) => {
+                        controlling.operation = ControlOperation::Delivery { stack, value };
+                        ControlStep::Failed(controlling, error)
+                    }
+                }
+            }
             ControlOperation::Poisoned => {
                 unreachable!("failed control work cannot be resumed before error handling")
             }
@@ -2353,80 +2453,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             };
         }
 
-        let mut resets = context.evaluate(&self.eval_context, |evaluator| {
-            let state = evaluator.project_root(&branch.state);
-            reset_frames_in(evaluator, &state, &self.tags.continuation_state)
+        let stack = context.evaluate(&self.eval_context, |evaluator| {
+            reset_stack_root_in(evaluator, &branch.state, &self.tags.continuation_state)
         })?;
-        let reset_order = resets
-            .last()
-            .filter(|frame| frame.scope_depth >= scope_depth)
-            .map(|frame| frame.order);
-        let delimiter_order = branch
-            .control
-            .delimiters
-            .last()
-            .filter(|delimiter| delimiter.scope_depth() >= scope_depth)
-            .map(Delimiter::order);
-        if reset_order > delimiter_order {
-            let frame = resets.pop().expect("reset order came from a frame");
-            let state = context.evaluate(&self.eval_context, |evaluator| {
-                let state = evaluator.project_root(&branch.state);
-                Ok::<_, TaskHalt>(replace_reset_frames(
-                    evaluator,
-                    state,
-                    &self.tags.continuation_state,
-                    &resets,
-                ))
-            })?;
-            branch.set_state(self.eval_context.values(), state);
-            return Ok(MachineStep::Continue(MachineWork::apply_roots(
-                frame.continuation,
-                vec![value],
-                branch,
-                scope_depth,
-            )));
-        }
-        let Some(_) = delimiter_order else {
-            return Ok(MachineStep::Continue(MachineWork::Outcome {
-                outcome: BranchOutcome::Complete(value, branch),
-                scope_depth,
-            }));
-        };
-        match branch
-            .control
-            .delimiters
-            .last()
-            .cloned()
-            .expect("delimiter order came from a delimiter")
-        {
-            Delimiter::Resume { outer_sequence, .. } => {
-                branch.control.delimiters.pop();
-                branch.control.sequence = outer_sequence;
-            }
-            Delimiter::Restore {
-                outer, reset_stack, ..
-            } => {
-                let state = context.evaluate(&self.eval_context, |evaluator| {
-                    let state = evaluator.project_root(&branch.state);
-                    let reset_stack = evaluator.project_root(&reset_stack);
-                    with_reset_stack_value_in(
-                        evaluator,
-                        state,
-                        &self.tags.continuation_state,
-                        reset_stack,
-                    )
-                    .map(|state| evaluator.root_value(state))
-                })?;
-                branch.control.delimiters.pop();
-                branch.state = state;
-                branch.control = *outer;
-            }
-        }
-        Ok(MachineStep::Continue(MachineWork::deliver_root(
+        Ok(MachineStep::Control(Box::new(ControlWork::delivery(
+            stack,
             value,
             branch,
             scope_depth,
-        )))
+        ))))
     }
 
     fn enter_cut(
@@ -3552,6 +3587,10 @@ enum ControlOperation<S: TaskSpecialization> {
         root: Arc<FixRoot<S>>,
         choices: Vec<FixChoice>,
     },
+    Delivery {
+        stack: ResetStackMachine,
+        value: RuntimeValueRoot,
+    },
     Poisoned,
 }
 
@@ -3647,6 +3686,22 @@ impl<S: TaskSpecialization> ControlWork<S> {
             },
             branch,
             scope_depth: root.scope_depth,
+        }
+    }
+
+    fn delivery(
+        stack: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            operation: ControlOperation::Delivery {
+                stack: ResetStackMachine::new(stack),
+                value,
+            },
+            branch,
+            scope_depth,
         }
     }
 }
@@ -5148,22 +5203,6 @@ fn require_state_dict_in(
     }
 }
 
-fn reset_stack_value_in(
-    context: &EvaluatorStepContext<'_>,
-    state: &Value,
-    continuation_state: &Key,
-) -> Result<Value, TaskHalt> {
-    let Value::Dict(state) = state else {
-        return Err(TaskHalt::new("reflection user state must be a dictionary"));
-    };
-    let stack = state
-        .get(continuation_state)
-        .cloned()
-        .unwrap_or_else(|| Value::List(List::empty()));
-    reset_frames_from_value_in(context, &stack)?;
-    Ok(stack)
-}
-
 fn reset_stack_root_in(
     context: &EvaluatorStepContext<'_>,
     state: &RuntimeValueRoot,
@@ -5178,17 +5217,6 @@ fn reset_stack_root_in(
             .cloned()
             .unwrap_or_else(|| Value::List(List::empty())),
     ))
-}
-
-fn reset_frames_in(
-    context: &EvaluatorStepContext<'_>,
-    state: &Value,
-    continuation_state: &Key,
-) -> Result<Vec<ResetFrame>, TaskHalt> {
-    reset_frames_from_value_in(
-        context,
-        &reset_stack_value_in(context, state, continuation_state)?,
-    )
 }
 
 fn reset_frames_from_value_in(
