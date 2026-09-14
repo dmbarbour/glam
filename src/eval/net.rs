@@ -324,6 +324,7 @@ impl NetDriver {
 
     fn restart_from_request_root(&mut self) {
         self.worklist.reset(self.request.root_work());
+        self.progressed = false;
     }
 }
 
@@ -341,11 +342,6 @@ fn drive_net_driver_work_in(
     driver: &mut NetDriver,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
-        #[cfg(feature = "interaction-net-profiling")]
-        context
-            .context()
-            .values()
-            .record_net_driver(crate::interaction_net::profiling::DriverEvent::WorkItem);
         let retained_work = work.clone();
         let outcome = context.with_value_access(|values| {
             let work_runtime = work.runtime(values.values());
@@ -442,6 +438,8 @@ fn drive_net_work_item(
     work: NetDriverWork,
     access: &CoreRuntimeNetAccess<'_, '_>,
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
+    #[cfg(feature = "interaction-net-profiling")]
+    access.record_driver(crate::interaction_net::profiling::DriverEvent::WorkItem);
     match work {
         NetDriverWork::RequestRoot { root, interface } => {
             #[cfg(feature = "interaction-net-profiling")]

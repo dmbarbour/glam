@@ -1958,6 +1958,8 @@ latched signature only with an explicit explanation of the changed rules.
 
 ##### W4E.1 — Deterministic reproducer and measurement surface
 
+**Status:** complete on 2026-09-14.
+
 First reproduce the mismatch with a source-shaped in-process fixture which
 uses the same `direct_assembly.g` configuration and duplicate-symbol program
 as `direct_assembly_rejects_duplicate_symbol_publication`. Do not replace it
@@ -2006,6 +2008,25 @@ current head with compilation excluded. Record wall time and CPU time as
 corroborating benchmark evidence only; elapsed time is not a correctness gate
 and repeated success is not evidence about scheduling order.
 
+The source-shaped failure reduced to a deterministic local expression: a
+one-argument wrapper returns another one-argument function and the caller
+supplies both arguments in one application spine. At `7fed99e` the fixture
+terminates with 71 driver work items and the exact semantic signature now
+latched by
+`wrapper_returning_function_then_accepts_remaining_application`. Before the
+repair, the same fixture alternated fresh wrapper and returned-function lazy
+calls without completing. This established semantic replay rather than a
+source-loader, module-fixpoint, or dependency-chain problem. The largest
+observed `prioritized_task_for` dependency depth in the executable fixture was
+four; that path was not material to the regression.
+
+The repaired duplicate-symbol executable fixture completes in roughly 12.6
+seconds on the same machine, versus roughly 8.1 to 8.5 seconds at `7fed99e`.
+Its driver work is comparable (159,322 versus 159,994 work items), while its
+semantic signature contains the small intentional topology increase described
+by W4E.2. The remaining cost is therefore scheduler/machine overhead rather
+than continuing interaction-net work.
+
 Exit: one bounded fixture distinguishes at least these cases:
 
 1. a source or completed semantic prefix is selected more than once;
@@ -2016,6 +2037,8 @@ Exit: one bounded fixture distinguishes at least these cases:
 4. both semantic work and scheduler work grow.
 
 ##### W4E.2 — Semantic replay repair
+
+**Status:** complete on 2026-09-14.
 
 If W4E.1 finds replay, identify the first duplicated stable identity or
 completed prefix and add the smallest forced-order fixture at that boundary.
@@ -2028,6 +2051,20 @@ to the Rust stack as a performance workaround.
 
 If semantic counts remain bounded, mark this checkpoint not applicable with
 the W4E.1 evidence rather than manufacturing a semantic change.
+
+`CoreOperator::ApplyArity` previously executed a saturated application while
+the operator active pair was claimed. Over-application could force an
+intermediate lazy function and yield from the nested WHNF pump; restoring the
+operator pair then discarded that intermediate application state and replayed
+the same call from its beginning. The operator now commits one ordinary lazy
+application. Its `WhnfComputation` durably owns the argument cursor and
+resumption state, so yielding does not reconstruct completed work.
+
+This deliberately exposes the application as ordinary net work. Compared with
+the pre-W4 baseline, the full executable therefore has a small, bounded change
+in call/operator/cursor topology even though its total driver work remains
+comparable. The minimized fixture's exact semantic signature is the regression
+contract; changing it requires an explicit lowering/topology explanation.
 
 ##### W4E.3 — Scheduler amplification repair
 

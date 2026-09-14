@@ -1654,7 +1654,6 @@ mod tests {
                     "src/eval/builtins/net.rs::apply_net_arity",
                     "src/eval/builtins/net.rs::apply",
                     "src/eval/builtins/object/implementation.rs::eval_object_instance_builtin",
-                    "src/eval/operator.rs::apply_builtin_values_lazily",
                     "src/eval/operator.rs::apply_core_operator",
                     "src/evaluation/access.rs::EvaluatorStepContext::construct_core_net",
                     "src/evaluation/access.rs::EvaluatorStepContext::construct_promise",

@@ -97,6 +97,76 @@ fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
 }
 
 #[test]
+fn wrapper_returning_function_then_accepts_remaining_application() {
+    let context = EvalContext::isolated(CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
+    let returned_code = Arc::new(lower_test_function_code_in(
+        context.values(),
+        1,
+        TestExpr::Local(0),
+    ));
+    let make = closed_function_value_in(
+        context.values(),
+        1,
+        TestExpr::Function {
+            code: returned_code,
+            captures: Arc::from([]),
+        },
+    );
+    let wrapper = closed_function_value_in(
+        context.values(),
+        1,
+        TestExpr::Apply(
+            Arc::new(TestExpr::Value(make)),
+            Arc::new(TestExpr::Local(0)),
+        ),
+    );
+    let expression = TestExpr::Apply(
+        Arc::new(TestExpr::Apply(
+            Arc::new(TestExpr::Value(wrapper)),
+            Arc::new(TestExpr::Value(unit_value())),
+        )),
+        Arc::new(TestExpr::Value(n(42))),
+    );
+
+    let code = lower_test_function_code_in(context.values(), 0, expression);
+    let computation = context.values().with_runtime_value_access(|access| {
+        Value::Lazy(LazyValue::from_net_computation_in(
+            &access,
+            NetValue::new(code.duplicate_runtime_in(&access)),
+        ))
+    });
+
+    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+    #[cfg(feature = "interaction-net-profiling")]
+    {
+        use crate::interaction_net::profiling::NetReductionCounts;
+
+        let profile = context.values().interaction_net_profile_snapshot();
+        assert_eq!(
+            profile.reductions,
+            NetReductionCounts {
+                bind_join: 9,
+                fan_join: 0,
+                fan_commute: 0,
+                fan_data: 0,
+                fan_bind: 0,
+                fan_operator: 0,
+                erase: 0,
+                call: 3,
+                operator_call: 6,
+                cursor_materialized: 6,
+                cursor_joined: 2,
+            },
+            "over-application through a returned function must not replay semantic work"
+        );
+        assert_eq!(profile.driver.work_items, 71);
+    }
+}
+
+#[test]
 fn claimed_evaluator_dispatches_unit_assertion_through_the_scoped_builtin_path() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

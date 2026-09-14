@@ -5,46 +5,6 @@ pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> Core
     CoreOperator::ApplyArity { arity, supplied }
 }
 
-/// Builds the semantic value for builtin application without executing a
-/// saturated call. Net construction may place that call in a lazy aggregate;
-/// evaluating it here would make enclosing construction accidentally strict.
-pub(super) fn apply_builtin_values_lazily(
-    context: &EvaluatorStepContext<'_>,
-    builtin: Builtin,
-    mut supplied: Vec<Value>,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
-    let remaining = builtin
-        .arity()
-        .checked_sub(supplied.len())
-        .expect("partial builtin cannot contain too many arguments");
-    if arguments.len() < remaining {
-        supplied.extend(arguments);
-        return Ok(Value::PartialBuiltin(BuiltinCall {
-            builtin,
-            arguments: Arc::from(supplied),
-        }));
-    }
-
-    let mut saturating = arguments;
-    let rest = saturating.split_off(remaining);
-    supplied.extend(saturating);
-    let result = Value::Lazy(context.construct_lazy(|access| {
-        LazyValue::from_builtin_in(
-            access,
-            BuiltinCall {
-                builtin,
-                arguments: Arc::from(supplied),
-            },
-        )
-    }));
-    if rest.is_empty() {
-        Ok(result)
-    } else {
-        apply_values_in(context, result, rest)
-    }
-}
-
 pub(crate) fn function_capture_operator(
     code: Arc<FunctionCode>,
     supplied: Arc<[Value]>,
@@ -128,19 +88,16 @@ pub(super) fn apply_core_operator(
             if *arity == 0 {
                 return Ok(OperatorYield::Data(function));
             }
-            let result = match function {
-                Value::Builtin(builtin) => {
-                    apply_builtin_values_lazily(context, builtin, Vec::new(), operands)
-                }
-                Value::PartialBuiltin(call) => apply_builtin_values_lazily(
-                    context,
-                    call.builtin,
-                    call.arguments.iter().cloned().collect(),
-                    operands,
-                ),
-                function => apply_values_in(context, function, operands),
-            }?;
-            Ok(OperatorYield::Data(result))
+            // A saturated apply operator may still represent over-application:
+            // evaluating `function` can first yield another function before the
+            // remaining operands are consumed. Keep that progress in the lazy
+            // application's WHNF machine. Executing the application while the
+            // operator pair is claimed would lose the intermediate state when
+            // the nested evaluation yields, causing the restored pair to replay
+            // the application from its beginning.
+            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
+                |access| LazyValue::from_application_in(access, function, Arc::from(operands)),
+            ))))
         }
         CoreOperator::FunctionCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
