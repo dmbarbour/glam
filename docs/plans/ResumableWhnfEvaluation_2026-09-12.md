@@ -2934,6 +2934,8 @@ continuation-reuse cases verify the successful capture shape.
 
 ####### W5C.4b.3 — Captured-continuation installation
 
+**Status: complete (2026-09-14).**
+
 Migrate `install_captured_control`. Decode the caller's current reset stack
 before rebasing or publishing any captured layer. Retain the captured
 continuation and caller sequence while blocked. After validation, merge reset
@@ -2945,6 +2947,17 @@ Keep cross-task and unknown-continuation rejection ahead of this work. Exercise
 multiple invocation of one captured continuation, nesting beneath an existing
 reset and resume delimiter, suspension in the caller stack, and failure before
 publication. Completed `.resume` ID decoding remains owned by W5C.1.
+
+Completion record: accepted `.resume` IDs now transfer the caller stack,
+captured continuation, delivered value, branch, and scope to control work.
+Stack validation precedes one checked reservation of the resume delimiter and
+all rebased captured-layer orders. The terminal transition then publishes the
+resume delimiter, encoded reset frames, rebased delimiters, captured sequence,
+and delivered value without further demand. This also removes the old partial
+publication in which the resume delimiter was pushed before stack validation.
+A promised caller-stack fixture forces the ordering and observes no delimiter
+or order allocation until resumption; the continuation suites cover nested
+and repeated successful installation.
 
 ####### W5C.4b.4 — Initial fixpoint setup
 

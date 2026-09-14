@@ -1187,6 +1187,15 @@ fn assert_execution_root_inventory(
                 super::reset_stack::assert_machine_shape(stack);
                 assert_keyed_control_shape(disposition);
             }
+            ControlOperation::InstallCaptured {
+                stack,
+                captured,
+                value,
+            } => {
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &CapturedContinuation = captured;
+                let _: &RuntimeValueRoot = value;
+            }
             ControlOperation::Poisoned => {}
         }
     }
@@ -1772,10 +1781,10 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
     let expected = [
         ("value_key_in", 2),
         ("reset_stack_value_in", 3),
-        ("reset_frames_in", 3),
+        ("reset_frames_in", 2),
         ("reset_frames_from_value_in", 4),
-        ("with_reset_frames_in", 3),
-        ("replace_reset_frames", 4),
+        ("with_reset_frames_in", 2),
+        ("replace_reset_frames", 5),
         ("with_reset_stack_value_in", 3),
     ];
 
@@ -2441,6 +2450,85 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
     assert_eq!(task.next_continuation, 1);
     assert_eq!(task.next_control_order, 1);
     assert!(task.continuations.is_empty());
+}
+
+#[test]
+fn captured_control_installation_waits_before_publishing_its_resume_layer() {
+    let values = crate::core::test_value_factory();
+    let stack = PromisedValue::new(&values, "captured caller reset stack");
+    let mut task = EffectTask::new(
+        &values,
+        eval::constant_effect(
+            &values,
+            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+        ),
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("captured-control fixture should construct");
+    let mut branch = task
+        .execution
+        .work
+        .branch()
+        .expect("fresh task should retain a branch")
+        .clone();
+    branch.state = values.construct_runtime_value_root(|access| {
+        Value::Dict(Dict::new_sync().insert(
+            task.tags.continuation_state.clone(),
+            Value::Promised(stack.duplicate_in(access)),
+        ))
+    });
+    let serialized =
+        values.construct_runtime_value_root(|access| Value::Promised(stack.duplicate_in(access)));
+    let value = values.construct_runtime_value_root(|_| Value::binary_from_text("resumed"));
+    task.execution.work = MachineWork::Outcome {
+        outcome: BranchOutcome::Cancelled,
+        scope_depth: 0,
+    };
+    task.execution.controlling = Some(ControlWork::install_captured(
+        serialized,
+        CapturedContinuation {
+            sequence: Vec::new(),
+            delimiters: Vec::new(),
+            reset_frames: Vec::new(),
+        },
+        value,
+        branch,
+        0,
+    ));
+
+    loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                assert!(matches!(
+                    blocked.dependency,
+                    Some(WorkDependency::Promise(_))
+                ));
+                break;
+            }
+            _ => panic!("captured installation did not block"),
+        }
+    }
+    assert_eq!(task.next_control_order, 1);
+    assert!(task.continuations.is_empty());
+    let branch = task
+        .execution
+        .active_branch()
+        .expect("blocked branch retained");
+    assert!(branch.control.sequence.is_empty());
+    assert!(branch.control.delimiters.is_empty());
+
+    crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
+        .expect("caller stack should publish once");
+    let TaskOutcome::Complete(result) = task.run().expect("installation should resume") else {
+        panic!("installation should complete")
+    };
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::binary_from_text("resumed")
+    );
+    assert_eq!(task.next_control_order, 2);
 }
 
 fn assert_fixpoint_root_inventory(

@@ -518,66 +518,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         Ok(Some(restarted))
     }
 
-    fn install_captured_control(
-        &mut self,
-        context: &EvaluationPollContext,
-        branch: &mut Branch<S>,
-        captured: &CapturedContinuation,
-        scope_depth: usize,
-    ) -> Result<(), TaskHalt> {
-        let mut layers = captured
-            .reset_frames
-            .iter()
-            .cloned()
-            .map(CapturedLayer::Reset)
-            .chain(
-                captured
-                    .delimiters
-                    .iter()
-                    .cloned()
-                    .map(CapturedLayer::Delimiter),
-            )
-            .collect::<Vec<_>>();
-        layers.sort_by_key(CapturedLayer::order);
-
-        let mut reset_frames = context.evaluate(&self.eval_context, |evaluator| {
-            let branch_state = evaluator.project_root(&branch.state);
-            reset_frames_in(evaluator, &branch_state, &self.tags.continuation_state)
-        })?;
-        let next_order = self
-            .next_control_order
-            .checked_add(layers.len())
-            .ok_or_else(|| TaskHalt::new("reflection control order exhausted"))?;
-        let mut delimiters = Vec::new();
-        for (order, layer) in (self.next_control_order..).zip(layers) {
-            match layer {
-                CapturedLayer::Reset(mut frame) => {
-                    frame.scope_depth = scope_depth;
-                    frame.order = order;
-                    reset_frames.push(frame);
-                }
-                CapturedLayer::Delimiter(mut delimiter) => {
-                    delimiter.rebase(scope_depth, order);
-                    delimiters.push(delimiter);
-                }
-            }
-        }
-        let state = context.evaluate(&self.eval_context, |evaluator| {
-            let branch_state = evaluator.project_root(&branch.state);
-            with_reset_frames_in(
-                evaluator,
-                branch_state,
-                &self.tags.continuation_state,
-                &reset_frames,
-            )
-            .map(|state| evaluator.root_value(state))
-        })?;
-        self.next_control_order = next_order;
-        branch.state = state;
-        branch.control.delimiters.extend(delimiters);
-        Ok(())
-    }
-
     pub(super) fn run(&mut self) -> Result<TaskOutcome, TaskHalt> {
         loop {
             match self.poll(256) {
@@ -1268,6 +1208,119 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         key,
                         stack,
                         disposition,
+                    };
+                    ControlStep::Failed(controlling, error)
+                }
+            },
+            ControlOperation::InstallCaptured {
+                mut stack,
+                captured,
+                value,
+            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                ResetStackPoll::Ready(decoded) => {
+                    let mut layers = captured
+                        .reset_frames
+                        .iter()
+                        .cloned()
+                        .map(CapturedLayer::Reset)
+                        .chain(
+                            captured
+                                .delimiters
+                                .iter()
+                                .cloned()
+                                .map(CapturedLayer::Delimiter),
+                        )
+                        .collect::<Vec<_>>();
+                    layers.sort_by_key(CapturedLayer::order);
+                    let allocation_count = match layers.len().checked_add(1) {
+                        Some(count) => count,
+                        None => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(controlling.branch, controlling.scope_depth),
+                                TaskHalt::new("reflection control order exhausted"),
+                            );
+                        }
+                    };
+                    let next_order = match self.next_control_order.checked_add(allocation_count) {
+                        Some(order) => order,
+                        None => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(controlling.branch, controlling.scope_depth),
+                                TaskHalt::new("reflection control order exhausted"),
+                            );
+                        }
+                    };
+                    let resume_order = self.next_control_order;
+                    let mut frames = decoded.frames;
+                    let mut delimiters = Vec::new();
+                    for (order, layer) in ((resume_order + 1)..).zip(layers) {
+                        match layer {
+                            CapturedLayer::Reset(mut frame) => {
+                                frame.scope_depth = controlling.scope_depth;
+                                frame.order = order;
+                                frames.push(frame);
+                            }
+                            CapturedLayer::Delimiter(mut delimiter) => {
+                                delimiter.rebase(controlling.scope_depth, order);
+                                delimiters.push(delimiter);
+                            }
+                        }
+                    }
+                    let mut branch = controlling.branch;
+                    let caller_sequence = std::mem::take(&mut branch.control.sequence);
+                    branch.control.delimiters.push(Delimiter::Resume {
+                        outer_sequence: caller_sequence,
+                        scope_depth: controlling.scope_depth,
+                        order: resume_order,
+                    });
+                    let state = context.evaluate(&self.eval_context, |evaluator| {
+                        let state = evaluator.project_root(&branch.state);
+                        replace_reset_frames(
+                            evaluator,
+                            state,
+                            &self.tags.continuation_state,
+                            &frames,
+                        )
+                    });
+                    self.next_control_order = next_order;
+                    branch.set_state(self.eval_context.values(), state);
+                    branch.control.delimiters.extend(delimiters);
+                    branch.control.sequence = captured.sequence;
+                    ControlStep::Complete(MachineWork::deliver_root(
+                        value,
+                        branch,
+                        controlling.scope_depth,
+                    ))
+                }
+                ResetStackPoll::Continue => {
+                    controlling.operation = ControlOperation::InstallCaptured {
+                        stack,
+                        captured,
+                        value,
+                    };
+                    ControlStep::Continue(controlling)
+                }
+                ResetStackPoll::Pending(dependency) => {
+                    controlling.operation = ControlOperation::InstallCaptured {
+                        stack,
+                        captured,
+                        value,
+                    };
+                    ControlStep::Blocked(controlling, dependency)
+                }
+                ResetStackPoll::Yielded => {
+                    controlling.operation = ControlOperation::InstallCaptured {
+                        stack,
+                        captured,
+                        value,
+                    };
+                    ControlStep::Yielded(controlling)
+                }
+                ResetStackPoll::Failed(error) => {
+                    controlling.operation = ControlOperation::InstallCaptured {
+                        stack,
+                        captured,
+                        value,
                     };
                     ControlStep::Failed(controlling, error)
                 }
@@ -2032,16 +2085,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .get(&id)
                     .cloned()
                     .ok_or_else(|| TaskHalt::new("unknown reflection continuation"))?;
-                let order = self.allocate_control_order()?;
-                let caller_sequence = std::mem::take(&mut branch.control.sequence);
-                branch.control.delimiters.push(Delimiter::Resume {
-                    outer_sequence: caller_sequence,
-                    scope_depth,
-                    order,
-                });
-                self.install_captured_control(context, &mut branch, &captured, scope_depth)?;
-                branch.control.sequence = captured.sequence.clone();
-                MachineWork::deliver_root(value, branch, scope_depth)
+                let stack = context.evaluate(&self.eval_context, |evaluator| {
+                    reset_stack_root_in(evaluator, &branch.state, &self.tags.continuation_state)
+                })?;
+                return Ok(MachineStep::Control(Box::new(
+                    ControlWork::install_captured(stack, captured, value, branch, scope_depth),
+                )));
             }
             Request::ExitSuccess => {
                 return Ok(MachineStep::Exit(ExitIntent::Success));
@@ -3436,6 +3485,11 @@ enum ControlOperation {
         stack: ResetStackMachine,
         disposition: KeyedControl,
     },
+    InstallCaptured {
+        stack: ResetStackMachine,
+        captured: CapturedContinuation,
+        value: RuntimeValueRoot,
+    },
     Poisoned,
 }
 
@@ -3484,6 +3538,24 @@ impl<S: TaskSpecialization> ControlWork<S> {
     fn poisoned(branch: Branch<S>, scope_depth: usize) -> Self {
         Self {
             operation: ControlOperation::Poisoned,
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn install_captured(
+        stack: RuntimeValueRoot,
+        captured: CapturedContinuation,
+        value: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            operation: ControlOperation::InstallCaptured {
+                stack: ResetStackMachine::new(stack),
+                captured,
+                value,
+            },
             branch,
             scope_depth,
         }
