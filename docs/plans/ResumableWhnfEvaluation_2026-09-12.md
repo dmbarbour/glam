@@ -2485,6 +2485,22 @@ Repairs required before closing this checkpoint:
    existing observation-epoch subscribe-and-recheck protocol so a mutation
    racing validation or re-registration cannot be lost.
 
+Implementation checkpoints:
+
+- **W5C.3c.1 — Complete (2026-09-14): resumable store boundary and committed
+  standalone reads.** Heap and volume get/set/rewrite operations now begin
+  only after resumable key conversion finishes. Standalone reads retain their
+  atomic snapshot without a retry checkpoint. Forced lazy suspension followed
+  by both disjoint and overlapping publication proves that heap and volume
+  reads return the original value without replay; the child-task regression
+  which exposed the coarse wake loop now completes.
+- **W5C.3c.2 — Pending: precise validation of suspended transactions.** Add the
+  read-only host validation boundary, retain every observation needed across
+  alternatives, and make a broad wake restart only a conflicting attempt.
+- **W5C.3c.3 — Pending: matrix and documentation closeout.** Exercise exact,
+  fingerprint, coarse, specialization, retryable-divergence, and
+  validation/re-registration orderings before marking W5C.3c complete.
+
 The primary forced-order verification matrix is:
 
 | Attempt state | Concurrent event | Required outcome |

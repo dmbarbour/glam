@@ -632,7 +632,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
 const EXPECTED_OCCURRENCES: usize = 278;
-const EXPECTED_FINGERPRINT: u64 = 5_974_682_478_390_928_480;
+const EXPECTED_FINGERPRINT: u64 = 4_505_261_029_275_298_577;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 95),
     (Signal::EvalLazy, 2),

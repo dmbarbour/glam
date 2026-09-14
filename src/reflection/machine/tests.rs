@@ -79,6 +79,30 @@ struct CountingLauncher {
     builds: Arc<AtomicUsize>,
 }
 
+struct SnapshotOrderingLauncher {
+    inner: Arc<dyn ReflectionTaskLauncher>,
+    host: Arc<TestHost>,
+    expected_snapshots: Arc<[usize]>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ReflectionTaskLauncher for SnapshotOrderingLauncher {
+    fn build(
+        &self,
+        context: EvalContext,
+        effect: Value,
+        result_policy: ReflectionTaskResultPolicy,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        let index = self.next.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(
+            self.host.callback_probe_count(CallbackProbeKind::Snapshot),
+            self.expected_snapshots[index],
+            "path demand {index} must complete before its host snapshot"
+        );
+        self.inner.build(context, effect, result_policy)
+    }
+}
+
 impl ReflectionTaskLauncher for CountingLauncher {
     fn build(
         &self,
@@ -426,6 +450,29 @@ impl TestHost {
 
     fn heap(&self) -> PublicValue {
         self.state.lock().unwrap().store.root().clone()
+    }
+
+    fn replace_heap(&self, heap: PublicValue) {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.store.replace_root(heap);
+            state.generation += 1;
+        }
+        self.publish_runtime_observation();
+    }
+
+    fn replace_volume(&self, volume: VolumeId, value: PublicValue) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let mut journal = StoreJournal::new(state.store.snapshot());
+            journal.write_volume(volume, Vec::new(), value);
+            assert_eq!(
+                state.store.try_commit(&journal),
+                StoreCommitResult::Committed
+            );
+            state.generation += 1;
+        }
+        self.publish_runtime_observation();
     }
 
     fn diagnostics(&self) -> Vec<Diagnostic> {
@@ -1403,6 +1450,7 @@ fn assert_state_path_root_inventory(
         StatePathOperation::SetUpdate(computation) => {
             let _: &crate::eval::whnf::WhnfComputation = computation;
         }
+        StatePathOperation::Poisoned => {}
     }
 
     match after {
@@ -1413,6 +1461,20 @@ fn assert_state_path_root_inventory(
             let _: &RuntimeValueRoot = state;
             let _: &RuntimeValueRoot = value;
         }
+        StatePathAfterKeys::Store(operation) => match operation {
+            StorePathOperation::HeapGet => {}
+            StorePathOperation::HeapSet(value) | StorePathOperation::HeapRewrite(value) => {
+                let _: &RuntimeValueRoot = value;
+            }
+            StorePathOperation::VolumeGet(volume) => {
+                let _: &VolumeId = volume;
+            }
+            StorePathOperation::VolumeSet(volume, value)
+            | StorePathOperation::VolumeRewrite(volume, value) => {
+                let _: &VolumeId = volume;
+                let _: &RuntimeValueRoot = value;
+            }
+        },
     }
 
     let ValuePathMachine {
@@ -2404,6 +2466,298 @@ fn task_state_paths_preserve_empty_missing_and_non_dictionary_semantics() {
         error
             .to_string()
             .contains("state path traverses a non-dictionary value")
+    );
+}
+
+#[test]
+fn heap_paths_complete_before_host_snapshots_and_commits() {
+    let (assembler, effect) = compile_effect(
+        ".heap.set (anno { refl:(.r ()) } ['value]) \"initial\" =>> .heap.rewrite (anno { refl:(.r ()) } ['value]) (\\_old -> \"ready\") =>> .heap.get (anno { refl:(.r ()) } ['value])",
+    );
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            host: host.clone(),
+            expected_snapshots: Arc::from([0, 1, 2]),
+            next: builds.clone(),
+        }))
+        .expect("fresh heap-path fixture should accept a launcher");
+    let mut task = EffectTask::new_owned_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        context,
+    )
+    .expect("heap-path fixture should build");
+
+    let TaskOutcome::Complete(value) = task.run().expect("heap paths should resume") else {
+        panic!("heap-path fixture should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+    assert_eq!(builds.load(Ordering::Acquire), 3);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 3);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Commit), 2);
+}
+
+#[test]
+fn transactional_heap_paths_suspend_before_the_cut_snapshot_is_observed() {
+    let (assembler, effect) = compile_effect(
+        ".cut (.heap.set (anno { refl:(.r ()) } ['value]) \"ready\" =>> .heap.get (anno { refl:(.r ()) } ['value]))",
+    );
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            host: host.clone(),
+            expected_snapshots: Arc::from([1, 1]),
+            next: builds.clone(),
+        }))
+        .expect("fresh transactional-path fixture should accept a launcher");
+    let mut task = EffectTask::new_owned_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        context,
+    )
+    .expect("transactional-path fixture should build");
+
+    let TaskOutcome::Complete(value) = task.run().expect("transactional paths should resume")
+    else {
+        panic!("transactional-path fixture should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+    assert_eq!(builds.load(Ordering::Acquire), 2);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 1);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Commit), 1);
+}
+
+#[test]
+fn volume_paths_complete_before_host_snapshots_and_commits() {
+    let assembler = Assembler::default();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let volume = host
+        .state
+        .lock()
+        .unwrap()
+        .store
+        .create_volume(assembler.values().empty_dict())
+        .unwrap();
+    let module = assembler
+        .module(["reflection_volume_paths"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nrun = \\cap -> cap.set (anno { refl:(.r ()) } ['value]) \"initial\" =>> cap.rewrite (anno { refl:(.r ()) } ['value]) (\\_old -> \"ready\") =>> cap.get (anno { refl:(.r ()) } ['value])\n",
+        )
+        .build()
+        .expect("volume path fixture should compile");
+    let run = assembler
+        .get(module.value(), "run")
+        .expect("volume path fixture should define run");
+    let effect = assembler
+        .apply(&run, [volume_effects(&assembler.core_values(), volume)])
+        .expect("volume path fixture should apply");
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            host: host.clone(),
+            expected_snapshots: Arc::from([0, 1, 2]),
+            next: builds.clone(),
+        }))
+        .expect("fresh volume-path fixture should accept a launcher");
+    let mut task = EffectTask::new_owned_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        context,
+    )
+    .expect("volume-path fixture should build");
+
+    let TaskOutcome::Complete(value) = task.run().expect("volume paths should resume") else {
+        panic!("volume-path fixture should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+    assert_eq!(builds.load(Ordering::Acquire), 3);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 3);
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Commit), 2);
+}
+
+#[test]
+fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
+    for (label, replacement) in [
+        (
+            "disjoint",
+            [("observed", "old"), ("unrelated", "changed")].as_slice(),
+        ),
+        ("overlapping", [("observed", "new")].as_slice()),
+    ] {
+        let assembler = Assembler::default();
+        let (_, build_effect) = compile_effect_with_runtime(
+            &assembler.evaluation_runtime(),
+            "\\x -> .heap.get ['observed] >>= (\\seen -> .r x >>= (\\value -> (value == \"ready\") =>> .r seen))",
+        );
+        let gate = public_value(
+            &assembler.core_values(),
+            Value::Lazy(LazyValue::from_reflection_gate(
+                &assembler.core_values(),
+                Value::Number(Number::from_u64(0)),
+                Value::binary_from_text("ready"),
+            )),
+        );
+        let effect = assembler
+            .apply(&build_effect, [gate])
+            .expect("standalone-read fixture should apply");
+        let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+        host.replace_heap(public_record(
+            &assembler,
+            [("observed", assembler.values().text("old"))],
+        ));
+        let mut task = EffectTask::new(
+            &assembler.core_values(),
+            effect.clone_core_for_test(),
+            TestEffects,
+            host.clone(),
+        )
+        .expect("standalone-read fixture should build");
+
+        let blocked = loop {
+            match task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Blocked(blocked) => break blocked,
+                EffectTaskPoll::Complete(_) => {
+                    panic!("{label} publication fixture should suspend after its read")
+                }
+                EffectTaskPoll::Failed(error) => panic!("{label} fixture failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("{label} fixture was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
+            }
+        };
+        let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
+            panic!("{label} fixture should retain its exact lazy dependency")
+        };
+        assert!(
+            blocked.observed_generation.is_none(),
+            "a successful standalone read must not retain a retry generation"
+        );
+        assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 1);
+
+        host.replace_heap(public_record(
+            &assembler,
+            replacement
+                .iter()
+                .map(|(key, value)| (*key, assembler.values().text(*value))),
+        ));
+        task.eval_context.complete_wait(&wait);
+
+        let value = loop {
+            match task.poll(512) {
+                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::Complete(value) => break value,
+                EffectTaskPoll::Blocked(_) => panic!("{label} fixture remained blocked"),
+                EffectTaskPoll::Failed(error) => panic!("{label} fixture failed: {error}"),
+                EffectTaskPoll::Cancelled => panic!("{label} fixture was cancelled"),
+                EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
+            }
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"old".as_slice());
+        assert_eq!(
+            host.callback_probe_count(CallbackProbeKind::Snapshot),
+            1,
+            "{label} publication must not replay the committed read"
+        );
+    }
+}
+
+#[test]
+fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
+    let assembler = Assembler::default();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let volume = host
+        .state
+        .lock()
+        .unwrap()
+        .store
+        .create_volume(assembler.values().text("old"))
+        .unwrap();
+    let module = assembler
+        .module(["standalone_volume_snapshot"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nrun = \\cap gate -> cap.get [] >>= (\\seen -> .r gate >>= (\\value -> (value == \"ready\") =>> .r seen))\n",
+        )
+        .build()
+        .expect("standalone-volume fixture should compile");
+    let run = assembler
+        .get(module.value(), "run")
+        .expect("standalone-volume fixture should define run");
+    let gate = public_value(
+        &assembler.core_values(),
+        Value::Lazy(LazyValue::from_reflection_gate(
+            &assembler.core_values(),
+            Value::Number(Number::from_u64(0)),
+            Value::binary_from_text("ready"),
+        )),
+    );
+    let effect = assembler
+        .apply(
+            &run,
+            [volume_effects(&assembler.core_values(), volume), gate],
+        )
+        .expect("standalone-volume fixture should apply");
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+    )
+    .expect("standalone-volume fixture should build");
+
+    let blocked = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            EffectTaskPoll::Complete(_) => {
+                panic!("standalone-volume fixture should suspend after its read")
+            }
+            EffectTaskPoll::Failed(error) => panic!("standalone-volume fixture failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("standalone-volume fixture was cancelled"),
+            EffectTaskPoll::Exit(_) => {
+                panic!("standalone-volume fixture unexpectedly voted to exit")
+            }
+        }
+    };
+    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
+        panic!("standalone-volume fixture should retain its exact lazy dependency")
+    };
+    assert!(blocked.observed_generation.is_none());
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 1);
+
+    host.replace_volume(volume, assembler.values().text("new"));
+    task.eval_context.complete_wait(&wait);
+
+    let value = loop {
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Complete(value) => break value,
+            EffectTaskPoll::Blocked(_) => panic!("standalone-volume fixture remained blocked"),
+            EffectTaskPoll::Failed(error) => panic!("standalone-volume fixture failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("standalone-volume fixture was cancelled"),
+            EffectTaskPoll::Exit(_) => {
+                panic!("standalone-volume fixture unexpectedly voted to exit")
+            }
+        }
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"old".as_slice());
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+        1,
+        "overlapping publication must not replay the committed volume read"
     );
 }
 

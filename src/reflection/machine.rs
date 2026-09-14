@@ -1050,6 +1050,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         let after = after
                             .take()
                             .expect("key path continuation must remain owned");
+                        if let StatePathAfterKeys::Store(operation) = after {
+                            return self.store_path_step(
+                                operation,
+                                keys,
+                                pathing.branch,
+                                pathing.scope_depth,
+                            );
+                        }
                         pathing.operation = match after {
                             StatePathAfterKeys::Get { state } => StatePathOperation::Get(
                                 ValuePathMachine::new(state, Arc::from(keys)),
@@ -1066,6 +1074,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                     path,
                                     value,
                                 }
+                            }
+                            StatePathAfterKeys::Store(_) => {
+                                unreachable!("store paths returned above")
                             }
                         };
                         StatePathStep::Continue(pathing)
@@ -1180,7 +1191,212 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     )),
                 ),
             },
+            StatePathOperation::Poisoned => {
+                unreachable!("failed state-path work cannot be resumed before error handling")
+            }
         }
+    }
+
+    fn store_path_step(
+        &mut self,
+        operation: StorePathOperation,
+        path: Vec<Key>,
+        mut branch: Branch<S>,
+        scope_depth: usize,
+    ) -> StatePathStep<S> {
+        let result = match operation {
+            StorePathOperation::HeapGet => {
+                let checkpoint = branch.retry_candidate();
+                let values =
+                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
+                let heap = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    let observed = transaction.store.observe_read(&path);
+                    let heap = values.clone_core(&transaction.store.view());
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
+                    heap
+                } else {
+                    let snapshot = self.host.snapshot();
+                    values.clone_core(snapshot.store().root())
+                };
+                let heap = match heap {
+                    Ok(heap) => heap,
+                    Err(error) => {
+                        return StatePathStep::Failed(
+                            StatePathWork::poisoned(branch, scope_depth),
+                            TaskHalt::from(error),
+                        );
+                    }
+                };
+                let value = lazy_value_path_root(&self.eval_context, heap, &path);
+                return StatePathStep::Complete(MachineWork::deliver_root(
+                    value,
+                    branch,
+                    scope_depth,
+                ));
+            }
+            StorePathOperation::HeapSet(value) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .write(path, PublicValue::from_runtime_root(value));
+                    return StatePathStep::Complete(MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    ));
+                }
+                let snapshot = self.host.snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                store.write(path, PublicValue::from_runtime_root(value));
+                self.host.commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    S::Journal::default(),
+                ))
+            }
+            StorePathOperation::HeapRewrite(updater) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .rewrite(path, PublicValue::from_runtime_root(updater));
+                    return StatePathStep::Complete(MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    ));
+                }
+                let snapshot = self.host.snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                store.rewrite(path, PublicValue::from_runtime_root(updater));
+                self.host.commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    S::Journal::default(),
+                ))
+            }
+            StorePathOperation::VolumeGet(volume) => {
+                let checkpoint = branch.retry_candidate();
+                let root = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    let observed = transaction.store.observe_volume_read(volume, &path);
+                    let root = transaction.store.volume_view(volume);
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
+                    root
+                } else {
+                    let snapshot = self.host.snapshot();
+                    snapshot.store().volume(volume).cloned()
+                };
+                let value = match root {
+                    Some(root) => {
+                        let values = crate::api::Values::from_core_factory(
+                            self.eval_context.values().clone(),
+                        );
+                        let root = match values.clone_core(&root) {
+                            Ok(root) => root,
+                            Err(error) => {
+                                return StatePathStep::Failed(
+                                    StatePathWork::poisoned(branch, scope_depth),
+                                    TaskHalt::from(error),
+                                );
+                            }
+                        };
+                        lazy_value_path_root(&self.eval_context, root, &path)
+                    }
+                    None => self
+                        .eval_context
+                        .values()
+                        .construct_runtime_value_root(|access| {
+                            Value::Lazy(LazyValue::error_in(
+                                access,
+                                format!("reflection volume {} has been revoked", volume.get()),
+                            ))
+                        }),
+                };
+                return StatePathStep::Complete(MachineWork::deliver_root(
+                    value,
+                    branch,
+                    scope_depth,
+                ));
+            }
+            StorePathOperation::VolumeSet(volume, value) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction.store.write_volume(
+                        volume,
+                        path,
+                        PublicValue::from_runtime_root(value),
+                    );
+                    return StatePathStep::Complete(MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    ));
+                }
+                let snapshot = self.host.snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                store.write_volume(volume, path, PublicValue::from_runtime_root(value));
+                self.host.commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    S::Journal::default(),
+                ))
+            }
+            StorePathOperation::VolumeRewrite(volume, updater) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction.store.rewrite_volume(
+                        volume,
+                        path,
+                        PublicValue::from_runtime_root(updater),
+                    );
+                    return StatePathStep::Complete(MachineWork::deliver(
+                        self.eval_context.values(),
+                        self.eval_context.values().unit(),
+                        branch,
+                        scope_depth,
+                    ));
+                }
+                let snapshot = self.host.snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                store.rewrite_volume(volume, path, PublicValue::from_runtime_root(updater));
+                self.host.commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    S::Journal::default(),
+                ))
+            }
+        };
+        StatePathStep::Complete(match result {
+            CommitResult::Committed => {
+                branch.retry = None;
+                MachineWork::deliver(
+                    self.eval_context.values(),
+                    self.eval_context.values().unit(),
+                    branch,
+                    scope_depth,
+                )
+            }
+            CommitResult::Conflict => MachineWork::Drive {
+                branch,
+                scope_depth,
+            },
+            CommitResult::MissingVolume(volume) => {
+                return StatePathStep::Failed(
+                    StatePathWork::poisoned(branch, scope_depth),
+                    missing_volume_error(volume),
+                );
+            }
+            CommitResult::Closed => MachineWork::Outcome {
+                outcome: BranchOutcome::Cancelled,
+                scope_depth,
+            },
+        })
     }
 
     fn complete_decode_phase(
@@ -1496,250 +1712,46 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ))));
             }
             Request::HeapGet(path) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                let checkpoint = branch.retry_candidate();
-                let values =
-                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
-                let heap = if let Some(transaction) = branch.transaction.as_mut() {
-                    let generation = transaction.snapshot.generation();
-                    let observed = transaction.store.observe_read(&path);
-                    let heap = values.clone_core(&transaction.store.view())?;
-                    if observed {
-                        branch.observe(checkpoint, generation);
-                    }
-                    heap
-                } else {
-                    let snapshot = self.host.snapshot();
-                    branch.observe(checkpoint, snapshot.generation());
-                    values.clone_core(snapshot.store().root())?
-                };
-                let value = lazy_value_path_root(&self.eval_context, heap, &path);
-                MachineWork::deliver_root(value, branch, scope_depth)
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::heap_get(
+                    path,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::HeapSet(path, value) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .write(path, PublicValue::from_runtime_root(value));
-                    MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    )
-                } else {
-                    let snapshot = self.host.snapshot();
-                    let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.write(path, PublicValue::from_runtime_root(value));
-                    let commit =
-                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
-                    match self.host.commit(commit) {
-                        CommitResult::Committed => {
-                            branch.retry = None;
-                            MachineWork::deliver(
-                                self.eval_context.values(),
-                                self.eval_context.values().unit(),
-                                branch,
-                                scope_depth,
-                            )
-                        }
-                        CommitResult::Conflict => MachineWork::Drive {
-                            branch,
-                            scope_depth,
-                        },
-                        CommitResult::MissingVolume(volume) => {
-                            return Err(missing_volume_error(volume));
-                        }
-                        CommitResult::Closed => MachineWork::Outcome {
-                            outcome: BranchOutcome::Cancelled,
-                            scope_depth,
-                        },
-                    }
-                }
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::heap_set(
+                    path,
+                    value,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::HeapRewrite(path, updater) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .rewrite(path, PublicValue::from_runtime_root(updater));
-                    MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    )
-                } else {
-                    let snapshot = self.host.snapshot();
-                    let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.rewrite(path, PublicValue::from_runtime_root(updater));
-                    let commit =
-                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
-                    match self.host.commit(commit) {
-                        CommitResult::Committed => {
-                            branch.retry = None;
-                            MachineWork::deliver(
-                                self.eval_context.values(),
-                                self.eval_context.values().unit(),
-                                branch,
-                                scope_depth,
-                            )
-                        }
-                        CommitResult::Conflict => MachineWork::Drive {
-                            branch,
-                            scope_depth,
-                        },
-                        CommitResult::MissingVolume(volume) => {
-                            return Err(missing_volume_error(volume));
-                        }
-                        CommitResult::Closed => MachineWork::Outcome {
-                            outcome: BranchOutcome::Cancelled,
-                            scope_depth,
-                        },
-                    }
-                }
+                return Ok(MachineStep::StatePath(Box::new(
+                    StatePathWork::heap_rewrite(path, updater, branch, scope_depth),
+                )));
             }
             Request::VolumeGet(volume, path) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                let checkpoint = branch.retry_candidate();
-                let root = if let Some(transaction) = branch.transaction.as_mut() {
-                    let generation = transaction.snapshot.generation();
-                    let observed = transaction.store.observe_volume_read(volume, &path);
-                    let root = transaction.store.volume_view(volume);
-                    if observed {
-                        branch.observe(checkpoint, generation);
-                    }
-                    root
-                } else {
-                    let snapshot = self.host.snapshot();
-                    branch.observe(checkpoint, snapshot.generation());
-                    snapshot.store().volume(volume).cloned()
-                };
-                let value = match root {
-                    Some(root) => {
-                        let values = crate::api::Values::from_core_factory(
-                            self.eval_context.values().clone(),
-                        );
-                        lazy_value_path_root(&self.eval_context, values.clone_core(&root)?, &path)
-                    }
-                    None => self
-                        .eval_context
-                        .values()
-                        .construct_runtime_value_root(|access| {
-                            Value::Lazy(LazyValue::error_in(
-                                access,
-                                format!("reflection volume {} has been revoked", volume.get()),
-                            ))
-                        }),
-                };
-                MachineWork::deliver_root(value, branch, scope_depth)
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::volume_get(
+                    volume,
+                    path,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::VolumeSet(volume, path, value) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction.store.write_volume(
-                        volume,
-                        path,
-                        PublicValue::from_runtime_root(value),
-                    );
-                    MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    )
-                } else {
-                    let snapshot = self.host.snapshot();
-                    let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.write_volume(volume, path, PublicValue::from_runtime_root(value));
-                    let commit =
-                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
-                    match self.host.commit(commit) {
-                        CommitResult::Committed => {
-                            branch.retry = None;
-                            MachineWork::deliver(
-                                self.eval_context.values(),
-                                self.eval_context.values().unit(),
-                                branch,
-                                scope_depth,
-                            )
-                        }
-                        CommitResult::Conflict => MachineWork::Drive {
-                            branch,
-                            scope_depth,
-                        },
-                        CommitResult::MissingVolume(volume) => {
-                            return Err(missing_volume_error(volume));
-                        }
-                        CommitResult::Closed => MachineWork::Outcome {
-                            outcome: BranchOutcome::Cancelled,
-                            scope_depth,
-                        },
-                    }
-                }
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::volume_set(
+                    volume,
+                    path,
+                    value,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::VolumeRewrite(volume, path, updater) => {
-                let path = context.evaluate(&self.eval_context, |evaluator| {
-                    let path = evaluator.project_root(&path);
-                    eval::eval_key_path_list_in(evaluator, &path).map_err(task_eval_error)
-                })?;
-                if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction.store.rewrite_volume(
-                        volume,
-                        path,
-                        PublicValue::from_runtime_root(updater),
-                    );
-                    MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    )
-                } else {
-                    let snapshot = self.host.snapshot();
-                    let mut store = StoreJournal::new(snapshot.store().clone());
-                    store.rewrite_volume(volume, path, PublicValue::from_runtime_root(updater));
-                    let commit =
-                        TaskCommit::new(store, snapshot.extra().clone(), S::Journal::default());
-                    match self.host.commit(commit) {
-                        CommitResult::Committed => {
-                            branch.retry = None;
-                            MachineWork::deliver(
-                                self.eval_context.values(),
-                                self.eval_context.values().unit(),
-                                branch,
-                                scope_depth,
-                            )
-                        }
-                        CommitResult::Conflict => MachineWork::Drive {
-                            branch,
-                            scope_depth,
-                        },
-                        CommitResult::MissingVolume(volume) => {
-                            return Err(missing_volume_error(volume));
-                        }
-                        CommitResult::Closed => MachineWork::Outcome {
-                            outcome: BranchOutcome::Cancelled,
-                            scope_depth,
-                        },
-                    }
-                }
+                return Ok(MachineStep::StatePath(Box::new(
+                    StatePathWork::volume_rewrite(volume, path, updater, branch, scope_depth),
+                )));
             }
             Request::Reset(key, operation) => {
                 let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
@@ -3156,6 +3168,7 @@ enum StatePathOperation {
         value: RuntimeValueRoot,
     },
     SetUpdate(WhnfComputation),
+    Poisoned,
 }
 
 enum StatePathAfterKeys {
@@ -3166,19 +3179,38 @@ enum StatePathAfterKeys {
         state: RuntimeValueRoot,
         value: RuntimeValueRoot,
     },
+    Store(StorePathOperation),
+}
+
+enum StorePathOperation {
+    HeapGet,
+    HeapSet(RuntimeValueRoot),
+    HeapRewrite(RuntimeValueRoot),
+    VolumeGet(VolumeId),
+    VolumeSet(VolumeId, RuntimeValueRoot),
+    VolumeRewrite(VolumeId, RuntimeValueRoot),
 }
 
 impl<S: TaskSpecialization> StatePathWork<S> {
-    fn get(path: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
-        let state = branch.state.clone();
+    fn keys(
+        path: RuntimeValueRoot,
+        after: StatePathAfterKeys,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
         Self {
             operation: StatePathOperation::Keys {
                 machine: Box::new(eval::KeyListMachine::unowned(path)),
-                after: Some(StatePathAfterKeys::Get { state }),
+                after: Some(after),
             },
             branch,
             scope_depth,
         }
+    }
+
+    fn get(path: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
+        let state = branch.state.clone();
+        Self::keys(path, StatePathAfterKeys::Get { state }, branch, scope_depth)
     }
 
     fn set(
@@ -3188,11 +3220,98 @@ impl<S: TaskSpecialization> StatePathWork<S> {
         scope_depth: usize,
     ) -> Self {
         let state = branch.state.clone();
+        Self::keys(
+            path,
+            StatePathAfterKeys::Set { state, value },
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn heap_get(path: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::HeapGet),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn heap_set(
+        path: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::HeapSet(value)),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn heap_rewrite(
+        path: RuntimeValueRoot,
+        updater: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::HeapRewrite(updater)),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn volume_get(
+        volume: VolumeId,
+        path: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::VolumeGet(volume)),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn volume_set(
+        volume: VolumeId,
+        path: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::VolumeSet(volume, value)),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn volume_rewrite(
+        volume: VolumeId,
+        path: RuntimeValueRoot,
+        updater: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(StorePathOperation::VolumeRewrite(volume, updater)),
+            branch,
+            scope_depth,
+        )
+    }
+
+    fn poisoned(branch: Branch<S>, scope_depth: usize) -> Self {
         Self {
-            operation: StatePathOperation::Keys {
-                machine: Box::new(eval::KeyListMachine::unowned(path)),
-                after: Some(StatePathAfterKeys::Set { state, value }),
-            },
+            operation: StatePathOperation::Poisoned,
             branch,
             scope_depth,
         }

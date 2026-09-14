@@ -456,7 +456,7 @@ impl RootPublicationOccurrence {
                 | "src/reflection/machine.rs::impl Branch < S >::new"
                 | "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation"
                 | "src/reflection/machine.rs::impl EffectTask < S >::interpret_decoded_drive"
-                | "src/reflection/machine.rs::impl EffectTask < S >::interpret_request"
+                | "src/reflection/machine.rs::impl EffectTask < S >::store_path_step"
                 | "src/reflection/machine.rs::lazy_value_path_root"
                 | "src/reflection/store.rs::apply_edit"
                 | "src/reflection/store.rs::apply_value_at_path"
@@ -795,7 +795,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine.rs::impl Branch < S >::set_state#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::interpret_request#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::lazy_value_path_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",
     "src/reflection/machine/tests.rs::captured_control_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
