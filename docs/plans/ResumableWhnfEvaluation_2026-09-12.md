@@ -2986,6 +2986,8 @@ promise resolves.
 
 ####### W5C.4b.5 — Fixpoint restart paths
 
+**Status: complete (2026-09-14).**
+
 Adapt `restart_fixpoint_at_scope` and every outcome path which may select it to
 return durable control work rather than synchronously calling fixpoint setup.
 Preserve the selected `FixRoot`, choice history, and inherited restart stack
@@ -2995,6 +2997,17 @@ same validation boundary used by initial setup has completed.
 Cover failed, retried, and completed alternatives, including a suspended reset
 stack during replay. Count promise creation, choice selection, and reset-stack
 publication so a resumed restart cannot allocate or publish either twice.
+
+Completion record: `restart_fixpoint_at_scope` now selects and transfers a
+matching root, choice history, and inherited restart stack into the same
+control-work path as initial setup. Cut, ordinary top-level, and retained
+search outcomes propagate that owner as `MachineStep::Control`; none can
+synchronously rebuild the fixpoint. The obsolete synchronous start helper and
+its nested stack decoder are removed. A promised entry-stack fixture forces a
+selected restart to block, verifies that its exact `FixRoot` and unchanged
+order counter remain owned, then resumes through one promise/order allocation
+and the original result. Existing alternative tests retain the nonempty choice
+history/replay matrix.
 
 ####### W5C.4b.6 — Delivery-time reset selection
 

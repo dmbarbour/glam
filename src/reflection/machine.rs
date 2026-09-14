@@ -434,66 +434,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }))
     }
 
-    fn start_fixpoint(
-        &mut self,
-        context: &EvaluationPollContext,
-        root: Arc<FixRoot<S>>,
-        choices: Vec<FixChoice>,
-    ) -> Result<MachineWork<S>, TaskHalt> {
-        let mut branch = root.entry.clone();
-        let (reset_stack, state) = context.evaluate(&self.eval_context, |evaluator| {
-            let branch_state = evaluator.project_root(&branch.state);
-            Ok::<_, TaskHalt>((
-                evaluator.root_value(reset_stack_value_in(
-                    evaluator,
-                    &branch_state,
-                    &self.tags.continuation_state,
-                )?),
-                evaluator.root_value(with_reset_frames_in(
-                    evaluator,
-                    branch_state,
-                    &self.tags.continuation_state,
-                    &[],
-                )?),
-            ))
-        })?;
-        let order = self.allocate_control_order()?;
-        let handle = PromisedValue::fixpoint(&self.eval_context, "reflection effect fixpoint")
-            .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let marker = branch.root_value(self.eval_context.values(), Value::Promised(handle.clone()));
-        let outer_control = std::mem::take(&mut branch.control);
-        branch.state = state;
-        let handle = self
-            .eval_context
-            .values()
-            .with_runtime_value_access(|access| handle.root_in(&access));
-        branch.active_fixes.push(ActiveFix {
-            root: root.clone(),
-            choices,
-            next_choice: 0,
-            handle: handle.clone(),
-        });
-        branch.control.sequence.push(Continuation::Fix(handle));
-        branch.control.delimiters.push(Delimiter::Restore {
-            outer: Box::new(outer_control),
-            reset_stack,
-            scope_depth: root.scope_depth,
-            order,
-        });
-        Ok(MachineWork::apply_roots(
-            root.function.clone(),
-            vec![marker],
-            branch,
-            root.scope_depth,
-        ))
-    }
-
     fn restart_fixpoint_at_scope(
         &mut self,
         context: &EvaluationPollContext,
         branch: &mut Branch<S>,
         scope_depth: usize,
-    ) -> Result<Option<MachineWork<S>>, TaskHalt> {
+    ) -> Result<Option<ControlWork<S>>, TaskHalt> {
         let Some(restart) = branch.fix_restarts.last() else {
             return Ok(None);
         };
@@ -510,12 +456,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .fix_restarts
             .pop()
             .expect("restart observed above must exist");
-        let mut restarted = self.start_fixpoint(context, restart.root, restart.choices)?;
-        restarted
-            .branch_mut()
-            .expect("fixpoint restart must retain its branch")
-            .fix_restarts = restart.inherited_restarts;
-        Ok(Some(restarted))
+        let stack = context.evaluate(&self.eval_context, |evaluator| {
+            reset_stack_root_in(
+                evaluator,
+                &restart.root.entry.state,
+                &self.tags.continuation_state,
+            )
+        })?;
+        Ok(Some(ControlWork::start_fixpoint_with_restarts(
+            stack,
+            restart.root,
+            restart.choices,
+            restart.inherited_restarts,
+        )))
     }
 
     pub(super) fn run(&mut self) -> Result<TaskOutcome, TaskHalt> {
@@ -2614,7 +2567,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(restarted) =
                     self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
                 {
-                    return Ok(MachineStep::Continue(restarted));
+                    return Ok(MachineStep::Control(Box::new(restarted)));
                 }
                 let frame = self
                     .execution
@@ -2723,7 +2676,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(restarted) =
                     self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
                 {
-                    return Ok(MachineStep::Continue(restarted));
+                    return Ok(MachineStep::Control(Box::new(restarted)));
                 }
                 let checkpoint = failed.retry.take().ok_or_else(|| {
                     TaskHalt::new("retryable reflection failure lost its observation")
@@ -2763,7 +2716,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     transaction,
                 ));
                 Ok(restarted
-                    .map(MachineStep::Continue)
+                    .map(|work| MachineStep::Control(Box::new(work)))
                     .unwrap_or_else(|| self.advance_isolated_search()))
             }
             BranchOutcome::Fork(left, right) => {
@@ -2780,7 +2733,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(restarted) =
                     self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
                 {
-                    return Ok(MachineStep::Continue(restarted));
+                    return Ok(MachineStep::Control(Box::new(restarted)));
                 }
                 let transaction = Self::isolated_transaction(&mut failed);
                 self.search
@@ -2791,7 +2744,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Some(restarted) =
                     self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
                 {
-                    return Ok(MachineStep::Continue(restarted));
+                    return Ok(MachineStep::Control(Box::new(restarted)));
                 }
                 let generation = failed
                     .transaction
@@ -3675,13 +3628,24 @@ impl<S: TaskSpecialization> ControlWork<S> {
         root: Arc<FixRoot<S>>,
         choices: Vec<FixChoice>,
     ) -> Self {
+        Self::start_fixpoint_with_restarts(stack, root, choices, Vec::new())
+    }
+
+    fn start_fixpoint_with_restarts(
+        stack: RuntimeValueRoot,
+        root: Arc<FixRoot<S>>,
+        choices: Vec<FixChoice>,
+        inherited_restarts: Vec<FixRestart<S>>,
+    ) -> Self {
+        let mut branch = root.entry.clone();
+        branch.fix_restarts = inherited_restarts;
         Self {
             operation: ControlOperation::StartFixpoint {
                 stack: ResetStackMachine::new(stack),
                 root: root.clone(),
                 choices,
             },
-            branch: root.entry.clone(),
+            branch,
             scope_depth: root.scope_depth,
         }
     }
@@ -5290,20 +5254,6 @@ fn reset_frames_value(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame])
             })
             .collect(),
     ))
-}
-
-fn with_reset_frames_in(
-    context: &EvaluatorStepContext<'_>,
-    state: Value,
-    continuation_state: &Key,
-    frames: &[ResetFrame],
-) -> Result<Value, TaskHalt> {
-    with_reset_stack_value_in(
-        context,
-        state,
-        continuation_state,
-        reset_frames_value(context, frames),
-    )
 }
 
 fn replace_reset_frames(

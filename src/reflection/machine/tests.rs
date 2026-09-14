@@ -1789,12 +1789,12 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
     let source = include_str!("../machine.rs");
     let expected = [
         ("value_key_in", 2),
-        ("reset_stack_value_in", 3),
+        ("reset_stack_value_in", 2),
         ("reset_frames_in", 2),
         ("reset_frames_from_value_in", 4),
-        ("with_reset_frames_in", 2),
+        ("with_reset_frames_in", 0),
         ("replace_reset_frames", 6),
-        ("with_reset_stack_value_in", 3),
+        ("with_reset_stack_value_in", 2),
     ];
 
     for (name, expected) in expected {
@@ -2595,6 +2595,99 @@ fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
     assert_eq!(
         result.clone_core_for_test(),
         Value::binary_from_text("fixed")
+    );
+    assert_eq!(task.next_control_order, 2);
+}
+
+#[test]
+fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["reflection_restart_test"])
+        .script(
+            "g",
+            "language g0\nimport 'std\nrefl.function = \\_loop -> .r \"restarted\"\n",
+        )
+        .build()
+        .expect("restart fixture should compile");
+    let function = assembler
+        .get(module.value(), "refl.function")
+        .expect("restart fixture should define its function")
+        .clone_core_for_test();
+    let values = assembler.core_values();
+    let stack = PromisedValue::new(&values, "restart entry stack");
+    let mut entry = Branch::<TestEffects>::new(&values, values.unit(), values.unit());
+    entry.state = values.construct_runtime_value_root(|access| {
+        Value::Dict(Dict::new_sync().insert(
+            Tags::new().continuation_state,
+            Value::Promised(stack.duplicate_in(access)),
+        ))
+    });
+    let root = Arc::new(FixRoot {
+        function: values.construct_runtime_value_root(|_| function),
+        entry,
+        scope_depth: 0,
+    });
+    let mut failed = root.entry.clone();
+    failed.fix_restarts.push(FixRestart {
+        root: root.clone(),
+        choices: Vec::new(),
+        inherited_restarts: Vec::new(),
+    });
+    let mut task = EffectTask::new(
+        &values,
+        eval::constant_effect(
+            &values,
+            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+        ),
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("restart control fixture should construct");
+    let poll_context = EvaluationPollContext::for_context(&task.eval_context);
+    let work = task
+        .restart_fixpoint_at_scope(&poll_context, &mut failed, 0)
+        .expect("restart selection should succeed")
+        .expect("matching restart should be selected");
+    task.execution.work = MachineWork::Outcome {
+        outcome: BranchOutcome::Cancelled,
+        scope_depth: 0,
+    };
+    task.execution.controlling = Some(work);
+
+    loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                assert!(matches!(
+                    blocked.dependency,
+                    Some(WorkDependency::Promise(_))
+                ));
+                break;
+            }
+            _ => panic!("unfulfilled restart stack did not block"),
+        }
+    }
+    assert_eq!(task.next_control_order, 1);
+    let ControlOperation::StartFixpoint { root: retained, .. } = &task
+        .execution
+        .controlling
+        .as_ref()
+        .expect("blocked restart must retain control work")
+        .operation
+    else {
+        panic!("blocked restart lost its selected fixpoint")
+    };
+    assert!(Arc::ptr_eq(retained, &root));
+
+    crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
+        .expect("restart stack should publish once");
+    let TaskOutcome::Complete(result) = task.run().expect("restart should resume") else {
+        panic!("restart should complete")
+    };
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::binary_from_text("restarted")
     );
     assert_eq!(task.next_control_order, 2);
 }
