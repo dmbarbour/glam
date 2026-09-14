@@ -2068,6 +2068,8 @@ contract; changing it requires an explicit lowering/topology explanation.
 
 ##### W4E.3 — Scheduler amplification repair
 
+**Status:** reassessment required as of 2026-09-14.
+
 Remove the measured superlinear selection behavior without weakening exact
 demand, cycle detection, or the temporary one-ordinary-machine-per-session
 rule by accident. Candidate changes include an authoritative O(1)
@@ -2086,6 +2088,21 @@ Make `NetWhnfMachine` consume a declared portion of the task's step budget
 only if W4E.1 shows that its existing cooperative-yield boundary contributes
 materially. A temporary experiment batching 64 progress outcomes did not
 resolve the regression, so a larger quantum alone is not an accepted repair.
+
+The first proposed repair—an authoritative O(1) per-session running-machine
+count—was implemented and measured, then reverted. The duplicate-symbol
+fixture remained at roughly 13 seconds. Retired work is removed from
+`work_by_session`, so the existing admission query does not scan the thousands
+of historical lazy tasks created over the whole assembly; the premise for the
+index was wrong for this workload. Do not reintroduce that index without new
+counter or profile evidence.
+
+The severe unbounded behavior is resolved by W4E.2. The residual regression is
+a bounded constant-factor cost: approximately the same net-driver work now
+passes through several thousand scheduled `NetWhnfMachine` polls. Before
+choosing another repair, decide whether W4E should accept that transitional
+cost until W6 removes the compatibility/admission boundary, or whether to add
+a narrower profile of machine claim, poll, release, and managed-access costs.
 
 ##### W4E.4 — Verification and plan reconciliation
 
