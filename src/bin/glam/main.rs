@@ -450,6 +450,98 @@ mod tests {
     }
 
     #[test]
+    fn logger_demand_resumes_failed_choice_before_reading_queued_input() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let mut resolver = None;
+        let assembler = Assembler::builder()
+            .evaluation_runtime(input.runtime.clone())
+            .reflection_environment(|environment| {
+                let (gate, gate_resolver) = environment.promise("logger stderr gate");
+                resolver = Some(gate_resolver);
+                environment.values().record([("gate", gate)])
+            })
+            .expect("logger gate environment should build")
+            .build()
+            .expect("logger gate assembler should build");
+        let module = assembler
+            .module(["logger_demand_resume"])
+            .script(
+                "g",
+                concat!(
+                    "language g0\n",
+                    "import 'std\n",
+                    "refl.effect = .env ['gate] >>= (\\gate -> .cut (.alt ",
+                    "(.write_stderr gate =>> .fail) ",
+                    "(.read_log >>= (\\_message -> .r ()))))\n",
+                ),
+            )
+            .build()
+            .expect("logger demand fixture should compile");
+        let effect = assembler
+            .get(module.value(), "refl.effect")
+            .expect("logger demand fixture should define its effect");
+        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fallback_values = fallback.clone();
+        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            fallback_values
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .push(diagnostic.message().to_owned());
+        });
+        let installation = supervisor.install().expect("logger should install");
+        let host = Arc::new(LoggerTaskHost::new(
+            input.clone(),
+            DiagnosticBus::for_runtime(&input.runtime),
+            assembler.reflection_environment_for_role("logger"),
+            assembler.clone(),
+        ));
+        let task = EffectRun::new(
+            &input.runtime,
+            &effect,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
+        .expect("logger demand fixture should schedule");
+
+        input.runtime.pump_until_stable();
+        assert!(matches!(
+            installation.lifecycle.status(),
+            glam::reflection::EffectLifecycleStatus::Blocked
+        ));
+        diagnostics.publish_local(Diagnostic::new(
+            &input.runtime.values(),
+            Severity::Info,
+            "queued while stderr demand is blocked",
+        ));
+        resolver
+            .take()
+            .expect("logger gate resolver should remain available")
+            .resolve(assembler.values().text("ABANDONED STDERR\n"))
+            .expect("logger stderr gate should resolve once");
+
+        input.runtime.pump_until_stable();
+        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
+        let mut remaining = RuntimeEventJournal::new(snapshot);
+        assert!(
+            remaining
+                .read(&input.diagnostic_reader)
+                .expect("logger input probe should match its runtime")
+                .is_none(),
+            "the resumed fallback branch must consume the queued diagnostic"
+        );
+        assert!(
+            fallback
+                .lock()
+                .expect("fallback collection mutex should not be poisoned")
+                .is_empty()
+        );
+        supervisor.finish(&installation);
+    }
+
+    #[test]
     fn recursive_logger_drains_input_queued_before_its_first_poll() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));

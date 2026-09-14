@@ -578,9 +578,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Complete(work) => self.execution.work = work,
                     ControlStep::Blocked(controlling, dependency) => {
                         self.execution.controlling = Some(controlling);
-                        self.blocked =
-                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
-                        return self.blocked_poll();
+                        let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
+                        if let Some(poll) = self.install_blocked(blocked) {
+                            return poll;
+                        }
                     }
                     ControlStep::Yielded(controlling) => {
                         self.execution.controlling = Some(controlling);
@@ -601,9 +602,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     SpecializationStep::Complete(work) => self.execution.work = *work,
                     SpecializationStep::Blocked(specializing, dependency) => {
                         self.execution.specializing = Some(specializing);
-                        self.blocked =
-                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
-                        return self.blocked_poll();
+                        let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
+                        if let Some(poll) = self.install_blocked(blocked) {
+                            return poll;
+                        }
                     }
                     SpecializationStep::Yielded(specializing) => {
                         self.execution.specializing = Some(specializing);
@@ -640,8 +642,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             unreachable!("one scalar completion cannot begin specialized work")
                         }
                         MachineStep::Blocked(blocked) => {
-                            self.blocked = Some(blocked);
-                            return self.blocked_poll();
+                            if let Some(poll) = self.install_blocked(blocked) {
+                                return poll;
+                            }
                         }
                         MachineStep::Exit(intent) => {
                             let exit = self.prepare_exit(intent);
@@ -656,9 +659,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     },
                     ScalarDemandStep::Blocked(demanding, dependency) => {
                         self.execution.demanding = Some(demanding);
-                        self.blocked =
-                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
-                        return self.blocked_poll();
+                        let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
+                        if let Some(poll) = self.install_blocked(blocked) {
+                            return poll;
+                        }
                     }
                     ScalarDemandStep::Yielded(demanding) => {
                         self.execution.demanding = Some(demanding);
@@ -677,9 +681,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Complete(work) => self.execution.work = work,
                     StatePathStep::Blocked(pathing, dependency) => {
                         self.execution.pathing = Some(pathing);
-                        self.blocked =
-                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
-                        return self.blocked_poll();
+                        let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
+                        if let Some(poll) = self.install_blocked(blocked) {
+                            return poll;
+                        }
                     }
                     StatePathStep::Yielded(pathing) => {
                         self.execution.pathing = Some(pathing);
@@ -700,9 +705,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     EffectDecodeStep::Complete(work) => self.execution.work = work,
                     EffectDecodeStep::Blocked(decoding, dependency) => {
                         self.execution.decoding = Some(decoding);
-                        self.blocked =
-                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
-                        return self.blocked_poll();
+                        let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
+                        if let Some(poll) = self.install_blocked(blocked) {
+                            return poll;
+                        }
                     }
                     EffectDecodeStep::Yielded(decoding) => {
                         self.execution.decoding = Some(decoding);
@@ -754,8 +760,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.execution.specializing = Some(specializing);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
-                    self.blocked = Some(blocked);
-                    return self.blocked_poll();
+                    if let Some(poll) = self.install_blocked(blocked) {
+                        return poll;
+                    }
                 }
                 Ok(MachineStep::Terminal(terminal)) => {
                     self.finish(terminal);
@@ -775,16 +782,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn handle_step_error(&mut self, error: TaskHalt) -> EffectTaskPoll {
         if let Some(wait) = error.blocked_on() {
-            self.blocked = Some(self.waiting_block(WorkDependency::Wait(wait.clone())));
-            return self.blocked_poll();
+            let blocked = self.waiting_block(WorkDependency::Wait(wait.clone()));
+            return self
+                .install_blocked(blocked)
+                .unwrap_or(EffectTaskPoll::Yielded);
         }
         if let Some(retry) = self.retry_wake() {
-            self.blocked = Some(BlockedExecution::evaluation_error(
-                error,
-                retry,
-                self.eval_context.values(),
-            ));
-            return self.blocked_poll();
+            let blocked =
+                BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
+            return self
+                .install_blocked(blocked)
+                .unwrap_or(EffectTaskPoll::Yielded);
         }
         self.finish(TaskTerminal::Failed(error));
         self.terminal.as_ref().expect("terminal set above").poll()
@@ -3095,13 +3103,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
-    fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
-        let retry_validation = self.blocked.as_ref()?.retry.as_ref().and_then(|retry| {
-            retry
-                .validation
-                .as_ref()
-                .map(|transaction| self.host.validate(transaction.validation()))
-        });
+    fn install_blocked(&mut self, blocked: BlockedExecution<S>) -> Option<EffectTaskPoll> {
+        self.blocked = Some(blocked);
+        // A resumed machine may have acquired a new transactional observation
+        // after the publication which woke its previous dependency. Validate
+        // the complete read set before exposing the new blocked state; no
+        // later publication is required to rescue a stale subscription.
+        match self.validate_blocked_retry() {
+            BlockedRetryPoll::Stable => Some(self.blocked_poll()),
+            BlockedRetryPoll::Restarted => None,
+            BlockedRetryPoll::Terminal(poll) => Some(poll),
+        }
+    }
+
+    fn validate_blocked_retry(&mut self) -> BlockedRetryPoll {
+        let retry_validation = self
+            .blocked
+            .as_ref()
+            .expect("blocked validation requires installed blocked work")
+            .retry
+            .as_ref()
+            .and_then(|retry| {
+                retry
+                    .validation
+                    .as_ref()
+                    .map(|transaction| self.host.validate(transaction.validation()))
+            });
         match retry_validation {
             Some(ValidationResult::Current { generation }) => {
                 self.blocked
@@ -3109,6 +3136,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .and_then(|blocked| blocked.retry.as_mut())
                     .expect("validated blocked work must retain its retry capsule")
                     .observed_generation = generation;
+                BlockedRetryPoll::Stable
             }
             Some(ValidationResult::Conflict) => {
                 let retry = self
@@ -3117,15 +3145,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .and_then(|blocked| blocked.retry)
                     .expect("conflicting blocked work must retain its wake action");
                 self.apply_wake(retry.action);
-                return None;
+                BlockedRetryPoll::Restarted
             }
             Some(ValidationResult::MissingVolume(volume)) => {
                 self.finish(TaskTerminal::Failed(missing_volume_error(volume)));
-                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+                BlockedRetryPoll::Terminal(
+                    self.terminal.as_ref().expect("terminal set above").poll(),
+                )
             }
             Some(ValidationResult::Closed) => {
                 self.finish(TaskTerminal::Cancelled);
-                return Some(self.terminal.as_ref().expect("terminal set above").poll());
+                BlockedRetryPoll::Terminal(
+                    self.terminal.as_ref().expect("terminal set above").poll(),
+                )
             }
             None => {
                 let changed = self.blocked.as_ref().is_some_and(|blocked| {
@@ -3140,9 +3172,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .and_then(|blocked| blocked.retry)
                         .expect("changed retry generation must retain its wake action");
                     self.apply_wake(retry.action);
-                    return None;
+                    BlockedRetryPoll::Restarted
+                } else {
+                    BlockedRetryPoll::Stable
                 }
             }
+        }
+    }
+
+    fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
+        self.blocked.as_ref()?;
+        match self.validate_blocked_retry() {
+            BlockedRetryPoll::Stable => {}
+            BlockedRetryPoll::Restarted => return None,
+            BlockedRetryPoll::Terminal(poll) => return Some(poll),
         }
         let blocked = self.blocked.as_ref().expect("checked blocked state above");
         let BlockReason::WaitingOn(dependency) = &blocked.reason else {
@@ -4475,6 +4518,12 @@ struct RetryWake<S: TaskSpecialization> {
     observed_generation: u64,
     validation: Option<Transaction<S>>,
     action: WakeAction<S>,
+}
+
+enum BlockedRetryPoll {
+    Stable,
+    Restarted,
+    Terminal(EffectTaskPoll),
 }
 
 enum WakeAction<S: TaskSpecialization> {

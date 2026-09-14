@@ -3312,6 +3312,14 @@ Partition the remaining migration as follows:
      explicitly authored retryable cut. Runtime FIFO fixtures separately force
      tail append, unrelated-endpoint publication, and competing-consumer
      commit order.
+     - **W5C.5c.4c.1 — Complete (2026-09-14): Post-resumption subscription
+       repair.** A forced logger schedule suspends output preparation, admits a
+       diagnostic, resumes into an abandoned alternative, and only then reads
+       the diagnostic FIFO. It reproduced a stale blocked transaction whose
+       new read was acquired after the publication that resumed it. Every
+       machine block is now installed and its complete retry read set validated
+       before the blocked state becomes observable; a conflict restarts the
+       machine immediately rather than waiting for another publication.
    - **W5C.5c.4d — Complete (2026-09-14): Compatibility closure.** Migrate the
      remaining uninhabited test fixtures, remove both synchronous adapters and
      every `RequestContext` demand method, and latch the closed source
