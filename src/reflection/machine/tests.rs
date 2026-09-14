@@ -2089,6 +2089,167 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
     assert_eq!(decoded.frames[0].order, 1);
 }
 
+#[test]
+fn reset_stack_decoder_matches_legacy_strict_decoding() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let serialized = values.construct_runtime_value_root(|_| {
+        Value::List(List::from_values(vec![
+            serialized_reset_frame(
+                Value::binary_from_text("outer"),
+                Value::Number(10.into()),
+                1,
+                2,
+            ),
+            serialized_reset_frame(
+                Value::List(List::from_values(vec![Value::binary_from_text("inner")])),
+                Value::Number(20.into()),
+                3,
+                4,
+            ),
+        ]))
+    });
+    let decoded =
+        drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized.clone()), &context)
+            .expect("new decoder should accept a strict stack");
+    let evaluator = EvaluatorStepContext::for_direct_compatibility(&context);
+    let strict = evaluator.project_root(&serialized);
+    let legacy = reset_frames_from_value_in(&evaluator, &strict)
+        .expect("legacy decoder should accept the same strict stack");
+    evaluator.finish();
+
+    assert_eq!(decoded.frames.len(), legacy.len());
+    for (decoded, legacy) in decoded.frames.iter().zip(&legacy) {
+        assert_eq!(decoded.key, legacy.key);
+        assert_eq!(decoded.scope_depth, legacy.scope_depth);
+        assert_eq!(decoded.order, legacy.order);
+        EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+            assert_eq!(
+                evaluator.project_root(&decoded.continuation),
+                evaluator.project_root(&legacy.continuation)
+            );
+        });
+    }
+}
+
+#[test]
+fn reset_stack_decoder_checks_every_fixed_frame_arity() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    for arity in 0..=5 {
+        let serialized = values.construct_runtime_value_root(|_| {
+            Value::List(List::from_values(vec![Value::List(List::from_values(
+                (0..arity)
+                    .map(|index| Value::Number(Number::from_usize(index)))
+                    .collect(),
+            ))]))
+        });
+        let result = drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized), &context);
+        if arity == 4 {
+            assert!(result.is_ok(), "four fields form one valid reset frame");
+        } else {
+            let error = match result {
+                Ok(_) => panic!("{arity} fields should be rejected"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("reflection continuation frame has the wrong size"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reset_stack_decoder_rejects_each_invalid_frame_field() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let invalid = [
+        (
+            vec![
+                Value::Builtin(Builtin::ListAt),
+                Value::Number(0.into()),
+                Value::Number(0.into()),
+                Value::Number(0.into()),
+            ],
+            "dictionary keys must evaluate to keyable values",
+        ),
+        (
+            vec![
+                Value::binary_from_text("key"),
+                Value::Number(0.into()),
+                Value::Number((-1).into()),
+                Value::Number(0.into()),
+            ],
+            "reflection continuation frame has an invalid scope",
+        ),
+        (
+            vec![
+                Value::binary_from_text("key"),
+                Value::Number(0.into()),
+                Value::Number(0.into()),
+                Value::binary_from_text("not an order"),
+            ],
+            "reflection continuation frame has an invalid order",
+        ),
+    ];
+    for (fields, expected) in invalid {
+        let serialized = values.construct_runtime_value_root(|_| {
+            Value::List(List::from_values(vec![Value::List(List::from_values(
+                fields,
+            ))]))
+        });
+        let error =
+            match drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized), &context) {
+                Ok(_) => panic!("invalid reset frame should fail"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn reset_stack_decoder_propagates_a_deferred_failure() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let serialized = values.construct_runtime_value_root(|access| {
+        Value::Lazy(LazyValue::error_in(access, "reset stack fixture failed"))
+    });
+    let error = match drive_reset_stack_decoder(&mut ResetStackMachine::new(serialized), &context) {
+        Ok(_) => panic!("failed reset stack should not decode"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("reset stack fixture failed"));
+}
+
+#[test]
+fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_the_promise() {
+    let values = crate::core::test_value_factory();
+    let context = EvalContext::isolated(values.clone());
+    let promised = PromisedValue::new(&values, "abandoned reset stack");
+    let serialized = values
+        .construct_runtime_value_root(|access| Value::Promised(promised.duplicate_in(access)));
+    let mut decoder = ResetStackMachine::new(serialized);
+    let poll_context = EvaluationPollContext::for_context(&context);
+    loop {
+        match decoder.poll(&poll_context, &context, 1) {
+            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Pending(WorkDependency::Promise(_)) => break,
+            ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
+            ResetStackPoll::Ready(_) => panic!("unfulfilled promise completed"),
+            ResetStackPoll::Failed(error) => panic!("unfulfilled promise failed: {error}"),
+        }
+    }
+    drop(decoder);
+    crate::core::set_test_promise(&values, &promised, Value::List(List::empty()))
+        .expect("dropping the decoder must not consume resolver authority");
+    values
+        .collect_managed_for_test()
+        .expect("retired decoder roots must not obstruct collection");
+}
+
 fn assert_fixpoint_root_inventory(
     root: &FixRoot<TestEffects>,
     active: &ActiveFix<TestEffects>,

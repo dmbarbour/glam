@@ -2834,6 +2834,8 @@ remains untouched by stack decoding.
 
 ####### W5C.4a.4 — Standalone decoder closure
 
+**Status: complete (2026-09-14).**
+
 Compare decoded strict stacks with the legacy decoder before migrating callers.
 Exercise nested frames, budget exhaustion at every phase, permanent child
 failure, and cancellation/owner retirement without replaying a completed
@@ -2842,6 +2844,16 @@ it contains no raw `Value` and no roots unrelated to future work.
 
 Do not remove the legacy helpers yet: W5C.4b migrates their control
 dispositions one at a time, and W5C.6 owns the final recursive-helper census.
+
+Completion record: strict nested stacks are compared field-for-field with the
+legacy decoder. Dedicated fixtures cover every zero-through-five field arity,
+non-list stacks and frames, invalid key/scope/order fields, deferred permanent
+failure, one-step yields through every structural and conversion phase, and a
+blocked decoder dropped before resolver-promise publication. The exhaustive
+shape fixture confirms that durable state consists solely of roots, decoded
+immediates, and the shared resumable submachines. Task-level cancellation and
+branch retry remain integration properties of W5C.4b.8 rather than being
+simulated by this task-independent decoder.
 
 ###### W5C.4b — Control integration
 
