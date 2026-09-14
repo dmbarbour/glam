@@ -2589,6 +2589,67 @@ Standalone heap reads and the macro-drain/metadata fixtures were updated to
 make retry scope explicit: ordinary reads commit their snapshot immediately,
 while intended retry loops now contain the read and divergence in `.cut`.
 
+##### W5C5-001 — Nested specialization demand deadlock
+
+**Status: active blocking defect (2026-09-14). Execution is pulled ahead of
+W5C.4; the protocol and migration remain part of W5C.5.**
+
+The parallel library suite exposed a hang in
+`coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return`.
+The zero-worker case remains reliable, while the four-worker case can park
+indefinitely after a diagnostic is admitted and the scheduled logger root is
+run. Parallel stress makes the ordering easier to reach, but repetition is
+reproduction evidence only.
+
+Temporary phase probes localized the hang to `ScheduledEffectRun::run`. A
+debugger snapshot then showed the scheduled runner and three evaluator workers
+parked on one coordinator generation while the remaining worker was inside
+`TaskSpecialization::handle_request`: `read_test_log` was enriching the
+diagnostic, `Diagnostic::enrich_with_factory` had entered a synchronous nested
+WHNF client demand, and `drive_client_demand` was waiting for executor work.
+Temporary coordinator-state inspection found a queued `ClientDemand` whose
+demand session also contained a `Deferred` record in `Terminalizing`.
+`claim_ready_client_demand` rejects that client demand while any machine in its
+session is running or terminalizing. The runtime selector can initially churn
+its broad work generation because an ineligible client demand remains in the
+ready queue, then every participant can park without a useful transition.
+
+This is provisionally a specialization-callback boundary defect, not a reason
+to weaken the one-ordinary-machine-per-demand-session rule or make recursive
+client demand an implicit worker behavior. The exact missing transition still
+needs a forced-order proof: a normal terminal publication-to-retirement window
+is expected to be finite, so the repair must distinguish an over-restrictive
+eligibility rule from a stranded retirement or wake handoff. Likewise, moving
+diagnostic enrichment to ingress would violate the structured-diagnostic rule
+that rendering and observer-specific enrichment remain late.
+
+Remediation checkpoints:
+
+1. **W5C5-001A — Complete (2026-09-14): finding and evidence.** Record the
+   failing surface, captured stacks and coordinator state, provisional
+   ownership cycle, and the explicit non-solutions above.
+2. **W5C5-001B — Forced-order characterization.** Add test-only channels or
+   barriers around deferred terminal publication, retirement, nested
+   client-demand admission, and selection. Convert the indefinite hang into a
+   finite assertion, and force both publication-before-retirement and
+   retirement-before-selection orderings. A timeout may bound a failed test
+   process during investigation but is not correctness evidence.
+3. **W5C5-001C — Minimal callback protocol decision.** Specify a durable
+   machine-owned boundary in which semantic preparation before a
+   specialization callback may suspend, the host callback runs exactly once,
+   and any semantic work returned by that callback resumes without replaying
+   the callback. No arbitrary Rust callback stack may synchronously drive a
+   nested client demand while its enclosing coordinator task remains claimed.
+4. **W5C5-001D — Diagnostic/test migration.** Apply the selected protocol to
+   diagnostic retrieval and enrichment plus `TestEffects`. Preserve atomic
+   FIFO observation/commit, structured diagnostic values, and late observer
+   enrichment. The original zero-worker and four-worker lifecycle fixture must
+   pass under the forced ordering.
+5. **W5C5-001E — Focused audit and handback.** Inventory equivalent recursive
+   demand in nearby specialization callbacks, migrate only any call sites
+   required by the selected shared mechanism, and assign the rest explicitly
+   to W5C.5b/c. Then resume W5C.4 with the routine suite reliable again.
+
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
 ###### W5C.4a — Standalone resumable stack decoder
@@ -2607,6 +2668,12 @@ Exercise nested reset/shift and fixpoint paths with suspension at every frame
 field and compare their final control order with uninterrupted execution.
 
 ##### W5C.5 — Specialization callback boundary
+
+W5C5-001 pulls the protocol decision and the diagnostic/test specialization
+slice ahead of W5C.4 because the known deadlock compromises routine suite
+verification. Its completion does not imply that the full callback inventory
+or the remaining reusable and executable-specific specializations below have
+been migrated.
 
 ###### W5C.5a — Protocol decision gate
 
