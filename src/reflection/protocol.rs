@@ -307,6 +307,17 @@ where
     }
 }
 
+impl<S: TaskSpecialization> SpecializationRequestWork<S> for Infallible {
+    fn poll(
+        &mut self,
+        _specialization: &S,
+        _input: Option<SpecializationRequestInput>,
+        _context: &mut RequestContext<'_, S>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        match *self {}
+    }
+}
+
 /// A task exposing only the standard effect machine.
 #[derive(Clone, Copy, Default)]
 pub struct StandardEffects;
@@ -314,7 +325,7 @@ pub struct StandardEffects;
 impl TaskSpecialization for StandardEffects {
     type Host = dyn TaskHost<Self>;
     type Request = Infallible;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = Infallible;
     type Snapshot = ();
     type Journal = ();
 
@@ -325,19 +336,8 @@ impl TaskSpecialization for StandardEffects {
     fn start_request(
         &self,
         request: Self::Request,
-        arguments: Vec<PublicValue>,
-    ) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
-    }
-}
-
-impl SynchronousTaskSpecialization for StandardEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
         _arguments: Vec<PublicValue>,
-        _context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
+    ) -> Self::RequestWork {
         match request {}
     }
 }
@@ -937,7 +937,7 @@ mod root_inventory_tests {
     impl TaskSpecialization for ProtocolRootTestEffects {
         type Host = dyn TaskHost<Self>;
         type Request = Infallible;
-        type RequestWork = SynchronousRequestWork<Self>;
+        type RequestWork = Infallible;
         type Snapshot = PublicValue;
         type Journal = Vec<PublicValue>;
 
@@ -948,19 +948,8 @@ mod root_inventory_tests {
         fn start_request(
             &self,
             request: Self::Request,
-            arguments: Vec<PublicValue>,
-        ) -> Self::RequestWork {
-            SynchronousRequestWork::new(request, arguments)
-        }
-    }
-
-    impl SynchronousTaskSpecialization for ProtocolRootTestEffects {
-        fn handle_request(
-            &self,
-            request: Self::Request,
             _arguments: Vec<PublicValue>,
-            _context: &mut RequestContext<'_, Self>,
-        ) -> Result<RequestResult, TaskHalt> {
+        ) -> Self::RequestWork {
             match request {}
         }
     }

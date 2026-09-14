@@ -3296,10 +3296,13 @@ Partition the remaining migration as follows:
    - **W5C.5c.4a — Logger request work.** Migrate `.write_stderr` binary
      preparation and keep `.read_log` as an immediate transactional FIFO
      operation. Preserve abandoned-choice output behavior.
-   - **W5C.5c.4b — Standard and test request work.** Replace the uninhabited
-     standard request adapter and migrate the in-tree test specialization's
-     evaluate/stderr demands without changing its raw alternatives/scoped
-     operands.
+   - **W5C.5c.4b — Standard and test request work.** Split into:
+     - **W5C.5c.4b.1 — Complete (2026-09-14): Uninhabited request work.** Use
+       `Infallible` itself for the standard specialization and the two
+       root-inventory fixtures rather than manufacturing unreachable adapters.
+     - **W5C.5c.4b.2 — Test specialization.** Migrate the in-tree test
+       specialization's evaluate/stderr demands without changing its raw
+       alternatives/scoped operands.
    - **W5C.5c.4c — Resumption and FIFO conformance.** Add a hostile machine
      which performs counted host activity, advances its state, requests a
      forced promise/lazy demand, and proves that resumption cannot re-enter the

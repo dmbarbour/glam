@@ -353,7 +353,7 @@ mod tests {
     impl TaskSpecialization for SearchRootTestEffects {
         type Host = dyn TaskHost<Self>;
         type Request = Infallible;
-        type RequestWork = super::super::protocol::SynchronousRequestWork<Self>;
+        type RequestWork = Infallible;
         type Snapshot = PublicValue;
         type Journal = Vec<PublicValue>;
 
@@ -364,19 +364,8 @@ mod tests {
         fn start_request(
             &self,
             request: Self::Request,
-            arguments: Vec<PublicValue>,
-        ) -> Self::RequestWork {
-            super::super::protocol::SynchronousRequestWork::new(request, arguments)
-        }
-    }
-
-    impl super::super::protocol::SynchronousTaskSpecialization for SearchRootTestEffects {
-        fn handle_request(
-            &self,
-            request: Self::Request,
             _arguments: Vec<PublicValue>,
-            _context: &mut super::super::protocol::RequestContext<'_, Self>,
-        ) -> Result<super::super::protocol::RequestResult, TaskHalt> {
+        ) -> Self::RequestWork {
             match request {}
         }
     }
