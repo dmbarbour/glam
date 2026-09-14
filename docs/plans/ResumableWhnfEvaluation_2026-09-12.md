@@ -2429,11 +2429,81 @@ were updated at this checkpoint.
 
 ###### W5C.3c — Heap and volume transaction boundaries
 
+**Status: in progress.**
+
 Use the same resumable path work for `.heap.*` and volume operations. Complete
 all path demand before observing a host snapshot, recording a transaction
 read, appending a journal edit, or attempting a commit. Forced suspension must
 prove that snapshots, observations, commits, and returned lazy path values are
 not duplicated. Host operations remain outside managed access.
+
+Implementation has reached the store-operation boundary and its direct
+ordering fixtures pass. Full-suite validation exposed a pre-existing retry
+interaction that must be resolved before this checkpoint can close: an exact
+dependency reached after a heap read currently races the read's coarse host
+generation retry. Unrelated task commits can therefore discard the resumable
+continuation and replay the read indefinitely.
+
+**Retry-semantics decision (2026-09-14).** A broad host generation is a wake
+signal, not evidence that an optimistic transaction conflicted. The store's
+configured exact, fingerprint, or coarse observation index remains the
+authority for reflection-heap conflicts; specialization-owned resources use
+their corresponding transaction validation. A broad wake may schedule a
+blocked machine to revalidate those records, but must not itself discard its
+retained work.
+
+A successful read outside an explicit transaction has different semantics.
+Its atomic snapshot is its commit point: `.heap.get` and protected-volume
+`get` return a lazy projection of that stable snapshot, and no later update,
+including an overlapping update, may replay the read or its continuation.
+These standalone reads therefore record no retry checkpoint.
+
+Retryable absence is a third, API-declared behavior rather than a property of
+all host reads. An operation such as reading an empty input FIFO may specify
+that absence diverges after making a retry observation. A later qualifying
+state change retries that same operation without advancing `.alt`. Each such
+operation must state this behavior in its API contract and retain the
+observation needed by its chosen validation policy. An API which does not
+offer that behavior leaves users to express retry explicitly with `.cut` and
+an error or failure path.
+
+Repairs required before closing this checkpoint:
+
+1. Remove `branch.observe` from the non-transactional heap and volume read
+   paths. Retain their snapshotted roots through the lazy path projection.
+2. When an exact dependency is suspended inside an explicit optimistic
+   transaction, use a broad generation change only to request read-only
+   revalidation of the retained store and specialization observations. A real
+   conflict restores the appropriate cut/search checkpoint. A still-current
+   transaction updates its wake baseline and re-registers the unchanged exact
+   dependency.
+3. Keep API-declared retryable absence on its explicit observation path. Do
+   not infer it merely because an operation read host state or returned a lazy
+   value.
+4. Perform revalidation outside managed value access and through the same
+   authoritative host state and conflict rules used by commit. Preserve the
+   existing observation-epoch subscribe-and-recheck protocol so a mutation
+   racing validation or re-registration cannot be lost.
+
+The forced-order verification matrix is:
+
+| Read/attempt | Concurrent change | Required outcome |
+| --- | --- | --- |
+| Standalone heap or volume read | Disjoint path or volume | The original lazy snapshot and continuation complete once; no replay |
+| Standalone heap or volume read | Exact, ancestor, or descendant overlap | The original lazy snapshot and continuation still complete once; no replay |
+| Explicit transaction, exact strategy | Disjoint path or volume, including protected task-status updates | Broad wake may revalidate, but the suspended exact dependency and continuation are retained |
+| Explicit transaction, exact strategy | Exact, ancestor, or descendant overlap | Validation reports conflict and restores the transaction checkpoint |
+| Explicit transaction, fingerprint strategy | Any overlap | Validation must restart; conservative collision retries remain permitted |
+| Explicit transaction, coarse strategy | Any reflection-store write after an observed read | Validation restarts according to the deliberately coarse policy |
+| API-declared retryable absence | No qualifying change | The operation remains divergent and does not advance `.alt` |
+| API-declared retryable absence | Qualifying state change | The same operation retries according to its documented observation policy |
+
+Each concurrency row must suspend after the read but before its exact
+dependency completes, force the named state publication, then release the
+dependency. Counters must latch snapshot/read, continuation, validation, and
+restart counts rather than relying on repeated scheduling. Also verify that a
+mutation between successful validation and blocked-work registration is
+observed by the existing epoch protocol.
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
