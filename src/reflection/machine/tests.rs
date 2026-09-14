@@ -2925,6 +2925,8 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
 #[test]
 fn malformed_restore_stack_fails_before_popping_the_delimiter() {
     let values = Assembler::default().core_values();
+    let host = Arc::new(TestHost::with_values(values.clone()));
+    let generation = <TestHost as TaskHost<TestEffects>>::snapshot(host.as_ref()).generation();
     let mut task = EffectTask::new(
         &values,
         eval::constant_effect(
@@ -2932,7 +2934,7 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
             request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
         ),
         TestEffects,
-        Arc::new(TestHost::with_values(values.clone())),
+        host,
     )
     .expect("malformed restore fixture should construct");
     let mut branch = task
@@ -2948,7 +2950,7 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
         order: 1,
     });
     branch.retry = Some(RetryCheckpoint {
-        generation: Some(0),
+        generation: Some(generation),
         branch: Box::new(branch.clone()),
     });
     let current = values.construct_runtime_value_root(|_| Value::List(List::empty()));

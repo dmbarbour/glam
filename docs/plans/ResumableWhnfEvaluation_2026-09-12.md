@@ -3320,6 +3320,11 @@ Partition the remaining migration as follows:
        machine block is now installed and its complete retry read set validated
        before the blocked state becomes observable; a conflict restarts the
        machine immediately rather than waiting for another publication.
+     - **W5C.5c.4c.2 — Complete (2026-09-14): Validation-latch closure.** The
+       neighboring malformed-control fixture now starts from the host's
+       actual generation, so it continues testing restore validation rather
+       than deliberately triggering the new stale-subscription restart. The
+       exact WHNF source census is refreshed for the centralized block path.
    - **W5C.5c.4d — Complete (2026-09-14): Compatibility closure.** Migrate the
      remaining uninhabited test fixtures, remove both synchronous adapters and
      every `RequestContext` demand method, and latch the closed source
