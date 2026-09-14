@@ -3288,12 +3288,12 @@ Partition the remaining migration as follows:
    - **W5C.5c.2b — Complete (2026-09-14): Text operations and closure.** Migrate
      text/regex inputs, retain exact journal and scoped-layout behavior, and
      remove the macro specialization's synchronous adapter.
-3. **W5C.5c.3 — Configured CLI.** Migrate text, atom, path-handle, script,
-   worker-count, and stderr-byte preparation. Keep parser/effect operands raw.
-   The nested token search remains behaviorally unchanged unless its current
-   non-suspending policy obstructs the request-work boundary.
+3. **W5C.5c.3 — Complete (2026-09-14): Configured CLI.** Migrate text, atom,
+   path-handle, script, and worker-count preparation. Keep parser/effect
+   operands raw. The nested token search remains behaviorally unchanged; only
+   its explanatory text is demanded by the outer request owner.
 4. **W5C.5c.4 — Logger, tests, and compatibility closure.** Migrate the
-   logger's stderr path and test specialization, then remove the internal
+   logger's stderr-byte path and test specialization, then remove the internal
    synchronous adapter and every `RequestContext` demand method. Add a hostile
    machine which performs counted host activity, advances its state, requests
    a forced promise/lazy demand, and proves that resumption cannot re-enter the

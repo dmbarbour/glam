@@ -2,18 +2,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::reflection::{
-    EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskHalt,
+    EffectRequestSpec, ReflectionRequest, ReflectionRequestWork, RequestContext, RequestResult,
+    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskHalt,
     TaskSpecialization, environment_diagnostic_request_specs,
 };
-use glam::{ModuleInput, Value};
+use glam::{EvaluatedValue, ModuleInput, Value};
 
 use super::super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
 use super::super::model::CommandEdit;
 use super::host::{CliHost, CliJournal};
 use super::path::{self, PathAccess, PathKind};
 use super::token;
-use crate::request_work::{ReflectionOrSynchronousRequestWork, SynchronousTaskSpecialization};
-
 const CASE_EXIT_TAG: [&str; 5] = ["cli_runtime", "v0", "request", "case", "exit"];
 
 #[derive(Clone, Copy)]
@@ -38,10 +37,49 @@ pub(super) enum CliRequest {
     EscapedToken,
 }
 
+pub(super) enum CliRequestWork {
+    Reflection(ReflectionRequestWork),
+    TextStart {
+        request: CliTextRequest,
+        arguments: Vec<Value>,
+    },
+    TextValue {
+        request: CliTextRequest,
+        retained: Vec<Value>,
+    },
+    PathStart(Vec<Value>),
+    PathKind(Value),
+    PathAccess(PathKind),
+    PathWriterStart {
+        writer: PathWriter,
+        arguments: Vec<Value>,
+    },
+    PathWriterValue(PathWriter),
+    ScriptStart(Vec<Value>),
+    ScriptExtension(Value),
+    ScriptBody(String),
+    WorkerCountStart(Vec<Value>),
+    WorkerCountValue,
+    Immediate {
+        request: CliRequest,
+        arguments: Vec<Value>,
+    },
+    Poisoned,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CliTextRequest {
+    ReadKeyword,
+    ReadText,
+    ReadToken,
+    WriteReflectionArgument,
+    WriteAssemblyArgument,
+}
+
 impl TaskSpecialization for CliEffects {
     type Host = CliHost;
     type Request = CliRequest;
-    type RequestWork = ReflectionOrSynchronousRequestWork<Self>;
+    type RequestWork = CliRequestWork;
     type Snapshot = super::host::CliSnapshot;
     type Journal = CliJournal;
 
@@ -114,42 +152,292 @@ impl TaskSpecialization for CliEffects {
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
         match request {
             CliRequest::Reflection(request) => {
-                ReflectionOrSynchronousRequestWork::reflection(request, arguments)
+                CliRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
             }
-            request => ReflectionOrSynchronousRequestWork::synchronous(request, arguments),
+            CliRequest::ReadKeyword => CliRequestWork::TextStart {
+                request: CliTextRequest::ReadKeyword,
+                arguments,
+            },
+            CliRequest::ReadText => CliRequestWork::TextStart {
+                request: CliTextRequest::ReadText,
+                arguments,
+            },
+            CliRequest::ReadToken => CliRequestWork::TextStart {
+                request: CliTextRequest::ReadToken,
+                arguments,
+            },
+            CliRequest::WriteReflectionArgument => CliRequestWork::TextStart {
+                request: CliTextRequest::WriteReflectionArgument,
+                arguments,
+            },
+            CliRequest::WriteAssemblyArgument => CliRequestWork::TextStart {
+                request: CliTextRequest::WriteAssemblyArgument,
+                arguments,
+            },
+            CliRequest::ReadPath => CliRequestWork::PathStart(arguments),
+            CliRequest::WriteFile => CliRequestWork::PathWriterStart {
+                writer: PathWriter::File,
+                arguments,
+            },
+            CliRequest::WriteManifest => CliRequestWork::PathWriterStart {
+                writer: PathWriter::Manifest,
+                arguments,
+            },
+            CliRequest::WriteScript => CliRequestWork::ScriptStart(arguments),
+            CliRequest::WriteWorkerCount => CliRequestWork::WorkerCountStart(arguments),
+            request => CliRequestWork::Immediate { request, arguments },
         }
     }
 }
 
-impl SynchronousTaskSpecialization for CliEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<Value>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
-        match request {
-            CliRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
-            CliRequest::ReadKeyword => read_keyword(arguments, context),
-            CliRequest::ReadText => read_text(arguments, context),
-            CliRequest::ReadToken => read_token(arguments, context),
-            CliRequest::ReadPath => read_path(arguments, context),
-            CliRequest::ReadEnd => read_end(arguments, context),
-            CliRequest::WriteFile => write_path(arguments, context, PathWriter::File),
-            CliRequest::WriteScript => write_script(arguments, context),
-            CliRequest::WriteManifest => write_path(arguments, context, PathWriter::Manifest),
-            CliRequest::WriteReflectionArgument => {
-                write_text_argument(arguments, context, TextWriter::Reflection)
+impl SpecializationRequestWork<CliEffects> for CliRequestWork {
+    fn poll(
+        &mut self,
+        specialization: &CliEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, CliEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        match std::mem::replace(self, Self::Poisoned) {
+            Self::Reflection(mut work) => {
+                let result = work.poll(specialization, input, context)?;
+                *self = Self::Reflection(work);
+                Ok(result)
             }
-            CliRequest::WriteAssemblyArgument => {
-                write_text_argument(arguments, context, TextWriter::Assembly)
+            Self::TextStart { request, arguments } => {
+                assert!(input.is_none(), "new CLI text request cannot have input");
+                let (value, retained) = cli_text_arguments(request, arguments)?;
+                *self = Self::TextValue { request, retained };
+                Ok(SpecializationRequestPoll::Demand(value))
             }
-            CliRequest::WriteWorkerCount => write_worker_count(arguments, context),
-            CliRequest::Case => enter_case(arguments, context),
-            CliRequest::CaseExit => exit_case(arguments, context),
-            CliRequest::EscapedToken => Err(TaskHalt::new(
-                "token parser operation escaped `.read.token`",
+            Self::TextValue { request, retained } => {
+                let value = completed_value(input, "CLI text request")?;
+                let text = evaluated_text(value, cli_text_request_name(request))?;
+                let result = match request {
+                    CliTextRequest::ReadKeyword => read_keyword_value(text, context),
+                    CliTextRequest::ReadText => read_text_value(text, context),
+                    CliTextRequest::ReadToken => {
+                        let [parser]: [Value; 1] = retained.try_into().unwrap();
+                        read_token_value(text, parser, context)
+                    }
+                    CliTextRequest::WriteReflectionArgument => {
+                        write_text_argument_value(text, context, TextWriter::Reflection)
+                    }
+                    CliTextRequest::WriteAssemblyArgument => {
+                        write_text_argument_value(text, context, TextWriter::Assembly)
+                    }
+                }?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::PathStart(arguments) => {
+                assert!(input.is_none(), "new CLI path request cannot have input");
+                let [kind, access]: [Value; 2] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.read.path` received the wrong number of arguments")
+                })?;
+                *self = Self::PathKind(access);
+                Ok(SpecializationRequestPoll::Demand(kind))
+            }
+            Self::PathKind(access) => {
+                let kind = evaluated_atom(
+                    completed_value(input, "CLI path kind")?,
+                    context,
+                    &["file", "folder", "any"],
+                    "path kind",
+                )?;
+                let kind = match kind {
+                    "file" => PathKind::File,
+                    "folder" => PathKind::Folder,
+                    "any" => PathKind::Any,
+                    _ => unreachable!(),
+                };
+                *self = Self::PathAccess(kind);
+                Ok(SpecializationRequestPoll::Demand(access))
+            }
+            Self::PathAccess(kind) => {
+                let access = evaluated_atom(
+                    completed_value(input, "CLI path access")?,
+                    context,
+                    &["r", "w"],
+                    "path access",
+                )?;
+                let access = match access {
+                    "r" => PathAccess::Read,
+                    "w" => PathAccess::Write,
+                    _ => unreachable!(),
+                };
+                Ok(SpecializationRequestPoll::Complete(read_path_value(
+                    kind, access, context,
+                )?))
+            }
+            Self::PathWriterStart { writer, arguments } => {
+                assert!(input.is_none(), "new CLI path writer cannot have input");
+                let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("CLI path writer received the wrong number of arguments")
+                })?;
+                *self = Self::PathWriterValue(writer);
+                Ok(SpecializationRequestPoll::Demand(handle))
+            }
+            Self::PathWriterValue(writer) => Ok(SpecializationRequestPoll::Complete(
+                write_path_value(completed_value(input, "CLI path writer")?, context, writer)?,
             )),
+            Self::ScriptStart(arguments) => {
+                assert!(input.is_none(), "new CLI script writer cannot have input");
+                let [extension, body]: [Value; 2] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.write.script` received the wrong number of arguments")
+                })?;
+                *self = Self::ScriptExtension(body);
+                Ok(SpecializationRequestPoll::Demand(extension))
+            }
+            Self::ScriptExtension(body) => {
+                let extension = evaluated_text(
+                    completed_value(input, "CLI script extension")?,
+                    "`.write.script` extension",
+                )?;
+                if extension.is_empty() {
+                    return Err(TaskHalt::new(
+                        "`.write.script` requires a nonempty extension",
+                    ));
+                }
+                *self = Self::ScriptBody(extension);
+                Ok(SpecializationRequestPoll::Demand(body))
+            }
+            Self::ScriptBody(extension) => {
+                let body = evaluated_text(
+                    completed_value(input, "CLI script body")?,
+                    "`.write.script` body",
+                )?;
+                push_edit(
+                    context,
+                    CommandEdit::Input(ModuleInput::script(extension, body)),
+                )?;
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
+            }
+            Self::WorkerCountStart(arguments) => {
+                assert!(
+                    input.is_none(),
+                    "new CLI worker-count writer cannot have input"
+                );
+                let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
+                })?;
+                *self = Self::WorkerCountValue;
+                Ok(SpecializationRequestPoll::Demand(count))
+            }
+            Self::WorkerCountValue => {
+                let count = completed_value(input, "CLI worker-count writer")?
+                    .as_u64()?
+                    .and_then(|count| usize::try_from(count).ok())
+                    .ok_or_else(|| {
+                        TaskHalt::new(
+                            "`.write.worker_count` requires a supported non-negative integer",
+                        )
+                    })?;
+                push_edit(context, CommandEdit::WorkerCount(count))?;
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
+            }
+            Self::Immediate { request, arguments } => Ok(SpecializationRequestPoll::Complete(
+                handle_immediate_cli_request(request, arguments, context)?,
+            )),
+            Self::Poisoned => panic!("completed CLI request work was polled again"),
+        }
+    }
+}
+
+fn handle_immediate_cli_request(
+    request: CliRequest,
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, CliEffects>,
+) -> Result<RequestResult, TaskHalt> {
+    match request {
+        CliRequest::ReadEnd => read_end(arguments, context),
+        CliRequest::Case => enter_case(arguments, context),
+        CliRequest::CaseExit => exit_case(arguments, context),
+        CliRequest::EscapedToken => Err(TaskHalt::new(
+            "token parser operation escaped `.read.token`",
+        )),
+        CliRequest::Reflection(_)
+        | CliRequest::ReadKeyword
+        | CliRequest::ReadText
+        | CliRequest::ReadToken
+        | CliRequest::ReadPath
+        | CliRequest::WriteFile
+        | CliRequest::WriteScript
+        | CliRequest::WriteManifest
+        | CliRequest::WriteReflectionArgument
+        | CliRequest::WriteAssemblyArgument
+        | CliRequest::WriteWorkerCount => unreachable!("CLI demand request uses durable work"),
+    }
+}
+
+fn completed_value(
+    input: Option<SpecializationRequestInput>,
+    request: &str,
+) -> Result<EvaluatedValue, TaskHalt> {
+    match input.unwrap_or_else(|| panic!("resumed {request} must have input")) {
+        SpecializationRequestInput::Value(value) => Ok(value),
+        SpecializationRequestInput::Failed(error) => Err(error),
+    }
+}
+
+fn evaluated_text(value: EvaluatedValue, request: &str) -> Result<String, TaskHalt> {
+    let bytes = value
+        .as_bytes()?
+        .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
+    String::from_utf8(bytes.into())
+        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
+}
+
+fn evaluated_atom<'a>(
+    value: EvaluatedValue,
+    context: &RequestContext<'_, CliEffects>,
+    accepted: &'a [&str],
+    kind: &str,
+) -> Result<&'a str, TaskHalt> {
+    let values = context.values();
+    accepted
+        .iter()
+        .copied()
+        .find(|name| {
+            value
+                .same_representation(&values.atom_from_text(name))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| TaskHalt::new(format!("invalid CLI {kind}")))
+}
+
+fn cli_text_arguments(
+    request: CliTextRequest,
+    arguments: Vec<Value>,
+) -> Result<(Value, Vec<Value>), TaskHalt> {
+    match request {
+        CliTextRequest::ReadToken => {
+            let [text, parser]: [Value; 2] = arguments.try_into().map_err(|_| {
+                TaskHalt::new("`.read.token` received the wrong number of arguments")
+            })?;
+            Ok((text, vec![parser]))
+        }
+        _ => {
+            let [text]: [Value; 1] = arguments.try_into().map_err(|_| {
+                TaskHalt::new(format!(
+                    "{} received the wrong number of arguments",
+                    cli_text_request_name(request)
+                ))
+            })?;
+            Ok((text, Vec::new()))
+        }
+    }
+}
+
+fn cli_text_request_name(request: CliTextRequest) -> &'static str {
+    match request {
+        CliTextRequest::ReadKeyword => "`.read.keyword`",
+        CliTextRequest::ReadText => "`.read.text`",
+        CliTextRequest::ReadToken => "`.read.token`",
+        CliTextRequest::WriteReflectionArgument | CliTextRequest::WriteAssemblyArgument => {
+            "CLI argument writer"
         }
     }
 }
@@ -215,14 +503,10 @@ fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Result<Value, T
         .map_err(TaskHalt::from)
 }
 
-fn read_keyword(
-    arguments: Vec<Value>,
+fn read_keyword_value(
+    expected: String,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [expected]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.read.keyword` received the wrong number of arguments"))?;
-    let expected = text_value(context, expected, "`.read.keyword`")?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -273,14 +557,10 @@ fn read_keyword(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn read_text(
-    arguments: Vec<Value>,
+fn read_text_value(
+    expectation: String,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [expectation]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.read.text` received the wrong number of arguments"))?;
-    let expectation = text_value(context, expectation, "`.read.text` expectation")?;
     let values = context.values();
     let mut transaction = context
         .transaction()
@@ -312,14 +592,11 @@ fn read_text(
     Ok(RequestResult::Return(values.text(argument)))
 }
 
-fn read_token(
-    arguments: Vec<Value>,
+fn read_token_value(
+    expectation: String,
+    parser: Value,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [expectation, parser]: [Value; 2] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.read.token` received the wrong number of arguments"))?;
-    let expectation = text_value(context, expectation, "`.read.token` expectation")?;
     let (argument_index, argument, completion_offset) = {
         let mut transaction = context
             .transaction()
@@ -439,24 +716,11 @@ pub(super) struct PathHandle {
     access: PathAccess,
 }
 
-fn read_path(
-    arguments: Vec<Value>,
+fn read_path_value(
+    kind: PathKind,
+    access: PathAccess,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [kind, access]: [Value; 2] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.read.path` received the wrong number of arguments"))?;
-    let kind = match atom_name(context, kind, &["file", "folder", "any"], "path kind")? {
-        "file" => PathKind::File,
-        "folder" => PathKind::Folder,
-        "any" => PathKind::Any,
-        _ => unreachable!(),
-    };
-    let access = match atom_name(context, access, &["r", "w"], "path access")? {
-        "r" => PathAccess::Read,
-        "w" => PathAccess::Write,
-        _ => unreachable!(),
-    };
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI reader escaped its isolated search transaction"))?;
@@ -506,20 +770,17 @@ fn read_path(
     )))
 }
 
-enum PathWriter {
+#[derive(Clone, Copy)]
+pub(super) enum PathWriter {
     File,
     Manifest,
 }
 
-fn write_path(
-    arguments: Vec<Value>,
+fn write_path_value(
+    handle: EvaluatedValue,
     context: &mut RequestContext<'_, CliEffects>,
     writer: PathWriter,
 ) -> Result<RequestResult, TaskHalt> {
-    let [handle]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("CLI path writer received the wrong number of arguments"))?;
-    let handle = context.evaluate(&handle)?;
     let mut transaction = context
         .transaction()
         .ok_or_else(|| TaskHalt::new("CLI writer escaped its isolated search transaction"))?;
@@ -558,64 +819,21 @@ fn write_path(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn write_script(
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskHalt> {
-    let [extension, body]: [Value; 2] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.write.script` received the wrong number of arguments"))?;
-    let extension = text_value(context, extension, "`.write.script` extension")?;
-    if extension.is_empty() {
-        return Err(TaskHalt::new(
-            "`.write.script` requires a nonempty extension",
-        ));
-    }
-    let body = text_value(context, body, "`.write.script` body")?;
-    push_edit(
-        context,
-        CommandEdit::Input(ModuleInput::script(extension, body)),
-    )?;
-    Ok(RequestResult::ReturnUnit)
-}
-
 enum TextWriter {
     Reflection,
     Assembly,
 }
 
-fn write_text_argument(
-    arguments: Vec<Value>,
+fn write_text_argument_value(
+    argument: String,
     context: &mut RequestContext<'_, CliEffects>,
     writer: TextWriter,
 ) -> Result<RequestResult, TaskHalt> {
-    let [argument]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("CLI argument writer received the wrong number of arguments"))?;
-    let argument = text_value(context, argument, "CLI argument writer")?;
     let edit = match writer {
         TextWriter::Reflection => CommandEdit::ReflectionArgument(argument.into()),
         TextWriter::Assembly => CommandEdit::AssemblyArgument(argument.into()),
     };
     push_edit(context, edit)?;
-    Ok(RequestResult::ReturnUnit)
-}
-
-fn write_worker_count(
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, CliEffects>,
-) -> Result<RequestResult, TaskHalt> {
-    let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
-    })?;
-    let count = context
-        .evaluate(&count)?
-        .as_u64()?
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(|| {
-            TaskHalt::new("`.write.worker_count` requires a supported non-negative integer")
-        })?;
-    push_edit(context, CommandEdit::WorkerCount(count))?;
     Ok(RequestResult::ReturnUnit)
 }
 
@@ -628,38 +846,6 @@ fn push_edit(
         .ok_or_else(|| TaskHalt::new("CLI writer escaped its isolated search transaction"))?;
     transaction.parts().1.edits.push(edit);
     Ok(())
-}
-
-fn text_value(
-    context: &RequestContext<'_, CliEffects>,
-    value: Value,
-    request: &str,
-) -> Result<String, TaskHalt> {
-    let value = context.evaluate(&value)?;
-    let bytes = value
-        .as_bytes()?
-        .ok_or_else(|| TaskHalt::new(format!("{request} requires text")))?;
-    String::from_utf8(bytes.into())
-        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
-}
-
-fn atom_name<'a>(
-    context: &RequestContext<'_, CliEffects>,
-    value: Value,
-    accepted: &'a [&str],
-    kind: &str,
-) -> Result<&'a str, TaskHalt> {
-    let value = context.evaluate(&value)?;
-    let values = context.values();
-    accepted
-        .iter()
-        .copied()
-        .find(|name| {
-            value
-                .same_representation(&values.atom_from_text(name))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| TaskHalt::new(format!("invalid CLI {kind}")))
 }
 
 fn record_expectation(
