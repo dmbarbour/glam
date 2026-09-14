@@ -2377,6 +2377,140 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
 }
 
 #[test]
+fn terminal_publication_releases_same_session_client_admission_before_retirement() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(
+        &session.demand.values,
+        "terminal publication admission ordering",
+        |_| panic!("the forced-order test drives its deferred machine explicitly"),
+    );
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh deferred work should reserve a canonical record")
+    };
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("new deferred work should retain its wait index");
+    assert!(coordinator.promote_deferred_wait(&wait));
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_ready_task_for_session(session.demand.id)
+        .expect("promoted deferred work should be claimable")
+    else {
+        panic!("claimed work should preserve its deferred kind")
+    };
+
+    let context = session.context();
+    let expected = context.values().unit();
+    let client = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .expect("same-session client demand should be admitted");
+    assert!(
+        matches!(coordinator.select(), CoordinatorSelection::None),
+        "an active semantic poll must exclude another ordinary same-session machine"
+    );
+
+    // Force terminal publication to finish while the detached machine and
+    // retirement obligation remain held by the publishing thread. Semantic
+    // evaluation has ended at this point; only non-semantic destruction and
+    // coordinator cleanup remain.
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    coordinator.settle_terminal_work(
+        work,
+        EvaluationWaitTerminal::Abandoned,
+        Arc::new(EvaluationFailure::message("forced terminal publication")),
+    );
+
+    let CoordinatorSelection::ClientDemand(claimed) = coordinator.select() else {
+        panic!("terminal publication must release semantic admission before retirement")
+    };
+    assert_eq!(claimed.id, client.work());
+    coordinator.poll_claimed_client_demand(claimed);
+    assert!(matches!(
+        client.poll(),
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
+    ));
+
+    drop(release);
+    coordinator.retire_deferred(work);
+}
+
+#[test]
+fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(
+        &session.demand.values,
+        "retirement before admission ordering",
+        |_| panic!("the forced-order test drives its deferred machine explicitly"),
+    );
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh deferred work should reserve a canonical record")
+    };
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("new deferred work should retain its wait index");
+    assert!(coordinator.promote_deferred_wait(&wait));
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_ready_task_for_session(session.demand.id)
+        .expect("promoted deferred work should be claimable")
+    else {
+        panic!("claimed work should preserve its deferred kind")
+    };
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    coordinator.settle_terminal_work(
+        work,
+        EvaluationWaitTerminal::Abandoned,
+        Arc::new(EvaluationFailure::message("forced terminal publication")),
+    );
+    drop(release);
+    coordinator.retire_deferred(work);
+
+    let context = session.context();
+    let expected = context.values().unit();
+    let client = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .expect("same-session client demand should be admitted");
+    let CoordinatorSelection::ClientDemand(claimed) = coordinator.select() else {
+        panic!("retired work must not delay client admission")
+    };
+    assert_eq!(claimed.id, client.work());
+    coordinator.poll_claimed_client_demand(claimed);
+    assert!(matches!(
+        client.poll(),
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
+    ));
+}
+
+#[test]
 fn outer_block_promotes_one_canonical_deferred_producer() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");

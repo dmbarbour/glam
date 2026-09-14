@@ -2628,12 +2628,26 @@ Remediation checkpoints:
 1. **W5C5-001A — Complete (2026-09-14): finding and evidence.** Record the
    failing surface, captured stacks and coordinator state, provisional
    ownership cycle, and the explicit non-solutions above.
-2. **W5C5-001B — Forced-order characterization.** Add test-only channels or
-   barriers around deferred terminal publication, retirement, nested
-   client-demand admission, and selection. Convert the indefinite hang into a
-   finite assertion, and force both publication-before-retirement and
-   retirement-before-selection orderings. A timeout may bound a failed test
-   process during investigation but is not correctness evidence.
+2. **W5C5-001B — Complete (2026-09-14): forced-order characterization and
+   semantic-admission repair.** Coordinator-level fixtures now drive the
+   relevant lifecycle transitions directly: one admits a same-session client
+   while its producer is `Running`, proves exclusion, publishes the producer's
+   terminal result while retaining its detached machine and retirement tail,
+   then proves the client becomes selectable before retirement. A paired
+   fixture retires first and proves the other ordering. The first assertion
+   failed finitely before the repair.
+
+   The missing transition was the admission predicate treating
+   `Terminalizing` as an active semantic machine. Terminal publication has
+   already detached the machine and made its result authoritative; destruction
+   and record retirement are non-semantic cleanup. Same-session admission now
+   excludes only `Running` ordinary machines. Lifecycle readiness continues to
+   count terminalizing records until cleanup completes. This removes one
+   proven edge from the captured ownership cycle without weakening exclusion
+   between two active semantic polls, relying on timing, or making worker-side
+   recursive demand a scheduler feature. The original four-worker fixture can
+   still expose the independently prohibited callback-to-client-demand edge;
+   W5C5-001C/D own that remaining repair.
 3. **W5C5-001C — Minimal callback protocol decision.** Specify a durable
    machine-owned boundary in which semantic preparation before a
    specialization callback may suspend, the host callback runs exactly once,

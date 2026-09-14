@@ -1952,6 +1952,14 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.ready_tasks.retain(|candidate| *candidate != id);
 }
 
+/// Returns whether one ordinary machine still owns a semantic poll for this
+/// demand session.
+///
+/// `Terminalizing` is deliberately excluded. Terminal publication has
+/// already detached the machine and made its result authoritative; the
+/// remaining machine destruction and coordinator retirement are
+/// non-semantic cleanup. Treating that tail as an active poll can deadlock a
+/// same-session client demand created while unwinding the completed machine.
 fn session_has_running_machine(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
     state
         .work_by_session
@@ -1960,8 +1968,7 @@ fn session_has_running_machine(state: &WorkCoordinatorState, session: Evaluation
         .flatten()
         .filter_map(|id| state.work.get(id))
         .any(|record| {
-            matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-                && !matches!(record.kind, WorkKind::Spark(_))
+            matches!(record.state, WorkState::Running) && !matches!(record.kind, WorkKind::Spark(_))
         })
 }
 
