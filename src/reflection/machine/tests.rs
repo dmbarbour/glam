@@ -6118,6 +6118,24 @@ fn reflection_environment_is_available_as_plain_data() {
 }
 
 #[test]
+fn reflection_environment_resumes_each_lazy_key_path_segment() {
+    let (assembler, effect) = compile_effect(
+        ".env (anno {refl:(.r ())} [anno {refl:(.r ())} 'glam, anno {refl:(.r ())} 'version])",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
+    let EvaluationWaitPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
+        panic!("environment traversal should resume every lazy key segment")
+    };
+    assert_eq!(
+        assembler
+            .to_binary(&PublicValue::from_runtime_root(*version))
+            .unwrap(),
+        env!("CARGO_PKG_VERSION").as_bytes()
+    );
+}
+
+#[test]
 fn task_value_is_symmetric_with_task_error() {
     let (assembler, effect) = compile_effect(
         ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_value -> .task.value task))",

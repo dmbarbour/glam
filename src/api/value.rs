@@ -891,6 +891,18 @@ impl EvaluatedValue {
         values.with_access(|access| access.with_core(self.as_value(), operation))
     }
 
+    pub(crate) fn with_core_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&'scope CoreValue, &'scope RuntimeValueAccess<'scope>) -> R,
+    ) -> Result<R, Error> {
+        let values = self.observation_values()?;
+        values.with_access(|access| {
+            access.with_core(self.as_value(), |value| {
+                operation(value, access.runtime_access())
+            })
+        })
+    }
+
     /// Compares this evaluated outer value with another retained runtime
     /// representation without demanding the other value.
     ///

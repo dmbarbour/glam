@@ -3242,7 +3242,7 @@ Partition this work as follows:
    - **W5C.5b.2b — Complete (2026-09-14): Logging preparation.** Migrate message, optional message
      interface, and severity demand in established order without repeating a
      completed prefix or host emission.
-   - **W5C.5b.2c — Environment traversal.** Migrate key-path conversion and
+   - **W5C.5b.2c — Complete (2026-09-14): Environment traversal.** Migrate key-path conversion and
      value-path selection as resumable recursive preparation.
 4. **W5C.5b.3 — Task request family.** Migrate task-handle preparation, query
    lookup/state decoding, acknowledgement/cancellation, and task join. Query

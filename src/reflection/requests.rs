@@ -9,6 +9,7 @@ use crate::evaluation::{
     EvaluationTaskStatus, EvaluationWaitPoll, PendingReflectionTask, PendingTaskPolicy,
     TaskStatusPublisher, TaskStatusWake,
 };
+use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
 
 use super::protocol::{
@@ -48,6 +49,7 @@ pub struct ReflectionRequestWork {
 }
 
 enum ReflectionRequestOperation {
+    Environment(EnvironmentRequestWork),
     Eval(EvalRequestWork),
     Inspection(InspectionRequestWork),
     Log(LogRequestWork),
@@ -91,9 +93,62 @@ enum LogRequestWork {
     },
 }
 
+enum EnvironmentRequestWork {
+    Start(Vec<Value>),
+    KeyPath(KeyListRequestWork),
+    ValuePath(ValuePathRequestWork),
+}
+
+struct ValuePathRequestWork {
+    path: Vec<Key>,
+    next: usize,
+    current: Value,
+    awaiting: bool,
+}
+
+struct KeyConversionRequestWork {
+    state: KeyConversionRequestState,
+}
+
+enum KeyConversionRequestState {
+    Demand(Value),
+    Awaiting,
+    List(Box<KeyListRequestWork>),
+    Dict(Box<DictKeyRequestWork>),
+    Poisoned,
+}
+
+struct DictKeyRequestWork {
+    members: Vec<(Key, Value)>,
+    next: usize,
+    converted: Vec<(Key, Key)>,
+    child: Option<KeyConversionRequestWork>,
+}
+
+struct KeyListRequestWork {
+    pending: Option<ListDemand>,
+    lists: Vec<crate::api::EvaluatedValue>,
+    child: Option<Box<KeyConversionRequestWork>>,
+    converted: Vec<Key>,
+}
+
+enum ListDemand {
+    Start(Value),
+    Awaiting,
+}
+
+enum PreparationPoll<T> {
+    Progress,
+    Demand(Value),
+    Ready(T),
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
+            ReflectionRequest::Environment => {
+                ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments))
+            }
             ReflectionRequest::Eval => {
                 ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments))
             }
@@ -133,6 +188,62 @@ where
         let operation =
             std::mem::replace(&mut self.operation, ReflectionRequestOperation::Poisoned);
         match operation {
+            ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments)) => {
+                assert!(input.is_none(), "new `.env` work cannot have demand input");
+                let [path]: [Value; 1] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("`.env` received the wrong number of arguments"))?;
+                self.operation = ReflectionRequestOperation::Environment(
+                    EnvironmentRequestWork::KeyPath(KeyListRequestWork::new(path)),
+                );
+                Ok(SpecializationRequestPoll::Continue)
+            }
+            ReflectionRequestOperation::Environment(EnvironmentRequestWork::KeyPath(mut path)) => {
+                match path.poll(input, context)? {
+                    PreparationPoll::Progress => {
+                        self.operation = ReflectionRequestOperation::Environment(
+                            EnvironmentRequestWork::KeyPath(path),
+                        );
+                        Ok(SpecializationRequestPoll::Continue)
+                    }
+                    PreparationPoll::Demand(value) => {
+                        self.operation = ReflectionRequestOperation::Environment(
+                            EnvironmentRequestWork::KeyPath(path),
+                        );
+                        Ok(SpecializationRequestPoll::Demand(value))
+                    }
+                    PreparationPoll::Ready(path) => {
+                        self.operation = ReflectionRequestOperation::Environment(
+                            EnvironmentRequestWork::ValuePath(ValuePathRequestWork {
+                                path,
+                                next: 0,
+                                current: context.host().reflection_environment(),
+                                awaiting: false,
+                            }),
+                        );
+                        Ok(SpecializationRequestPoll::Continue)
+                    }
+                }
+            }
+            ReflectionRequestOperation::Environment(EnvironmentRequestWork::ValuePath(
+                mut path,
+            )) => match path.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    self.operation = ReflectionRequestOperation::Environment(
+                        EnvironmentRequestWork::ValuePath(path),
+                    );
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+                PreparationPoll::Demand(value) => {
+                    self.operation = ReflectionRequestOperation::Environment(
+                        EnvironmentRequestWork::ValuePath(path),
+                    );
+                    Ok(SpecializationRequestPoll::Demand(value))
+                }
+                PreparationPoll::Ready(value) => Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::Return(value),
+                )),
+            },
             ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments)) => {
                 assert!(input.is_none(), "new `.eval` work cannot have demand input");
                 let [value]: [Value; 1] = arguments
@@ -264,6 +375,287 @@ where
             }
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
+            }
+        }
+    }
+}
+
+impl ValuePathRequestWork {
+    fn poll<S: TaskSpecialization>(
+        &mut self,
+        input: Option<SpecializationRequestInput>,
+        context: &RequestContext<'_, S>,
+    ) -> Result<PreparationPoll<Value>, TaskHalt> {
+        if self.next == self.path.len() {
+            assert!(
+                input.is_none(),
+                "completed value path cannot have demand input"
+            );
+            return Ok(PreparationPoll::Ready(self.current.clone()));
+        }
+        if !self.awaiting {
+            assert!(input.is_none(), "new value-path demand cannot have input");
+            self.awaiting = true;
+            return Ok(PreparationPoll::Demand(self.current.clone()));
+        }
+        let current = demand_value(input, "resumed value-path work")?;
+        let key = &self.path[self.next];
+        let selected = current.with_core(|value| {
+            let CoreValue::Dict(dict) = value else {
+                return Err(TaskHalt::new("state path traverses a non-dictionary value"));
+            };
+            Ok(dict
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| CoreValue::Dict(Dict::new_sync())))
+        })??;
+        self.current = context.values().wrap(selected);
+        self.next += 1;
+        self.awaiting = false;
+        Ok(PreparationPoll::Progress)
+    }
+}
+
+impl KeyConversionRequestWork {
+    fn new(value: Value) -> Self {
+        Self {
+            state: KeyConversionRequestState::Demand(value),
+        }
+    }
+
+    fn poll<S: TaskSpecialization>(
+        &mut self,
+        input: Option<SpecializationRequestInput>,
+        context: &RequestContext<'_, S>,
+    ) -> Result<PreparationPoll<Key>, TaskHalt> {
+        let state = std::mem::replace(&mut self.state, KeyConversionRequestState::Poisoned);
+        match state {
+            KeyConversionRequestState::Demand(value) => {
+                assert!(input.is_none(), "new key demand cannot have input");
+                self.state = KeyConversionRequestState::Awaiting;
+                Ok(PreparationPoll::Demand(value))
+            }
+            KeyConversionRequestState::Awaiting => {
+                let value = demand_value(input, "resumed key conversion")?;
+                match classify_key_value(&value)? {
+                    ClassifiedRequestKey::Ready(key) => Ok(PreparationPoll::Ready(key)),
+                    ClassifiedRequestKey::List => {
+                        self.state = KeyConversionRequestState::List(Box::new(
+                            KeyListRequestWork::from_ready(value),
+                        ));
+                        Ok(PreparationPoll::Progress)
+                    }
+                    ClassifiedRequestKey::Dict(members) => {
+                        let values = context.values();
+                        self.state =
+                            KeyConversionRequestState::Dict(Box::new(DictKeyRequestWork {
+                                members: members
+                                    .into_iter()
+                                    .map(|(key, value)| (key, values.wrap(value)))
+                                    .collect(),
+                                next: 0,
+                                converted: Vec::new(),
+                                child: None,
+                            }));
+                        Ok(PreparationPoll::Progress)
+                    }
+                    ClassifiedRequestKey::Invalid => Err(TaskHalt::new(
+                        "dictionary keys must evaluate to keyable values",
+                    )),
+                }
+            }
+            KeyConversionRequestState::List(mut list) => match list.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    self.state = KeyConversionRequestState::List(list);
+                    Ok(PreparationPoll::Progress)
+                }
+                PreparationPoll::Demand(value) => {
+                    self.state = KeyConversionRequestState::List(list);
+                    Ok(PreparationPoll::Demand(value))
+                }
+                PreparationPoll::Ready(items) => {
+                    Ok(PreparationPoll::Ready(Key::List(Arc::from(items))))
+                }
+            },
+            KeyConversionRequestState::Dict(mut dict) => match dict.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    self.state = KeyConversionRequestState::Dict(dict);
+                    Ok(PreparationPoll::Progress)
+                }
+                PreparationPoll::Demand(value) => {
+                    self.state = KeyConversionRequestState::Dict(dict);
+                    Ok(PreparationPoll::Demand(value))
+                }
+                PreparationPoll::Ready(items) => {
+                    Ok(PreparationPoll::Ready(Key::Dict(Arc::from(items))))
+                }
+            },
+            KeyConversionRequestState::Poisoned => {
+                panic!("completed key conversion was polled again")
+            }
+        }
+    }
+}
+
+enum ClassifiedRequestKey {
+    Ready(Key),
+    List,
+    Dict(Vec<(Key, CoreValue)>),
+    Invalid,
+}
+
+fn classify_key_value(
+    value: &crate::api::EvaluatedValue,
+) -> Result<ClassifiedRequestKey, TaskHalt> {
+    value
+        .with_core(|value| match value {
+            CoreValue::Atom(atom) => ClassifiedRequestKey::Ready(Key::Atom(atom.clone())),
+            CoreValue::Number(number) => ClassifiedRequestKey::Ready(Key::Number(number.clone())),
+            CoreValue::Binary(bytes) => ClassifiedRequestKey::Ready(Key::Binary(bytes.clone())),
+            CoreValue::List(_) => ClassifiedRequestKey::List,
+            CoreValue::Dict(dict) => ClassifiedRequestKey::Dict(
+                dict.iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            ),
+            CoreValue::Builtin(_)
+            | CoreValue::PartialBuiltin(_)
+            | CoreValue::Function(_)
+            | CoreValue::Net(_)
+            | CoreValue::Lazy(_)
+            | CoreValue::Promised(_)
+            | CoreValue::Metadata(_)
+            | CoreValue::Opaque(_) => ClassifiedRequestKey::Invalid,
+        })
+        .map_err(TaskHalt::from)
+}
+
+impl DictKeyRequestWork {
+    fn poll<S: TaskSpecialization>(
+        &mut self,
+        input: Option<SpecializationRequestInput>,
+        context: &RequestContext<'_, S>,
+    ) -> Result<PreparationPoll<Vec<(Key, Key)>>, TaskHalt> {
+        if let Some(child) = self.child.as_mut() {
+            return match child.poll(input, context)? {
+                PreparationPoll::Progress => Ok(PreparationPoll::Progress),
+                PreparationPoll::Demand(value) => Ok(PreparationPoll::Demand(value)),
+                PreparationPoll::Ready(value) => {
+                    let (key, _) = &self.members[self.next - 1];
+                    if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
+                        self.converted.push((key.clone(), value));
+                    }
+                    self.child = None;
+                    Ok(PreparationPoll::Progress)
+                }
+            };
+        }
+        assert!(
+            input.is_none(),
+            "idle dictionary key work cannot have input"
+        );
+        let Some((_, value)) = self.members.get(self.next) else {
+            return Ok(PreparationPoll::Ready(std::mem::take(&mut self.converted)));
+        };
+        self.next += 1;
+        self.child = Some(KeyConversionRequestWork::new(value.clone()));
+        Ok(PreparationPoll::Progress)
+    }
+}
+
+impl KeyListRequestWork {
+    fn new(value: Value) -> Self {
+        Self {
+            pending: Some(ListDemand::Start(value)),
+            lists: Vec::new(),
+            child: None,
+            converted: Vec::new(),
+        }
+    }
+
+    fn from_ready(value: crate::api::EvaluatedValue) -> Self {
+        Self {
+            pending: None,
+            lists: vec![value],
+            child: None,
+            converted: Vec::new(),
+        }
+    }
+
+    fn poll<S: TaskSpecialization>(
+        &mut self,
+        input: Option<SpecializationRequestInput>,
+        context: &RequestContext<'_, S>,
+    ) -> Result<PreparationPoll<Vec<Key>>, TaskHalt> {
+        if let Some(child) = self.child.as_mut() {
+            return match child.poll(input, context)? {
+                PreparationPoll::Progress => Ok(PreparationPoll::Progress),
+                PreparationPoll::Demand(value) => Ok(PreparationPoll::Demand(value)),
+                PreparationPoll::Ready(key) => {
+                    self.converted.push(key);
+                    self.child = None;
+                    Ok(PreparationPoll::Progress)
+                }
+            };
+        }
+        if let Some(pending) = self.pending.take() {
+            return match pending {
+                ListDemand::Start(value) => {
+                    assert!(input.is_none(), "new list demand cannot have input");
+                    self.pending = Some(ListDemand::Awaiting);
+                    Ok(PreparationPoll::Demand(value))
+                }
+                ListDemand::Awaiting => {
+                    let value = demand_value(input, "resumed key-list demand")?;
+                    let is_list = value.with_core(|value| matches!(value, CoreValue::List(_)))?;
+                    if !is_list {
+                        return Err(TaskHalt::new(
+                            "path-list operand must evaluate to a list value",
+                        ));
+                    }
+                    self.lists.push(value);
+                    Ok(PreparationPoll::Progress)
+                }
+            };
+        }
+        assert!(input.is_none(), "idle key-list work cannot have input");
+        let Some(list) = self.lists.pop() else {
+            return Ok(PreparationPoll::Ready(std::mem::take(&mut self.converted)));
+        };
+        let step = list.with_core_access(|value, access| {
+            let CoreValue::List(list) = value else {
+                unreachable!("key-list work retains only validated lists")
+            };
+            list.pop_front_step_by(&mut |value| access.duplicate_value(value), &mut |thunk| {
+                thunk.duplicate_as_value_in(access)
+            })
+        })?;
+        match step {
+            ListFrontStep::Empty => Ok(PreparationPoll::Progress),
+            ListFrontStep::Item { item, tail } => {
+                let tail = context.values().wrap(CoreValue::List(tail));
+                self.lists.push(crate::api::EvaluatedValue::from_whnf(
+                    &context.values(),
+                    tail,
+                ));
+                match item {
+                    ListItem::Byte(byte) => self.converted.push(Key::Number(Number::from_u8(byte))),
+                    ListItem::Value(value) => {
+                        self.child = Some(Box::new(KeyConversionRequestWork::new(
+                            context.values().wrap(value),
+                        )));
+                    }
+                }
+                Ok(PreparationPoll::Progress)
+            }
+            ListFrontStep::Deferred { deferred, suffix } => {
+                let suffix = context.values().wrap(CoreValue::List(suffix));
+                self.lists.push(crate::api::EvaluatedValue::from_whnf(
+                    &context.values(),
+                    suffix,
+                ));
+                self.pending = Some(ListDemand::Start(context.values().wrap(deferred)));
+                Ok(PreparationPoll::Progress)
             }
         }
     }
