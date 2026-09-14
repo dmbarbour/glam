@@ -1081,53 +1081,53 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> ControlStep<S> {
         let operation = std::mem::replace(&mut controlling.operation, ControlOperation::Poisoned);
         match operation {
-            ControlOperation::ResetKey {
+            ControlOperation::Key {
                 mut key,
                 stack,
-                operation,
+                disposition,
             } => {
                 let poll = context.evaluate(&self.eval_context, |evaluator| {
                     key.poll(context, evaluator, &self.eval_context, step_budget.max(1))
                 });
                 match poll {
                     eval::ConversionPoll::Ready(key) => {
-                        controlling.operation = ControlOperation::ResetStack {
+                        controlling.operation = ControlOperation::Stack {
                             key,
                             stack,
-                            operation,
+                            disposition,
                         };
                         ControlStep::Continue(controlling)
                     }
                     eval::ConversionPoll::Pending(dependency) => {
-                        controlling.operation = ControlOperation::ResetKey {
+                        controlling.operation = ControlOperation::Key {
                             key,
                             stack,
-                            operation,
+                            disposition,
                         };
                         ControlStep::Blocked(controlling, dependency)
                     }
                     eval::ConversionPoll::Yielded => {
-                        controlling.operation = ControlOperation::ResetKey {
+                        controlling.operation = ControlOperation::Key {
                             key,
                             stack,
-                            operation,
+                            disposition,
                         };
                         ControlStep::Yielded(controlling)
                     }
                     eval::ConversionPoll::Failed(failure) => {
-                        controlling.operation = ControlOperation::ResetKey {
+                        controlling.operation = ControlOperation::Key {
                             key,
                             stack,
-                            operation,
+                            disposition,
                         };
                         ControlStep::Failed(controlling, TaskHalt::rooted_failure(failure))
                     }
                 }
             }
-            ControlOperation::ResetStack {
+            ControlOperation::Stack {
                 key,
                 mut stack,
-                operation,
+                disposition,
             } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
                 ResetStackPoll::Ready(decoded) => {
                     let reset_stack::DecodedResetStack {
@@ -1137,79 +1137,137 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     drop(serialized);
                     let mut branch = controlling.branch;
                     let scope_depth = controlling.scope_depth;
-                    let order = match self.allocate_control_order() {
-                        Ok(order) => order,
-                        Err(error) => {
-                            return ControlStep::Failed(
-                                ControlWork::poisoned(branch, scope_depth),
-                                error,
-                            );
+                    match disposition {
+                        KeyedControl::Reset { operation } => {
+                            let order = match self.allocate_control_order() {
+                                Ok(order) => order,
+                                Err(error) => {
+                                    return ControlStep::Failed(
+                                        ControlWork::poisoned(branch, scope_depth),
+                                        error,
+                                    );
+                                }
+                            };
+                            let continuation =
+                                match self.capture_continuation(CapturedContinuation {
+                                    sequence: std::mem::take(&mut branch.control.sequence),
+                                    delimiters: Vec::new(),
+                                    reset_frames: Vec::new(),
+                                }) {
+                                    Ok(continuation) => continuation,
+                                    Err(error) => {
+                                        return ControlStep::Failed(
+                                            ControlWork::poisoned(branch, scope_depth),
+                                            error,
+                                        );
+                                    }
+                                };
+                            frames.push(ResetFrame {
+                                key,
+                                continuation,
+                                scope_depth,
+                                order,
+                            });
+                            let state = context.evaluate(&self.eval_context, |evaluator| {
+                                let state = evaluator.project_root(&branch.state);
+                                replace_reset_frames(
+                                    evaluator,
+                                    state,
+                                    &self.tags.continuation_state,
+                                    &frames,
+                                )
+                            });
+                            branch.set_state(self.eval_context.values(), state);
+                            branch.set_effect_root(operation);
+                            ControlStep::Complete(MachineWork::Drive {
+                                branch,
+                                scope_depth,
+                            })
                         }
-                    };
-                    let continuation = match self.capture_continuation(CapturedContinuation {
-                        sequence: std::mem::take(&mut branch.control.sequence),
-                        delimiters: Vec::new(),
-                        reset_frames: Vec::new(),
-                    }) {
-                        Ok(continuation) => continuation,
-                        Err(error) => {
-                            return ControlStep::Failed(
-                                ControlWork::poisoned(branch, scope_depth),
-                                error,
-                            );
+                        KeyedControl::Shift { function } => {
+                            let Some(index) = frames.iter().rposition(|frame| frame.key == key)
+                            else {
+                                return ControlStep::Failed(
+                                    ControlWork::poisoned(branch, scope_depth),
+                                    TaskHalt::new("`.shift` key is not in reset scope"),
+                                );
+                            };
+                            let inner_reset_frames = frames.split_off(index + 1);
+                            let target = frames.pop().expect("matching reset frame must exist");
+                            let first_inner_delimiter = branch
+                                .control
+                                .delimiters
+                                .iter()
+                                .position(|delimiter| delimiter.order() > target.order)
+                                .unwrap_or(branch.control.delimiters.len());
+                            let inner_delimiters =
+                                branch.control.delimiters.split_off(first_inner_delimiter);
+                            let continuation =
+                                match self.capture_continuation(CapturedContinuation {
+                                    sequence: std::mem::take(&mut branch.control.sequence),
+                                    delimiters: inner_delimiters,
+                                    reset_frames: inner_reset_frames,
+                                }) {
+                                    Ok(continuation) => continuation,
+                                    Err(error) => {
+                                        return ControlStep::Failed(
+                                            ControlWork::poisoned(branch, scope_depth),
+                                            error,
+                                        );
+                                    }
+                                };
+                            let state = context.evaluate(&self.eval_context, |evaluator| {
+                                let state = evaluator.project_root(&branch.state);
+                                replace_reset_frames(
+                                    evaluator,
+                                    state,
+                                    &self.tags.continuation_state,
+                                    &frames,
+                                )
+                            });
+                            branch.set_state(self.eval_context.values(), state);
+                            branch
+                                .control
+                                .sequence
+                                .push(Continuation::Glam(target.continuation));
+                            ControlStep::Complete(MachineWork::apply_roots(
+                                function,
+                                vec![continuation],
+                                branch,
+                                scope_depth,
+                            ))
                         }
-                    };
-                    frames.push(ResetFrame {
-                        key,
-                        continuation,
-                        scope_depth,
-                        order,
-                    });
-                    let state = context.evaluate(&self.eval_context, |evaluator| {
-                        let state = evaluator.project_root(&branch.state);
-                        replace_reset_frames(
-                            evaluator,
-                            state,
-                            &self.tags.continuation_state,
-                            &frames,
-                        )
-                    });
-                    branch.set_state(self.eval_context.values(), state);
-                    branch.set_effect_root(operation);
-                    ControlStep::Complete(MachineWork::Drive {
-                        branch,
-                        scope_depth,
-                    })
+                    }
                 }
                 ResetStackPoll::Continue => {
-                    controlling.operation = ControlOperation::ResetStack {
+                    controlling.operation = ControlOperation::Stack {
                         key,
                         stack,
-                        operation,
+                        disposition,
                     };
                     ControlStep::Continue(controlling)
                 }
                 ResetStackPoll::Pending(dependency) => {
-                    controlling.operation = ControlOperation::ResetStack {
+                    controlling.operation = ControlOperation::Stack {
                         key,
                         stack,
-                        operation,
+                        disposition,
                     };
                     ControlStep::Blocked(controlling, dependency)
                 }
                 ResetStackPoll::Yielded => {
-                    controlling.operation = ControlOperation::ResetStack {
+                    controlling.operation = ControlOperation::Stack {
                         key,
                         stack,
-                        operation,
+                        disposition,
                     };
                     ControlStep::Yielded(controlling)
                 }
                 ResetStackPoll::Failed(error) => {
-                    controlling.operation = ControlOperation::ResetStack {
+                    controlling.operation = ControlOperation::Stack {
                         key,
                         stack,
-                        operation,
+                        disposition,
                     };
                     ControlStep::Failed(controlling, error)
                 }
@@ -1952,46 +2010,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ))));
             }
             Request::Shift(key, function) => {
-                let (key, mut frames) = context.evaluate(&self.eval_context, |evaluator| {
-                    let key = evaluator.project_root(&key);
-                    let state = evaluator.project_root(&branch.state);
-                    Ok::<_, TaskHalt>((
-                        value_key_in(evaluator, key)?,
-                        reset_frames_in(evaluator, &state, &self.tags.continuation_state)?,
-                    ))
+                let stack = context.evaluate(&self.eval_context, |evaluator| {
+                    reset_stack_root_in(evaluator, &branch.state, &self.tags.continuation_state)
                 })?;
-                let Some(index) = frames.iter().rposition(|frame| frame.key == key) else {
-                    return Err(TaskHalt::new("`.shift` key is not in reset scope"));
-                };
-                let inner_reset_frames = frames.split_off(index + 1);
-                let target = frames.pop().expect("matching reset frame must exist");
-                let first_inner_delimiter = branch
-                    .control
-                    .delimiters
-                    .iter()
-                    .position(|delimiter| delimiter.order() > target.order)
-                    .unwrap_or(branch.control.delimiters.len());
-                let inner_delimiters = branch.control.delimiters.split_off(first_inner_delimiter);
-                let continuation = self.capture_continuation(CapturedContinuation {
-                    sequence: std::mem::take(&mut branch.control.sequence),
-                    delimiters: inner_delimiters,
-                    reset_frames: inner_reset_frames,
-                })?;
-                let state = context.evaluate(&self.eval_context, |evaluator| {
-                    let state = evaluator.project_root(&branch.state);
-                    Ok::<_, TaskHalt>(replace_reset_frames(
-                        evaluator,
-                        state,
-                        &self.tags.continuation_state,
-                        &frames,
-                    ))
-                })?;
-                branch.set_state(self.eval_context.values(), state);
-                branch
-                    .control
-                    .sequence
-                    .push(Continuation::Glam(target.continuation));
-                MachineWork::apply_roots(function, vec![continuation], branch, scope_depth)
+                return Ok(MachineStep::Control(Box::new(ControlWork::shift(
+                    key,
+                    stack,
+                    function,
+                    branch,
+                    scope_depth,
+                ))));
             }
             Request::Resume(task_id, id, value) => {
                 if task_id != self.id {
@@ -3398,17 +3426,22 @@ struct ControlWork<S: TaskSpecialization> {
 }
 
 enum ControlOperation {
-    ResetKey {
+    Key {
         key: eval::KeyConversionMachine,
         stack: ResetStackMachine,
-        operation: RuntimeValueRoot,
+        disposition: KeyedControl,
     },
-    ResetStack {
+    Stack {
         key: Key,
         stack: ResetStackMachine,
-        operation: RuntimeValueRoot,
+        disposition: KeyedControl,
     },
     Poisoned,
+}
+
+enum KeyedControl {
+    Reset { operation: RuntimeValueRoot },
+    Shift { function: RuntimeValueRoot },
 }
 
 impl<S: TaskSpecialization> ControlWork<S> {
@@ -3420,10 +3453,28 @@ impl<S: TaskSpecialization> ControlWork<S> {
         scope_depth: usize,
     ) -> Self {
         Self {
-            operation: ControlOperation::ResetKey {
+            operation: ControlOperation::Key {
                 key: eval::KeyConversionMachine::new(key, None),
                 stack: ResetStackMachine::new(stack),
-                operation,
+                disposition: KeyedControl::Reset { operation },
+            },
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn shift(
+        key: RuntimeValueRoot,
+        stack: RuntimeValueRoot,
+        function: RuntimeValueRoot,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            operation: ControlOperation::Key {
+                key: eval::KeyConversionMachine::new(key, None),
+                stack: ResetStackMachine::new(stack),
+                disposition: KeyedControl::Shift { function },
             },
             branch,
             scope_depth,

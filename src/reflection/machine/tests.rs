@@ -1169,23 +1169,23 @@ fn assert_execution_root_inventory(
         let _: &Branch<TestEffects> = branch;
         let _: &usize = scope_depth;
         match operation {
-            ControlOperation::ResetKey {
+            ControlOperation::Key {
                 key,
                 stack,
-                operation,
+                disposition,
             } => {
                 let _: &eval::KeyConversionMachine = key;
                 super::reset_stack::assert_machine_shape(stack);
-                let _: &RuntimeValueRoot = operation;
+                assert_keyed_control_shape(disposition);
             }
-            ControlOperation::ResetStack {
+            ControlOperation::Stack {
                 key,
                 stack,
-                operation,
+                disposition,
             } => {
                 let _: &Key = key;
                 super::reset_stack::assert_machine_shape(stack);
-                let _: &RuntimeValueRoot = operation;
+                assert_keyed_control_shape(disposition);
             }
             ControlOperation::Poisoned => {}
         }
@@ -1327,6 +1327,17 @@ fn assert_execution_root_inventory(
             let _: &usize = index;
         }
         WakeAction::RestartSearch => {}
+    }
+}
+
+fn assert_keyed_control_shape(control: &KeyedControl) {
+    match control {
+        KeyedControl::Reset { operation } => {
+            let _: &RuntimeValueRoot = operation;
+        }
+        KeyedControl::Shift { function } => {
+            let _: &RuntimeValueRoot = function;
+        }
     }
 }
 
@@ -1759,9 +1770,9 @@ type ControlRootInventoryFn =
 fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
     let source = include_str!("../machine.rs");
     let expected = [
-        ("value_key_in", 3),
+        ("value_key_in", 2),
         ("reset_stack_value_in", 3),
-        ("reset_frames_in", 4),
+        ("reset_frames_in", 3),
         ("reset_frames_from_value_in", 4),
         ("with_reset_frames_in", 3),
         ("replace_reset_frames", 4),
@@ -2297,6 +2308,21 @@ fn reset_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedVa
     })
 }
 
+fn shift_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedValue) -> Value {
+    values.with_runtime_value_access(|access| {
+        eval::constant_effect_in(
+            &access,
+            request_value(
+                &tags.shift,
+                vec![
+                    Value::Promised(key.duplicate_in(&access)),
+                    Value::Builtin(Builtin::ListAt),
+                ],
+            ),
+        )
+    })
+}
+
 #[test]
 fn reset_control_work_does_not_publish_before_its_key_resolves() {
     let values = crate::core::test_value_factory();
@@ -2357,6 +2383,64 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
         "reset capture and the subsequent effect application each allocate one order"
     );
     assert_eq!(task.continuations.len(), 1);
+}
+
+#[test]
+fn shift_control_work_does_not_capture_before_its_key_resolves() {
+    let values = crate::core::test_value_factory();
+    let tags = Tags::new();
+    let key = PromisedValue::new(&values, "shift request key");
+    let effect = shift_request_effect(&values, &tags, &key);
+    let mut task = EffectTask::new(
+        &values,
+        effect,
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("shift control fixture should construct");
+
+    loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                assert!(matches!(
+                    blocked.dependency,
+                    Some(WorkDependency::Promise(_))
+                ));
+                break;
+            }
+            EffectTaskPoll::Complete(_) => panic!("unfulfilled shift key completed"),
+            EffectTaskPoll::Failed(error) => panic!("unfulfilled shift key failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("shift fixture was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("shift fixture voted to exit"),
+        }
+    }
+    assert_eq!(task.next_continuation, 1);
+    assert_eq!(task.next_control_order, 1);
+    assert!(task.continuations.is_empty());
+    assert!(
+        task.execution
+            .active_branch()
+            .expect("blocked shift should retain its branch")
+            .control
+            .delimiters
+            .is_empty()
+    );
+
+    crate::core::set_test_promise(&values, &key, Value::binary_from_text("missing"))
+        .expect("shift key should publish once");
+    let error = match task.run() {
+        Ok(_) => panic!("resolved unmatched shift should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("`.shift` key is not in reset scope")
+    );
+    assert_eq!(task.next_continuation, 1);
+    assert_eq!(task.next_control_order, 1);
+    assert!(task.continuations.is_empty());
 }
 
 fn assert_fixpoint_root_inventory(

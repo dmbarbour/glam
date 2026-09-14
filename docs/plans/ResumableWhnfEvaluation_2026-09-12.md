@@ -2909,6 +2909,8 @@ completion.
 
 ####### W5C.4b.2 — `.shift` request entry and capture
 
+**Status: complete (2026-09-14).**
+
 Decode the shift key followed by the current stack, then locate the innermost
 matching frame without further demand. Preserve the unmatched-key diagnostic.
 Only after a match is established may `.shift` split inner reset frames and
@@ -2920,6 +2922,15 @@ the reset and delimiter stacks intact. On success, the captured continuation
 contains exactly the reset frames and delimiters inside the selected prompt,
 and the target continuation remains on the outer control sequence in the same
 order as uninterrupted execution.
+
+Completion record: keyed control work now shares one resumable key/stack
+frontier and carries an explicit reset-versus-shift disposition. `.shift`
+does not search, split either stack, or capture a continuation until both
+inputs validate; only the terminal transition performs those mutations and
+applies the shift function. A resolver-promise key fixture forces suspension,
+then an unmatched-key failure, while latching unchanged order/continuation
+counters and delimiter state. Existing nested-reset, cut, task-locality, and
+continuation-reuse cases verify the successful capture shape.
 
 ####### W5C.4b.3 — Captured-continuation installation
 
