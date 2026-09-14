@@ -55,6 +55,7 @@ enum ReflectionRequestOperation {
     Log(LogRequestWork),
     TaskCreate(Vec<Value>),
     TaskControl(TaskControlRequestWork),
+    TaskJoin(TaskJoinRequestWork),
     TaskQuery(TaskQueryRequestWork),
     Synchronous {
         request: ReflectionRequest,
@@ -180,6 +181,12 @@ enum TaskQueryRequest {
     Halt,
 }
 
+enum TaskJoinRequestWork {
+    Start(Vec<Value>),
+    Handle,
+    Waiting(Arc<TaskHandleCell>),
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
@@ -205,6 +212,9 @@ impl ReflectionRequestWork {
                 ReflectionRequestOperation::Log(LogRequestWork::Start(arguments))
             }
             ReflectionRequest::TaskNew => ReflectionRequestOperation::TaskCreate(arguments),
+            ReflectionRequest::TaskJoin => {
+                ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Start(arguments))
+            }
             ReflectionRequest::TaskAcknowledgeError => {
                 ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
                     request: TaskControlRequest::AcknowledgeError,
@@ -438,6 +448,27 @@ where
                 let result = create_task(arguments, context)?;
                 Ok(SpecializationRequestPoll::Complete(result))
             }
+            ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Start(arguments)) => {
+                assert!(input.is_none(), "new task join cannot have demand input");
+                let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.task.join` received the wrong number of arguments")
+                })?;
+                self.operation = ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Handle);
+                Ok(SpecializationRequestPoll::Demand(handle))
+            }
+            ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Handle) => {
+                let handle = demand_value(input, "resumed task join handle")?;
+                let handle = evaluated_task_handle(context, &handle, "task.join")?;
+                ensure_runtime_task(context.eval_context(), &handle)?;
+                poll_task_join(&mut self.operation, context, handle)
+            }
+            ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Waiting(handle)) => {
+                assert!(
+                    input.is_none(),
+                    "shared task wake does not carry demand input"
+                );
+                poll_task_join(&mut self.operation, context, handle)
+            }
             ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
                 request,
                 arguments,
@@ -513,6 +544,42 @@ where
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
             }
+        }
+    }
+}
+
+fn poll_task_join<S: TaskSpecialization>(
+    operation: &mut ReflectionRequestOperation,
+    context: &RequestContext<'_, S>,
+    handle: Arc<TaskHandleCell>,
+) -> Result<SpecializationRequestPoll, TaskHalt> {
+    match context.eval_context().poll_reflection_task(&handle.task) {
+        EvaluationWaitPoll::Pending(wait) => {
+            *operation = ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Waiting(handle));
+            Ok(SpecializationRequestPoll::Wait(
+                super::protocol::SpecializationRequestWait::new(wait),
+            ))
+        }
+        EvaluationWaitPoll::Complete(value) => Ok(SpecializationRequestPoll::Complete(
+            RequestResult::Return(Value::from_runtime_root(*value)),
+        )),
+        EvaluationWaitPoll::Failed(error) => {
+            handle.task.acknowledge_propagated_failure();
+            Err(TaskHalt::rooted_failure(error)
+                .with_core_context(task_join_context(handle.task.id())))
+        }
+        EvaluationWaitPoll::Cancelled => Err(TaskHalt::new("joined reflection task was cancelled")),
+        EvaluationWaitPoll::Abandoned => Err(TaskHalt::new(
+            "joined reflection task was abandoned when its evaluation session closed",
+        )
+        .with_core_context(task_join_context(handle.task.id()))),
+        EvaluationWaitPoll::Exited => Err(TaskHalt::new(
+            "joined reflection task exited without producing a result",
+        )
+        .with_core_context(task_join_context(handle.task.id()))),
+        EvaluationWaitPoll::Killed(error) => {
+            Err(TaskHalt::rooted_failure(error)
+                .with_core_context(task_join_context(handle.task.id())))
         }
     }
 }
