@@ -3111,6 +3111,8 @@ been migrated.
 
 ###### W5C.5a — Protocol decision gate
 
+**Status: complete (2026-09-14).**
+
 Inventory every `TaskSpecialization::handle_request` implementation and every
 `RequestContext::{evaluate,evaluate_key_path,evaluate_path}` call. Determine
 whether declarative argument preparation on `EffectRequestSpec`, a pollable
@@ -3123,21 +3125,150 @@ callbacks should demand their arguments before side effects is not sufficient.
 Record migration and compatibility consequences before changing the public
 trait.
 
+Decision record: use one pollable, specialization-owned request-work machine.
+Do not add declarative argument modes to `EffectRequestSpec`. Such modes cover
+the common raw-versus-WHNF distinction, but not a value discovered only after
+a host or transaction read. Supporting those cases would require a second
+continuation protocol beside the declarative one.
+
+The source inventory contains ten `TaskSpecialization` implementations. Seven
+are production specializations: `StandardEffects`, `ReflectionEffects`, the
+executable logger and configured-CLI specializations, the nested token parser,
+the macro runner, and interaction-net construction. The other three are the
+protocol/search inventory fixtures and the full reflection test
+specialization. There are twenty-two direct `RequestContext` demand calls:
+twenty-one in production and one in `TestEffects`. The logger's stderr request
+also enters `Assembler::evaluator().eval` directly and is therefore a
+twenty-second production nested-demand boundary even though it does not call a
+`RequestContext` demand method.
+
+The request families divide as follows:
+
+- Reusable reflection requests demand key paths, dictionaries, metadata,
+  `.eval` operands, log severity/message structure, and task handles. `.eval`
+  uniquely converts a permanent demand failure to `{err:Diagnostic}` instead
+  of propagating it.
+- Environment lookup first demands the requested key path, then obtains the
+  environment from the host or macro transaction, and only then can traverse
+  lazy intermediate dictionaries. This is a genuine demand-after-observation
+  shape.
+- Task status/value/error first demand a task handle, then read the protected
+  query view, whose path accessor is lazy, and only then can decode the query
+  state. Task join similarly demands the handle before polling a shared
+  completion source and may return an explicit dependency.
+- Logger stderr extraction, configured-CLI text/atom/path/count decoding,
+  token text/regex decoding, macro text/regex decoding, and net copy/port
+  decoding are pre-effect demands. Several are sequential, so replay currently
+  repeats already-completed decoding even when no host edit has occurred.
+- Case scopes, task creation, macro data/layout operations, raw net data,
+  diagnostic FIFO retrieval after W5C5-001, and most zero-argument readers and
+  writers need no semantic demand. Configured `.read.token` runs a nested
+  isolated effect search, but it does not suspend the outer request: an
+  unavailable dependency is currently converted to a token-parser error. A
+  future cooperative nested-search conversion can use the same owned-work
+  protocol without changing it.
+
+The selected protocol has these requirements; exact Rust names may be tuned
+when the scaffold lands:
+
+1. `TaskSpecialization` constructs a non-cloneable `RequestWork` from the
+   decoded request and its rooted arguments. `EffectTask` owns that work in a
+   dedicated `specializing` slot, parallel to its scalar, path, and control
+   work owners. It must not leave the work in cloneable `MachineWork` while a
+   specialization phase runs.
+2. Advancing request work is a short, mutator-free callback. It may complete,
+   take one cooperative step, request a semantic demand, or register an
+   explicit shared-completion dependency. A requested demand transfers an
+   already-advanced request state to the generic reflection machine before
+   evaluation begins.
+3. The generic owner polls the appropriate `WhnfComputation`, key-path, or
+   value-path machine. Yield and lazy/promise/reflection suspension retain that
+   owner and do not re-enter the specialization callback. A completed value or
+   permanent failure is delivered to the advanced request state; this lets
+   `.eval` capture failure while ordinary requests propagate it.
+4. `RequestContext` loses `poll_context`, `evaluate`, `evaluate_key_path`, and
+   `evaluate_path`. It retains value construction, host/transaction access,
+   observation and commit recording, and nested-search construction. A
+   callback cannot manufacture a blocked `TaskHalt`; task join and any future
+   host completion wait use an explicit request-work transition.
+5. Activity accumulated by one callback step is applied before a requested
+   demand or wait is installed. Consequently a committed immediate effect
+   clears retry eligibility once, and a host observation remains attached to
+   the branch while its subsequent semantic demand is suspended.
+6. Retrying an optimistic cut deliberately reconstructs request work from the
+   branch checkpoint. Waking a semantic dependency resumes the existing work.
+   The former is transaction replay; the latter must never replay a completed
+   host/request phase.
+
+This is a source-breaking change to the public, pre-release
+`TaskSpecialization` trait. A compatibility implementation of synchronous
+`handle_request` cannot provide the structural guarantee, so it must not
+remain as a public fallback. Migration may use a crate-private, source-latched
+adapter briefly to keep intermediate commits buildable, but W5C.5c removes it
+and the old context demand methods. `EffectRequestSpec`, `TaskHost`, commit and
+validation, and terminal `RequestResult` semantics remain unchanged.
+
+The alternative designs were rejected for concrete reasons:
+
+- Per-argument `Raw`/`Whnf` flags duplicate request-shape knowledge in the
+  request spec and cannot express host-derived query/environment values,
+  sequential composite message preparation, or `.eval`'s failure policy.
+- Declarative preparation plus a new deferred-result continuation would create
+  two suspension protocols and still need explicit wait ownership for task
+  join.
+- Keeping synchronous evaluation in `RequestContext` preserves an arbitrary
+  Rust stack and makes dependency wake re-enter the original callback. An
+  ordering convention cannot prevent a future callback from observing or
+  changing host state before that demand.
+
 ###### W5C.5b — Reflection `.eval` and reusable requests
 
-Move `.eval` first, preserving its deliberate conversion of permanent
-evaluation failure into `{err:Diagnostic}` while lazy and promise dependencies
-suspend the enclosing request. Then migrate environment lookup, dictionary and
-metadata inspection, logging preparation, task handles and query state, and
-the other reusable reflection requests according to the selected protocol.
+Partition this work as follows:
+
+1. **W5C.5b.0 — Request-work scaffold.** Add the non-cloneable specialization
+   owner, demand/result transitions, activity handoff, explicit wait handoff,
+   and compile-exhaustive lifecycle inventory. Convert all implementations to
+   the new trait shape with the smallest buildable internal adapter; do not
+   expose the adapter as compatibility API.
+2. **W5C.5b.1 — Reflection `.eval`.** Move `.eval` first, preserving its
+   deliberate conversion of permanent evaluation failure into
+   `{err:Diagnostic}` while lazy and promise dependencies suspend the enclosing
+   request. Force both completion dispositions and prove one request phase.
+3. **W5C.5b.2 — Pure reusable preparation.** Migrate environment key-path and
+   value-path traversal, dictionary and metadata inspection, and logging
+   severity/message preparation. Preserve completed prefixes across every
+   sequential demand.
+4. **W5C.5b.3 — Task request family.** Migrate task-handle preparation, query
+   lookup/state decoding, acknowledgement/cancellation, and task join. Query
+   observation must precede its owned value-path demand; join must use an
+   explicit dependency transition rather than a blocked callback error.
+5. **W5C.5b.4 — Reusable closure.** Relatch request activity, retry, structured
+   failure, and runtime-root inventories. Remove the reusable family's access
+   to the transitional adapter.
 
 ###### W5C.5c — Remaining specializations
 
-Migrate logger, macro, configured-command-line, token, net-construction, test,
-and any other specialization implementations. Add a hostile fixture which
-would count duplicate callback entry or duplicate host activity if a demand
-were replayed. Close the compatibility surface rather than leaving two
-different suspension contracts under the same trait.
+Partition the remaining migration as follows:
+
+1. **W5C.5c.1 — Net and token preparation.** Migrate copy counts, sequential
+   construction ports, and token text/regex inputs. Raw construction data and
+   zero-argument token operations remain non-demanding.
+2. **W5C.5c.2 — Macro preparation.** Migrate environment traversal,
+   severity/message handling, and text/regex inputs while retaining exact
+   journal and scoped-layout behavior.
+3. **W5C.5c.3 — Configured CLI.** Migrate text, atom, path-handle, script,
+   worker-count, and stderr-byte preparation. Keep parser/effect operands raw.
+   The nested token search remains behaviorally unchanged unless its current
+   non-suspending policy obstructs the request-work boundary.
+4. **W5C.5c.4 — Logger, tests, and compatibility closure.** Migrate the
+   logger's stderr path and test specialization, then remove the internal
+   synchronous adapter and every `RequestContext` demand method. Add a hostile
+   machine which performs counted host activity, advances its state, requests
+   a forced promise/lazy demand, and proves that resumption cannot re-enter the
+   host-active phase.
+
+Close the compatibility surface rather than leaving two different suspension
+contracts under the same trait.
 
 The logger migration owns the optimized-API conformance fixture. Existing
 tests already cover an empty `.read_log` suspension, retry after diagnostic
