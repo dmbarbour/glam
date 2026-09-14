@@ -176,6 +176,36 @@ pub(super) fn eval_object_from_dict_builtin(
     eval_object_instance_builtin(context, &dict_object_spec(dict))
 }
 
+/// Normalizes one diagnostic emission to an object as ordinary semantic work.
+///
+/// The caller composes the returned object with the metadata update before
+/// evaluation begins. If a source field blocks, this builtin remains the
+/// stable intermediate rather than regenerating and immediately demanding a
+/// fresh object fixpoint on every retry.
+pub(super) fn eval_diagnostic_object_builtin(
+    context: &EvaluatorStepContext<'_>,
+    message: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let message = eval_value_in(context, message)?;
+    let Value::Dict(message_dict) = &message else {
+        return Err(EvaluationHalt::new(
+            "object_from_dict requires a dictionary value",
+        ));
+    };
+    let has_defined_spec = match message_dict.get(&*keys::SPEC) {
+        Some(spec) => {
+            let spec = eval_value_in(context, spec)?;
+            !context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec))
+        }
+        None => false,
+    };
+    if has_defined_spec {
+        Ok(message)
+    } else {
+        eval_object_from_dict_builtin(context, &message)
+    }
+}
+
 pub(super) fn eval_object_local_name_builtin(
     context: &EvaluatorStepContext<'_>,
     host: &Value,

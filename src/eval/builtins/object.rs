@@ -31,6 +31,10 @@ pub(super) fn apply(
             let [spec] = super::exact(arguments, "object instance")?;
             eval_object_instance_builtin(context, &spec)
         }
+        Builtin::DiagnosticObject => {
+            let [message] = super::exact(arguments, "diagnostic object")?;
+            eval_diagnostic_object_builtin(context, &message)
+        }
         Builtin::ObjectDefaultDefs => {
             let [base, _self_value] = super::exact(arguments, "default object definitions")?;
             eval_value_in(context, &base)

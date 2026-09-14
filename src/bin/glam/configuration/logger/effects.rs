@@ -156,7 +156,9 @@ fn read_log(
             .map_err(glam::reflection::TaskHalt::from)?
         {
             return Diagnostic::from_transport_value(&context.host().resources.values(), &value)
-                .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
+                .and_then(|diagnostic| {
+                    diagnostic.prepare_enrichment(&context.host().resources.values())
+                })
                 .map(RequestResult::Return)
                 .map_err(glam::reflection::TaskHalt::from);
         }
@@ -176,7 +178,9 @@ fn read_log(
             return Ok(RequestResult::Fail);
         };
         let value = Diagnostic::from_transport_value(&context.host().resources.values(), &value)
-            .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
+            .and_then(|diagnostic| {
+                diagnostic.prepare_enrichment(&context.host().resources.values())
+            })
             .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),

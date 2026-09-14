@@ -11,7 +11,7 @@ use super::runtime::{
     set_runtime_diagnostic_route_guarded,
 };
 use super::{Error, EvaluationRuntime, Value, Values};
-use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
+use crate::core::{Builtin, CoreValueFactory, Dict, Key, Value as CoreValue};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::evaluation::{TaskStatusPublisher, TaskStatusWake};
 use crate::number::Number;
@@ -122,6 +122,47 @@ impl Diagnostic {
         )
         .map(|value| public_values.wrap(value))
         .map_err(|error| Error::from_eval(values, error))
+    }
+
+    /// Composes authoritative assembler enrichment without demanding it.
+    ///
+    /// Effect specializations use this form after claiming an input event so
+    /// their host callback can return before semantic evaluation begins. The
+    /// ordinary reflection machine then owns any suspension while the caller
+    /// observes the returned diagnostic.
+    #[doc(hidden)]
+    pub fn prepare_enrichment(&self, values: &Values) -> Result<Value, Error> {
+        self.emission.require_runtime(values.runtime)?;
+        if let Some(origin) = &self.origin {
+            origin.require_runtime(values.runtime)?;
+        }
+        values.with_access(|access| {
+            let emission = access.clone_core(&self.emission)?;
+            let origin = self
+                .origin
+                .as_ref()
+                .map(|origin| access.clone_core(origin))
+                .transpose()?;
+            let updates = CoreValue::Dict(crate::diagnostic::assembler_metadata(
+                access.core(),
+                self.severity,
+                origin,
+            ));
+            let message = CoreValue::builtin_call_in(
+                access.runtime_access(),
+                Builtin::DiagnosticObject,
+                vec![emission],
+            );
+            let extension_defs = CoreValue::PartialBuiltin(crate::core::BuiltinCall {
+                builtin: Builtin::ObjectOverrideDefs,
+                arguments: Arc::from([updates]),
+            });
+            Ok(access.wrap(CoreValue::builtin_call_in(
+                access.runtime_access(),
+                Builtin::ObjectWithDefs,
+                vec![message, extension_defs],
+            )))
+        })
     }
 
     /// Applies assembler metadata followed by observer-specific object updates.

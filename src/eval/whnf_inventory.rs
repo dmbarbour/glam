@@ -631,10 +631,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // Filled from W0B's deliberately failing initial AST scan. The per-signal
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
-const EXPECTED_OCCURRENCES: usize = 278;
-const EXPECTED_FINGERPRINT: u64 = 4_505_261_029_275_298_577;
+const EXPECTED_OCCURRENCES: usize = 280;
+const EXPECTED_FINGERPRINT: u64 = 13_982_261_769_743_499_792;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 95),
+    (Signal::EvalValue, 97),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 15),
@@ -653,7 +653,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 131),
+    (WorkShape::DemandThenInspect, 133),
     (WorkShape::OrderedOperands, 4),
     (WorkShape::CollectionWalk, 42),
     (WorkShape::Application, 11),

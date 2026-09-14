@@ -246,8 +246,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/object/implementation.rs",
-        [10, 0],
-        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction"
+        [11, 0],
+        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction; W5C5-001D lazy diagnostic normalization"
     ),
     context_entry!(
         "src/eval/list_effect_machine.rs",

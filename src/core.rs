@@ -2113,6 +2113,10 @@ pub enum Builtin {
     ObjectLocalName,
     ObjectInstanceFromParts,
     ObjectInstance,
+    /// Compiler-private lazy normalization of one diagnostic emission to an
+    /// object. Host readers compose this with ordinary object updates without
+    /// evaluating either step inside their callback.
+    DiagnosticObject,
     /// Internal protocol adapters used while object/effect construction is
     /// still implemented by the bootstrap evaluator.
     EffectApply,
@@ -2188,6 +2192,7 @@ impl Builtin {
             Self::ObjectLocalName => 2,
             Self::ObjectInstanceFromParts => 3,
             Self::ObjectInstance => 1,
+            Self::DiagnosticObject => 1,
             Self::EffectApply => 3,
             Self::EffectCall => 3,
             Self::EffectMap => 2,

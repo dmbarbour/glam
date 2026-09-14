@@ -2591,8 +2591,8 @@ while intended retry loops now contain the read and divergence in `.cut`.
 
 ##### W5C5-001 — Nested specialization demand deadlock
 
-**Status: active blocking defect (2026-09-14). Execution is pulled ahead of
-W5C.4; the protocol and migration remain part of W5C.5.**
+**Status: complete (2026-09-14). Execution was pulled ahead of W5C.4; the
+remaining callback families stay assigned to W5C.5.**
 
 The parallel library suite exposed a hang in
 `coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return`.
@@ -2648,21 +2648,46 @@ Remediation checkpoints:
    recursive demand a scheduler feature. The original four-worker fixture can
    still expose the independently prohibited callback-to-client-demand edge;
    W5C5-001C/D own that remaining repair.
-3. **W5C5-001C — Minimal callback protocol decision.** Specify a durable
-   machine-owned boundary in which semantic preparation before a
-   specialization callback may suspend, the host callback runs exactly once,
-   and any semantic work returned by that callback resumes without replaying
-   the callback. No arbitrary Rust callback stack may synchronously drive a
-   nested client demand while its enclosing coordinator task remains claimed.
-4. **W5C5-001D — Diagnostic/test migration.** Apply the selected protocol to
-   diagnostic retrieval and enrichment plus `TestEffects`. Preserve atomic
-   FIFO observation/commit, structured diagnostic values, and late observer
-   enrichment. The original zero-worker and four-worker lifecycle fixture must
-   pass under the forced ordering.
-5. **W5C5-001E — Focused audit and handback.** Inventory equivalent recursive
-   demand in nearby specialization callbacks, migrate only any call sites
-   required by the selected shared mechanism, and assign the rest explicitly
-   to W5C.5b/c. Then resume W5C.4 with the routine suite reliable again.
+3. **W5C5-001C — Complete (2026-09-14): minimal callback protocol decision.**
+   A specialization callback which can express its semantic post-processing
+   as the returned value needs no new request-result variant:
+   `RequestResult::Return(PublicValue)` is already the rooted, machine-owned
+   handoff. The callback first performs its one atomic host observation or
+   commit, then returns a lazy semantic graph without demanding it. The
+   reflection machine delivers that graph to the continuation; ordinary WHNF
+   work owns any later suspension, and an unused result performs no semantic
+   post-processing at all.
+
+   This is intentionally narrower than making synchronous nested evaluation
+   safe inside arbitrary callbacks. Semantic argument preparation needed
+   *before* a host action, and post-callback work whose disposition is not a
+   returned value, still require the general W5C.5a protocol. No worker-side
+   recursive-demand fallback was added.
+4. **W5C5-001D — Complete (2026-09-14): diagnostic/test migration.** Diagnostic
+   retrieval in both the executable logger and `TestEffects` now returns a
+   lazily composed enrichment value. A compiler-private `DiagnosticObject`
+   builtin preserves the existing plain-dictionary versus object
+   normalization; ordinary `ObjectWithDefs` and `ObjectOverrideDefs` apply the
+   metadata afterward. This staging gives each generated object fixpoint a
+   stable lazy owner rather than constructing and immediately demanding it
+   inside the host callback.
+
+   FIFO observation and commit remain in the callback, while assembler and
+   origin metadata are captured for late semantic enrichment. A direct API
+   fixture proves prepared and eager enrichment agree after demand. A
+   reflection fixture reads `message.msg.text` and latches exactly one
+   specialization callback and one commit. The original zero-worker and
+   four-worker descendant-failure fixture now completes with the same retained
+   failure report.
+5. **W5C5-001E — Complete (2026-09-14): focused audit and handback.** No
+   production `TaskSpecialization::handle_request` path now calls
+   `Diagnostic::{enrich,enrich_with_factory}`. The remaining synchronous
+   specialization demands are the already inventoried reusable reflection
+   requests, `TestEffects::Evaluate`, stderr byte extraction, configured CLI
+   and token requests, macro requests, and interaction-net construction.
+   W5C.5b owns the reusable reflection family; W5C.5c owns executable, macro,
+   net, stderr, and test-specialization migration. None is needed by the
+   diagnostic handoff mechanism, so W5C5-001 closes and W5C.4 may resume.
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 

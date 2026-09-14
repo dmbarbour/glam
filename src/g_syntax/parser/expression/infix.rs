@@ -294,5 +294,6 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectWithDefs) => "object_with_defs",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectComposedDefs) => "object_composed_defs",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectOverrideDefs) => "object_override_defs",
+        SyntaxOperator::Builtin(crate::core::Builtin::DiagnosticObject) => "diagnostic_object",
     }
 }

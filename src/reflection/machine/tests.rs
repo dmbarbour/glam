@@ -286,7 +286,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
         };
         journal.consumed_diagnostics += 1;
         return diagnostic
-            .enrich_with_factory(&values)
+            .prepare_enrichment(&Values::from_core_factory(values))
             .map(RequestResult::Return)
             .map_err(TaskHalt::from);
     }
@@ -298,7 +298,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
             return Ok(RequestResult::Fail);
         };
         let value = diagnostic
-            .enrich_with_factory(context.eval_context().values())
+            .prepare_enrichment(&context.values())
             .map_err(TaskHalt::from)?;
         let commit = TaskCommit::new(
             StoreJournal::new(snapshot.store().clone()),
@@ -6376,6 +6376,36 @@ fn empty_log_read_outside_cut_retries_after_its_observation_changes() {
         b"arrived later".as_slice()
     );
     assert_eq!(host.wait_count(), 1);
+    assert!(host.diagnostics().is_empty());
+}
+
+#[test]
+fn log_read_returns_lazy_enrichment_after_one_specialization_callback() {
+    let (assembler, effect) = compile_effect(".read_log >>= (\\message -> .r message.msg.text)");
+    let host = Arc::new(TestHost::with_diagnostics(
+        assembler.core_values(),
+        vec![Diagnostic::new(
+            &assembler.values(),
+            crate::diagnostic::Severity::Warning,
+            "prepared once",
+        )],
+    ));
+    host.state.lock().unwrap().callback_probe = true;
+
+    let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
+    else {
+        panic!("prepared diagnostic read should complete")
+    };
+    assert_eq!(
+        assembler.to_binary(&value).unwrap(),
+        b"prepared once".as_slice()
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "semantic enrichment must not re-enter or replay the host callback"
+    );
+    assert_eq!(host.callback_probe_count(CallbackProbeKind::Commit), 1);
     assert!(host.diagnostics().is_empty());
 }
 

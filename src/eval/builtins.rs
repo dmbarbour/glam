@@ -100,6 +100,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectLocalName
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance
+        | Builtin::DiagnosticObject
         | Builtin::ObjectDefaultDefs
         | Builtin::ObjectDictDefs
         | Builtin::ObjectWithDefs

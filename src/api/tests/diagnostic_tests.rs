@@ -800,6 +800,27 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
 }
 
 #[test]
+fn prepared_diagnostic_enrichment_defers_work_and_matches_eager_enrichment() {
+    let runtime = EvaluationRuntime::new(0).expect("test runtime should build");
+    let values = runtime.values();
+    let diagnostic = Diagnostic::new(&values, Severity::Warning, "prepared warning");
+    let prepared = diagnostic
+        .prepare_enrichment(&values)
+        .expect("diagnostic enrichment should compose");
+    assert!(matches!(prepared.clone_core_for_test(), CoreValue::Lazy(_)));
+
+    let context = crate::evaluation::EvalContext::isolated(values.core().clone());
+    let prepared = context
+        .evaluate_compatibility_whnf(&prepared.clone_core_for_test())
+        .expect("prepared enrichment should evaluate");
+    let eager = diagnostic
+        .enrich(&values)
+        .expect("eager enrichment should evaluate")
+        .clone_core_for_test();
+    assert_eq!(prepared, eager);
+}
+
+#[test]
 fn viewers_can_inherit_one_diagnostic_independently() {
     let trace = test_compilation_trace("test.g");
     let values = EvaluationRuntime::new(0).unwrap().values();

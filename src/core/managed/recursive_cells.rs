@@ -1618,6 +1618,7 @@ mod tests {
                 "publishes the completed same-region graph through its containing runtime value root",
                 &[
                     "src/api/assembly.rs::Assembler::net",
+                    "src/api/diagnostics.rs::Diagnostic::prepare_enrichment",
                     "src/api/value.rs::ScopedValues::access",
                     "src/api/value.rs::ScopedValues::anno",
                     "src/api/value.rs::ScopedValues::apply",
