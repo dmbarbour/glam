@@ -804,6 +804,65 @@ fn reflection_release_publishes_nonterminal_status_before_session_close() {
 }
 
 #[test]
+fn stale_nonterminal_release_cannot_outlive_terminal_retirement() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let session_id = session.demand.id;
+    let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let published = statuses.clone();
+    assert!(coordinator.attach_reflection_lifecycle_publisher(
+        work,
+        TaskStatusPublisher::new(move |_mutation, status| {
+            published.lock().unwrap().push(status);
+            TaskStatusWake::new(|| {})
+        }),
+    ));
+    let first_claim = claim_ready_test_reflection(&coordinator, session_id);
+    let (release_entered, release_observed) = std::sync::mpsc::channel();
+    let (resume_release, resume_observed) = std::sync::mpsc::channel();
+    coordinator.set_reflection_release_status_probe(move || {
+        release_entered
+            .send(())
+            .expect("release observer should remain live");
+        resume_observed
+            .recv()
+            .expect("release continuation should remain live");
+    });
+
+    thread::scope(|scope| {
+        let releasing = coordinator.clone();
+        let first_release = scope
+            .spawn(move || releasing.release_reflection(first_claim, ReflectionWorkPoll::Yielded));
+        release_observed
+            .recv()
+            .expect("first release should publish its queued state");
+
+        // The queued machine may complete and retire before the older release
+        // reaches its nonterminal status tail. That tail is advisory: it must
+        // neither require the work record nor overwrite the terminal status.
+        let second_claim = claim_ready_test_reflection(&coordinator, session_id);
+        let terminal = coordinator.release_reflection(second_claim, ReflectionWorkPoll::Terminal);
+        assert!(terminal.terminal);
+        settle_test_reflection(&coordinator, work);
+
+        resume_release
+            .send(())
+            .expect("paused release should remain live");
+        let stale = first_release
+            .join()
+            .expect("first release should not panic");
+        assert!(!stale.terminal);
+    });
+
+    assert_eq!(
+        statuses.lock().unwrap().as_slice(),
+        [EvaluationTaskStatus::Cancelled]
+    );
+}
+
+#[test]
 fn session_close_preserves_an_earlier_running_task_cancellation() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");

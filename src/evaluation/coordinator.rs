@@ -550,6 +550,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     test_values: Option<CoreValueFactory>,
     #[cfg(test)]
     terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(super) enum CoordinatorSelection {
@@ -594,6 +596,8 @@ impl EvaluationWorkCoordinator {
             test_values: None,
             #[cfg(test)]
             terminal_publication_probe: Mutex::new(None),
+            #[cfg(test)]
+            reflection_release_status_probe: Mutex::new(None),
         })
     }
 
@@ -612,6 +616,7 @@ impl EvaluationWorkCoordinator {
             work_available: Condvar::new(),
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),
+            reflection_release_status_probe: Mutex::new(None),
         });
         values.attach_work_coordinator(&coordinator);
         coordinator
@@ -655,6 +660,29 @@ impl EvaluationWorkCoordinator {
     #[cfg(test)]
     pub(super) fn settlement_admission_is_free(&self) -> bool {
         self.admission.try_settlement_guard().is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_reflection_release_status_probe(
+        &self,
+        probe: impl FnOnce() + Send + 'static,
+    ) {
+        *self
+            .reflection_release_status_probe
+            .lock()
+            .expect("reflection release status probe was poisoned") = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn run_reflection_release_status_probe(&self) {
+        let probe = self
+            .reflection_release_status_probe
+            .lock()
+            .expect("reflection release status probe was poisoned")
+            .take();
+        if let Some(probe) = probe {
+            probe();
+        }
     }
 
     #[cfg(test)]
@@ -1376,9 +1404,10 @@ impl EvaluationWorkCoordinator {
         let mut completion_wakes = vec![wake];
         let mut status_wakes = Vec::with_capacity(status_update.len());
         let mut status_publishers = Vec::with_capacity(status_update.len());
-        for (publisher, status) in status_update {
-            debug_assert_eq!(status, terminal_task_status(&terminal));
-            status_wakes.push(publisher.publish_guarded(&mutation, status));
+        for update in status_update {
+            debug_assert_eq!(update.status, terminal_task_status(&terminal));
+            let publisher = update.publisher.clone();
+            status_wakes.push(publisher.publish_update_guarded(&mutation, update));
             status_publishers.push(publisher);
         }
         let mut promise_publications = Vec::with_capacity(promises.len());

@@ -568,30 +568,44 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
+        #[cfg(test)]
+        self.run_reflection_release_status_probe();
         let status_wakes = if !release.terminal && !release.exit_waiting {
-            let status = if release.remains_blocked {
-                EvaluationTaskStatus::Blocked
-            } else {
-                EvaluationTaskStatus::Launched
-            };
             let updates = {
                 let mut state = self
                     .state
                     .lock()
                     .expect("evaluation work coordinator was poisoned");
-                let record = state
+                state
                     .work
                     .get_mut(&id)
-                    .expect("released reflection work must remain registered");
-                record
-                    .obligations
-                    .task_publisher_mut()
-                    .expect("active reflection work must retain its terminal publisher")
-                    .update_status(status, false)
+                    .and_then(|record| {
+                        // Releasing makes queued work claimable before this
+                        // advisory status tail. A later quantum may therefore
+                        // have advanced or retired the same stable record.
+                        // Publish its current state when it remains live; a
+                        // terminal update owns the final status otherwise.
+                        let status = match record.state {
+                            WorkState::Blocked => Some(EvaluationTaskStatus::Blocked),
+                            WorkState::Dormant
+                            | WorkState::Reserved
+                            | WorkState::Queued
+                            | WorkState::Running => Some(EvaluationTaskStatus::Launched),
+                            WorkState::ExitWaiting | WorkState::Terminalizing => None,
+                        }?;
+                        record
+                            .obligations
+                            .task_publisher_mut()
+                            .map(|publisher| publisher.update_status(status, false))
+                    })
+                    .unwrap_or_default()
             };
             updates
                 .into_iter()
-                .map(|(publisher, status)| publisher.publish_guarded(&mutation, status))
+                .map(|update| {
+                    let publisher = update.publisher.clone();
+                    publisher.publish_update_guarded(&mutation, update)
+                })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()

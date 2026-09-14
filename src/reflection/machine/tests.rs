@@ -967,6 +967,7 @@ fn assert_branch_root_inventory(
 fn assert_execution_root_inventory(
     execution: &TaskExecution<TestEffects>,
     supplied_decoding: &EffectDecodeWork<TestEffects>,
+    supplied_demand: &ScalarDemandWork<TestEffects>,
     supplied_work: &MachineWork<TestEffects>,
     outcome: &BranchOutcome<TestEffects>,
     cut: &CutFrame<TestEffects>,
@@ -975,10 +976,12 @@ fn assert_execution_root_inventory(
     let TaskExecution {
         work,
         decoding,
+        demanding,
         cuts,
     } = execution;
     let _: &MachineWork<TestEffects> = work;
     let _: &Option<EffectDecodeWork<TestEffects>> = decoding;
+    let _: &Option<ScalarDemandWork<TestEffects>> = demanding;
     let _: &Vec<CutFrame<TestEffects>> = cuts;
 
     let EffectDecodeWork {
@@ -999,6 +1002,23 @@ fn assert_execution_root_inventory(
             }
         }
         EffectDecodeOperation::Request(request) => assert_request_decode_inventory(request),
+    }
+    let _: &Branch<TestEffects> = branch;
+    let _: &usize = scope_depth;
+
+    let ScalarDemandWork {
+        computation,
+        purpose,
+        branch,
+        scope_depth,
+    } = supplied_demand;
+    let _: &crate::eval::whnf::WhnfComputation = computation;
+    match purpose {
+        ScalarDemandPurpose::ApplyContinuation { argument, fused } => {
+            let _: &RuntimeValueRoot = argument;
+            let _: &bool = fused;
+        }
+        ScalarDemandPurpose::ExitError => {}
     }
     let _: &Branch<TestEffects> = branch;
     let _: &usize = scope_depth;
@@ -1331,6 +1351,7 @@ fn assert_effect_decode_step_inventory(step: &EffectDecodeStep<TestEffects>) {
 type ExecutionRootInventoryFn = fn(
     &TaskExecution<TestEffects>,
     &EffectDecodeWork<TestEffects>,
+    &ScalarDemandWork<TestEffects>,
     &MachineWork<TestEffects>,
     &BranchOutcome<TestEffects>,
     &CutFrame<TestEffects>,
@@ -1539,6 +1560,9 @@ fn assert_protocol_handoff_inventory(
         }
         MachineStep::Decode(decoding) => {
             let _: &EffectDecodeWork<TestEffects> = decoding;
+        }
+        MachineStep::Demand(demanding) => {
+            let _: &ScalarDemandWork<TestEffects> = demanding;
         }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
@@ -2058,6 +2082,43 @@ fn fused_standard_chains_match_unfused_results() {
         assert!(
             fused_probe.fused_requests() > 0,
             "fixture did not fuse: {source}"
+        );
+    }
+}
+
+#[test]
+fn continuation_function_demand_resumes_without_replay_in_both_delivery_paths() {
+    for force_unfused in [false, true] {
+        let (assembler, effect) =
+            compile_effect(".r \"ready\" >>= (anno { refl:(.r ()) } (\\value -> .r value))");
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let context = EvalContext::isolated(assembler.core_values());
+        let builds = Arc::new(AtomicUsize::new(0));
+        context
+            .install_reflection_launcher(Arc::new(CountingLauncher {
+                inner: task_launcher(TestEffects, host.clone()),
+                builds: builds.clone(),
+            }))
+            .expect("fresh continuation fixture should accept a launcher");
+        let mut task = EffectTask::new_owned_in_context(
+            effect.clone_core_for_test(),
+            TestEffects,
+            host,
+            context,
+        )
+        .expect("continuation fixture should build");
+        if force_unfused {
+            task = task.forcing_unfused();
+        }
+
+        let TaskOutcome::Complete(value) = task.run().expect("continuation should resume") else {
+            panic!("continuation fixture should complete")
+        };
+        assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            1,
+            "continuation demand must retain one nested reflection activation"
         );
     }
 }
@@ -2598,6 +2659,39 @@ fn internal_exit_error_forces_and_roots_its_message() {
             .to_binary(&assembler.get(&message, "msg.text").unwrap())
             .unwrap(),
         b"stop".as_slice()
+    );
+    drop(owner);
+}
+
+#[test]
+fn internal_exit_error_message_resumes_without_replay() {
+    let (assembler, effect) =
+        compile_effect(".exit.error (anno { refl:(.r ()) } {msg:{text:\"stop\"}})");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        }))
+        .expect("fresh exit fixture should accept a launcher");
+    let poll_context = EvaluationPollContext::for_context(&context);
+    let task = EffectTask::new_exit_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host,
+        context.clone(),
+    )
+    .expect("internal exit task should initialize");
+    let mut machine = ValueEffectTask(task);
+
+    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
+    assert!(matches!(exit.intent, ExitIntent::Error(_)));
+    assert_eq!(
+        builds.load(Ordering::Acquire),
+        1,
+        "exit-message demand must retain one nested reflection activation"
     );
     drop(owner);
 }

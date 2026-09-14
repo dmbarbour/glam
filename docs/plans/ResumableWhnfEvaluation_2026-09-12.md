@@ -2341,10 +2341,31 @@ owns any later regional elimination of those per-step roots.
 
 ###### W5C.2a — Glam continuations and exit errors
 
+**Status: complete (2026-09-14).**
+
 Replace recursive function WHNF in `Continuation::Glam` with owned WHNF work
 which resumes into one continuation application. Treat `.exit.error` message
 WHNF as a separate terminal disposition. Neither path may pop its continuation
 or publish its exit intent until the demanded value is ready.
+
+Completion record: `ScalarDemandWork` now retains an exact WHNF computation,
+branch, scope, and completion disposition beside effect decoding. Both fused
+and generic Glam delivery enter that owner before inspecting the continuation
+function; successful completion alone pops the continuation, and fused
+application failure retains the completed function plus the original control
+stack. `.exit.error` similarly publishes no exit intent until its message WHNF
+completes. Forced reflection-gate fixtures cover both continuation paths and
+the exit-message path, asserting one nested activation across resumption.
+
+The parallel gate exposed an older scheduler race at the newly more frequent
+cooperative boundary: a yielded record becomes claimable before its prior
+release finishes publishing advisory lifecycle status, so the later quantum
+may terminally retire the record first. Nonterminal release tails now observe
+the latest live record when one remains and otherwise defer to the terminal
+publication. Coordinator-assigned status order prevents an older callback
+from overwriting a later terminal status. A channel-latched regression forces
+the second claim through terminal retirement before allowing the first release
+tail to continue; repetition is not used as concurrency evidence.
 
 ###### W5C.2b — Unit assertions and scoped close
 

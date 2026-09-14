@@ -164,17 +164,23 @@ pub(crate) enum EvaluationTaskStatus {
 pub(super) struct TaskTerminalPublisher {
     pub(super) wait: EvaluationWaitToken,
     published_status: EvaluationTaskStatus,
+    status_order: u64,
     pub(super) protected_status: Option<TaskStatusPublisher>,
     lifecycle_status: Option<TaskStatusPublisher>,
 }
 
-pub(super) type TaskStatusUpdate = (TaskStatusPublisher, EvaluationTaskStatus);
+pub(super) struct TaskStatusUpdate {
+    pub(super) publisher: TaskStatusPublisher,
+    pub(super) status: EvaluationTaskStatus,
+    order: u64,
+}
 
 impl TaskTerminalPublisher {
     pub(super) fn new(wait: EvaluationWaitToken) -> Self {
         Self {
             wait,
             published_status: EvaluationTaskStatus::Launched,
+            status_order: 0,
             protected_status: None,
             lifecycle_status: None,
         }
@@ -203,6 +209,10 @@ impl TaskTerminalPublisher {
             return Vec::new();
         }
         self.published_status = status.clone();
+        self.status_order = self
+            .status_order
+            .checked_add(1)
+            .expect("reflection task status publication order exhausted");
         let protected = if terminal {
             self.protected_status.take()
         } else {
@@ -216,7 +226,11 @@ impl TaskTerminalPublisher {
         [protected, lifecycle]
             .into_iter()
             .flatten()
-            .map(|publisher| (publisher, status.clone()))
+            .map(|publisher| TaskStatusUpdate {
+                publisher,
+                status: status.clone(),
+                order: self.status_order,
+            })
             .collect()
     }
 }
@@ -235,9 +249,17 @@ pub(super) fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> Evaluat
 type GuardedTaskStatusPublication =
     dyn Fn(&dyn RuntimeMutationAuthority, EvaluationTaskStatus) -> TaskStatusWake + Send + Sync;
 
+struct TaskStatusPublisherInner {
+    publish: Box<GuardedTaskStatusPublication>,
+    /// Last coordinator-assigned status order delivered through this
+    /// publisher. The mutex also prevents an older nonterminal callback from
+    /// completing after a newer terminal callback.
+    published_order: Mutex<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) struct TaskStatusPublisher {
-    publish: Arc<GuardedTaskStatusPublication>,
+    inner: Arc<TaskStatusPublisherInner>,
 }
 
 impl TaskStatusPublisher {
@@ -248,7 +270,10 @@ impl TaskStatusPublisher {
         + 'static,
     ) -> Self {
         Self {
-            publish: Arc::new(publish),
+            inner: Arc::new(TaskStatusPublisherInner {
+                publish: Box::new(publish),
+                published_order: Mutex::new(0),
+            }),
         }
     }
 
@@ -257,7 +282,31 @@ impl TaskStatusPublisher {
         mutation: &dyn RuntimeMutationAuthority,
         status: EvaluationTaskStatus,
     ) -> TaskStatusWake {
-        (self.publish)(mutation, status)
+        let _publication = self
+            .inner
+            .published_order
+            .lock()
+            .expect("task status publisher was poisoned");
+        (self.inner.publish)(mutation, status)
+    }
+
+    pub(super) fn publish_update_guarded(
+        &self,
+        mutation: &dyn RuntimeMutationAuthority,
+        update: TaskStatusUpdate,
+    ) -> TaskStatusWake {
+        debug_assert!(Arc::ptr_eq(&self.inner, &update.publisher.inner));
+        let mut published_order = self
+            .inner
+            .published_order
+            .lock()
+            .expect("task status publisher was poisoned");
+        if update.order <= *published_order {
+            return TaskStatusWake::new(|| {});
+        }
+        let wake = (self.inner.publish)(mutation, update.status);
+        *published_order = update.order;
+        wake
     }
 }
 

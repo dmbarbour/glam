@@ -296,6 +296,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth: 0,
                 },
                 decoding: None,
+                demanding: None,
                 cuts: Vec::new(),
             },
             blocked: None,
@@ -667,6 +668,52 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         for _ in 0..steps {
+            if let Some(demanding) = self.execution.demanding.take() {
+                match self.scalar_demand_step(context, demanding, steps) {
+                    ScalarDemandStep::Complete(step) => match step {
+                        MachineStep::Continue(work) => self.execution.work = work,
+                        MachineStep::Decode(decoding) => {
+                            self.execution.work = MachineWork::Outcome {
+                                outcome: BranchOutcome::Cancelled,
+                                scope_depth: 0,
+                            };
+                            self.execution.decoding = Some(decoding);
+                        }
+                        MachineStep::Demand(_) => {
+                            unreachable!("one scalar completion cannot immediately demand another")
+                        }
+                        MachineStep::Blocked(blocked) => {
+                            self.blocked = Some(blocked);
+                            return self.blocked_poll();
+                        }
+                        MachineStep::Exit(intent) => {
+                            let exit = self.prepare_exit(intent);
+                            let poll = exit.poll.clone();
+                            self.exit = Some(exit);
+                            return EffectTaskPoll::Exit(poll);
+                        }
+                        MachineStep::Terminal(terminal) => {
+                            self.finish(terminal);
+                            return self.terminal.as_ref().expect("terminal set above").poll();
+                        }
+                    },
+                    ScalarDemandStep::Blocked(demanding, dependency) => {
+                        self.execution.demanding = Some(demanding);
+                        self.blocked =
+                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
+                        return self.blocked_poll();
+                    }
+                    ScalarDemandStep::Yielded(demanding) => {
+                        self.execution.demanding = Some(demanding);
+                        return EffectTaskPoll::Yielded;
+                    }
+                    ScalarDemandStep::Failed(demanding, error) => {
+                        self.execution.demanding = Some(demanding);
+                        return self.handle_step_error(error);
+                    }
+                }
+                continue;
+            }
             if let Some(decoding) = self.execution.decoding.take() {
                 match self.decode_step(context, decoding, steps) {
                     EffectDecodeStep::Continue(decoding) => {
@@ -699,6 +746,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         scope_depth: 0,
                     };
                     self.execution.decoding = Some(decoding);
+                }
+                Ok(MachineStep::Demand(demanding)) => {
+                    self.execution.work = MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth: 0,
+                    };
+                    self.execution.demanding = Some(demanding);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
@@ -805,6 +859,94 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 self.complete_decode_phase(context, decoding, purpose, value)
             }
         }
+    }
+
+    fn scalar_demand_step(
+        &mut self,
+        context: &EvaluationPollContext,
+        mut demanding: ScalarDemandWork<S>,
+        step_budget: usize,
+    ) -> ScalarDemandStep<S> {
+        let value = match poll_whnf_computation(
+            &mut demanding.computation,
+            context,
+            &self.eval_context,
+            step_budget.max(1),
+        ) {
+            WhnfOwnerPoll::Ready(value) => value,
+            WhnfOwnerPoll::Pending(dependency) => {
+                return ScalarDemandStep::Blocked(demanding, dependency);
+            }
+            WhnfOwnerPoll::Yielded => return ScalarDemandStep::Yielded(demanding),
+            WhnfOwnerPoll::Failed(failure) => {
+                return ScalarDemandStep::Failed(demanding, TaskHalt::rooted_failure(failure));
+            }
+            WhnfOwnerPoll::External(boundary) => {
+                return ScalarDemandStep::Failed(
+                    demanding,
+                    TaskHalt::new(format!(
+                        "reflection scalar demand reached an unsupported {boundary:?} boundary"
+                    )),
+                );
+            }
+        };
+        let ScalarDemandWork {
+            purpose,
+            mut branch,
+            scope_depth,
+            ..
+        } = demanding;
+        let step = match purpose {
+            ScalarDemandPurpose::ApplyContinuation { argument, fused } => {
+                let Some(Continuation::Glam(_)) = branch.control.sequence.last() else {
+                    return ScalarDemandStep::Failed(
+                        ScalarDemandWork::new(
+                            value,
+                            ScalarDemandPurpose::ApplyContinuation { argument, fused },
+                            branch,
+                            scope_depth,
+                        ),
+                        TaskHalt::new("reflection continuation control became unbalanced"),
+                    );
+                };
+                if fused {
+                    let effect = context.evaluate(&self.eval_context, |evaluator| {
+                        let function = evaluator.project_root(&value);
+                        let argument = evaluator.project_root(&argument);
+                        apply_in(evaluator, function, vec![argument])
+                            .map(|effect| evaluator.root_value(effect))
+                    });
+                    let effect = match effect {
+                        Ok(effect) => effect,
+                        Err(error) => {
+                            return ScalarDemandStep::Failed(
+                                ScalarDemandWork::new(
+                                    value,
+                                    ScalarDemandPurpose::ApplyContinuation { argument, fused },
+                                    branch,
+                                    scope_depth,
+                                ),
+                                error,
+                            );
+                        }
+                    };
+                    self.record_fused_request();
+                    branch.control.sequence.pop();
+                    branch.set_effect_root(effect);
+                    MachineStep::Decode(EffectDecodeWork::new(branch, scope_depth))
+                } else {
+                    branch.control.sequence.pop();
+                    MachineStep::Continue(MachineWork::apply_roots(
+                        value,
+                        vec![argument],
+                        branch,
+                        scope_depth,
+                    ))
+                }
+            }
+            ScalarDemandPurpose::ExitError => MachineStep::Exit(ExitIntent::Error(value)),
+        };
+        ScalarDemandStep::Complete(step)
     }
 
     fn complete_decode_phase(
@@ -1018,19 +1160,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
     fn finish_fused_delivery(
         &mut self,
         context: &EvaluationPollContext,
-        mut branch: Branch<S>,
+        branch: Branch<S>,
         value: RuntimeValueRoot,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
-        let effect = context.evaluate(&self.eval_context, |evaluator| {
-            let value = evaluator.project_root(&value);
-            fuse_glam_delivery_in(evaluator, &mut branch, value)
-                .map(|effect| effect.map(|effect| evaluator.root_value(effect)))
-        })?;
-        if let Some(effect) = effect {
-            self.record_fused_request();
-            branch.set_effect_root(effect);
-            return Ok(MachineStep::Decode(EffectDecodeWork::new(
+        if let Some(Continuation::Glam(function)) = branch.control.sequence.last().cloned() {
+            return Ok(MachineStep::Demand(ScalarDemandWork::new(
+                function,
+                ScalarDemandPurpose::ApplyContinuation {
+                    argument: value,
+                    fused: true,
+                },
                 branch,
                 scope_depth,
             )));
@@ -1489,11 +1629,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 return Ok(MachineStep::Exit(ExitIntent::Success));
             }
             Request::ExitError(message) => {
-                let message = context.evaluate(&self.eval_context, |evaluator| {
-                    let message = evaluator.project_root(&message);
-                    evaluate_in(evaluator, message).map(|message| evaluator.root_value(message))
-                })?;
-                return Ok(MachineStep::Exit(ExitIntent::Error(message)));
+                return Ok(MachineStep::Demand(ScalarDemandWork::new(
+                    message,
+                    ScalarDemandPurpose::ExitError,
+                    branch,
+                    scope_depth,
+                )));
             }
             Request::Fix(function) => {
                 let root = Arc::new(FixRoot {
@@ -1598,16 +1739,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> Result<MachineStep<S>, TaskHalt> {
         if let Some(continuation) = branch.control.sequence.last().cloned() {
             return match continuation {
-                Continuation::Glam(function) => {
-                    let function = evaluate_root(context, &self.eval_context, &function)?;
-                    branch.control.sequence.pop();
-                    Ok(MachineStep::Continue(MachineWork::apply_roots(
-                        function,
-                        vec![value],
-                        branch,
-                        scope_depth,
-                    )))
-                }
+                Continuation::Glam(function) => Ok(MachineStep::Demand(ScalarDemandWork::new(
+                    function,
+                    ScalarDemandPurpose::ApplyContinuation {
+                        argument: value,
+                        fused: false,
+                    },
+                    branch,
+                    scope_depth,
+                ))),
                 Continuation::RequireUnit => {
                     let value = context.evaluate(&self.eval_context, |evaluator| {
                         let value = evaluate_in(evaluator, evaluator.project_root(&value))?;
@@ -2313,6 +2453,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
         }
         self.execution.decoding = None;
+        self.execution.demanding = None;
         self.execution.work = MachineWork::Outcome {
             outcome: BranchOutcome::Cancelled,
             scope_depth: 0,
@@ -2333,6 +2474,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn apply_wake(&mut self, wake: WakeAction<S>) {
         self.execution.decoding = None;
+        self.execution.demanding = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
@@ -2342,6 +2484,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn restart_search(&mut self) {
         self.execution.decoding = None;
+        self.execution.demanding = None;
         self.execution.cuts.clear();
         let mut root = self
             .search
@@ -2356,6 +2499,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn restart_cut(&mut self, index: usize) {
         self.execution.decoding = None;
+        self.execution.demanding = None;
         self.execution.cuts.truncate(index + 1);
         let mut frame = self
             .execution
@@ -2390,6 +2534,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         };
         self.eval_context.fail_local_promises(unfinished_failure);
         self.execution.decoding = None;
+        self.execution.demanding = None;
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
@@ -2633,21 +2778,25 @@ impl<S: TaskSpecialization> Branch<S> {
 struct TaskExecution<S: TaskSpecialization> {
     work: MachineWork<S>,
     decoding: Option<EffectDecodeWork<S>>,
+    demanding: Option<ScalarDemandWork<S>>,
     cuts: Vec<CutFrame<S>>,
 }
 
 impl<S: TaskSpecialization> TaskExecution<S> {
     fn active_branch(&self) -> Option<&Branch<S>> {
-        self.decoding
+        self.demanding
             .as_ref()
             .map(|work| &work.branch)
+            .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
             .or_else(|| self.work.branch())
     }
 
     fn active_scope_depth(&self) -> usize {
-        self.decoding
+        self.demanding
             .as_ref()
-            .map_or_else(|| self.work.scope_depth(), |work| work.scope_depth)
+            .map(|work| work.scope_depth)
+            .or_else(|| self.decoding.as_ref().map(|work| work.scope_depth))
+            .unwrap_or_else(|| self.work.scope_depth())
     }
 }
 
@@ -2735,6 +2884,49 @@ enum EffectDecodeStep<S: TaskSpecialization> {
     Blocked(EffectDecodeWork<S>, WorkDependency),
     Yielded(EffectDecodeWork<S>),
     Failed(EffectDecodeWork<S>, TaskHalt),
+}
+
+/// Owns one scalar WHNF demand whose completion changes reflection control.
+///
+/// This state is kept beside effect decoding because its completed value is
+/// delivered to an existing continuation or terminal intent rather than
+/// interpreted as another effect request.
+struct ScalarDemandWork<S: TaskSpecialization> {
+    computation: WhnfComputation,
+    purpose: ScalarDemandPurpose,
+    branch: Branch<S>,
+    scope_depth: usize,
+}
+
+enum ScalarDemandPurpose {
+    ApplyContinuation {
+        argument: RuntimeValueRoot,
+        fused: bool,
+    },
+    ExitError,
+}
+
+impl<S: TaskSpecialization> ScalarDemandWork<S> {
+    fn new(
+        value: RuntimeValueRoot,
+        purpose: ScalarDemandPurpose,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            computation: WhnfComputation::from_root(value),
+            purpose,
+            branch,
+            scope_depth,
+        }
+    }
+}
+
+enum ScalarDemandStep<S: TaskSpecialization> {
+    Complete(MachineStep<S>),
+    Blocked(ScalarDemandWork<S>, WorkDependency),
+    Yielded(ScalarDemandWork<S>),
+    Failed(ScalarDemandWork<S>, TaskHalt),
 }
 
 #[derive(Clone)]
@@ -2924,6 +3116,7 @@ const EFFECT_FUSION_BUDGET: usize = 32;
 enum MachineStep<S: TaskSpecialization> {
     Continue(MachineWork<S>),
     Decode(EffectDecodeWork<S>),
+    Demand(ScalarDemandWork<S>),
     Blocked(BlockedExecution<S>),
     Exit(ExitIntent),
     Terminal(TaskTerminal),
@@ -3910,36 +4103,12 @@ fn alternative_returns_root(
     })
 }
 
-fn fuse_glam_delivery_in<S: TaskSpecialization>(
-    context: &EvaluatorStepContext<'_>,
-    branch: &mut Branch<S>,
-    value: Value,
-) -> Result<Option<Value>, TaskHalt> {
-    let Some(Continuation::Glam(function)) = branch.control.sequence.last().cloned() else {
-        return Ok(None);
-    };
-    let function = evaluate_in(context, context.project_root(&function))?;
-    branch.control.sequence.pop();
-    apply_in(context, function, vec![value]).map(Some)
-}
-
 fn apply_in(
     context: &EvaluatorStepContext<'_>,
     function: Value,
     arguments: Vec<Value>,
 ) -> Result<Value, TaskHalt> {
     eval::apply_values_in(context, function, arguments).map_err(task_eval_error)
-}
-
-fn evaluate_root(
-    poll: &EvaluationPollContext,
-    context: &EvalContext,
-    value: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, TaskHalt> {
-    poll.evaluate(context, |evaluator| {
-        evaluate_in(evaluator, evaluator.project_root(value))
-            .map(|value| evaluator.root_value(value))
-    })
 }
 
 fn evaluate_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Value, TaskHalt> {

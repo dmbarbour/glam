@@ -466,9 +466,10 @@ impl EvaluationWorkCoordinator {
             let (_, wake) =
                 wait.publish_terminal_guarded(self, mutation, selected.terminal.clone());
             completion_wakes.push(wake);
-            for (publisher, status) in std::mem::take(&mut selected.status_updates) {
-                debug_assert_eq!(status, terminal_task_status(&selected.terminal));
-                status_wakes.push(publisher.publish_guarded(mutation, status));
+            for update in std::mem::take(&mut selected.status_updates) {
+                debug_assert_eq!(update.status, terminal_task_status(&selected.terminal));
+                let publisher = update.publisher.clone();
+                status_wakes.push(publisher.publish_update_guarded(mutation, update));
                 status_publishers.push(publisher);
             }
             for obligation in &selected.promises {
