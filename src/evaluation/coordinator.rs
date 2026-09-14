@@ -315,7 +315,7 @@ impl WorkDependency {
         }
     }
 
-    fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         match self {
             Self::Wait(wait) => wait.terminal_poll().is_some(),
             Self::Promise(promise) => promise.is_terminal(),

@@ -20,13 +20,13 @@ use crate::core::{
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
+use crate::eval::whnf::WhnfComputation;
 #[cfg(test)]
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitToken, EvaluatorStepContext,
-    ExitIntent, WorkDependency,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExitIntent, WorkDependency,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -303,6 +303,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     branch,
                     scope_depth: 0,
                 },
+                decoding: None,
                 cuts: Vec::new(),
             },
             blocked: None,
@@ -594,7 +595,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
             match self.poll(256) {
                 EffectTaskPoll::Yielded => {}
                 EffectTaskPoll::Blocked(blocked) => {
-                    if let Some(wait) = blocked.lazy {
+                    if let Some(dependency) = blocked.dependency {
+                        let wait = match dependency {
+                            WorkDependency::Wait(wait) => wait,
+                            WorkDependency::Promise(promise) => {
+                                eval::promise_root_wait(&self.eval_context, &promise)
+                                    .map_err(|error| TaskHalt::new(error.as_ref()))?
+                            }
+                            #[cfg(test)]
+                            WorkDependency::Test(_) => {
+                                return Err(TaskHalt::new(
+                                    "synchronous reflection task cannot wait on a synthetic dependency",
+                                ));
+                            }
+                        };
                         match self.eval_context.pump_wait(&wait, 4_096) {
                             EvaluationPumpOutcome::TargetReady
                             | EvaluationPumpOutcome::BudgetExhausted => continue,
@@ -678,7 +692,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 Err(error) => {
                     if let Some(wait) = error.blocked_on() {
-                        self.blocked = Some(self.waiting_block(wait.clone()));
+                        self.blocked = Some(self.waiting_block(WorkDependency::Wait(wait.clone())));
                         return self.blocked_poll();
                     }
                     if let Some(retry) = self.retry_wake() {
@@ -1982,8 +1996,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )
     }
 
-    fn waiting_block(&self, wait: EvaluationWaitToken) -> BlockedExecution<S> {
-        BlockedExecution::waiting_on(wait, self.retry_wake())
+    fn waiting_block(&self, dependency: WorkDependency) -> BlockedExecution<S> {
+        BlockedExecution::waiting_on(dependency, self.retry_wake())
     }
 
     fn retry_wake(&self) -> Option<RetryWake<S>> {
@@ -1998,8 +2012,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .any(|frame| frame.observed_failure);
             let branch_observed = self
                 .execution
-                .work
-                .branch()
+                .active_branch()
                 .and_then(|branch| branch.transaction.as_ref())
                 .is_some_and(|transaction| transaction.observed);
             if frame_observed || branch_observed {
@@ -2019,8 +2032,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if self.search.retains_all()
             && let Some(transaction) = self
                 .execution
-                .work
-                .branch()
+                .active_branch()
                 .and_then(|branch| branch.transaction.as_ref())
             && transaction.observed
         {
@@ -2029,14 +2041,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 action: WakeAction::RestartSearch,
             });
         }
-        let branch = self.execution.work.branch()?;
+        let branch = self.execution.active_branch()?;
         let checkpoint = branch.retry.as_ref()?;
         let observed_generation = checkpoint.generation?;
         Some(RetryWake {
             observed_generation,
             action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
                 branch: (*checkpoint.branch).clone(),
-                scope_depth: self.execution.work.scope_depth(),
+                scope_depth: self.execution.active_scope_depth(),
             })),
         })
     }
@@ -2054,7 +2066,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             self.apply_wake(retry.action);
             return None;
         }
-        let BlockReason::WaitingOn(wait) = &blocked.reason else {
+        let BlockReason::WaitingOn(dependency) = &blocked.reason else {
+            return Some(self.blocked_poll());
+        };
+        if dependency.is_terminal() {
+            self.blocked = None;
+            return None;
+        }
+        let WorkDependency::Wait(wait) = dependency else {
             return Some(self.blocked_poll());
         };
         match self.eval_context.poll_wait(wait) {
@@ -2139,6 +2158,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 self.execution.cuts.clear()
             }
         }
+        self.execution.decoding = None;
         self.execution.work = MachineWork::Outcome {
             outcome: BranchOutcome::Cancelled,
             scope_depth: 0,
@@ -2151,13 +2171,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .expect("blocked poll requires blocked state");
         EffectTaskPoll::Blocked(TaskBlock {
-            lazy: blocked.lazy(),
+            dependency: blocked.dependency(),
             observed_generation: blocked.observed_generation(),
             error: blocked.error(),
         })
     }
 
     fn apply_wake(&mut self, wake: WakeAction<S>) {
+        self.execution.decoding = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
@@ -2166,6 +2187,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn restart_search(&mut self) {
+        self.execution.decoding = None;
         self.execution.cuts.clear();
         let mut root = self
             .search
@@ -2179,6 +2201,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn restart_cut(&mut self, index: usize) {
+        self.execution.decoding = None;
         self.execution.cuts.truncate(index + 1);
         let mut frame = self
             .execution
@@ -2212,6 +2235,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             TaskTerminal::Failed(error) => error.clone().into_failure(),
         };
         self.eval_context.fail_local_promises(unfinished_failure);
+        self.execution.decoding = None;
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
@@ -2332,7 +2356,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
     match task.poll_with_context(context, step_budget) {
         EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
         EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            dependency: blocked.lazy.map(WorkDependency::Wait),
+            dependency: blocked.dependency,
             observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
             error: blocked.error,
         }),
@@ -2361,7 +2385,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                    dependency: blocked.lazy.map(WorkDependency::Wait),
+                    dependency: blocked.dependency,
                     observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
                     error: blocked.error,
                 })
@@ -2504,10 +2528,41 @@ impl<S: TaskSpecialization> Branch<S> {
     }
 }
 
-#[derive(Clone)]
 struct TaskExecution<S: TaskSpecialization> {
     work: MachineWork<S>,
+    decoding: Option<EffectDecodeWork<S>>,
     cuts: Vec<CutFrame<S>>,
+}
+
+impl<S: TaskSpecialization> TaskExecution<S> {
+    fn active_branch(&self) -> Option<&Branch<S>> {
+        self.decoding
+            .as_ref()
+            .map(|work| &work.branch)
+            .or_else(|| self.work.branch())
+    }
+
+    fn active_scope_depth(&self) -> usize {
+        self.decoding
+            .as_ref()
+            .map_or_else(|| self.work.scope_depth(), |work| work.scope_depth)
+    }
+}
+
+/// Sole owner of one resumable WHNF request while the reflection machine is
+/// decoding an effect. Unlike ordinary [`MachineWork`], this state is never
+/// cloned to preserve a retry checkpoint.
+#[allow(dead_code, reason = "W5B activates the W5A decoder owner")]
+struct EffectDecodeWork<S: TaskSpecialization> {
+    computation: WhnfComputation,
+    purpose: EffectDecodePurpose,
+    branch: Branch<S>,
+    scope_depth: usize,
+}
+
+#[allow(dead_code, reason = "W5B activates the W5A decoder owner")]
+enum EffectDecodePurpose {
+    EffectObject,
 }
 
 #[derive(Clone)]
@@ -2711,9 +2766,9 @@ struct BlockedExecution<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> BlockedExecution<S> {
-    fn waiting_on(wait: EvaluationWaitToken, retry: Option<RetryWake<S>>) -> Self {
+    fn waiting_on(dependency: WorkDependency, retry: Option<RetryWake<S>>) -> Self {
         Self {
-            reason: BlockReason::WaitingOn(wait),
+            reason: BlockReason::WaitingOn(dependency),
             retry,
         }
     }
@@ -2736,9 +2791,9 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
-    fn lazy(&self) -> Option<EvaluationWaitToken> {
+    fn dependency(&self) -> Option<WorkDependency> {
         match &self.reason {
-            BlockReason::WaitingOn(wait) => Some(wait.clone()),
+            BlockReason::WaitingOn(dependency) => Some(dependency.clone()),
             BlockReason::Exhausted | BlockReason::EvaluationError(_) => None,
         }
     }
@@ -2761,7 +2816,7 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
 }
 
 enum BlockReason {
-    WaitingOn(EvaluationWaitToken),
+    WaitingOn(WorkDependency),
     Exhausted,
     EvaluationError(TaskHalt),
 }
@@ -2778,7 +2833,7 @@ enum WakeAction<S: TaskSpecialization> {
 }
 
 pub(super) struct TaskBlock {
-    pub(super) lazy: Option<EvaluationWaitToken>,
+    pub(super) dependency: Option<WorkDependency>,
     pub(super) observed_generation: Option<u64>,
     pub(super) error: Option<crate::runtime::RuntimeFailureRoot>,
 }

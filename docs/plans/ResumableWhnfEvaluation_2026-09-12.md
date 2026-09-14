@@ -2202,6 +2202,8 @@ expected result.
 
 #### W5A — WHNF submachine work state
 
+**Status: complete (2026-09-14).**
+
 Add a reflection work variant or dedicated decoding substate which owns
 `WhnfComputation` plus one explicit completion purpose. It must compose with
 branch cloning, cuts, retries, exits, cancellation, and transaction scopes
@@ -2210,6 +2212,18 @@ without cloning a live WHNF computation into multiple committed owners.
 If an `.alt` branch needs independent evaluation, it receives an independently
 rooted checkpoint by the existing branch construction policy; do not make
 `WhnfComputation: Clone` as a shortcut.
+
+Completion record: `TaskExecution` now has one dedicated, non-cloneable
+`EffectDecodeWork` slot containing the exact `WhnfComputation`, its explicit
+effect-object completion purpose, branch, and scope depth. Retry discovery
+reads whichever of ordinary work or decoder work is active; cut/search restart,
+exit disposal, cancellation, and terminalization all retire decoder state
+before installing replacement work. Blocking now
+retains the exact `WorkDependency`, including a promise completion source,
+while the synchronous and isolated-search compatibility surfaces adapt promise
+dependencies to their existing wait-token APIs. Compile-exhaustive inventories
+and the private-WHNF owner inventory latch the new durable owner without making
+the computation cloneable. W5B activates this owner for effect decoding.
 
 #### W5B — Effect request decoding phases
 

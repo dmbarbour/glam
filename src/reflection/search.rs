@@ -8,7 +8,7 @@ use super::requests::ReflectionServices;
 use super::store::{ExactConflictAnalysis, ReflectionStore, StoreSnapshot};
 use crate::api::{Diagnostic, Value as PublicValue, Values};
 use crate::core::CoreValueFactory;
-use crate::evaluation::{EvalContext, EvaluationWaitToken};
+use crate::evaluation::{EvalContext, EvaluationWaitToken, WorkDependency};
 
 /// Immutable host for one all-results effect search.
 ///
@@ -288,8 +288,26 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 let error = blocked.error.map(TaskHalt::rooted_failure);
+                let dependency = match blocked.dependency {
+                    Some(WorkDependency::Wait(wait)) => Some(wait),
+                    Some(WorkDependency::Promise(promise)) => {
+                        match crate::eval::promise_root_wait(&self.task.eval_context, &promise) {
+                            Ok(wait) => Some(wait),
+                            Err(error) => {
+                                return IsolatedSearchPoll::Failed(TaskHalt::new(error.as_ref()));
+                            }
+                        }
+                    }
+                    #[cfg(test)]
+                    Some(WorkDependency::Test(_)) => {
+                        return IsolatedSearchPoll::Failed(TaskHalt::new(
+                            "isolated search cannot wait on a synthetic dependency",
+                        ));
+                    }
+                    None => None,
+                };
                 IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
-                    dependency: blocked.lazy,
+                    dependency,
                     observed_generation: blocked.observed_generation,
                     error,
                 })

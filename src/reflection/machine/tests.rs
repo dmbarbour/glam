@@ -966,14 +966,33 @@ fn assert_branch_root_inventory(
 
 fn assert_execution_root_inventory(
     execution: &TaskExecution<TestEffects>,
+    supplied_decoding: &EffectDecodeWork<TestEffects>,
     supplied_work: &MachineWork<TestEffects>,
     outcome: &BranchOutcome<TestEffects>,
     cut: &CutFrame<TestEffects>,
     wake: &WakeAction<TestEffects>,
 ) {
-    let TaskExecution { work, cuts } = execution;
+    let TaskExecution {
+        work,
+        decoding,
+        cuts,
+    } = execution;
     let _: &MachineWork<TestEffects> = work;
+    let _: &Option<EffectDecodeWork<TestEffects>> = decoding;
     let _: &Vec<CutFrame<TestEffects>> = cuts;
+
+    let EffectDecodeWork {
+        computation,
+        purpose,
+        branch,
+        scope_depth,
+    } = supplied_decoding;
+    let _: &crate::eval::whnf::WhnfComputation = computation;
+    match purpose {
+        EffectDecodePurpose::EffectObject => {}
+    }
+    let _: &Branch<TestEffects> = branch;
+    let _: &usize = scope_depth;
 
     match supplied_work {
         MachineWork::Drive {
@@ -1063,6 +1082,7 @@ fn assert_execution_root_inventory(
 
 type ExecutionRootInventoryFn = fn(
     &TaskExecution<TestEffects>,
+    &EffectDecodeWork<TestEffects>,
     &MachineWork<TestEffects>,
     &BranchOutcome<TestEffects>,
     &CutFrame<TestEffects>,
@@ -1314,8 +1334,8 @@ type PreparedHandoffInventoryFn = fn(
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
-        BlockReason::WaitingOn(wait) => {
-            let _: &EvaluationWaitToken = wait;
+        BlockReason::WaitingOn(dependency) => {
+            let _: &WorkDependency = dependency;
         }
         BlockReason::Exhausted => {}
         BlockReason::EvaluationError(error) => {
@@ -1325,11 +1345,11 @@ fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &T
     let _: &Option<RetryWake<TestEffects>> = retry;
 
     let TaskBlock {
-        lazy,
+        dependency,
         observed_generation,
         error,
     } = poll;
-    let _: &Option<EvaluationWaitToken> = lazy;
+    let _: &Option<WorkDependency> = dependency;
     let _: &Option<u64> = observed_generation;
     let _: &Option<crate::runtime::RuntimeFailureRoot> = error;
 }
@@ -3583,7 +3603,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
         panic!("eval should suspend on its value's pending dependency");
     };
-    assert!(blocked.lazy.is_some());
+    assert!(blocked.dependency.is_some());
 
     crate::core::fail_test_promise_message(session.values(), &promised, "dependency failed")
         .expect("test promise should fail once");
@@ -4576,7 +4596,7 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
     let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
         panic!("error after an observed alternative should remain retryable")
     };
-    assert!(blocked.lazy.is_none());
+    assert!(blocked.dependency.is_none());
     assert!(blocked.observed_generation.is_some());
     assert!(
         blocked
@@ -4708,7 +4728,7 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
     let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
         panic!("empty queue should suspend the task")
     };
-    assert!(blocked.lazy.is_none());
+    assert!(blocked.dependency.is_none());
     assert!(blocked.observed_generation.is_some());
     assert_eq!(host.wait_count(), 0);
 
@@ -4755,9 +4775,9 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
         EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
         EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
     };
-    let wait = blocked
-        .lazy
-        .expect("lazy suspension should retain its wait token");
+    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
+        panic!("lazy suspension should retain its wait token")
+    };
     assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
 
     task.eval_context.complete_wait(&wait);
@@ -4801,7 +4821,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
         panic!("right alternative should retain the failed queue observation")
     };
-    assert!(blocked.lazy.is_some());
+    assert!(blocked.dependency.is_some());
     assert!(blocked.observed_generation.is_some());
 
     host.emit_diagnostic(Diagnostic::new(

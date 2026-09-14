@@ -1184,8 +1184,8 @@ mod tests {
         let reflection = fs::read_to_string(manifest.join("src/reflection/machine.rs"))
             .expect("reflection machine source should be readable");
         assert!(
-            !reflection.contains("WhnfComputation"),
-            "reflection cutover remains staged for W5"
+            reflection.contains("computation: WhnfComputation"),
+            "W5 reflection decoding must own its resumable WHNF computation"
         );
     }
 
