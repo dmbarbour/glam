@@ -445,6 +445,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .record_driver(event);
     }
 
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn driver_work_item_limit_reached(&self) -> bool {
+        self.values
+            .values()
+            .interaction_net_profile()
+            .driver_work_item_limit_reached()
+    }
+
     #[cfg(test)]
     pub(crate) fn active_normalization_batch(&self) -> Option<(u64, bool)> {
         self.runtime.cell().active_normalization_batch()

@@ -112,6 +112,8 @@ impl NetWhnfMachine {
                 self.driver.restart_from_request_root();
                 Ok(NetWhnfPoll::Yielded)
             }
+            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            NetDriverOutcome::ProbeBudgetExhausted => Ok(NetWhnfPoll::Yielded),
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 let value = context.with_value_access(|access| {
                     let runtime = CoreRuntimeNet::from_root(&self.request.root, access.values());
@@ -302,6 +304,8 @@ enum NetDriverOutcome {
     Progressed,
     Root(InterfaceDemand),
     Contended(NetContention),
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    ProbeBudgetExhausted,
 }
 
 struct NetDriver {
@@ -381,6 +385,14 @@ fn drive_net_driver_work_in(
                     }
                     return Err(error);
                 }
+                #[cfg(all(test, feature = "interaction-net-profiling"))]
+                if context
+                    .context()
+                    .values()
+                    .net_driver_work_item_limit_reached()
+                {
+                    return Ok(NetDriverOutcome::ProbeBudgetExhausted);
+                }
             }
         }
     }
@@ -414,6 +426,12 @@ fn drive_net_batch(
         );
         if let Some(outcome) = drive_net_work_item(driver, work, access)? {
             return Ok(outcome);
+        }
+        #[cfg(all(test, feature = "interaction-net-profiling"))]
+        if access.driver_work_item_limit_reached() {
+            return Ok(NetBatchOutcome::Driver(
+                NetDriverOutcome::ProbeBudgetExhausted,
+            ));
         }
         let Some(next) = driver.worklist.pop() else {
             assert!(
@@ -829,6 +847,8 @@ fn drive_net_interface_with_contention_handoff(
     loop {
         match drive_net_work_in(context, request)? {
             NetDriverOutcome::Progressed => continue,
+            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            NetDriverOutcome::ProbeBudgetExhausted => continue,
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 return Ok(NetInterfaceOutcome::Data);
             }
@@ -2190,6 +2210,10 @@ mod driver_tests {
                 panic!("resumed driver unexpectedly remained contended")
             }
             NetDriverOutcome::Progressed => unreachable!("the fixture loop consumes progress"),
+            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            NetDriverOutcome::ProbeBudgetExhausted => {
+                panic!("the fixture did not install a profiling work budget")
+            }
         }
         assert_eq!(
             runtime.active_normalization_batch(context.values()),

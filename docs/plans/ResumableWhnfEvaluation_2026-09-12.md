@@ -2114,9 +2114,10 @@ investigation while removing the compatibility/admission boundary.
 
 ##### W4E.4 — Verification and plan reconciliation
 
-**Status:** partially complete on 2026-09-14.
+**Status:** complete on 2026-09-14.
 
-The repaired source-shaped fixture must deterministically:
+The provisional repair matrix asked a source-shaped fixture to
+deterministically:
 
 - terminate within the latched poll and net-work budgets;
 - reproduce the last-known-good per-rule reduction signature;
@@ -2149,10 +2150,19 @@ than silently rewriting the original W4 outcome.
 Completed verification:
 
 - `wrapper_returning_function_then_accepts_remaining_application` terminates
-  and latches the last-known-good per-rule reduction signature plus exactly 71
-  net-driver work items under `interaction-net-profiling`;
+  through a bounded client-demand harness and latches 17 coordinator polls,
+  the last-known-good per-rule reduction signature, and the complete
+  net-driver signature including exactly 71 work items and six dependency
+  visits under `interaction-net-profiling`;
+- a test-only static profiling fuse stops that same computation after exactly
+  16 work items. The inverse fixture proves the demand remains pending, the
+  original source remains installed, no terminal cache has been published,
+  and explicit abandonment retires the one client-demand record;
+- both the interrupted and completed schedules retain no in-flight net claim
+  or normalization lease. Completion removes the source, publishes the
+  terminal cache, and retires the client-demand record;
 - the source-shaped duplicate-symbol executable terminates, fails once with
-  the expected diagnostic, and completed in 12.75 seconds in the final run;
+  the expected diagnostic, and completed in 12.88 seconds in the final run;
 - the affected diagnostic-context fixtures, W3B.3/W4C coverage, and all four
   executable fixtures pass through the ordinary full suite;
 - the raw-value, evaluator-access, mutator-introduction, and WHNF inventories
@@ -2160,17 +2170,21 @@ Completed verification:
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
   warnings`, the profiling fixture, and `cargo test -q` pass.
 
-Still outstanding before this checkpoint is complete:
+The broader provisional matrix above was narrowed after the W4E.1-W4E.3
+evidence. Exact reduction and driver signatures detect semantic replay without
+adding an intrusive per-source identity journal; lazy-cell synchronization
+already makes terminal publication single-assignment. The fixture now observes
+the stable source net directly for the lifecycle assertions that are not
+encoded in those signatures.
 
-- a deterministic pre-completion work-budget harness rather than relying on a
-  successful test return before checking exact counts;
-- explicit stable-identity accounting for source selection and terminal-cache
-  publication;
-- explicit post-run assertions for claimed net calls, normalization scopes,
-  running tasks, dependency-edge visits, and ready-candidate visits;
-- a successful direct-assembly case in that same bounded harness; and
-- forced zero-worker and one-worker scheduling-barrier variants where order
-  matters.
+Ready-candidate accounting belonged to the disproven W4E.3 scheduler-index
+hypothesis. A second source-level success harness would duplicate the minimized
+successful semantic case without isolating the repaired boundary. Forced
+zero/one-worker schedules are likewise not appropriate here: W4E.2 repaired a
+deterministic single-owner replay rather than a disputed cross-thread ordering.
+The existing worker, restoration, and executable suites remain the coverage
+for those independent policies. This checkpoint therefore does not add those
+three mechanisms merely to satisfy the earlier speculative matrix.
 
 ### Phase W5 — Reflection Machine Integration
 

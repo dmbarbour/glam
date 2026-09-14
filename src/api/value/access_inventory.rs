@@ -706,6 +706,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",

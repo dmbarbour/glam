@@ -7,6 +7,7 @@ use crate::core::{
     ClosedCompatibilityValue, Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key,
     LazyValue, Value, keys,
 };
+use crate::core_net::CoreRuntimeNet;
 use crate::evaluation::{
     EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskMachine, EvaluationWaitPoll,
     ReflectionTaskLauncher, ReflectionTaskResultPolicy,
@@ -96,12 +97,7 @@ fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
     assert_eq!(claimed, n(42));
 }
 
-#[test]
-fn wrapper_returning_function_then_accepts_remaining_application() {
-    let context = EvalContext::isolated(CoreValueFactory::new(
-        crate::runtime::allocate_evaluation_runtime_id(),
-        crate::runtime::RuntimeIds::new(),
-    ));
+fn wrapper_returning_function_computation(context: &EvalContext) -> LazyValue {
     let returned_code = Arc::new(lower_test_function_code_in(
         context.values(),
         1,
@@ -132,17 +128,79 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     );
 
     let code = lower_test_function_code_in(context.values(), 0, expression);
-    let computation = Value::Lazy(LazyValue::from_net_computation(
+    LazyValue::from_net_computation(
         context.values(),
         NetValue::new(code.runtime().duplicate_for_test(context.values())),
-    ));
+    )
+}
+
+fn isolated_w4e_context() -> OwnedEvalContext {
+    EvalContext::isolated(CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ))
+}
+
+fn net_computation_runtime(lazy: &LazyValue, context: &EvalContext) -> CoreRuntimeNet {
+    let Some(crate::core::LazySource::NetComputation(net)) = lazy.source_snapshot(context.values())
+    else {
+        panic!("the W4E fixture must retain its net-computation source");
+    };
+    net.into_runtime()
+}
+
+#[test]
+fn wrapper_returning_function_then_accepts_remaining_application() {
+    let context = isolated_w4e_context();
+    let computation_lazy = wrapper_returning_function_computation(&context);
+    let computation_runtime = net_computation_runtime(&computation_lazy, &context);
+    let computation = Value::Lazy(computation_lazy.clone());
+
+    #[cfg(feature = "interaction-net-profiling")]
+    context.values().set_net_driver_work_item_limit(128);
+
+    let demand = context
+        .demand_whnf(crate::runtime::RuntimeValueRoot::new(
+            context.values(),
+            computation.clone(),
+        ))
+        .expect("bounded wrapper demand should be admitted");
+    let mut machine_polls = 0;
+    while demand.poll().is_none() {
+        assert!(
+            machine_polls < 128,
+            "wrapper demand exceeded its deterministic machine-poll budget"
+        );
+        assert!(
+            context.poll_one_runtime_work_for_test(),
+            "wrapper demand retained no runnable producer"
+        );
+        machine_polls += 1;
+        #[cfg(feature = "interaction-net-profiling")]
+        assert!(
+            !context.values().net_driver_work_item_limit_reached(),
+            "wrapper demand exceeded its deterministic net-work budget: {:?}",
+            context.values().interaction_net_profile_snapshot()
+        );
+    }
 
     assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+    assert_eq!(context.client_demand_count_for_test(), 0);
+    assert!(computation_lazy.source_snapshot(context.values()).is_none());
+    assert!(computation_lazy.cached(context.values()).is_some());
+    assert_eq!(
+        computation_runtime.active_normalization_batch(context.values()),
+        None
+    );
+    computation_runtime.test_with(context.values(), |net| {
+        assert!(!net.has_in_flight_claims());
+    });
     #[cfg(feature = "interaction-net-profiling")]
     {
-        use crate::interaction_net::profiling::NetReductionCounts;
+        use crate::interaction_net::profiling::{NetDriverCounts, NetReductionCounts};
 
         let profile = context.values().interaction_net_profile_snapshot();
+        assert_eq!(machine_polls, 17);
         assert_eq!(
             profile.reductions,
             NetReductionCounts {
@@ -160,8 +218,65 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
             },
             "over-application through a returned function must not replay semantic work"
         );
-        assert_eq!(profile.driver.work_items, 71);
+        assert_eq!(
+            profile.driver,
+            NetDriverCounts {
+                machine_polls: 4,
+                work_items: 71,
+                interface_polls: 27,
+                cursor_steps: 11,
+                active_pair_steps: 27,
+                cursor_dependencies: 6,
+                blocked_retries: 0,
+                contentions: 0,
+                disturbances: 0,
+                request_root_restarts: 0,
+            }
+        );
     }
+}
+
+#[cfg(feature = "interaction-net-profiling")]
+#[test]
+fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
+    let context = isolated_w4e_context();
+    let computation_lazy = wrapper_returning_function_computation(&context);
+    let computation_runtime = net_computation_runtime(&computation_lazy, &context);
+    let computation = Value::Lazy(computation_lazy.clone());
+    context.values().set_net_driver_work_item_limit(16);
+
+    let demand = context
+        .demand_whnf(crate::runtime::RuntimeValueRoot::new(
+            context.values(),
+            computation,
+        ))
+        .expect("bounded wrapper demand should be admitted");
+    for _ in 0..128 {
+        assert!(
+            context.poll_one_runtime_work_for_test(),
+            "budget probe retained no runnable producer"
+        );
+        if context.values().net_driver_work_item_limit_reached() {
+            break;
+        }
+    }
+
+    let profile = context.values().interaction_net_profile_snapshot();
+    assert_eq!(profile.driver.work_items, 16);
+    assert!(demand.poll().is_none());
+    assert_eq!(context.client_demand_count_for_test(), 1);
+    assert!(computation_lazy.source_snapshot(context.values()).is_some());
+    assert!(computation_lazy.cached(context.values()).is_none());
+    assert_eq!(
+        computation_runtime.active_normalization_batch(context.values()),
+        None
+    );
+    computation_runtime.test_with(context.values(), |net| {
+        assert!(!net.has_in_flight_claims());
+    });
+
+    demand.abandon();
+    assert_eq!(context.client_demand_count_for_test(), 0);
 }
 
 #[test]

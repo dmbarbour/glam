@@ -121,6 +121,8 @@ atomic_counts!(AtomicNetDriverCounts => NetDriverCounts {
 pub(crate) struct InteractionNetProfile {
     reductions: AtomicNetReductionCounts,
     driver: AtomicNetDriverCounts,
+    #[cfg(test)]
+    driver_work_item_limit: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,5 +193,22 @@ impl InteractionNetProfile {
             DriverEvent::RequestRootRestart => &self.driver.request_root_restarts,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_driver_work_item_limit(&self, limit: u64) {
+        assert_ne!(limit, 0, "a profiling work-item limit must be positive");
+        assert_eq!(
+            self.driver.work_items.load(Ordering::Relaxed),
+            0,
+            "a profiling work-item limit must be installed before net work begins"
+        );
+        self.driver_work_item_limit.store(limit, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn driver_work_item_limit_reached(&self) -> bool {
+        let limit = self.driver_work_item_limit.load(Ordering::Relaxed);
+        limit != 0 && self.driver.work_items.load(Ordering::Relaxed) >= limit
     }
 }

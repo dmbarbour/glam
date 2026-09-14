@@ -851,6 +851,18 @@ impl EvalContext {
         self.admit_client_demand(ClientDemandOperation::new(value))
     }
 
+    #[cfg(test)]
+    pub(crate) fn poll_one_runtime_work_for_test(&self) -> bool {
+        self.coordinator()
+            .is_some_and(|coordinator| coordinator.poll_runtime_work())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_demand_count_for_test(&self) -> usize {
+        self.coordinator()
+            .map_or(0, |coordinator| coordinator.client_demand_count())
+    }
+
     fn admit_client_demand(
         &self,
         operation: ClientDemandOperation,

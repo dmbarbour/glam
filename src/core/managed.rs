@@ -432,6 +432,20 @@ impl CoreValueFactory {
         self.domain.interaction_net_profile.snapshot()
     }
 
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn set_net_driver_work_item_limit(&self, limit: u64) {
+        self.domain
+            .interaction_net_profile
+            .set_driver_work_item_limit(limit);
+    }
+
+    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn net_driver_work_item_limit_reached(&self) -> bool {
+        self.domain
+            .interaction_net_profile
+            .driver_work_item_limit_reached()
+    }
+
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
     ///
