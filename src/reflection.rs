@@ -33,12 +33,15 @@ pub use search::{
 
 #[cfg(test)]
 pub(crate) use requests::assert_task_handle_family_shape;
+pub(crate) use requests::{
+    KeyListRequestWork, PreparationPoll, ValuePathRequestWork, parse_evaluated_severity,
+    parse_severity, prepare_message,
+};
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
     environment_diagnostic_request_specs, reflection_request_specs,
 };
-pub(crate) use requests::{parse_severity, prepare_message};
 pub use store::{
     CoarseConflictAnalysis, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
     ConflictPath, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,

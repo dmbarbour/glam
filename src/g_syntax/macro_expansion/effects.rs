@@ -2,8 +2,10 @@ use crate::api::{Diagnostic, Value};
 use crate::core::{Dict, Key, List, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, SynchronousRequestWork,
-    SynchronousTaskSpecialization, TaskHalt, TaskSpecialization, parse_severity, prepare_message,
+    EffectRequestSpec, KeyListRequestWork, PreparationPoll, RequestContext, RequestResult,
+    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork,
+    SynchronousRequestWork, SynchronousTaskSpecialization, TaskHalt, TaskSpecialization,
+    ValuePathRequestWork, parse_evaluated_severity,
 };
 use crate::text_pattern::TextPattern;
 
@@ -39,10 +41,29 @@ pub(super) enum MacroRequest {
     WriteLayoutExit,
 }
 
+pub(super) enum MacroRequestWork {
+    EnvironmentStart(Vec<Value>),
+    EnvironmentPath(KeyListRequestWork),
+    EnvironmentValue(ValuePathRequestWork),
+    LogStart(Vec<Value>),
+    LogSeverity {
+        message: Value,
+    },
+    LogMessage {
+        severity: crate::diagnostic::Severity,
+    },
+    LogMessageInterface {
+        severity: crate::diagnostic::Severity,
+        message: crate::api::EvaluatedValue,
+    },
+    Synchronous(SynchronousRequestWork<MacroEffects>),
+    Poisoned,
+}
+
 impl TaskSpecialization for MacroEffects {
     type Host = MacroHost;
     type Request = MacroRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = MacroRequestWork;
     type Snapshot = MacroSnapshot;
     type Journal = MacroJournal;
 
@@ -120,8 +141,156 @@ impl TaskSpecialization for MacroEffects {
     }
 
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
+        match request {
+            MacroRequest::Environment => MacroRequestWork::EnvironmentStart(arguments),
+            MacroRequest::Log => MacroRequestWork::LogStart(arguments),
+            request => {
+                MacroRequestWork::Synchronous(SynchronousRequestWork::new(request, arguments))
+            }
+        }
     }
+}
+
+impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
+    fn poll(
+        &mut self,
+        specialization: &MacroEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, MacroEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        let work = std::mem::replace(self, Self::Poisoned);
+        match work {
+            Self::EnvironmentStart(arguments) => {
+                assert!(
+                    input.is_none(),
+                    "new macro environment request cannot have input"
+                );
+                let [path]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("macro `.env` received the wrong number of arguments")
+                })?;
+                *self = Self::EnvironmentPath(KeyListRequestWork::new(path));
+                Ok(SpecializationRequestPoll::Continue)
+            }
+            Self::EnvironmentPath(mut path) => match path.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    *self = Self::EnvironmentPath(path);
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+                PreparationPoll::Demand(value) => {
+                    *self = Self::EnvironmentPath(path);
+                    Ok(SpecializationRequestPoll::Demand(value))
+                }
+                PreparationPoll::Ready(path) => {
+                    let environment = {
+                        let mut transaction = context.transaction().ok_or_else(|| {
+                            TaskHalt::new("macro `.env` escaped its isolated transaction")
+                        })?;
+                        transaction.parts().0.environment.clone()
+                    };
+                    *self = Self::EnvironmentValue(ValuePathRequestWork::new(environment, path));
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+            },
+            Self::EnvironmentValue(mut path) => match path.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    *self = Self::EnvironmentValue(path);
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+                PreparationPoll::Demand(value) => {
+                    *self = Self::EnvironmentValue(path);
+                    Ok(SpecializationRequestPoll::Demand(value))
+                }
+                PreparationPoll::Ready(value) => Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::Return(value),
+                )),
+            },
+            Self::LogStart(arguments) => {
+                assert!(input.is_none(), "new macro log request cannot have input");
+                let [severity, message]: [Value; 2] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("macro `.log` received the wrong number of arguments")
+                })?;
+                *self = Self::LogSeverity { message };
+                Ok(SpecializationRequestPoll::Demand(severity))
+            }
+            Self::LogSeverity { message } => {
+                let severity = macro_demand(input, "log_severity", context)?;
+                let severity = parse_evaluated_severity(&severity)?;
+                *self = Self::LogMessage { severity };
+                Ok(SpecializationRequestPoll::Demand(message))
+            }
+            Self::LogMessage { severity } => {
+                let message = macro_demand(input, "log_message", context)?;
+                let interface = message.with_core(|value| {
+                    let CoreValue::Dict(message) = value else {
+                        return Err(TaskHalt::new("`.log` message must evaluate to an object"));
+                    };
+                    Ok(message.get(&*crate::core::keys::MSG).cloned())
+                })??;
+                if let Some(interface) = interface {
+                    *self = Self::LogMessageInterface { severity, message };
+                    Ok(SpecializationRequestPoll::Demand(
+                        context.values().wrap(interface),
+                    ))
+                } else {
+                    let result = emit_macro_log(context, severity, message.into_value())?;
+                    Ok(SpecializationRequestPoll::Complete(result))
+                }
+            }
+            Self::LogMessageInterface { severity, message } => {
+                let interface = macro_demand(input, "log_message", context)?;
+                let values = context.values();
+                let message = message.with_core(|value| {
+                    let CoreValue::Dict(message) = value else {
+                        unreachable!("validated macro log message remains a dictionary")
+                    };
+                    Ok::<_, TaskHalt>(values.wrap(CoreValue::Dict(message.insert(
+                        (*crate::core::keys::MSG).clone(),
+                        values.clone_core(interface.as_value())?,
+                    ))))
+                })??;
+                let result = emit_macro_log(context, severity, message)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::Synchronous(mut work) => {
+                let result = work.poll(specialization, input, context)?;
+                *self = Self::Synchronous(work);
+                Ok(result)
+            }
+            Self::Poisoned => panic!("completed macro request work was polled again"),
+        }
+    }
+}
+
+fn macro_demand(
+    input: Option<SpecializationRequestInput>,
+    operation: &str,
+    context: &RequestContext<'_, MacroEffects>,
+) -> Result<crate::api::EvaluatedValue, TaskHalt> {
+    match input.expect("resumed macro request must have demand input") {
+        SpecializationRequestInput::Value(value) => Ok(value),
+        SpecializationRequestInput::Failed(error) => {
+            let values = context.values();
+            Err(error.with_context(
+                &values,
+                values.wrap(crate::diagnostic::evaluation_context_frame(operation)),
+            ))
+        }
+    }
+}
+
+fn emit_macro_log(
+    context: &mut RequestContext<'_, MacroEffects>,
+    severity: crate::diagnostic::Severity,
+    message: Value,
+) -> Result<RequestResult, TaskHalt> {
+    let values = context.values();
+    let diagnostic = Diagnostic::from_emission(&values, severity, message)
+        .map_err(|error| TaskHalt::new(error.to_string()))?;
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskHalt::new("macro `.log` escaped its isolated transaction"))?;
+    transaction.parts().1.push_diagnostic(diagnostic);
+    Ok(RequestResult::ReturnUnit)
 }
 
 impl SynchronousTaskSpecialization for MacroEffects {
@@ -132,8 +301,9 @@ impl SynchronousTaskSpecialization for MacroEffects {
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt> {
         match request {
-            MacroRequest::Environment => environment(arguments, context),
-            MacroRequest::Log => log(arguments, context),
+            MacroRequest::Environment | MacroRequest::Log => {
+                unreachable!("macro environment and log requests use durable work")
+            }
             MacroRequest::Case => enter_case(arguments, context),
             MacroRequest::CaseExit => exit_case(arguments, context),
             MacroRequest::ReadText => read_text(arguments, context),
@@ -167,44 +337,6 @@ fn request(
         arity,
         request,
     )
-}
-
-fn environment(
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskHalt> {
-    let [path]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("macro `.env` received the wrong number of arguments"))?;
-    let path = context.evaluate_key_path(&path)?;
-    let environment = {
-        let mut transaction = context
-            .transaction()
-            .ok_or_else(|| TaskHalt::new("macro `.env` escaped its isolated transaction"))?;
-        transaction.parts().0.environment.clone()
-    };
-    Ok(RequestResult::Return(
-        context.evaluate_path(&environment, &path)?,
-    ))
-}
-
-fn log(
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, MacroEffects>,
-) -> Result<RequestResult, TaskHalt> {
-    let [severity, message]: [Value; 2] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("macro `.log` received the wrong number of arguments"))?;
-    let severity = parse_severity(context, severity)?;
-    let message = prepare_message(context, message)?;
-    let values = context.values();
-    let diagnostic = Diagnostic::from_emission(&values, severity, message)
-        .map_err(|error| TaskHalt::new(error.to_string()))?;
-    let mut transaction = context
-        .transaction()
-        .ok_or_else(|| TaskHalt::new("macro `.log` escaped its isolated transaction"))?;
-    transaction.parts().1.push_diagnostic(diagnostic);
-    Ok(RequestResult::ReturnUnit)
 }
 
 fn enter_case(

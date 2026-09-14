@@ -99,7 +99,7 @@ enum EnvironmentRequestWork {
     ValuePath(ValuePathRequestWork),
 }
 
-struct ValuePathRequestWork {
+pub(crate) struct ValuePathRequestWork {
     path: Vec<Key>,
     next: usize,
     current: Value,
@@ -125,7 +125,7 @@ struct DictKeyRequestWork {
     child: Option<KeyConversionRequestWork>,
 }
 
-struct KeyListRequestWork {
+pub(crate) struct KeyListRequestWork {
     pending: Option<ListDemand>,
     lists: Vec<crate::api::EvaluatedValue>,
     child: Option<Box<KeyConversionRequestWork>>,
@@ -137,7 +137,7 @@ enum ListDemand {
     Awaiting,
 }
 
-enum PreparationPoll<T> {
+pub(crate) enum PreparationPoll<T> {
     Progress,
     Demand(Value),
     Ready(T),
@@ -287,12 +287,10 @@ where
                     }
                     PreparationPoll::Ready(path) => {
                         self.operation = ReflectionRequestOperation::Environment(
-                            EnvironmentRequestWork::ValuePath(ValuePathRequestWork {
+                            EnvironmentRequestWork::ValuePath(ValuePathRequestWork::new(
+                                context.host().reflection_environment(),
                                 path,
-                                next: 0,
-                                current: context.host().reflection_environment(),
-                                awaiting: false,
-                            }),
+                            )),
                         );
                         Ok(SpecializationRequestPoll::Continue)
                     }
@@ -805,7 +803,16 @@ where
 }
 
 impl ValuePathRequestWork {
-    fn poll<S: TaskSpecialization>(
+    pub(crate) fn new(current: Value, path: Vec<Key>) -> Self {
+        Self {
+            path,
+            next: 0,
+            current,
+            awaiting: false,
+        }
+    }
+
+    pub(crate) fn poll<S: TaskSpecialization>(
         &mut self,
         input: Option<SpecializationRequestInput>,
         context: &RequestContext<'_, S>,
@@ -988,7 +995,7 @@ impl DictKeyRequestWork {
 }
 
 impl KeyListRequestWork {
-    fn new(value: Value) -> Self {
+    pub(crate) fn new(value: Value) -> Self {
         Self {
             pending: Some(ListDemand::Start(value)),
             lists: Vec::new(),
@@ -1006,7 +1013,7 @@ impl KeyListRequestWork {
         }
     }
 
-    fn poll<S: TaskSpecialization>(
+    pub(crate) fn poll<S: TaskSpecialization>(
         &mut self,
         input: Option<SpecializationRequestInput>,
         context: &RequestContext<'_, S>,
@@ -1130,7 +1137,9 @@ where
     Ok(())
 }
 
-fn parse_evaluated_severity(value: &crate::api::EvaluatedValue) -> Result<Severity, TaskHalt> {
+pub(crate) fn parse_evaluated_severity(
+    value: &crate::api::EvaluatedValue,
+) -> Result<Severity, TaskHalt> {
     let (info, warn, error) = value.with_core(|value| {
         (
             severity_matches(value, "info", &keys::INFO),
