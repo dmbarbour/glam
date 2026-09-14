@@ -2691,20 +2691,244 @@ Remediation checkpoints:
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
+**Review record (2026-09-14).** The semantic scope remains correct, but the
+original two-checkpoint split predates the concrete W3--W5 machine shapes and
+is too coarse. Reset-stack decoding is still concentrated in the synchronous
+`reset_stack_value_in`, `reset_frames_in`, and
+`reset_frames_from_value_in` helpers. One call can demand the stack shell,
+traverse lazy list chunks, demand every frame shell, traverse each frame list,
+convert its key, and validate both numeric fields. If a later step blocks, the
+completed prefix exists only on the Rust stack and is replayed.
+
+The established implementation no longer favors adding a generic
+`CollectionWalk` continuation to `WhnfComputation`. `RequestDecodeWork`,
+`KeyListMachine`, `ListFrontMachine`, and `StatePathWork` instead demonstrate
+the smaller and more inspectable boundary: one domain-specific durable owner
+composes the shared WHNF, logical-list-front, and key-conversion machines. Use
+that shape for a `ResetStackMachine`; do not add reset/control policy to the
+pure WHNF reducer merely because the work contains lists.
+
+The old integration list also omitted two material call sites. Ordinary value
+delivery decodes the active reset stack before choosing between a reset frame,
+a Rust-side delimiter, and task completion. `Delimiter::Restore` validates a
+saved stack before replacing the current stack and restoring its outer
+control. Both are part of W5C.4. Conversely, `.resume` task and continuation
+ID decoding is already complete in W5C.1 and must not be reopened here.
+
+The reset stack is stored in task-local state and can be replaced by user code,
+so its decoder continues to treat every serialized field as untrusted even
+though compiler-created frames are strict. The canonical resumable key
+converter replaces the legacy outer-WHNF-only `value_key_in` path. Scope and
+order fields receive ordinary WHNF demand before integer/range validation;
+this makes deferred numeric fields obey the language's normal lazy semantics
+instead of being rejected merely because they are not already in WHNF. The
+continuation field is deliberately retained without demand and is forced only
+when control later applies it.
+
 ###### W5C.4a — Standalone resumable stack decoder
 
-Represent reset-stack WHNF, list traversal, frame-list WHNF, frame arity,
-key conversion, and numeric scope/order validation as one explicit collection
-walk. Its durable form roots only the stack, current frame, and completed
-continuation values needed after a real boundary.
+####### W5C.4a.0 — Decoder contract and source latch
+
+Inventory every production read, validation, encoding, and replacement of
+`continuation_state`. Record for each caller whether it needs the original
+serialized stack, decoded `ResetFrame`s, or a newly encoded stack. Add a
+compile-exhaustive fixture for the selected decoder states and latch the
+remaining legacy helper call sites before behavior changes.
+
+The decoder owns one source stack root, the currently active list-front and
+field computation, completed `ResetFrame`s, and any completed fields of the
+current frame. Keys, indexes, field tags, scopes, and orders are immediate;
+only the source/list cursors, the current field, and completed continuation
+values need runtime roots. It returns decoded frames without observing or
+mutating `Control`, `next_control_order`, `next_continuation`, the continuation
+table, or branch state.
+
+####### W5C.4a.1 — Stack shell and logical frame-list traversal
+
+Add `ResetStackMachine` with an explicit source-WHNF phase. Require a list
+after that demand, then consume its logical front through `ListFrontMachine`
+so a lazy chunk suspends with the exact remaining suffix rather than replaying
+earlier frames. Empty stacks complete directly. Preserve the existing
+non-list stack diagnostic and give every local transition bounded work-unit
+accounting.
+
+At this checkpoint, extracted frame values may remain pending roots; frame
+interpretation belongs to the next checkpoint. Verify strict, empty,
+source-lazy, source-promise, and lazy-list-chunk cases with a one-step budget
+and counted producers.
+
+####### W5C.4a.2 — Frame shell, logical field traversal, and arity
+
+For each extracted frame, demand its outer shell, require a list, and consume
+exactly four logical fields through a nested list-front owner. Detect an
+undersized frame at end-of-list and an oversized frame upon observing the
+fifth field; do not traverse an arbitrary surplus merely to report the fixed
+arity error. Preserve completed earlier frames while the frame shell or any
+lazy field-list chunk suspends.
+
+Keep the existing non-list-frame and wrong-size diagnostics. Add fixtures for
+zero through five fields, a deferred frame shell, a deferred chunk before each
+field boundary, and a deferred tail needed only to establish exact arity.
+
+####### W5C.4a.3 — Ordered field conversion
+
+Decode fields in their serialized order:
+
+1. convert the key through the canonical `KeyConversionMachine`, including
+   recursive list/dictionary key values;
+2. retain the continuation value as a root without demanding it;
+3. demand `scope_depth` to WHNF and require a nonnegative `usize` integer; and
+4. demand `order` to WHNF and apply the same validation.
+
+Make the minimal visibility adjustment needed to reuse key conversion; do not
+duplicate `Key::from_value` traversal in reflection. A suspension or failure
+at a later field retains the prior converted key and continuation root. Only
+after all four fields succeed may the completed `ResetFrame` enter the output
+vector.
+
+Add counted lazy and promise fixtures at key, scope, and order, including a
+recursive deferred composite key. Verify that a deferred continuation remains
+undemanded during decoding and is demanded exactly once only by later control
+application. Preserve the existing invalid-key, invalid-scope, and
+invalid-order diagnostics after WHNF is reached.
+
+####### W5C.4a.4 — Standalone decoder closure
+
+Compare decoded strict stacks with the legacy decoder before migrating callers.
+Exercise nested frames, budget exhaustion at every phase, permanent child
+failure, and cancellation/owner retirement without replaying a completed
+prefix. Inspect the durable shape after each forced boundary and require that
+it contains no raw `Value` and no roots unrelated to future work.
+
+Do not remove the legacy helpers yet: W5C.4b migrates their control
+dispositions one at a time, and W5C.6 owns the final recursive-helper census.
 
 ###### W5C.4b — Control integration
 
-Integrate that decoder with fixpoint setup, `.reset`, `.shift`, resume
-installation, delimiter restoration, and stack replacement. No control frame
-is removed, rebased, or published until all preceding validation succeeds.
-Exercise nested reset/shift and fixpoint paths with suspension at every frame
-field and compare their final control order with uninterrupted execution.
+####### W5C.4b.0 — Durable control-work owner
+
+Add a `ControlWork<S>` family beside effect decoding, scalar demand, and state
+path work. It owns the original `Branch`, scope, reset-stack decoder, and the
+operation-specific roots needed to finish one control transition. Integrate it
+with task polling, blocking, yielding, retry/error handling, cancellation,
+active-branch projection, and the compile-exhaustive root inventory before
+migrating a request.
+
+Follow the current low-risk `TaskExecution` ownership pattern for this phase;
+do not combine all active work slots into a new general enum while control
+semantics are moving. W5C.6 may perform that mechanical consolidation after
+specialization work in W5C.5 establishes the final set of owners.
+
+####### W5C.4b.1 — `.reset` request entry
+
+Decode the request key, preserving it while the current stack is decoded.
+Only after both complete may `.reset` allocate control order and continuation
+identity, capture the current sequence, append the new reset frame, publish
+the replacement stack, and begin the requested operation. All fallible
+semantic validation precedes that commit section; the post-validation frame
+encoder performs no demand.
+
+Force suspension independently in the request key, stack shell, frame list,
+stored key, scope, and order. Latch that branch state, control sequence,
+continuation table, and allocation counters remain unchanged until the final
+validation succeeds, then change exactly once.
+
+####### W5C.4b.2 — `.shift` request entry and capture
+
+Decode the shift key followed by the current stack, then locate the innermost
+matching frame without further demand. Preserve the unmatched-key diagnostic.
+Only after a match is established may `.shift` split inner reset frames and
+ordered delimiters, capture the current continuation, publish the shortened
+stack, and apply the shift function.
+
+Forced fixtures must show that suspension and permanent failure leave both
+the reset and delimiter stacks intact. On success, the captured continuation
+contains exactly the reset frames and delimiters inside the selected prompt,
+and the target continuation remains on the outer control sequence in the same
+order as uninterrupted execution.
+
+####### W5C.4b.3 — Captured-continuation installation
+
+Migrate `install_captured_control`. Decode the caller's current reset stack
+before rebasing or publishing any captured layer. Retain the captured
+continuation and caller sequence while blocked. After validation, merge reset
+frames and delimiters by their existing total `order`, allocate the replacement
+order range once, publish the encoded stack, append the rebased delimiters,
+and install the captured sequence as one control transition.
+
+Keep cross-task and unknown-continuation rejection ahead of this work. Exercise
+multiple invocation of one captured continuation, nesting beneath an existing
+reset and resume delimiter, suspension in the caller stack, and failure before
+publication. Completed `.resume` ID decoding remains owned by W5C.1.
+
+####### W5C.4b.4 — Initial fixpoint setup
+
+Move the initial `.fix` path onto control work. Decode and preserve the
+original reset stack, then encode the hidden empty stack before allocating the
+control order, fixpoint promise, marker, active-fix entry, `Continuation::Fix`,
+and `Delimiter::Restore`. A blocked or invalid stack must create none of those
+externally meaningful control records.
+
+Verify that a reset outside a fixpoint is hidden while the fixpoint body runs,
+that the exact original serialized stack remains owned by the restore
+delimiter, and that completing the body restores it before subsequent
+`.shift` dispatch.
+
+####### W5C.4b.5 — Fixpoint restart paths
+
+Adapt `restart_fixpoint_at_scope` and every outcome path which may select it to
+return durable control work rather than synchronously calling fixpoint setup.
+Preserve the selected `FixRoot`, choice history, and inherited restart stack
+across suspension. Do not pop a restart or publish a new active fix until the
+same validation boundary used by initial setup has completed.
+
+Cover failed, retried, and completed alternatives, including a suspended reset
+stack during replay. Count promise creation, choice selection, and reset-stack
+publication so a resumed restart cannot allocate or publish either twice.
+
+####### W5C.4b.6 — Delivery-time reset selection
+
+When the ordinary continuation sequence is empty, retain the delivered value
+and decode the current reset stack before comparing its innermost applicable
+frame with the innermost Rust-side delimiter. If a reset wins, encode the
+remaining frames and publish that stack before applying its continuation. If
+no reset or delimiter applies, complete the branch without another demand.
+
+Exercise suspension with both possible orderings of reset frame and delimiter,
+at nested scope depths, and with no applicable local layer. The comparison and
+selected transition must match uninterrupted execution and must not pop or
+rebase either side before decoding succeeds.
+
+####### W5C.4b.7 — Delimiter restoration and stack replacement
+
+For `Delimiter::Restore`, decode the saved serialized stack and validate the
+current state dictionary before popping the delimiter or replacing the outer
+control. Publish the restored stack through the non-demanding encoder, then
+restore `Control` and redeliver the retained value. `Delimiter::Resume` has no
+semantic stack demand and remains a direct transition.
+
+Split the legacy helper's two roles explicitly: the decoder validates and
+returns frames; the encoder writes already validated frames or a retained
+validated serialized stack. No function named as a replacement or encoder may
+silently demand values. Test malformed saved stacks, suspension at every saved
+field, nested restore/resume delimiters, and exactly-once outer-control
+restoration.
+
+####### W5C.4b.8 — Control integration closure
+
+Run the existing reset/shift, task-locality, root-state replacement, fixpoint,
+cut, and continuation-reuse suites alongside a forced-boundary matrix. For
+each applicable control disposition cover uninterrupted execution, one-step
+budget yield, lazy and promise suspension, permanent failure, cancellation,
+and branch retry. Count decoder entry, completed frame prefixes, continuation
+capture, control-order allocation, fixpoint promise creation, and state
+publication rather than relying on repeated schedules.
+
+Require identical final control order and result for strict versus suspended
+execution. Update the source/root inventories after each migration checkpoint;
+retire `value_key_in` and the reset-specific synchronous helpers as their last
+W5C.4 callers move. Leave the shared `evaluate_in` retirement and the final
+no-unowned-demand census to W5C.6 after W5C.5 closes.
 
 ##### W5C.5 — Specialization callback boundary
 
