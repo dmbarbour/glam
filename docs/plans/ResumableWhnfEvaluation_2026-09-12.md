@@ -2262,10 +2262,143 @@ not promise which runnable task wins that unrelated race.
 
 #### W5C — Remaining reflection demand sites
 
-Migrate task assertions, continuations, request payloads, keys, paths, stacks,
-and protocol `.eval` requests currently using local `evaluate_in` loops.
-Classify each as WHNF submachine work or a proven already-WHNF projection.
-Remove the local recursive `evaluate_in` helper after its final caller moves.
+W5C is partitioned because the remaining recursive calls do not share one
+completion disposition. Request decoding resumes into dispatch, continuation
+demands resume into control delivery, paths resume before transactional host
+work, reset stacks retain a collection walk, and specialization callbacks
+cannot preserve an arbitrary Rust call stack across suspension. Do not hide
+those differences behind one increasingly general reflection-purpose enum.
+
+##### W5C.0 — Remaining-demand census and work vocabulary
+
+Latch every production reflection demand which can reach lazy, promise, net,
+or reflection work. The W5B baseline includes the remaining local
+`machine::evaluate_in` calls, the direct loops in `RequestContext`, and helper
+families such as request-list, key-path, value-path, and reset-stack traversal
+which can conceal more than one child demand.
+
+For each occurrence, record its durable owner, exact result disposition,
+whether any semantic or host action precedes the demand, and the smallest
+resumable work form which can represent its completed prefix. Select separate
+completion purposes for the families below and extend the compile-exhaustive
+machine inventory before migrating behavior.
+
+##### W5C.1 — Request payload and identity decoding
+
+Make request payload-list WHNF, list-spine extraction, and `.resume` task and
+continuation ID conversion explicit resumable decode phases. Select the
+request tag before suspending when possible, retain the exact selected payload,
+and do not rescan or reconstruct an already completed request prefix merely
+because a later payload or ID blocks.
+
+Preserve malformed request, unknown tag, wrong arity, non-list payload, and
+invalid ID diagnostics. Force suspension independently at payload WHNF, list
+extraction, task ID, and continuation ID, and assert one application result,
+one selected request, and no duplicate nested reflection activation.
+
+##### W5C.2 — Continuation and terminal-value demands
+
+###### W5C.2a — Glam continuations and exit errors
+
+Replace recursive function WHNF in `Continuation::Glam` with owned WHNF work
+which resumes into one continuation application. Treat `.exit.error` message
+WHNF as a separate terminal disposition. Neither path may pop its continuation
+or publish its exit intent until the demanded value is ready.
+
+###### W5C.2b — Unit assertions and scoped close
+
+Migrate `RequireUnit`, `AssertUnit`, and `RestoreScopedValue`. Construct an
+assertion computation once, preserve its diagnostic context across
+suspension, and mutate the control stack only after success. Verify success,
+structured permanent failure, lazy and promise suspension, cancellation, and
+scope-close restoration without replay.
+
+##### W5C.3 — Keys, paths, and state operations
+
+###### W5C.3a — Reusable key-path and value-path work
+
+Introduce or reuse resumable work for key conversion, path-list traversal,
+and intermediate dictionary WHNF. Preserve the distinction between an absent
+member, which produces the language's undefined value, and a non-dictionary
+intermediate, which is an evaluation failure. The final selected value remains
+lazy unless the caller explicitly demands it.
+
+###### W5C.3b — Task-local `.get` and `.set`
+
+Move task-local state lookup, update, and dictionary validation onto the path
+work. Retain the original branch and state until the complete replacement
+state is ready, then publish it once. Cover empty paths, missing members,
+lazy intermediates, lazy keys, and a suspending dictionary update.
+
+###### W5C.3c — Heap and volume transaction boundaries
+
+Use the same resumable path work for `.heap.*` and volume operations. Complete
+all path demand before observing a host snapshot, recording a transaction
+read, appending a journal edit, or attempting a commit. Forced suspension must
+prove that snapshots, observations, commits, and returned lazy path values are
+not duplicated. Host operations remain outside managed access.
+
+##### W5C.4 — Reset, shift, and continuation-stack traversal
+
+###### W5C.4a — Standalone resumable stack decoder
+
+Represent reset-stack WHNF, list traversal, frame-list WHNF, frame arity,
+key conversion, and numeric scope/order validation as one explicit collection
+walk. Its durable form roots only the stack, current frame, and completed
+continuation values needed after a real boundary.
+
+###### W5C.4b — Control integration
+
+Integrate that decoder with fixpoint setup, `.reset`, `.shift`, resume
+installation, delimiter restoration, and stack replacement. No control frame
+is removed, rebased, or published until all preceding validation succeeds.
+Exercise nested reset/shift and fixpoint paths with suspension at every frame
+field and compare their final control order with uninterrupted execution.
+
+##### W5C.5 — Specialization callback boundary
+
+###### W5C.5a — Protocol decision gate
+
+Inventory every `TaskSpecialization::handle_request` implementation and every
+`RequestContext::{evaluate,evaluate_key_path,evaluate_path}` call. Determine
+whether declarative argument preparation on `EffectRequestSpec`, a pollable
+specialization-request machine, or a smaller combination gives the callback a
+completed input without retaining managed access or an arbitrary Rust stack.
+
+The selected protocol must structurally prevent replay of a callback after it
+has observed or changed host or transaction state. Merely documenting that
+callbacks should demand their arguments before side effects is not sufficient.
+Record migration and compatibility consequences before changing the public
+trait.
+
+###### W5C.5b — Reflection `.eval` and reusable requests
+
+Move `.eval` first, preserving its deliberate conversion of permanent
+evaluation failure into `{err:Diagnostic}` while lazy and promise dependencies
+suspend the enclosing request. Then migrate environment lookup, dictionary and
+metadata inspection, logging preparation, task handles and query state, and
+the other reusable reflection requests according to the selected protocol.
+
+###### W5C.5c — Remaining specializations
+
+Migrate logger, macro, configured-command-line, token, net-construction, test,
+and any other specialization implementations. Add a hostile fixture which
+would count duplicate callback entry or duplicate host activity if a demand
+were replayed. Close the compatibility surface rather than leaving two
+different suspension contracts under the same trait.
+
+##### W5C.6 — Recursive helper retirement and focused verification
+
+Remove the local recursive `machine::evaluate_in`, `evaluate_root`, and
+equivalent production loops in `RequestContext` after their final callers
+move. Re-run the exact W0B census and require no unowned recursive WHNF demand
+under `src/reflection`. Any helper retained as a proven already-WHNF projection
+must assert or encode that precondition instead of silently evaluating.
+
+Run each family with uninterrupted, budget-yielded, lazy-suspended,
+promise-suspended, permanently failed, cancelled, and retryable branch forms
+as applicable. Update root/publication inventories at each checkpoint rather
+than relatching the aggregate only after all of W5C.
 
 #### W5D — Replay and branch verification
 
