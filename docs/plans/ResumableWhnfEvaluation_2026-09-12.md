@@ -3038,6 +3038,8 @@ one another's deliberately raw managed fixtures.
 
 ####### W5C.4b.7 — Delimiter restoration and stack replacement
 
+**Status: complete (2026-09-14).**
+
 For `Delimiter::Restore`, decode the saved serialized stack and validate the
 current state dictionary before popping the delimiter or replacing the outer
 control. Publish the restored stack through the non-demanding encoder, then
@@ -3050,6 +3052,18 @@ validated serialized stack. No function named as a replacement or encoder may
 silently demand values. Test malformed saved stacks, suspension at every saved
 field, nested restore/resume delimiters, and exactly-once outer-control
 restoration.
+
+Completion record: delivery now turns a selected `Delimiter::Restore` into a
+second control phase which retains the outer control, delivered value, branch,
+and a decoder for the saved serialized stack. It does not pop the delimiter or
+replace state until that decoder succeeds and the current state is confirmed
+to remain a dictionary. Publication reinstalls the exact validated serialized
+stack (whose deferred shell is then cached), restores the outer control, and
+redelivers without another semantic demand. `Delimiter::Resume` remains a
+direct transition. Promise and malformed-stack fixtures respectively force
+successful resumption and failure-before-pop, and inspect the replacement
+before redelivery. The last production synchronous reset-stack helpers are
+removed; only the test-only legacy comparator remains until closure.
 
 ####### W5C.4b.8 — Control integration closure
 

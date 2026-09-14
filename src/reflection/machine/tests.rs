@@ -1209,6 +1209,15 @@ fn assert_execution_root_inventory(
                 super::reset_stack::assert_machine_shape(stack);
                 let _: &RuntimeValueRoot = value;
             }
+            ControlOperation::Restore {
+                stack,
+                outer,
+                value,
+            } => {
+                super::reset_stack::assert_machine_shape(stack);
+                let _: &Control = outer;
+                let _: &RuntimeValueRoot = value;
+            }
             ControlOperation::Poisoned => {}
         }
     }
@@ -1795,10 +1804,10 @@ fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
         ("value_key_in", 2),
         ("reset_stack_value_in", 0),
         ("reset_frames_in", 0),
-        ("reset_frames_from_value_in", 2),
+        ("reset_frames_from_value_in", 1),
         ("with_reset_frames_in", 0),
         ("replace_reset_frames", 6),
-        ("with_reset_stack_value_in", 2),
+        ("with_reset_stack_value_in", 0),
     ];
 
     for (name, expected) in expected {
@@ -2786,6 +2795,150 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
             _ => panic!("delivery selected the wrong innermost control layer"),
         }
     }
+}
+
+#[test]
+fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
+    let values = crate::core::test_value_factory();
+    let saved = PromisedValue::new(&values, "saved restore stack");
+    let mut task = EffectTask::new(
+        &values,
+        eval::constant_effect(
+            &values,
+            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+        ),
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("restore fixture should construct");
+    let mut branch = task
+        .execution
+        .work
+        .branch()
+        .expect("fresh task should retain a branch")
+        .clone();
+    branch.control.delimiters.push(Delimiter::Restore {
+        outer: Box::new(Control::default()),
+        reset_stack: values
+            .construct_runtime_value_root(|access| Value::Promised(saved.duplicate_in(access))),
+        scope_depth: 0,
+        order: 1,
+    });
+    branch.state = values.construct_runtime_value_root(|_| {
+        Value::Dict(Dict::new_sync().insert(
+            task.tags.continuation_state.clone(),
+            Value::List(List::empty()),
+        ))
+    });
+    let current = values.construct_runtime_value_root(|_| Value::List(List::empty()));
+    let delivered = values.construct_runtime_value_root(|_| Value::binary_from_text("restored"));
+    task.execution.work = MachineWork::Outcome {
+        outcome: BranchOutcome::Cancelled,
+        scope_depth: 0,
+    };
+    task.execution.controlling = Some(ControlWork::delivery(current, delivered, branch, 0));
+
+    loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => {
+                assert!(matches!(
+                    blocked.dependency,
+                    Some(WorkDependency::Promise(_))
+                ));
+                break;
+            }
+            _ => panic!("unfulfilled restore stack did not block"),
+        }
+    }
+    let branch = task
+        .execution
+        .active_branch()
+        .expect("blocked restore should retain its branch");
+    assert_eq!(branch.control.delimiters.len(), 1);
+
+    crate::core::set_test_promise(&values, &saved, Value::List(List::empty()))
+        .expect("saved restore stack should publish once");
+    while task.execution.controlling.is_some() {
+        assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+    }
+    let MachineWork::Deliver { branch, .. } = &task.execution.work else {
+        panic!("restore should redeliver after replacing control")
+    };
+    assert!(branch.control.delimiters.is_empty());
+    EvaluationPollContext::for_context(&task.eval_context).evaluate(
+        &task.eval_context,
+        |evaluator| {
+            let Value::Dict(state) = evaluator.project_root(&branch.state) else {
+                panic!("restored state must remain a dictionary")
+            };
+            assert!(matches!(
+                state.get(&task.tags.continuation_state),
+                Some(Value::Promised(_))
+            ));
+        },
+    );
+    let TaskOutcome::Complete(result) = task.run().expect("restore should complete") else {
+        panic!("restore should complete")
+    };
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::binary_from_text("restored")
+    );
+}
+
+#[test]
+fn malformed_restore_stack_fails_before_popping_the_delimiter() {
+    let values = crate::core::test_value_factory();
+    let mut task = EffectTask::new(
+        &values,
+        eval::constant_effect(
+            &values,
+            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+        ),
+        TestEffects,
+        Arc::new(TestHost::with_values(values.clone())),
+    )
+    .expect("malformed restore fixture should construct");
+    let mut branch = task
+        .execution
+        .work
+        .branch()
+        .expect("fresh task should retain a branch")
+        .clone();
+    branch.control.delimiters.push(Delimiter::Restore {
+        outer: Box::new(Control::default()),
+        reset_stack: values.construct_runtime_value_root(|_| Value::Number(1.into())),
+        scope_depth: 0,
+        order: 1,
+    });
+    let current = values.construct_runtime_value_root(|_| Value::List(List::empty()));
+    let delivered = values.construct_runtime_value_root(|_| Value::binary_from_text("unused"));
+    task.execution.work = MachineWork::Outcome {
+        outcome: BranchOutcome::Cancelled,
+        scope_depth: 0,
+    };
+    task.execution.controlling = Some(ControlWork::delivery(current, delivered, branch, 0));
+
+    let error = match task.run() {
+        Ok(_) => panic!("malformed saved stack should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("reflection continuation state must be a list"),
+        "{error}"
+    );
+    assert_eq!(
+        task.execution
+            .active_branch()
+            .expect("failed restore should retain its branch")
+            .control
+            .delimiters
+            .len(),
+        1
+    );
 }
 
 fn assert_fixpoint_root_inventory(

@@ -1430,29 +1430,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             Delimiter::Restore {
                                 outer, reset_stack, ..
                             } => {
-                                let state = context.evaluate(&self.eval_context, |evaluator| {
-                                    let state = evaluator.project_root(&branch.state);
-                                    let reset_stack = evaluator.project_root(&reset_stack);
-                                    with_reset_stack_value_in(
-                                        evaluator,
-                                        state,
-                                        &self.tags.continuation_state,
-                                        reset_stack,
-                                    )
-                                    .map(|state| evaluator.root_value(state))
-                                });
-                                let state = match state {
-                                    Ok(state) => state,
-                                    Err(error) => {
-                                        return ControlStep::Failed(
-                                            ControlWork::poisoned(branch, scope_depth),
-                                            error,
-                                        );
-                                    }
+                                controlling.branch = branch;
+                                controlling.operation = ControlOperation::Restore {
+                                    stack: ResetStackMachine::new(reset_stack),
+                                    outer,
+                                    value,
                                 };
-                                branch.control.delimiters.pop();
-                                branch.state = state;
-                                branch.control = *outer;
+                                return ControlStep::Continue(controlling);
                             }
                         }
                         ControlStep::Complete(MachineWork::deliver_root(value, branch, scope_depth))
@@ -1475,6 +1459,75 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 }
             }
+            ControlOperation::Restore {
+                mut stack,
+                outer,
+                value,
+            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                ResetStackPoll::Ready(decoded) => {
+                    let mut branch = controlling.branch;
+                    let state = context.evaluate(&self.eval_context, |evaluator| {
+                        let Value::Dict(state) = evaluator.project_root(&branch.state) else {
+                            return Err(TaskHalt::new(
+                                "reflection user state must be a dictionary",
+                            ));
+                        };
+                        Ok(evaluator.root_value(Value::Dict(state.insert(
+                            self.tags.continuation_state.clone(),
+                            evaluator.project_root(&decoded.serialized),
+                        ))))
+                    });
+                    let state = match state {
+                        Ok(state) => state,
+                        Err(error) => {
+                            return ControlStep::Failed(
+                                ControlWork::poisoned(branch, controlling.scope_depth),
+                                error,
+                            );
+                        }
+                    };
+                    branch.control.delimiters.pop();
+                    branch.state = state;
+                    branch.control = *outer;
+                    ControlStep::Complete(MachineWork::deliver_root(
+                        value,
+                        branch,
+                        controlling.scope_depth,
+                    ))
+                }
+                ResetStackPoll::Continue => {
+                    controlling.operation = ControlOperation::Restore {
+                        stack,
+                        outer,
+                        value,
+                    };
+                    ControlStep::Continue(controlling)
+                }
+                ResetStackPoll::Pending(dependency) => {
+                    controlling.operation = ControlOperation::Restore {
+                        stack,
+                        outer,
+                        value,
+                    };
+                    ControlStep::Blocked(controlling, dependency)
+                }
+                ResetStackPoll::Yielded => {
+                    controlling.operation = ControlOperation::Restore {
+                        stack,
+                        outer,
+                        value,
+                    };
+                    ControlStep::Yielded(controlling)
+                }
+                ResetStackPoll::Failed(error) => {
+                    controlling.operation = ControlOperation::Restore {
+                        stack,
+                        outer,
+                        value,
+                    };
+                    ControlStep::Failed(controlling, error)
+                }
+            },
             ControlOperation::Poisoned => {
                 unreachable!("failed control work cannot be resumed before error handling")
             }
@@ -3591,6 +3644,11 @@ enum ControlOperation<S: TaskSpecialization> {
         stack: ResetStackMachine,
         value: RuntimeValueRoot,
     },
+    Restore {
+        stack: ResetStackMachine,
+        outer: Box<Control>,
+        value: RuntimeValueRoot,
+    },
     Poisoned,
 }
 
@@ -5148,6 +5206,7 @@ fn apply_in(
     eval::apply_values_in(context, function, arguments).map_err(task_eval_error)
 }
 
+#[cfg(test)]
 fn evaluate_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Value, TaskHalt> {
     let mut value = value;
     while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
@@ -5170,6 +5229,7 @@ fn missing_volume_error(volume: VolumeId) -> TaskHalt {
     ))
 }
 
+#[cfg(test)]
 fn value_key_in(context: &EvaluatorStepContext<'_>, value: Value) -> Result<Key, TaskHalt> {
     Key::from_value(&evaluate_in(context, value)?)
         .ok_or_else(|| TaskHalt::new("effect index is not keyable"))
@@ -5193,16 +5253,6 @@ fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> Ru
     })
 }
 
-fn require_state_dict_in(
-    context: &EvaluatorStepContext<'_>,
-    value: Value,
-) -> Result<Value, TaskHalt> {
-    match evaluate_in(context, value)? {
-        value @ Value::Dict(_) => Ok(value),
-        _ => Err(TaskHalt::new("reflection user state must be a dictionary")),
-    }
-}
-
 fn reset_stack_root_in(
     context: &EvaluatorStepContext<'_>,
     state: &RuntimeValueRoot,
@@ -5219,6 +5269,7 @@ fn reset_stack_root_in(
     ))
 }
 
+#[cfg(test)]
 fn reset_frames_from_value_in(
     context: &EvaluatorStepContext<'_>,
     stack: &Value,
@@ -5302,19 +5353,6 @@ fn replace_reset_frames(
         continuation_state.clone(),
         reset_frames_value(context, frames),
     ))
-}
-
-fn with_reset_stack_value_in(
-    context: &EvaluatorStepContext<'_>,
-    state: Value,
-    continuation_state: &Key,
-    stack: Value,
-) -> Result<Value, TaskHalt> {
-    reset_frames_from_value_in(context, &stack)?;
-    let Value::Dict(state) = require_state_dict_in(context, state)? else {
-        unreachable!("require_state_dict returned a non-dictionary")
-    };
-    Ok(Value::Dict(state.insert(continuation_state.clone(), stack)))
 }
 
 #[cfg(test)]
