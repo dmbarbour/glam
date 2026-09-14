@@ -10,8 +10,8 @@ use crate::evaluation::{EvalContext, EvaluatorStepContext};
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
-    RequestResult, SynchronousRequestWork, SynchronousTaskSpecialization, TaskHalt,
-    TaskSpecialization, task_eval_error,
+    RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
+    SpecializationRequestWork, TaskHalt, TaskSpecialization, task_eval_error,
 };
 
 use super::super::super::{EvaluationHalt, eval_value_in};
@@ -154,10 +154,27 @@ struct InteractionNetEffects {
     brand: Arc<ConstructionBrand>,
 }
 
+enum InteractionNetRequestWork {
+    Immediate {
+        request: InteractionNetRequest,
+        arguments: Vec<PublicValue>,
+    },
+    CopyStart(Vec<PublicValue>),
+    CopyCount,
+    WireStart(Vec<PublicValue>),
+    WireLeft {
+        right: PublicValue,
+    },
+    WireRight {
+        left: ConstructionPortId,
+    },
+    Poisoned,
+}
+
 impl TaskSpecialization for InteractionNetEffects {
     type Host = ConstructionHost;
     type Request = InteractionNetRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = InteractionNetRequestWork;
     type Snapshot = ();
     type Journal = ConstructionJournal;
 
@@ -200,29 +217,154 @@ impl TaskSpecialization for InteractionNetEffects {
         request: Self::Request,
         arguments: Vec<PublicValue>,
     ) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
+        match request {
+            InteractionNetRequest::Copy => InteractionNetRequestWork::CopyStart(arguments),
+            InteractionNetRequest::Wire => InteractionNetRequestWork::WireStart(arguments),
+            request => InteractionNetRequestWork::Immediate { request, arguments },
+        }
     }
 }
 
-impl SynchronousTaskSpecialization for InteractionNetEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<PublicValue>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
+impl SpecializationRequestWork<InteractionNetEffects> for InteractionNetRequestWork {
+    fn poll(
+        &mut self,
+        specialization: &InteractionNetEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, InteractionNetEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
         #[cfg(test)]
         assert!(
             !crate::core::thread_has_runtime_value_access_for_test(),
             "interaction-net effect callbacks must not inherit an evaluator value-access region"
         );
-        match request {
-            InteractionNetRequest::Bind => construct_bind(arguments, context, &self.brand),
-            InteractionNetRequest::Copy => construct_copy(arguments, context, &self.brand),
-            InteractionNetRequest::Data => construct_data(arguments, context, &self.brand),
-            InteractionNetRequest::Wire => construct_wire(arguments, context, &self.brand),
+        let work = std::mem::replace(self, Self::Poisoned);
+        match work {
+            Self::Immediate { request, arguments } => {
+                assert!(
+                    input.is_none(),
+                    "immediate net request cannot have demand input"
+                );
+                let result = match request {
+                    InteractionNetRequest::Bind => {
+                        construct_bind(arguments, context, &specialization.brand)
+                    }
+                    InteractionNetRequest::Data => {
+                        construct_data(arguments, context, &specialization.brand)
+                    }
+                    InteractionNetRequest::Copy | InteractionNetRequest::Wire => {
+                        unreachable!("demanding net requests receive dedicated work")
+                    }
+                }?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::CopyStart(arguments) => {
+                assert!(input.is_none(), "new copy request cannot have demand input");
+                let [outputs] = exact(arguments, "`.copy`")?;
+                *self = Self::CopyCount;
+                Ok(SpecializationRequestPoll::Demand(outputs))
+            }
+            Self::CopyCount => {
+                let outputs = request_input(input, "resumed copy count").map_err(|halt| {
+                    let values = context.values();
+                    halt.with_context(
+                        &values,
+                        values.wrap(crate::diagnostic::evaluation_context_frame("copy_count")),
+                    )
+                })?;
+                let result = construct_copy_count(outputs, context, &specialization.brand)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::WireStart(arguments) => {
+                assert!(input.is_none(), "new wire request cannot have demand input");
+                let [left, right] = exact(arguments, "`.wire`")?;
+                *self = Self::WireLeft { right };
+                Ok(SpecializationRequestPoll::Demand(left))
+            }
+            Self::WireLeft { right } => {
+                let left = request_port(
+                    request_input(input, "resumed left construction port")?,
+                    context,
+                    &specialization.brand,
+                )?;
+                *self = Self::WireRight { left };
+                Ok(SpecializationRequestPoll::Demand(right))
+            }
+            Self::WireRight { left } => {
+                let right = request_port(
+                    request_input(input, "resumed right construction port")?,
+                    context,
+                    &specialization.brand,
+                )?;
+                let result = construct_wire_ports(left, right, context)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::Poisoned => panic!("completed net request work was polled again"),
         }
     }
+}
+
+fn request_input(
+    input: Option<SpecializationRequestInput>,
+    resumed: &str,
+) -> Result<crate::api::EvaluatedValue, TaskHalt> {
+    match input.expect(resumed) {
+        SpecializationRequestInput::Value(value) => Ok(value),
+        SpecializationRequestInput::Failed(error) => Err(error),
+    }
+}
+
+fn construct_copy_count(
+    outputs: crate::api::EvaluatedValue,
+    context: &mut RequestContext<'_, InteractionNetEffects>,
+    brand: &Arc<ConstructionBrand>,
+) -> Result<RequestResult, TaskHalt> {
+    let outputs = outputs
+        .with_core(|value| {
+            let Value::Number(number) = value else {
+                return Err(TaskHalt::new("`.copy` builtin requires number values"));
+            };
+            number.to_usize_if_integer().ok_or_else(|| {
+                TaskHalt::new("`.copy` builtin requires non-negative integer indices")
+            })
+        })
+        .map_err(|error| TaskHalt::new(error.to_string()))??;
+    let port_count = outputs
+        .checked_add(1)
+        .ok_or_else(|| TaskHalt::new("`.copy` output count is too large"))?;
+    let mut transaction = construction_transaction(context)?;
+    let (_, journal) = transaction.parts();
+    let ports = journal.allocate_ports(port_count)?;
+    journal.append(ConstructionOp::Copy {
+        ports: Arc::from(ports.clone()),
+    });
+    Ok(RequestResult::Return(port_list(
+        &context.values(),
+        brand,
+        ports,
+    )))
+}
+
+fn request_port(
+    value: crate::api::EvaluatedValue,
+    context: &RequestContext<'_, InteractionNetEffects>,
+    brand: &Arc<ConstructionBrand>,
+) -> Result<ConstructionPortId, TaskHalt> {
+    let values = context.values();
+    value
+        .with_core(|value| construction_port_value(values.core(), value, brand))
+        .map_err(|error| TaskHalt::new(error.to_string()))?
+        .map_err(task_eval_error)
+}
+
+fn construct_wire_ports(
+    left: ConstructionPortId,
+    right: ConstructionPortId,
+    context: &mut RequestContext<'_, InteractionNetEffects>,
+) -> Result<RequestResult, TaskHalt> {
+    let mut transaction = construction_transaction(context)?;
+    let (_, journal) = transaction.parts();
+    journal.append(ConstructionOp::Wire { left, right });
+    Ok(RequestResult::ReturnUnit)
 }
 
 type ConstructionHost = IsolatedTaskHost<()>;
@@ -340,29 +482,6 @@ fn construct_bind(
     )))
 }
 
-fn construct_copy(
-    arguments: Vec<PublicValue>,
-    context: &mut RequestContext<'_, InteractionNetEffects>,
-    brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskHalt> {
-    let [outputs] = exact(arguments, "`.copy`")?;
-    let outputs = construction_copy_count(context, &outputs)?;
-    let port_count = outputs
-        .checked_add(1)
-        .ok_or_else(|| TaskHalt::new("`.copy` output count is too large"))?;
-    let mut transaction = construction_transaction(context)?;
-    let (_, journal) = transaction.parts();
-    let ports = journal.allocate_ports(port_count)?;
-    journal.append(ConstructionOp::Copy {
-        ports: Arc::from(ports.clone()),
-    });
-    Ok(RequestResult::Return(port_list(
-        &context.values(),
-        brand,
-        ports,
-    )))
-}
-
 fn construct_data(
     arguments: Vec<PublicValue>,
     context: &mut RequestContext<'_, InteractionNetEffects>,
@@ -385,20 +504,6 @@ fn construct_data(
         brand,
         [port],
     )))
-}
-
-fn construct_wire(
-    arguments: Vec<PublicValue>,
-    context: &mut RequestContext<'_, InteractionNetEffects>,
-    brand: &Arc<ConstructionBrand>,
-) -> Result<RequestResult, TaskHalt> {
-    let [left, right] = exact(arguments, "`.wire`")?;
-    let left = construction_port_request(context, &left, brand)?;
-    let right = construction_port_request(context, &right, brand)?;
-    let mut transaction = construction_transaction(context)?;
-    let (_, journal) = transaction.parts();
-    journal.append(ConstructionOp::Wire { left, right });
-    Ok(RequestResult::ReturnUnit)
 }
 
 fn construction_transaction<'a>(
@@ -439,42 +544,6 @@ fn port_list(
             })
             .collect(),
     )))
-}
-
-fn construction_copy_count(
-    context: &RequestContext<'_, InteractionNetEffects>,
-    value: &PublicValue,
-) -> Result<usize, TaskHalt> {
-    let value = context.evaluate(value).map_err(|halt| {
-        let values = context.values();
-        halt.with_context(
-            &values,
-            values.wrap(crate::diagnostic::evaluation_context_frame("copy_count")),
-        )
-    })?;
-    value
-        .with_core(|value| {
-            let Value::Number(number) = value else {
-                return Err(TaskHalt::new("`.copy` builtin requires number values"));
-            };
-            number.to_usize_if_integer().ok_or_else(|| {
-                TaskHalt::new("`.copy` builtin requires non-negative integer indices")
-            })
-        })
-        .map_err(|error| TaskHalt::new(error.to_string()))?
-}
-
-fn construction_port_request(
-    context: &RequestContext<'_, InteractionNetEffects>,
-    value: &PublicValue,
-    brand: &Arc<ConstructionBrand>,
-) -> Result<ConstructionPortId, TaskHalt> {
-    let value = context.evaluate(value)?;
-    let values = context.values();
-    value
-        .with_core(|value| construction_port_value(values.core(), value, brand))
-        .map_err(|error| TaskHalt::new(error.to_string()))?
-        .map_err(task_eval_error)
 }
 
 fn construction_port_in(
