@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::machine::task_eval_error;
 use super::requests::{
-    ReflectionHost, ReflectionJournal, ReflectionRequest, handle_reflection_request,
+    ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionRequestWork,
     reflection_request_specs,
 };
 use super::search::IsolatedEffectSearch;
@@ -349,7 +349,7 @@ pub struct ReflectionEffects;
 impl TaskSpecialization for ReflectionEffects {
     type Host = dyn ReflectionHost<Self>;
     type Request = ReflectionRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = ReflectionRequestWork;
     type Snapshot = ();
     type Journal = ReflectionJournal;
 
@@ -362,18 +362,7 @@ impl TaskSpecialization for ReflectionEffects {
         request: Self::Request,
         arguments: Vec<PublicValue>,
     ) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
-    }
-}
-
-impl SynchronousTaskSpecialization for ReflectionEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<PublicValue>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
-        handle_reflection_request(request, arguments, context)
+        ReflectionRequestWork::new(request, arguments)
     }
 }
 

@@ -12,8 +12,9 @@ use crate::evaluation::{
 use crate::number::Number;
 
 use super::protocol::{
-    CommitResult, EffectRequestSpec, RequestContext, RequestResult, TaskCommit, TaskEnvironment,
-    TaskHalt, TaskHost, TaskSpecialization,
+    CommitResult, EffectRequestSpec, RequestContext, RequestResult, SpecializationRequestInput,
+    SpecializationRequestPoll, SpecializationRequestWork, TaskCommit, TaskEnvironment, TaskHalt,
+    TaskHost, TaskSpecialization,
 };
 use super::store::{
     EvaluationQueryHandle, EvaluationQueryPoll, EvaluationQueryState, StoreJournal,
@@ -35,6 +36,102 @@ pub enum ReflectionRequest {
     TaskHalt,
     TaskAcknowledgeError,
     TaskCancel,
+}
+
+/// Durable interpretation state for one reusable reflection request.
+///
+/// Requests migrate from the temporary synchronous arm family by family.
+/// The `.eval` arm owns its WHNF demand here, so dependency wakeup resumes
+/// after that demand rather than re-entering request dispatch.
+pub struct ReflectionRequestWork {
+    operation: ReflectionRequestOperation,
+}
+
+enum ReflectionRequestOperation {
+    Eval(EvalRequestWork),
+    Synchronous {
+        request: ReflectionRequest,
+        arguments: Vec<Value>,
+    },
+    Poisoned,
+}
+
+enum EvalRequestWork {
+    Start(Vec<Value>),
+    Awaiting,
+}
+
+impl ReflectionRequestWork {
+    pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
+        let operation = match request {
+            ReflectionRequest::Eval => {
+                ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments))
+            }
+            request => ReflectionRequestOperation::Synchronous { request, arguments },
+        };
+        Self { operation }
+    }
+}
+
+impl<S> SpecializationRequestWork<S> for ReflectionRequestWork
+where
+    S: TaskSpecialization<Request = ReflectionRequest>,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    fn poll(
+        &mut self,
+        _specialization: &S,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, S>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        let operation =
+            std::mem::replace(&mut self.operation, ReflectionRequestOperation::Poisoned);
+        match operation {
+            ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments)) => {
+                assert!(input.is_none(), "new `.eval` work cannot have demand input");
+                let [value]: [Value; 1] = arguments
+                    .try_into()
+                    .map_err(|_| TaskHalt::new("`.eval` received the wrong number of arguments"))?;
+                self.operation = ReflectionRequestOperation::Eval(EvalRequestWork::Awaiting);
+                Ok(SpecializationRequestPoll::Demand(value))
+            }
+            ReflectionRequestOperation::Eval(EvalRequestWork::Awaiting) => {
+                let input = input.expect("resumed `.eval` work must receive demand input");
+                let result = match input {
+                    SpecializationRequestInput::Value(value) => {
+                        tagged_result(&context.values(), &keys::OK, value.into_value())
+                    }
+                    SpecializationRequestInput::Failed(error) => {
+                        let failure = error.permanent_failure().expect(
+                            "completed `.eval` demand failure must retain a permanent failure",
+                        );
+                        let values = context.values();
+                        let diagnostic =
+                            values.wrap(crate::diagnostic::failure_diagnostic_value_with(
+                                context.eval_context().values(),
+                                failure,
+                            ));
+                        tagged_result(&values, &keys::ERR, diagnostic)
+                    }
+                };
+                Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
+                    result,
+                )))
+            }
+            ReflectionRequestOperation::Synchronous { request, arguments } => {
+                assert!(
+                    input.is_none(),
+                    "synchronous reusable request cannot receive demand input"
+                );
+                let result = handle_reflection_request(request, arguments, context)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            ReflectionRequestOperation::Poisoned => {
+                panic!("completed reflection request work was polled again")
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

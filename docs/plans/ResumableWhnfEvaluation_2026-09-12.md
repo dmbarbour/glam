@@ -3231,7 +3231,7 @@ Partition this work as follows:
    handoff, explicit wait handoff, and compile-exhaustive lifecycle inventory.
    Convert all implementations to the new trait shape with the smallest
    buildable internal adapter; do not expose the adapter as compatibility API.
-2. **W5C.5b.1 — Reflection `.eval`.** Move `.eval` first, preserving its
+2. **W5C.5b.1 — Complete (2026-09-14): Reflection `.eval`.** Move `.eval` first, preserving its
    deliberate conversion of permanent evaluation failure into
    `{err:Diagnostic}` while lazy and promise dependencies suspend the enclosing
    request. Force both completion dispositions and prove one request phase.
