@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
@@ -237,18 +237,23 @@ impl StoreEdit {
 }
 
 /// Reads and ordered edits accumulated by one optimistic transaction.
+///
+/// Clones are alternative views of the same transaction attempt: they share
+/// the monotone observation set while retaining independent speculative views
+/// and edit overlays. Dropping a failed alternative therefore rolls back its
+/// writes without forgetting the reads which influenced the enclosing cut.
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
     views: RedBlackTreeMapSync<VolumeId, PublicValue>,
-    observations: Box<dyn ConflictObservationIndex>,
+    observations: Arc<Mutex<Box<dyn ConflictObservationIndex>>>,
     edits: Vec<StoreEdit>,
 }
 
 impl StoreJournal {
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
-        let observations = snapshot.strategy.begin();
+        let observations = Arc::new(Mutex::new(snapshot.strategy.begin()));
         let views = snapshot.roots.clone();
         Self {
             snapshot,
@@ -268,7 +273,7 @@ impl StoreJournal {
     pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
         let address = ConflictAddress::reflection(volume, ConflictPath::from_keys(path.to_vec()));
         if self.snapshot.volume(volume).is_none() {
-            self.observations.observe(&address);
+            self.observations.lock().unwrap().observe(&address);
             return true;
         }
         let mut dependency = ConflictPath::from_keys(path.to_vec());
@@ -291,6 +296,8 @@ impl StoreJournal {
             }
         }
         self.observations
+            .lock()
+            .unwrap()
             .observe(&ConflictAddress::reflection(volume, dependency));
         true
     }
@@ -646,7 +653,8 @@ impl ReflectionStore {
 
     fn conflicts(&self, journal: &StoreJournal) -> bool {
         self.latest_changes.iter().any(|(changed, revision)| {
-            *revision > journal.snapshot.revision && journal.observations.may_conflict(changed)
+            *revision > journal.snapshot.revision
+                && journal.observations.lock().unwrap().may_conflict(changed)
         })
     }
 }

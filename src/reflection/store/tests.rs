@@ -107,7 +107,7 @@ fn assert_store_root_boundary_inventory(
     } = journal;
     let _: &StoreSnapshot = snapshot;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = views;
-    let _: &dyn ConflictObservationIndex = observations.as_ref();
+    let _: &Arc<Mutex<Box<dyn ConflictObservationIndex>>> = observations;
     let _: &Vec<StoreEdit> = edits;
 
     let ReflectionStore {
@@ -515,6 +515,31 @@ fn rewrite_widens_a_descendant_read_dependency() {
     concurrent.write(path(&["x", "y", "sibling"]), integer(&store, 1));
     assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
+}
+
+#[test]
+fn forked_transaction_views_share_observations_but_not_speculative_edits() {
+    let mut store = store();
+    let snapshot = store.snapshot();
+    let mut failed_alternative = StoreJournal::new(snapshot.clone());
+    let winning_alternative = failed_alternative.clone();
+
+    assert!(failed_alternative.observe_read(&path(&["observed"])));
+    failed_alternative.write(path(&["discarded"]), text(&store, "bad"));
+    assert!(same_representation(
+        &store,
+        &winning_alternative.view(),
+        &empty(&store),
+    ));
+
+    let mut concurrent = StoreJournal::new(snapshot);
+    concurrent.write(path(&["observed"]), text(&store, "changed"));
+    assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
+    assert_eq!(
+        store.try_commit(&winning_alternative),
+        StoreCommitResult::Conflict,
+        "a later alternative must retain reads performed by an earlier failed alternative",
+    );
 }
 
 #[test]

@@ -2458,6 +2458,27 @@ Its atomic snapshot is its commit point: `.heap.get` and protected-volume
 including an overlapping update, may replay the read or its continuation.
 These standalone reads therefore record no retry checkpoint.
 
+**Cut-wide observation ownership (2026-09-14).** The optimistic read set
+belongs to the enclosing `CutFrame`, not to an individual `.alt` branch. It
+accumulates every external read performed during the current cut attempt up
+to suspension or commit, including reads in alternatives which have already
+failed and reads in the currently active alternative. A later branch can win
+only because every earlier branch failed, so those earlier observations are
+part of the winning result's serializability proof. Entering or advancing an
+`.alt` must therefore never reset or replace the cut's observation set.
+
+Branch-local speculative edits, input cursors, buffered outputs, local state,
+and continuation state still rewind when an alternative fails; the existing
+rollback behavior is intentional and independently tested. The current code
+clones the whole `Transaction` when it forks a branch, which accidentally
+clones the exact observation index along with the speculative edit state.
+Before exact conflict analysis this defect was masked by the cut-wide
+`observed_failure` bit and coarse generation retry. W5C.3c must separate the
+cut-wide conflict evidence from branch-local speculative state. Introducing
+fine-grained read-set checkpoints at individual `.alt` boundaries would need
+an explicit alternative-frame design and is deferred; it is not part of this
+repair.
+
 Retryable absence is a common instance of transactional divergence, not a
 separate conflict regime. Users can express this via a pattern such as
 `(.cut (.alt HappyPath DivergeOnFailure))`, using errors for the divergence.
@@ -2494,9 +2515,22 @@ Implementation checkpoints:
   by both disjoint and overlapping publication proves that heap and volume
   reads return the original value without replay; the child-task regression
   which exposed the coarse wake loop now completes.
-- **W5C.3c.2 — Pending: precise validation of suspended transactions.** Add the
-  read-only host validation boundary, retain every observation needed across
-  alternatives, and make a broad wake restart only a conflicting attempt.
+- **W5C.3c.2 — Pending: cut-wide observations and precise validation of
+  suspended transactions.** First latch and repair the loss of exact read
+  observations across `.alt` branches while preserving branch-local rollback.
+  Then add the read-only host validation boundary and make a broad wake
+  restart only a genuinely conflicting cut attempt.
+  - **W5C.3c.2a — Complete (2026-09-14): reflection-store observation
+    ownership.** `StoreJournal` clones now share one monotone conflict-index
+    allocation while retaining independent persistent views and edit vectors.
+    A regression first demonstrated that an overlapping publication could
+    commit between a failed reader alternative and its winning sibling; it
+    now conflicts, while the failed sibling's speculative edit remains absent
+    from the winner.
+  - **W5C.3c.2b — Pending: specialization observations and read-only host
+    validation.** Audit specialization journals for the same observation/edit
+    ownership split, establish the generic validation boundary, and replace
+    broad-generation restart with validate-then-restart-or-resubscribe.
 - **W5C.3c.3 — Pending: matrix and documentation closeout.** Exercise exact,
   fingerprint, coarse, specialization, retryable-divergence, and
   validation/re-registration orderings before marking W5C.3c complete.
