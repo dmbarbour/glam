@@ -3303,10 +3303,13 @@ Partition the remaining migration as follows:
      - **W5C.5c.4b.2 — Complete (2026-09-14): Test specialization.** Migrate
        the in-tree test specialization's evaluate/stderr demands without
        changing its raw alternatives/scoped operands.
-   - **W5C.5c.4c — Resumption and FIFO conformance.** Add a hostile machine
-     which performs counted host activity, advances its state, requests a
-     forced promise/lazy demand, and proves that resumption cannot re-enter the
-     host-active phase. Add the optimized `.read_log` conformance fixture below.
+   - **W5C.5c.4c — Complete (2026-09-14): Resumption and FIFO conformance.** A
+     hostile test request performs counted host activity before suspending on
+     a forced promise and proves that resumption does not re-enter that phase.
+     A paired machine fixture compares optimized empty `.read_log` with an
+     explicitly authored retryable cut. Runtime FIFO fixtures separately force
+     tail append, unrelated-endpoint publication, and competing-consumer
+     commit order.
    - **W5C.5c.4d — Compatibility closure.** Migrate the remaining uninhabited
      test fixtures, remove both synchronous adapters and every
      `RequestContext` demand method, and latch the closed source inventory.

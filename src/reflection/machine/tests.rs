@@ -6081,6 +6081,61 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
 }
 
 #[test]
+fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
+    let (assembler, function) = compile_effect("\\value -> .evaluate value");
+    let session = EvalContext::isolated(assembler.core_values());
+    let (promised, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("specialization demand dependency"))
+        .unwrap();
+    let observer = session.with_new_task().unwrap();
+    let effect = eval::apply_values(
+        &observer,
+        function.clone_core_for_test(),
+        vec![Value::Promised(promised.clone())],
+    )
+    .unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
+
+    let blocked = loop {
+        match task.poll(256) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            _ => panic!("the hostile specialization demand should suspend"),
+        }
+    };
+    assert!(blocked.dependency.is_some());
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "the request must advance past host activity before owning its demand"
+    );
+
+    crate::core::set_test_promise(
+        &assembler.core_values(),
+        &promised,
+        Value::Binary(Bytes::from_static(b"ready")),
+    )
+    .expect("the hostile demand dependency should resolve once");
+    let value = loop {
+        match task.poll(256) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Complete(value) => break value,
+            EffectTaskPoll::Blocked(_) => panic!("the resolved hostile demand stayed blocked"),
+            EffectTaskPoll::Failed(error) => panic!("the hostile request failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("the hostile request was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("the hostile request voted to exit"),
+        }
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "resumption must not re-enter the request's host-active phase"
+    );
+}
+
+#[test]
 fn effect_map_runs_left_to_right_and_preserves_result_order() {
     let (assembler, effect) = compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
     let (context, task) = schedule_composed_test_task(
@@ -7754,6 +7809,45 @@ fn empty_log_read_outside_cut_retries_after_its_observation_changes() {
     );
     assert_eq!(host.wait_count(), 1);
     assert!(host.diagnostics().is_empty());
+}
+
+#[test]
+fn optimized_empty_log_read_matches_explicit_retryable_divergence() {
+    for (case, source) in [
+        (
+            "optimized reader",
+            ".read_log >>= (\\message -> .r message.msg.text)",
+        ),
+        (
+            "explicit cut",
+            ".cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (1 2))",
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let host = Arc::new(TestHost::with_wake_diagnostic(
+            assembler.core_values(),
+            Diagnostic::new(
+                &assembler.values(),
+                crate::diagnostic::Severity::Warning,
+                "arrived at the observed tail",
+            ),
+        ));
+        let TaskOutcome::Complete(value) = run_log_test(&assembler, &effect, host.clone()).unwrap()
+        else {
+            panic!("{case} should resume after the observed queue tail changes")
+        };
+        assert_eq!(
+            assembler.to_binary(&value).unwrap(),
+            b"arrived at the observed tail".as_slice(),
+            "{case} returned a different result"
+        );
+        assert_eq!(
+            host.wait_count(),
+            1,
+            "{case} should expose one retryable divergence"
+        );
+        assert!(host.diagnostics().is_empty());
+    }
 }
 
 #[test]
