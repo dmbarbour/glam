@@ -2076,7 +2076,7 @@ continue to receive the net-computation frame.
 
 ##### W4E.3 — Scheduler amplification repair
 
-**Status:** reassessment required as of 2026-09-14.
+**Status:** determined not applicable on 2026-09-14.
 
 Remove the measured superlinear selection behavior without weakening exact
 demand, cycle detection, or the temporary one-ordinary-machine-per-session
@@ -2107,12 +2107,14 @@ counter or profile evidence.
 
 The severe unbounded behavior is resolved by W4E.2. The residual regression is
 a bounded constant-factor cost: approximately the same net-driver work now
-passes through several thousand scheduled `NetWhnfMachine` polls. Before
-choosing another repair, decide whether W4E should accept that transitional
-cost until W6 removes the compatibility/admission boundary, or whether to add
-a narrower profile of machine claim, poll, release, and managed-access costs.
+passes through several thousand scheduled `NetWhnfMachine` polls. This is not
+the superlinear scheduler amplification W4E.3 was intended to repair. W4E
+therefore accepts the transitional cost; W6 owns its explicit measurement and
+investigation while removing the compatibility/admission boundary.
 
 ##### W4E.4 — Verification and plan reconciliation
+
+**Status:** partially complete on 2026-09-14.
 
 The repaired source-shaped fixture must deterministically:
 
@@ -2143,6 +2145,32 @@ Update W6's per-session-policy checkpoint, W7C's quantitative work
 verification, and W8A's compatibility retirement description with whichever
 responsibility W4E actually removes. Record a new dated review finding rather
 than silently rewriting the original W4 outcome.
+
+Completed verification:
+
+- `wrapper_returning_function_then_accepts_remaining_application` terminates
+  and latches the last-known-good per-rule reduction signature plus exactly 71
+  net-driver work items under `interaction-net-profiling`;
+- the source-shaped duplicate-symbol executable terminates, fails once with
+  the expected diagnostic, and completed in 12.75 seconds in the final run;
+- the affected diagnostic-context fixtures, W3B.3/W4C coverage, and all four
+  executable fixtures pass through the ordinary full suite;
+- the raw-value, evaluator-access, mutator-introduction, and WHNF inventories
+  were reconciled and pass; and
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
+  warnings`, the profiling fixture, and `cargo test -q` pass.
+
+Still outstanding before this checkpoint is complete:
+
+- a deterministic pre-completion work-budget harness rather than relying on a
+  successful test return before checking exact counts;
+- explicit stable-identity accounting for source selection and terminal-cache
+  publication;
+- explicit post-run assertions for claimed net calls, normalization scopes,
+  running tasks, dependency-edge visits, and ready-candidate visits;
+- a successful direct-assembly case in that same bounded harness; and
+- forced zero-worker and one-worker scheduling-barrier variants where order
+  matters.
 
 ### Phase W5 — Reflection Machine Integration
 
@@ -2232,6 +2260,24 @@ Convert the remaining object builtins and interaction-net builtin request
 construction. Object-fixpoint C3 traversal, referential identity validation,
 and the mixin fold are already complete in W3B.2b and are not reimplemented
 here. Preserve referential-spec validation and source-owned net journals.
+
+#### W6G — Residual resumable-machine overhead
+
+Investigate the bounded performance regression accepted by W4E. The
+duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.75
+seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
+though net-driver work is comparable (159,322 versus 159,994 work items).
+
+Measure the cost after each relevant W6 compatibility or admission boundary is
+removed. If the gap remains, add static profiling for machine claim, poll,
+release, managed-access entry, and requeue activity before changing policy.
+Determine whether the overhead comes from scheduling several thousand
+`NetWhnfMachine` polls, managed-access traffic, or another measured source.
+Do not reintroduce the rejected per-session running-machine index: retired work
+does not remain in `work_by_session`, and the measured experiment produced no
+improvement. Close W6G by restoring comparable fixture cost or by recording a
+measured, justified residual with ownership assigned to a later performance
+phase.
 
 W6 closure also revisits the temporary one-ordinary-machine-per-demand-session
 admission rule introduced to contain recursive compatibility evaluation.
