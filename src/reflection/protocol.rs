@@ -831,44 +831,6 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
     /// Evaluates one path expression entirely inside a bounded evaluator
     /// phase. The resulting keys contain no managed value authority and may
     /// safely cross back into the request interpreter.
-    pub(crate) fn evaluate_key_path(&self, value: &PublicValue) -> Result<Vec<Key>, TaskHalt> {
-        let value = self.values().clone_core(value)?;
-        self.poll_context
-            .evaluate(self.eval_context, |evaluator| {
-                eval::eval_key_path_list_in(evaluator, &value)
-            })
-            .map_err(task_eval_error)
-    }
-
-    /// Selects a path through a runtime-local value in one bounded evaluator
-    /// phase and roots the selected value before returning to the interpreter.
-    pub(crate) fn evaluate_path(
-        &self,
-        value: &PublicValue,
-        path: &[Key],
-    ) -> Result<PublicValue, TaskHalt> {
-        let value = self.values().clone_core(value)?;
-        let value = self
-            .poll_context
-            .evaluate(self.eval_context, |evaluator| {
-                let mut current = value;
-                for key in path {
-                    let Value::Dict(dict) = eval::eval_value_in(evaluator, &current)? else {
-                        return Err(EvaluationHalt::new(
-                            "state path traverses a non-dictionary value",
-                        ));
-                    };
-                    current = dict
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
-                }
-                Ok(evaluator.root_value(current))
-            })
-            .map_err(task_eval_error)?;
-        Ok(PublicValue::from_runtime_root(value))
-    }
-
     fn evaluate_root(&self, value: &PublicValue) -> Result<RuntimeValueRoot, TaskHalt> {
         let value = self.values().clone_core(value)?;
         self.poll_context
@@ -1229,9 +1191,7 @@ mod root_inventory_tests {
         assert!(!task_specialization.contains("handle_request"));
 
         let reflection_facade = include_str!("../reflection.rs");
-        assert!(reflection_facade.contains(
-            "pub(crate) use protocol::{SynchronousRequestWork, SynchronousTaskSpecialization};"
-        ));
+        assert!(!reflection_facade.contains(concat!("pub use protocol::{Synchronous", "Request")));
         assert_eq!(count(concat!("handle_reflection", "_request")), 0);
     }
 

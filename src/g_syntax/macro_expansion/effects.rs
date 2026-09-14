@@ -3,9 +3,8 @@ use crate::core::{Dict, Key, List, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
     EffectRequestSpec, KeyListRequestWork, PreparationPoll, RequestContext, RequestResult,
-    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork,
-    SynchronousRequestWork, SynchronousTaskSpecialization, TaskHalt, TaskSpecialization,
-    ValuePathRequestWork, parse_evaluated_severity,
+    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskHalt,
+    TaskSpecialization, ValuePathRequestWork, parse_evaluated_severity,
 };
 use crate::text_pattern::TextPattern;
 
@@ -56,8 +55,23 @@ pub(super) enum MacroRequestWork {
         severity: crate::diagnostic::Severity,
         message: crate::api::EvaluatedValue,
     },
-    Synchronous(SynchronousRequestWork<MacroEffects>),
+    TextStart {
+        request: MacroTextRequest,
+        arguments: Vec<Value>,
+    },
+    TextValue(MacroTextRequest),
+    Immediate {
+        request: MacroRequest,
+        arguments: Vec<Value>,
+    },
     Poisoned,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MacroTextRequest {
+    ReadText,
+    ReadRegex,
+    WriteText,
 }
 
 impl TaskSpecialization for MacroEffects {
@@ -144,9 +158,19 @@ impl TaskSpecialization for MacroEffects {
         match request {
             MacroRequest::Environment => MacroRequestWork::EnvironmentStart(arguments),
             MacroRequest::Log => MacroRequestWork::LogStart(arguments),
-            request => {
-                MacroRequestWork::Synchronous(SynchronousRequestWork::new(request, arguments))
-            }
+            MacroRequest::ReadText => MacroRequestWork::TextStart {
+                request: MacroTextRequest::ReadText,
+                arguments,
+            },
+            MacroRequest::ReadRegex => MacroRequestWork::TextStart {
+                request: MacroTextRequest::ReadRegex,
+                arguments,
+            },
+            MacroRequest::WriteText => MacroRequestWork::TextStart {
+                request: MacroTextRequest::WriteText,
+                arguments,
+            },
+            request => MacroRequestWork::Immediate { request, arguments },
         }
     }
 }
@@ -154,7 +178,7 @@ impl TaskSpecialization for MacroEffects {
 impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
     fn poll(
         &mut self,
-        specialization: &MacroEffects,
+        _specialization: &MacroEffects,
         input: Option<SpecializationRequestInput>,
         context: &mut RequestContext<'_, MacroEffects>,
     ) -> Result<SpecializationRequestPoll, TaskHalt> {
@@ -251,14 +275,55 @@ impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
                 let result = emit_macro_log(context, severity, message)?;
                 Ok(SpecializationRequestPoll::Complete(result))
             }
-            Self::Synchronous(mut work) => {
-                let result = work.poll(specialization, input, context)?;
-                *self = Self::Synchronous(work);
-                Ok(result)
+            Self::TextStart { request, arguments } => {
+                assert!(input.is_none(), "new macro text request cannot have input");
+                let name = macro_text_request_name(request);
+                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new(format!("{name} received the wrong number of arguments"))
+                })?;
+                *self = Self::TextValue(request);
+                Ok(SpecializationRequestPoll::Demand(value))
+            }
+            Self::TextValue(request) => {
+                let value = match input.expect("resumed macro text request must have input") {
+                    SpecializationRequestInput::Value(value) => value,
+                    SpecializationRequestInput::Failed(error) => return Err(error),
+                };
+                let text = evaluated_text(value, macro_text_request_name(request))?;
+                let result = match request {
+                    MacroTextRequest::ReadText => read_text_value(text, context),
+                    MacroTextRequest::ReadRegex => read_regex_pattern(text, context),
+                    MacroTextRequest::WriteText => write_text_value(text, context),
+                }?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
+            Self::Immediate { request, arguments } => {
+                assert!(input.is_none(), "immediate macro request cannot have input");
+                let result = handle_immediate_macro_request(request, arguments, context)?;
+                Ok(SpecializationRequestPoll::Complete(result))
             }
             Self::Poisoned => panic!("completed macro request work was polled again"),
         }
     }
+}
+
+fn macro_text_request_name(request: MacroTextRequest) -> &'static str {
+    match request {
+        MacroTextRequest::ReadText => "macro `.read.text`",
+        MacroTextRequest::ReadRegex => "macro `.read.regex`",
+        MacroTextRequest::WriteText => "macro `.write.text`",
+    }
+}
+
+fn evaluated_text(value: crate::api::EvaluatedValue, request: &str) -> Result<String, TaskHalt> {
+    let Some(bytes) = value
+        .as_bytes()
+        .map_err(|error| TaskHalt::new(error.to_string()))?
+    else {
+        return Err(TaskHalt::new(format!("{request} requires text")));
+    };
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }
 
 fn macro_demand(
@@ -293,35 +358,32 @@ fn emit_macro_log(
     Ok(RequestResult::ReturnUnit)
 }
 
-impl SynchronousTaskSpecialization for MacroEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<Value>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, TaskHalt> {
-        match request {
-            MacroRequest::Environment | MacroRequest::Log => {
-                unreachable!("macro environment and log requests use durable work")
-            }
-            MacroRequest::Case => enter_case(arguments, context),
-            MacroRequest::CaseExit => exit_case(arguments, context),
-            MacroRequest::ReadText => read_text(arguments, context),
-            MacroRequest::ReadRegex => read_regex(arguments, context),
-            MacroRequest::ReadTextSpan => read_text_span(arguments, context),
-            MacroRequest::ReadData => read_data(arguments, context),
-            MacroRequest::ReadSeparator => read_separator(arguments, context),
-            MacroRequest::ReadLayout => read_layout(arguments, context),
-            MacroRequest::ReadAnchor => read_anchor(arguments, context),
-            MacroRequest::ReadLayoutExit => read_layout_exit(arguments, context),
-            MacroRequest::ReadEnd => read_end(arguments, context),
-            MacroRequest::WriteText => write_text(arguments, context),
-            MacroRequest::WriteData => write_data(arguments, context),
-            MacroRequest::WriteSeparator => write_separator(arguments, context),
-            MacroRequest::WriteLayout => write_layout(arguments, context),
-            MacroRequest::WriteAnchor => write_anchor(arguments, context),
-            MacroRequest::WriteLayoutExit => write_layout_exit(arguments, context),
+fn handle_immediate_macro_request(
+    request: MacroRequest,
+    arguments: Vec<Value>,
+    context: &mut RequestContext<'_, MacroEffects>,
+) -> Result<RequestResult, TaskHalt> {
+    match request {
+        MacroRequest::Environment | MacroRequest::Log => {
+            unreachable!("macro environment and log requests use durable work")
         }
+        MacroRequest::ReadText | MacroRequest::ReadRegex | MacroRequest::WriteText => {
+            unreachable!("macro text requests use durable work")
+        }
+        MacroRequest::Case => enter_case(arguments, context),
+        MacroRequest::CaseExit => exit_case(arguments, context),
+        MacroRequest::ReadTextSpan => read_text_span(arguments, context),
+        MacroRequest::ReadData => read_data(arguments, context),
+        MacroRequest::ReadSeparator => read_separator(arguments, context),
+        MacroRequest::ReadLayout => read_layout(arguments, context),
+        MacroRequest::ReadAnchor => read_anchor(arguments, context),
+        MacroRequest::ReadLayoutExit => read_layout_exit(arguments, context),
+        MacroRequest::ReadEnd => read_end(arguments, context),
+        MacroRequest::WriteData => write_data(arguments, context),
+        MacroRequest::WriteSeparator => write_separator(arguments, context),
+        MacroRequest::WriteLayout => write_layout(arguments, context),
+        MacroRequest::WriteAnchor => write_anchor(arguments, context),
+        MacroRequest::WriteLayoutExit => write_layout_exit(arguments, context),
     }
 }
 
@@ -378,14 +440,10 @@ fn exit_case(
     Ok(RequestResult::ReturnUnit)
 }
 
-fn read_text(
-    arguments: Vec<Value>,
+fn read_text_value(
+    expected: String,
     context: &mut RequestContext<'_, MacroEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [expected]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("macro `.read.text` received the wrong number of arguments"))?;
-    let expected = text_value(context, expected, "macro `.read.text`")?;
     let mut transaction = macro_transaction(context, "macro `.read.text`")?;
     let (snapshot, journal) = transaction.parts();
     if journal.cursor.read_text(&snapshot.input, &expected) {
@@ -395,14 +453,10 @@ fn read_text(
     }
 }
 
-fn read_regex(
-    arguments: Vec<Value>,
+fn read_regex_pattern(
+    pattern: String,
     context: &mut RequestContext<'_, MacroEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [pattern]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("macro `.read.regex` received the wrong number of arguments"))?;
-    let pattern = text_value(context, pattern, "macro `.read.regex`")?;
     let matcher = TextPattern::parse(&pattern)
         .map_err(|error| TaskHalt::new(format!("invalid macro text pattern: {error}")))?;
     let mut transaction = macro_transaction(context, "macro `.read.regex`")?;
@@ -541,14 +595,10 @@ fn read_end(
     }
 }
 
-fn write_text(
-    arguments: Vec<Value>,
+fn write_text_value(
+    text: String,
     context: &mut RequestContext<'_, MacroEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [text]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("macro `.write.text` received the wrong number of arguments"))?;
-    let text = text_value(context, text, "macro `.write.text`")?;
     validate_written_text(&text).map_err(TaskHalt::new)?;
     macro_transaction(context, "macro `.write.text`")?
         .parts()
@@ -673,20 +723,4 @@ fn macro_transaction<'context, 'request>(
     context
         .transaction()
         .ok_or_else(|| TaskHalt::new(format!("{request} escaped its isolated transaction")))
-}
-
-fn text_value(
-    context: &RequestContext<'_, MacroEffects>,
-    value: Value,
-    request: &str,
-) -> Result<String, TaskHalt> {
-    let value = context.evaluate(&value)?;
-    let Some(bytes) = value
-        .as_bytes()
-        .map_err(|error| TaskHalt::new(error.to_string()))?
-    else {
-        return Err(TaskHalt::new(format!("{request} requires text")));
-    };
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| TaskHalt::new(format!("{request} requires UTF-8 text")))
 }

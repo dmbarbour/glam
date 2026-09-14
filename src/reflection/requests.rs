@@ -1610,61 +1610,6 @@ fn observe_query_change<S: TaskSpecialization>(
     }
 }
 
-pub(crate) fn prepare_message<S: TaskSpecialization>(
-    context: &RequestContext<'_, S>,
-    message: Value,
-) -> Result<Value, TaskHalt> {
-    let log_message_context = || crate::diagnostic::evaluation_context_frame("log_message");
-    let evaluated_message = context
-        .evaluate(&message)
-        .map_err(|error| error.with_core_context(log_message_context()))?;
-    let values = context.values();
-    let mut message = evaluated_message.with_core(|value| {
-        let CoreValue::Dict(message) = value else {
-            return Err(TaskHalt::new("`.log` message must evaluate to an object"));
-        };
-        Ok(message.clone())
-    })??;
-    if let Some(interface) = message.get(&*keys::MSG) {
-        let interface = values.wrap(interface.clone());
-        let evaluated = context
-            .evaluate(&interface)
-            .map_err(|error| error.with_core_context(log_message_context()))?;
-        message = message.insert(
-            (*keys::MSG).clone(),
-            values.clone_core(evaluated.as_value())?,
-        );
-    }
-    Ok(values.wrap(CoreValue::Dict(message)))
-}
-
-pub(crate) fn parse_severity<S: TaskSpecialization>(
-    context: &RequestContext<'_, S>,
-    value: Value,
-) -> Result<Severity, TaskHalt> {
-    let value = context.evaluate(&value).map_err(|error| {
-        error.with_core_context(crate::diagnostic::evaluation_context_frame("log_severity"))
-    })?;
-    let (info, warn, error) = value.with_core(|value| {
-        (
-            severity_matches(value, "info", &keys::INFO),
-            severity_matches(value, "warn", &keys::WARN),
-            severity_matches(value, "error", &keys::ERROR),
-        )
-    })?;
-    if info {
-        Ok(Severity::Info)
-    } else if warn {
-        Ok(Severity::Warning)
-    } else if error {
-        Ok(Severity::Error)
-    } else {
-        Err(TaskHalt::new(
-            "`.log` severity must be `'info`, `'warn`, or `'error`",
-        ))
-    }
-}
-
 fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
     Key::from_value(value).as_ref() == Some(canonical)
         || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))

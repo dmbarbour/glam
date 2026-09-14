@@ -17,7 +17,6 @@ pub use lifecycle::{
     run, run_standard,
 };
 pub(crate) use machine::{task_eval_error, volume_effects};
-pub(crate) use protocol::{SynchronousRequestWork, SynchronousTaskSpecialization};
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,
@@ -35,7 +34,6 @@ pub use search::{
 pub(crate) use requests::assert_task_handle_family_shape;
 pub(crate) use requests::{
     KeyListRequestWork, PreparationPoll, ValuePathRequestWork, parse_evaluated_severity,
-    parse_severity, prepare_message,
 };
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,

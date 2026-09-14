@@ -3285,9 +3285,9 @@ Partition the remaining migration as follows:
 2. **W5C.5c.2 — Macro preparation.** Split into:
    - **W5C.5c.2a — Complete (2026-09-14): Environment and diagnostics.** Migrate environment
      traversal and severity/message handling in their established order.
-   - **W5C.5c.2b — Text operations and closure.** Migrate text/regex inputs,
-     retain exact journal and scoped-layout behavior, and remove the macro
-     specialization's synchronous adapter.
+   - **W5C.5c.2b — Complete (2026-09-14): Text operations and closure.** Migrate
+     text/regex inputs, retain exact journal and scoped-layout behavior, and
+     remove the macro specialization's synchronous adapter.
 3. **W5C.5c.3 — Configured CLI.** Migrate text, atom, path-handle, script,
    worker-count, and stderr-byte preparation. Keep parser/effect operands raw.
    The nested token search remains behaviorally unchanged unless its current
