@@ -4,9 +4,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use glam::reflection::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReflectionJournal, ReflectionQueryWriter,
-    ReflectionRequest, ReflectionServices, ReflectionTransaction, RequestContext, RequestResult,
-    TaskCommit, TaskEnvironment, TaskHost, TaskSpecialization, TaskValidation, ValidationResult,
-    reflection_request_specs,
+    ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
+    RequestContext, RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
+    SpecializationRequestWork, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
+    TaskValidation, ValidationResult, reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
@@ -16,7 +17,6 @@ use glam::{
 
 use super::supervisor::LogHost;
 use crate::DiagnosticBusLocal;
-use crate::request_work::{ReflectionOrSynchronousRequestWork, SynchronousTaskSpecialization};
 
 #[derive(Clone)]
 pub(crate) struct MainEffects {
@@ -34,6 +34,14 @@ pub(crate) enum MainRequest {
     Reflection(ReflectionRequest),
     ReadLog,
     WriteStderr,
+}
+
+pub(crate) enum MainRequestWork {
+    Reflection(ReflectionRequestWork),
+    ReadLog(Vec<Value>),
+    WriteStderrStart(Vec<Value>),
+    WriteStderrValue,
+    Poisoned,
 }
 
 type MainSnapshot = RuntimeEventSnapshot;
@@ -62,7 +70,7 @@ fn event_journal<'a>(
 impl TaskSpecialization for MainEffects {
     type Host = LoggerTaskHost;
     type Request = MainRequest;
-    type RequestWork = ReflectionOrSynchronousRequestWork<Self>;
+    type RequestWork = MainRequestWork;
     type Snapshot = MainSnapshot;
     type Journal = MainJournal;
 
@@ -97,57 +105,73 @@ impl TaskSpecialization for MainEffects {
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
         match request {
             MainRequest::Reflection(request) => {
-                ReflectionOrSynchronousRequestWork::reflection(request, arguments)
+                MainRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
             }
-            request => ReflectionOrSynchronousRequestWork::synchronous(request, arguments),
+            MainRequest::ReadLog => MainRequestWork::ReadLog(arguments),
+            MainRequest::WriteStderr => MainRequestWork::WriteStderrStart(arguments),
         }
     }
 }
 
-impl SynchronousTaskSpecialization for MainEffects {
-    fn handle_request(
-        &self,
-        request: Self::Request,
-        arguments: Vec<Value>,
-        context: &mut RequestContext<'_, Self>,
-    ) -> Result<RequestResult, glam::reflection::TaskHalt> {
-        match request {
-            MainRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
-            MainRequest::ReadLog => read_log(context),
-            MainRequest::WriteStderr => {
-                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
-                    glam::reflection::TaskHalt::new(
-                        "`.write_stderr` received the wrong number of arguments",
-                    )
+impl SpecializationRequestWork<MainEffects> for MainRequestWork {
+    fn poll(
+        &mut self,
+        specialization: &MainEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, MainEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        match std::mem::replace(self, Self::Poisoned) {
+            Self::Reflection(mut work) => {
+                let result = work.poll(specialization, input, context)?;
+                *self = Self::Reflection(work);
+                Ok(result)
+            }
+            Self::ReadLog(arguments) => {
+                assert!(input.is_none(), "new `.read_log` request cannot have input");
+                let []: [Value; 0] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.read_log` received the wrong number of arguments")
                 })?;
-                let values = self.assembler.values();
-                let binary = values
+                Ok(SpecializationRequestPoll::Complete(read_log(context)?))
+            }
+            Self::WriteStderrStart(arguments) => {
+                assert!(
+                    input.is_none(),
+                    "new `.write_stderr` request cannot have input"
+                );
+                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.write_stderr` received the wrong number of arguments")
+                })?;
+                let binary = specialization
+                    .assembler
+                    .values()
                     .anno_binary(value)
-                    .and_then(|binary| self.assembler.evaluator().eval(&binary))
-                    .map_err(glam::reflection::TaskHalt::from)?;
-                let bytes = binary
-                    .as_bytes()
-                    .map_err(glam::reflection::TaskHalt::from)?
-                    .ok_or_else(|| {
-                        glam::reflection::TaskHalt::new(
-                            "`.write_stderr` argument did not evaluate to binary data",
-                        )
-                    })?;
+                    .map_err(TaskHalt::from)?;
+                *self = Self::WriteStderrValue;
+                Ok(SpecializationRequestPoll::Demand(binary))
+            }
+            Self::WriteStderrValue => {
+                let binary = match input.expect("resumed `.write_stderr` must have input") {
+                    SpecializationRequestInput::Value(value) => value,
+                    SpecializationRequestInput::Failed(error) => return Err(error),
+                };
+                let bytes = binary.as_bytes().map_err(TaskHalt::from)?.ok_or_else(|| {
+                    TaskHalt::new("`.write_stderr` argument did not evaluate to binary data")
+                })?;
                 let stderr_writer = context.host().stderr_writer.clone();
                 if let Some(mut transaction) = context.transaction() {
                     let (snapshot, journal) = transaction.parts();
                     event_journal(snapshot, journal)
                         .write(&stderr_writer, binary.into_value())
-                        .map_err(glam::reflection::TaskHalt::from)?;
+                        .map_err(TaskHalt::from)?;
                 } else {
-                    context
-                        .host()
-                        .write_stderr(bytes)
-                        .map_err(glam::reflection::TaskHalt::from)?;
+                    context.host().write_stderr(bytes).map_err(TaskHalt::from)?;
                     context.committed();
                 }
-                Ok(RequestResult::ReturnUnit)
+                Ok(SpecializationRequestPoll::Complete(
+                    RequestResult::ReturnUnit,
+                ))
             }
+            Self::Poisoned => panic!("completed logger request work was polled again"),
         }
     }
 }

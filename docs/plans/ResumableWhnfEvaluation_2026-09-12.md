@@ -3292,12 +3292,21 @@ Partition the remaining migration as follows:
    path-handle, script, and worker-count preparation. Keep parser/effect
    operands raw. The nested token search remains behaviorally unchanged; only
    its explanatory text is demanded by the outer request owner.
-4. **W5C.5c.4 — Logger, tests, and compatibility closure.** Migrate the
-   logger's stderr-byte path and test specialization, then remove the internal
-   synchronous adapter and every `RequestContext` demand method. Add a hostile
-   machine which performs counted host activity, advances its state, requests
-   a forced promise/lazy demand, and proves that resumption cannot re-enter the
-   host-active phase.
+4. **W5C.5c.4 — Logger, tests, and compatibility closure.** Split into:
+   - **W5C.5c.4a — Logger request work.** Migrate `.write_stderr` binary
+     preparation and keep `.read_log` as an immediate transactional FIFO
+     operation. Preserve abandoned-choice output behavior.
+   - **W5C.5c.4b — Standard and test request work.** Replace the uninhabited
+     standard request adapter and migrate the in-tree test specialization's
+     evaluate/stderr demands without changing its raw alternatives/scoped
+     operands.
+   - **W5C.5c.4c — Resumption and FIFO conformance.** Add a hostile machine
+     which performs counted host activity, advances its state, requests a
+     forced promise/lazy demand, and proves that resumption cannot re-enter the
+     host-active phase. Add the optimized `.read_log` conformance fixture below.
+   - **W5C.5c.4d — Compatibility closure.** Migrate the remaining uninhabited
+     test fixtures, remove both synchronous adapters and every
+     `RequestContext` demand method, and latch the closed source inventory.
 
 Close the compatibility surface rather than leaving two different suspension
 contracts under the same trait.
