@@ -6,13 +6,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::protocol::{
-    CommitResult, EffectRequestSpec, RequestActivity, RequestContext, RequestResult, TaskCommit,
+    CommitResult, EffectRequestSpec, RequestActivity, RequestContext, RequestResult,
+    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskCommit,
     TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, Transaction, ValidationResult,
     request_value,
 };
 use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, VolumeId};
-use crate::api::Value as PublicValue;
+use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 #[cfg(test)]
 use crate::core::LazyId;
 use crate::core::{
@@ -304,6 +305,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 demanding: None,
                 pathing: None,
                 controlling: None,
+                specializing: None,
                 cuts: Vec::new(),
             },
             blocked: None,
@@ -591,6 +593,29 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 continue;
             }
+            if let Some(specializing) = self.execution.specializing.take() {
+                match self.specialization_step(context, specializing, steps) {
+                    SpecializationStep::Continue(specializing) => {
+                        self.execution.specializing = Some(specializing);
+                    }
+                    SpecializationStep::Complete(work) => self.execution.work = *work,
+                    SpecializationStep::Blocked(specializing, dependency) => {
+                        self.execution.specializing = Some(specializing);
+                        self.blocked =
+                            Some(BlockedExecution::waiting_on(dependency, self.retry_wake()));
+                        return self.blocked_poll();
+                    }
+                    SpecializationStep::Yielded(specializing) => {
+                        self.execution.specializing = Some(specializing);
+                        return EffectTaskPoll::Yielded;
+                    }
+                    SpecializationStep::Failed(specializing, error) => {
+                        self.execution.specializing = Some(specializing);
+                        return self.handle_step_error(error);
+                    }
+                }
+                continue;
+            }
             if let Some(demanding) = self.execution.demanding.take() {
                 match self.scalar_demand_step(context, demanding, steps) {
                     ScalarDemandStep::Complete(step) => match step {
@@ -610,6 +635,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         }
                         MachineStep::Control(_) => {
                             unreachable!("one scalar completion cannot begin control work")
+                        }
+                        MachineStep::Specialize(_) => {
+                            unreachable!("one scalar completion cannot begin specialized work")
                         }
                         MachineStep::Blocked(blocked) => {
                             self.blocked = Some(blocked);
@@ -718,6 +746,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     };
                     self.execution.controlling = Some(*controlling);
                 }
+                Ok(MachineStep::Specialize(specializing)) => {
+                    self.execution.work = MachineWork::Outcome {
+                        outcome: BranchOutcome::Cancelled,
+                        scope_depth: 0,
+                    };
+                    self.execution.specializing = Some(specializing);
+                }
                 Ok(MachineStep::Blocked(blocked)) => {
                     self.blocked = Some(blocked);
                     return self.blocked_poll();
@@ -821,6 +856,98 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             WhnfOwnerPoll::Ready(value) => {
                 self.complete_decode_phase(context, decoding, purpose, value)
+            }
+        }
+    }
+
+    fn specialization_step(
+        &mut self,
+        context: &EvaluationPollContext,
+        mut specializing: Box<SpecializationWork<S>>,
+        step_budget: usize,
+    ) -> SpecializationStep<S> {
+        if let Some(computation) = specializing.demand.as_mut() {
+            let input = match poll_whnf_computation(
+                computation,
+                context,
+                &self.eval_context,
+                step_budget.max(1),
+            ) {
+                WhnfOwnerPoll::Ready(value) => {
+                    let values = Values::from_core_factory(self.eval_context.values().clone());
+                    SpecializationRequestInput::Value(EvaluatedValue::from_whnf(
+                        &values,
+                        PublicValue::from_runtime_root(value),
+                    ))
+                }
+                WhnfOwnerPoll::Pending(dependency) => {
+                    return SpecializationStep::Blocked(specializing, dependency);
+                }
+                WhnfOwnerPoll::Yielded => {
+                    return SpecializationStep::Yielded(specializing);
+                }
+                WhnfOwnerPoll::Failed(failure) => {
+                    SpecializationRequestInput::Failed(TaskHalt::rooted_failure(failure))
+                }
+                WhnfOwnerPoll::External(boundary) => {
+                    SpecializationRequestInput::Failed(TaskHalt::new(format!(
+                        "specialized reflection request reached an unsupported {boundary:?} boundary"
+                    )))
+                }
+            };
+            specializing.demand = None;
+            specializing.input = Some(input);
+        }
+
+        let checkpoint = specializing.branch.retry_candidate();
+        let mut activity = RequestActivity::default();
+        let result = specializing.request.poll(
+            &self.specialization,
+            specializing.input.take(),
+            &mut RequestContext {
+                eval_context: &self.eval_context,
+                poll_context: context,
+                host: &self.host,
+                transaction: specializing.branch.transaction.as_mut(),
+                activity: &mut activity,
+            },
+        );
+        if let Some(generation) = activity.observed_generation {
+            specializing.branch.observe(checkpoint, generation);
+        }
+        if activity.committed {
+            specializing.branch.retry = None;
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return SpecializationStep::Failed(specializing, error),
+        };
+
+        match result {
+            SpecializationRequestPoll::Continue => SpecializationStep::Continue(specializing),
+            SpecializationRequestPoll::Demand(value) => {
+                let values = Values::from_core_factory(self.eval_context.values().clone());
+                if let Err(error) = values.require(&value) {
+                    return SpecializationStep::Failed(
+                        specializing,
+                        TaskHalt::new(error.to_string()),
+                    );
+                }
+                specializing.demand = Some(WhnfComputation::from_root(value.into_runtime_root()));
+                SpecializationStep::Continue(specializing)
+            }
+            SpecializationRequestPoll::Wait(wait) => {
+                SpecializationStep::Blocked(specializing, WorkDependency::Wait(wait.into_inner()))
+            }
+            SpecializationRequestPoll::Complete(result) => {
+                if let Err(error) = self.validate_specialization_result(&result) {
+                    return SpecializationStep::Failed(specializing, error);
+                }
+                SpecializationStep::Complete(Box::new(self.complete_specialization_request(
+                    result,
+                    specializing.branch,
+                    specializing.scope_depth,
+                )))
             }
         }
     }
@@ -2327,89 +2454,105 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ))));
             }
             Request::Specialized(request, arguments) => {
-                let checkpoint = branch.retry_candidate();
-                let mut activity = RequestActivity::default();
-                let result = self.specialization.handle_request(
+                let request = self.specialization.start_request(
                     request,
                     arguments
                         .into_iter()
                         .map(PublicValue::from_runtime_root)
                         .collect(),
-                    &mut RequestContext {
-                        eval_context: &self.eval_context,
-                        poll_context: context,
-                        host: &self.host,
-                        transaction: branch.transaction.as_mut(),
-                        activity: &mut activity,
-                    },
-                )?;
-                if let Some(generation) = activity.observed_generation {
-                    branch.observe(checkpoint.clone(), generation);
-                }
-                if activity.committed {
-                    branch.retry = None;
-                }
-                match result {
-                    RequestResult::Return(value) => {
-                        MachineWork::deliver_root(value.into_runtime_root(), branch, scope_depth)
-                    }
-                    RequestResult::Alternatives(values) => {
-                        let public_values = crate::api::Values::from_core_factory(
-                            self.eval_context.values().clone(),
-                        );
-                        let values = values
-                            .iter()
-                            .map(|value| public_values.clone_core(value))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        match values.as_slice() {
-                            [] => MachineWork::Outcome {
-                                outcome: branch.into_failure(),
-                                scope_depth,
-                            },
-                            [value] => MachineWork::deliver(
-                                self.eval_context.values(),
-                                value.clone(),
-                                branch,
-                                scope_depth,
-                            ),
-                            _ => MachineWork::Drive {
-                                branch: branch.with_effect_root(alternative_returns_root(
-                                    self.eval_context.values(),
-                                    &self.tags,
-                                    values,
-                                )),
-                                scope_depth,
-                            },
-                        }
-                    }
-                    RequestResult::Scoped { operation, close } => {
-                        branch
-                            .control
-                            .sequence
-                            .push(Continuation::CloseScope(close.into_runtime_root()));
-                        MachineWork::Drive {
-                            branch: branch.with_effect_root(operation.into_runtime_root()),
-                            scope_depth,
-                        }
-                    }
-                    RequestResult::ReturnUnit => MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    ),
-                    RequestResult::Fail => MachineWork::Outcome {
+                );
+                return Ok(MachineStep::Specialize(Box::new(SpecializationWork::new(
+                    request,
+                    branch,
+                    scope_depth,
+                ))));
+            }
+        };
+        Ok(MachineStep::Continue(work))
+    }
+
+    fn complete_specialization_request(
+        &self,
+        result: RequestResult,
+        mut branch: Branch<S>,
+        scope_depth: usize,
+    ) -> MachineWork<S> {
+        match result {
+            RequestResult::Return(value) => {
+                MachineWork::deliver_root(value.into_runtime_root(), branch, scope_depth)
+            }
+            RequestResult::Alternatives(values) => {
+                let public_values =
+                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
+                let values = values
+                    .iter()
+                    .map(|value| public_values.clone_core(value))
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("validated specialized alternatives share the task runtime");
+                match values.as_slice() {
+                    [] => MachineWork::Outcome {
                         outcome: branch.into_failure(),
                         scope_depth,
                     },
-                    RequestResult::Cancelled => MachineWork::Outcome {
-                        outcome: BranchOutcome::Cancelled,
+                    [value] => MachineWork::deliver(
+                        self.eval_context.values(),
+                        value.clone(),
+                        branch,
+                        scope_depth,
+                    ),
+                    _ => MachineWork::Drive {
+                        branch: branch.with_effect_root(alternative_returns_root(
+                            self.eval_context.values(),
+                            &self.tags,
+                            values,
+                        )),
                         scope_depth,
                     },
                 }
             }
+            RequestResult::Scoped { operation, close } => {
+                branch
+                    .control
+                    .sequence
+                    .push(Continuation::CloseScope(close.into_runtime_root()));
+                MachineWork::Drive {
+                    branch: branch.with_effect_root(operation.into_runtime_root()),
+                    scope_depth,
+                }
+            }
+            RequestResult::ReturnUnit => MachineWork::deliver(
+                self.eval_context.values(),
+                self.eval_context.values().unit(),
+                branch,
+                scope_depth,
+            ),
+            RequestResult::Fail => MachineWork::Outcome {
+                outcome: branch.into_failure(),
+                scope_depth,
+            },
+            RequestResult::Cancelled => MachineWork::Outcome {
+                outcome: BranchOutcome::Cancelled,
+                scope_depth,
+            },
+        }
+    }
+
+    fn validate_specialization_result(&self, result: &RequestResult) -> Result<(), TaskHalt> {
+        let values = Values::from_core_factory(self.eval_context.values().clone());
+        let validate = |value: &PublicValue| {
+            values
+                .require(value)
+                .map_err(|error| TaskHalt::new(error.to_string()))
         };
-        Ok(MachineStep::Continue(work))
+        match result {
+            RequestResult::Return(value) => validate(value),
+            RequestResult::Alternatives(values) => values.iter().try_for_each(validate),
+            RequestResult::Scoped { operation, close } => {
+                validate(operation)?;
+                validate(close)
+            }
+            RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => Ok(()),
+        }
     }
 
     fn deliver_step(
@@ -3125,6 +3268,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
+        self.execution.specializing = None;
         self.execution.work = MachineWork::Outcome {
             outcome: BranchOutcome::Cancelled,
             scope_depth: 0,
@@ -3148,6 +3292,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.demanding = None;
         self.execution.pathing = None;
         self.execution.controlling = None;
+        self.execution.specializing = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
             WakeAction::RestartCut(index) => self.restart_cut(index),
@@ -3160,6 +3305,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.demanding = None;
         self.execution.pathing = None;
         self.execution.controlling = None;
+        self.execution.specializing = None;
         self.execution.cuts.clear();
         let mut root = self
             .search
@@ -3177,6 +3323,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.demanding = None;
         self.execution.pathing = None;
         self.execution.controlling = None;
+        self.execution.specializing = None;
         self.execution.cuts.truncate(index + 1);
         let mut frame = self
             .execution
@@ -3214,6 +3361,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.demanding = None;
         self.execution.pathing = None;
         self.execution.controlling = None;
+        self.execution.specializing = None;
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
@@ -3460,6 +3608,7 @@ struct TaskExecution<S: TaskSpecialization> {
     demanding: Option<ScalarDemandWork<S>>,
     pathing: Option<StatePathWork<S>>,
     controlling: Option<ControlWork<S>>,
+    specializing: Option<Box<SpecializationWork<S>>>,
     cuts: Vec<CutFrame<S>>,
 }
 
@@ -3468,6 +3617,7 @@ impl<S: TaskSpecialization> TaskExecution<S> {
         self.controlling
             .as_ref()
             .map(|work| &work.branch)
+            .or_else(|| self.specializing.as_ref().map(|work| &work.branch))
             .or_else(|| self.demanding.as_ref().map(|work| &work.branch))
             .or_else(|| self.pathing.as_ref().map(|work| &work.branch))
             .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
@@ -3478,6 +3628,7 @@ impl<S: TaskSpecialization> TaskExecution<S> {
         self.controlling
             .as_ref()
             .map(|work| work.scope_depth)
+            .or_else(|| self.specializing.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.demanding.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.pathing.as_ref().map(|work| work.scope_depth))
             .or_else(|| self.decoding.as_ref().map(|work| work.scope_depth))
@@ -3617,6 +3768,40 @@ enum ScalarDemandStep<S: TaskSpecialization> {
     Blocked(ScalarDemandWork<S>, WorkDependency),
     Yielded(ScalarDemandWork<S>),
     Failed(ScalarDemandWork<S>, TaskHalt),
+}
+
+/// Sole owner of specialization-defined request progress.
+///
+/// The request state is never cloned into a retry checkpoint. A semantic
+/// dependency retains its WHNF computation here, while an optimistic
+/// transaction retry reconstructs fresh request work from the branch
+/// checkpoint.
+struct SpecializationWork<S: TaskSpecialization> {
+    request: S::RequestWork,
+    input: Option<SpecializationRequestInput>,
+    demand: Option<WhnfComputation>,
+    branch: Branch<S>,
+    scope_depth: usize,
+}
+
+impl<S: TaskSpecialization> SpecializationWork<S> {
+    fn new(request: S::RequestWork, branch: Branch<S>, scope_depth: usize) -> Self {
+        Self {
+            request,
+            input: None,
+            demand: None,
+            branch,
+            scope_depth,
+        }
+    }
+}
+
+enum SpecializationStep<S: TaskSpecialization> {
+    Continue(Box<SpecializationWork<S>>),
+    Complete(Box<MachineWork<S>>),
+    Blocked(Box<SpecializationWork<S>>, WorkDependency),
+    Yielded(Box<SpecializationWork<S>>),
+    Failed(Box<SpecializationWork<S>>, TaskHalt),
 }
 
 /// Owns one reset-stack-dependent transition while its serialized control
@@ -4220,6 +4405,7 @@ enum MachineStep<S: TaskSpecialization> {
     Demand(ScalarDemandWork<S>),
     StatePath(Box<StatePathWork<S>>),
     Control(Box<ControlWork<S>>),
+    Specialize(Box<SpecializationWork<S>>),
     Blocked(BlockedExecution<S>),
     Exit(ExitIntent),
     Terminal(TaskTerminal),

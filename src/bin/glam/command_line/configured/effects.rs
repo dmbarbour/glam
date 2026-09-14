@@ -12,6 +12,7 @@ use super::super::model::CommandEdit;
 use super::host::{CliHost, CliJournal};
 use super::path::{self, PathAccess, PathKind};
 use super::token;
+use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
 
 const CASE_EXIT_TAG: [&str; 5] = ["cli_runtime", "v0", "request", "case", "exit"];
 
@@ -40,6 +41,7 @@ pub(super) enum CliRequest {
 impl TaskSpecialization for CliEffects {
     type Host = CliHost;
     type Request = CliRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = super::host::CliSnapshot;
     type Journal = CliJournal;
 
@@ -109,6 +111,12 @@ impl TaskSpecialization for CliEffects {
             .collect()
     }
 
+    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for CliEffects {
     fn handle_request(
         &self,
         request: Self::Request,

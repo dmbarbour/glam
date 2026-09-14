@@ -2,6 +2,7 @@ mod batch;
 mod command_line;
 mod configuration;
 mod rendering;
+mod request_work;
 
 use std::env;
 use std::fs;

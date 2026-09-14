@@ -2,8 +2,8 @@ use crate::api::{Diagnostic, Value};
 use crate::core::{Dict, Key, List, Value as CoreValue};
 use crate::eval;
 use crate::reflection::{
-    EffectRequestSpec, RequestContext, RequestResult, TaskHalt, TaskSpecialization, parse_severity,
-    prepare_message,
+    EffectRequestSpec, RequestContext, RequestResult, SynchronousRequestWork,
+    SynchronousTaskSpecialization, TaskHalt, TaskSpecialization, parse_severity, prepare_message,
 };
 use crate::text_pattern::TextPattern;
 
@@ -42,6 +42,7 @@ pub(super) enum MacroRequest {
 impl TaskSpecialization for MacroEffects {
     type Host = MacroHost;
     type Request = MacroRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = MacroSnapshot;
     type Journal = MacroJournal;
 
@@ -118,6 +119,12 @@ impl TaskSpecialization for MacroEffects {
         ]
     }
 
+    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for MacroEffects {
     fn handle_request(
         &self,
         request: Self::Request,

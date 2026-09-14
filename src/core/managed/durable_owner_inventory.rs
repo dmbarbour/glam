@@ -295,9 +295,9 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.2"
     ),
     closed_durable!(
-        "src/reflection/protocol.rs",
+        "src/reflection/protocol.rs; src/bin/glam/request_work.rs",
         "reflection protocol requests, results, snapshots, transactions, and failures",
-        "public Value results plus specialization-owned Snapshot / Journal root contracts and rooted TaskHalt failures",
+        "public Value request-work inputs/results plus specialization-owned Snapshot / Journal root contracts and rooted TaskHalt failures",
         "cross-phase reflection protocol state",
         "decoded request/result publication",
         "protocol completion or transaction retirement",
@@ -829,10 +829,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 166;
+const DECLARATION_BASELINE_COUNT: usize = 168;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([109, 140, 1, 14, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_433_044_218_840_445_170;
+    DeclarationSignals::new([110, 140, 2, 14, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_202_165_552_474_890_878;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -903,6 +903,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         )
     {
         "public Value / EvaluatedValue / RuntimeValueRoot / RuntimeFailureRoot facade"
+    } else if declaration.starts_with("src/bin/glam/request_work.rs::") {
+        "reflection protocol requests, results, snapshots, transactions, and failures"
     } else if declaration.starts_with("src/bin/glam/command_line/") {
         "CLI command-line search and token state"
     } else if declaration.starts_with("src/bin/glam/configuration/logger/")

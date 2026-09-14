@@ -173,6 +173,7 @@ impl ReflectionTransaction for TestJournal {
 impl TaskSpecialization for TestEffects {
     type Host = TestHost;
     type Request = TestRequest;
+    type RequestWork = super::super::protocol::SynchronousRequestWork<Self>;
     type Snapshot = TestSnapshot;
     type Journal = TestJournal;
 
@@ -215,6 +216,16 @@ impl TaskSpecialization for TestEffects {
             .collect()
     }
 
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+    ) -> Self::RequestWork {
+        super::super::protocol::SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl super::super::protocol::SynchronousTaskSpecialization for TestEffects {
     fn handle_request(
         &self,
         request: Self::Request,
@@ -1154,12 +1165,27 @@ fn assert_execution_root_inventory(
         demanding,
         pathing,
         controlling,
+        specializing,
         cuts,
     } = execution;
     let _: &MachineWork<TestEffects> = work;
     let _: &Option<EffectDecodeWork<TestEffects>> = decoding;
     let _: &Option<ScalarDemandWork<TestEffects>> = demanding;
     let _: &Option<StatePathWork<TestEffects>> = pathing;
+    if let Some(specializing) = specializing {
+        let SpecializationWork {
+            request,
+            input,
+            demand,
+            branch,
+            scope_depth,
+        } = specializing.as_ref();
+        let _: &<TestEffects as TaskSpecialization>::RequestWork = request;
+        let _: &Option<SpecializationRequestInput> = input;
+        let _: &Option<crate::eval::whnf::WhnfComputation> = demand;
+        let _: &Branch<TestEffects> = branch;
+        let _: &usize = scope_depth;
+    }
     if let Some(controlling) = controlling {
         let ControlWork {
             operation,
@@ -3082,6 +3108,9 @@ fn assert_protocol_handoff_inventory(
         MachineStep::Control(controlling) => {
             let _: &ControlWork<TestEffects> = controlling;
         }
+        MachineStep::Specialize(specializing) => {
+            let _: &SpecializationWork<TestEffects> = specializing;
+        }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
         }
@@ -3091,6 +3120,31 @@ fn assert_protocol_handoff_inventory(
         MachineStep::Terminal(terminal) => {
             let _: &TaskTerminal = terminal;
         }
+    }
+}
+
+fn assert_specialization_step_inventory(step: &SpecializationStep<TestEffects>) {
+    match step {
+        SpecializationStep::Continue(specializing)
+        | SpecializationStep::Blocked(specializing, _)
+        | SpecializationStep::Yielded(specializing)
+        | SpecializationStep::Failed(specializing, _) => {
+            let _: &SpecializationWork<TestEffects> = specializing;
+        }
+        SpecializationStep::Complete(work) => {
+            let _: &MachineWork<TestEffects> = work;
+        }
+    }
+    match step {
+        SpecializationStep::Blocked(_, dependency) => {
+            let _: &WorkDependency = dependency;
+        }
+        SpecializationStep::Failed(_, error) => {
+            let _: &TaskHalt = error;
+        }
+        SpecializationStep::Continue(_)
+        | SpecializationStep::Complete(_)
+        | SpecializationStep::Yielded(_) => {}
     }
 }
 
@@ -3200,6 +3254,7 @@ fn outer_machine_root_inventory_is_complete() {
     let _: FixpointRootInventoryFn = assert_fixpoint_root_inventory;
     let _: RequestHandoffInventoryFn = assert_request_handoff_inventory;
     let _: ProtocolHandoffInventoryFn = assert_protocol_handoff_inventory;
+    let _: fn(&SpecializationStep<TestEffects>) = assert_specialization_step_inventory;
 }
 
 #[test]

@@ -16,6 +16,7 @@ use glam::{
 
 use super::supervisor::LogHost;
 use crate::DiagnosticBusLocal;
+use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
 
 #[derive(Clone)]
 pub(crate) struct MainEffects {
@@ -61,6 +62,7 @@ fn event_journal<'a>(
 impl TaskSpecialization for MainEffects {
     type Host = LoggerTaskHost;
     type Request = MainRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = MainSnapshot;
     type Journal = MainJournal;
 
@@ -92,6 +94,12 @@ impl TaskSpecialization for MainEffects {
             .collect()
     }
 
+    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for MainEffects {
     fn handle_request(
         &self,
         request: Self::Request,

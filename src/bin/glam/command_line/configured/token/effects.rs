@@ -4,6 +4,7 @@ use glam::reflection::{
 use glam::{TextPattern, Value, Values};
 
 use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
+use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
 
 #[derive(Clone, Copy)]
 pub(super) struct TokenEffects;
@@ -20,6 +21,7 @@ pub(in crate::command_line) enum TokenRequest {
 impl TaskSpecialization for TokenEffects {
     type Host = TokenHost;
     type Request = TokenRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = super::TokenSnapshot;
     type Journal = TokenJournal;
 
@@ -31,6 +33,12 @@ impl TaskSpecialization for TokenEffects {
         request_specs()
     }
 
+    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for TokenEffects {
     fn handle_request(
         &self,
         request: Self::Request,

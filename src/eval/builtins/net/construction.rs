@@ -10,7 +10,8 @@ use crate::evaluation::{EvalContext, EvaluatorStepContext};
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
-    RequestResult, TaskHalt, TaskSpecialization, task_eval_error,
+    RequestResult, SynchronousRequestWork, SynchronousTaskSpecialization, TaskHalt,
+    TaskSpecialization, task_eval_error,
 };
 
 use super::super::super::{EvaluationHalt, eval_value_in};
@@ -156,6 +157,7 @@ struct InteractionNetEffects {
 impl TaskSpecialization for InteractionNetEffects {
     type Host = ConstructionHost;
     type Request = InteractionNetRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = ();
     type Journal = ConstructionJournal;
 
@@ -193,6 +195,16 @@ impl TaskSpecialization for InteractionNetEffects {
         .into()
     }
 
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+    ) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for InteractionNetEffects {
     fn handle_request(
         &self,
         request: Self::Request,

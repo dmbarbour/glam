@@ -17,12 +17,14 @@ pub use lifecycle::{
     run, run_standard,
 };
 pub(crate) use machine::{task_eval_error, volume_effects};
+pub(crate) use protocol::{SynchronousRequestWork, SynchronousTaskSpecialization};
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,
-    RequestContext, RequestResult, StandardEffects, TaskCommit, TaskEnvironment, TaskHalt,
-    TaskHost, TaskOutcome, TaskSpecialization, TaskValidation, TransactionContext,
-    ValidationResult,
+    RequestContext, RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
+    SpecializationRequestWait, SpecializationRequestWork, StandardEffects, TaskCommit,
+    TaskEnvironment, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, TaskValidation,
+    TransactionContext, ValidationResult,
 };
 pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,

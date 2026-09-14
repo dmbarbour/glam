@@ -3131,15 +3131,16 @@ the common raw-versus-WHNF distinction, but not a value discovered only after
 a host or transaction read. Supporting those cases would require a second
 continuation protocol beside the declarative one.
 
-The source inventory contains ten `TaskSpecialization` implementations. Seven
-are production specializations: `StandardEffects`, `ReflectionEffects`, the
-executable logger and configured-CLI specializations, the nested token parser,
-the macro runner, and interaction-net construction. The other three are the
-protocol/search inventory fixtures and the full reflection test
-specialization. There are twenty-two direct `RequestContext` demand calls:
-twenty-one in production and one in `TestEffects`. The logger's stderr request
-also enters `Assembler::evaluator().eval` directly and is therefore a
-twenty-second production nested-demand boundary even though it does not call a
+The source inventory now contains eleven `TaskSpecialization` implementations.
+Seven are production specializations: `StandardEffects`, `ReflectionEffects`,
+the executable logger and configured-CLI specializations, the nested token
+parser, the macro runner, and interaction-net construction. The other four are
+the protocol/search inventory fixtures, the full reflection test
+specialization, and the public effect-embedding contract fixture. At scaffold
+landing there are twenty-one direct `RequestContext` demand calls: twenty in
+production and one in `TestEffects`. The logger's stderr request also enters
+`Assembler::evaluator().eval` directly and is therefore a twenty-first
+production nested-demand boundary even though it does not call a
 `RequestContext` demand method.
 
 The request families divide as follows:
@@ -3225,11 +3226,11 @@ The alternative designs were rejected for concrete reasons:
 
 Partition this work as follows:
 
-1. **W5C.5b.0 — Request-work scaffold.** Add the non-cloneable specialization
-   owner, demand/result transitions, activity handoff, explicit wait handoff,
-   and compile-exhaustive lifecycle inventory. Convert all implementations to
-   the new trait shape with the smallest buildable internal adapter; do not
-   expose the adapter as compatibility API.
+1. **W5C.5b.0 — Complete (2026-09-14): request-work scaffold.** Add the
+   non-cloneable specialization owner, demand/result transitions, activity
+   handoff, explicit wait handoff, and compile-exhaustive lifecycle inventory.
+   Convert all implementations to the new trait shape with the smallest
+   buildable internal adapter; do not expose the adapter as compatibility API.
 2. **W5C.5b.1 — Reflection `.eval`.** Move `.eval` first, preserving its
    deliberate conversion of permanent evaluation failure into
    `{err:Diagnostic}` while lazy and promise dependencies suspend the enclosing
@@ -3245,6 +3246,22 @@ Partition this work as follows:
 5. **W5C.5b.4 — Reusable closure.** Relatch request activity, retry, structured
    failure, and runtime-root inventories. Remove the reusable family's access
    to the transitional adapter.
+
+W5C.5b.0 introduced `SpecializationRequestWork` as the only public callback
+surface. `EffectTask` now owns its boxed, non-cloneable request state beside the
+other durable machine owners and preserves it across WHNF demand, explicit
+shared waits, yields, and wakeup without inflating every inactive task's stack
+footprint. Every callback's observation and commit activity is applied before
+interpreting its transition. Ten in-tree implementations use a library- or
+executable-private synchronous bridge while they migrate; that bridge retains
+its request inputs across the legacy callback's blocked result so intermediate
+checkpoints preserve established behavior. The public embedding fixture
+instead advances an explicit two-phase request, blocks on a forced promise
+argument, and proves with counters that wakeup resumes rather than reconstructs
+the owner. Source and compile-exhaustive inventories latch all eleven
+implementations, the private bridge boundary, the new task slot, and every
+transition/result variant. The old synchronous callback is absent from
+`TaskSpecialization` rather than surviving as a public fallback.
 
 ###### W5C.5c — Remaining specializations
 

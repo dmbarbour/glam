@@ -160,6 +160,10 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     /// Decoded specialization state. Any semantic value retained here must
     /// use a public/runtime root rather than a bare core value.
     type Request: Clone + Send + Sync + 'static;
+    /// Durable, non-cloneable state for interpreting one decoded specialized
+    /// request. The reflection machine owns this value across cooperative
+    /// yields and semantic dependencies.
+    type RequestWork: SpecializationRequestWork<Self>;
     /// Immutable specialization state retained across an optimistic
     /// transaction. Implementations own the exact tracing/root contract for
     /// any semantic values reachable from this type.
@@ -187,12 +191,120 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
 
+    /// Creates the durable owner for one decoded request.
+    ///
+    /// This constructor receives no request context: host observation,
+    /// transaction edits, and semantic demand begin only when the returned
+    /// work is polled by the reflection machine.
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+    ) -> Self::RequestWork;
+}
+
+/// One specialization-owned request machine.
+///
+/// `poll` is invoked only when no semantic demand from this request is still
+/// active. Before returning [`SpecializationRequestPoll::Demand`] or
+/// [`SpecializationRequestPoll::Wait`], an implementation must advance its
+/// own phase so that resumption cannot repeat host observation or mutation.
+pub trait SpecializationRequestWork<S: TaskSpecialization>: Send + 'static {
+    fn poll(
+        &mut self,
+        specialization: &S,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, S>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt>;
+}
+
+/// Completion delivered to request work after its owned WHNF demand.
+pub enum SpecializationRequestInput {
+    Value(EvaluatedValue),
+    Failed(TaskHalt),
+}
+
+/// Explicit shared-completion dependency for specialized request work.
+///
+/// Construction remains private until a public host-completion capability is
+/// designed. Reusable reflection requests use this for task joins.
+pub struct SpecializationRequestWait(EvaluationWaitToken);
+
+impl SpecializationRequestWait {
+    #[allow(dead_code)] // Public construction begins with explicit host waits in W5C.5b.3.
+    pub(super) fn new(wait: EvaluationWaitToken) -> Self {
+        Self(wait)
+    }
+
+    pub(super) fn into_inner(self) -> EvaluationWaitToken {
+        self.0
+    }
+}
+
+/// One bounded transition from specialization-owned request work.
+#[non_exhaustive]
+pub enum SpecializationRequestPoll {
+    Continue,
+    Demand(PublicValue),
+    Wait(SpecializationRequestWait),
+    Complete(RequestResult),
+}
+
+/// Temporary in-crate adapter for request implementations not yet migrated to
+/// explicit request work. Its presence is source-latched and ends in
+/// W5C.5c.4; it is deliberately unavailable to embedding clients.
+pub struct SynchronousRequestWork<S: TaskSpecialization> {
+    request: Option<S::Request>,
+    arguments: Option<Vec<PublicValue>>,
+}
+
+impl<S: TaskSpecialization> SynchronousRequestWork<S> {
+    pub(crate) fn new(request: S::Request, arguments: Vec<PublicValue>) -> Self {
+        Self {
+            request: Some(request),
+            arguments: Some(arguments),
+        }
+    }
+}
+
+pub(crate) trait SynchronousTaskSpecialization: TaskSpecialization {
     fn handle_request(
         &self,
         request: Self::Request,
         arguments: Vec<PublicValue>,
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt>;
+}
+
+impl<S> SpecializationRequestWork<S> for SynchronousRequestWork<S>
+where
+    S: SynchronousTaskSpecialization,
+{
+    fn poll(
+        &mut self,
+        specialization: &S,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, S>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        assert!(
+            input.is_none(),
+            "synchronous request work cannot receive a demand completion"
+        );
+        let request = self
+            .request
+            .as_ref()
+            .expect("synchronous request work must retain its request")
+            .clone();
+        let arguments = self
+            .arguments
+            .as_ref()
+            .expect("synchronous request work must retain its arguments")
+            .clone();
+        let result = specialization.handle_request(request, arguments, context)?;
+        self.request = None;
+        self.arguments = None;
+        Ok(SpecializationRequestPoll::Complete(result))
+    }
 }
 
 /// A task exposing only the standard effect machine.
@@ -202,6 +314,7 @@ pub struct StandardEffects;
 impl TaskSpecialization for StandardEffects {
     type Host = dyn TaskHost<Self>;
     type Request = Infallible;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = ();
     type Journal = ();
 
@@ -209,6 +322,16 @@ impl TaskSpecialization for StandardEffects {
         Vec::new()
     }
 
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+    ) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for StandardEffects {
     fn handle_request(
         &self,
         request: Self::Request,
@@ -226,6 +349,7 @@ pub struct ReflectionEffects;
 impl TaskSpecialization for ReflectionEffects {
     type Host = dyn ReflectionHost<Self>;
     type Request = ReflectionRequest;
+    type RequestWork = SynchronousRequestWork<Self>;
     type Snapshot = ();
     type Journal = ReflectionJournal;
 
@@ -233,6 +357,16 @@ impl TaskSpecialization for ReflectionEffects {
         reflection_request_specs()
     }
 
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<PublicValue>,
+    ) -> Self::RequestWork {
+        SynchronousRequestWork::new(request, arguments)
+    }
+}
+
+impl SynchronousTaskSpecialization for ReflectionEffects {
     fn handle_request(
         &self,
         request: Self::Request,
@@ -852,6 +986,7 @@ mod root_inventory_tests {
     impl TaskSpecialization for ProtocolRootTestEffects {
         type Host = dyn TaskHost<Self>;
         type Request = Infallible;
+        type RequestWork = SynchronousRequestWork<Self>;
         type Snapshot = PublicValue;
         type Journal = Vec<PublicValue>;
 
@@ -859,6 +994,16 @@ mod root_inventory_tests {
             Vec::new()
         }
 
+        fn start_request(
+            &self,
+            request: Self::Request,
+            arguments: Vec<PublicValue>,
+        ) -> Self::RequestWork {
+            SynchronousRequestWork::new(request, arguments)
+        }
+    }
+
+    impl SynchronousTaskSpecialization for ProtocolRootTestEffects {
         fn handle_request(
             &self,
             request: Self::Request,
@@ -895,6 +1040,33 @@ mod root_inventory_tests {
                 let _: &PublicValue = close;
             }
             RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => {}
+        }
+    }
+
+    fn assert_specialization_request_input_inventory(input: &SpecializationRequestInput) {
+        match input {
+            SpecializationRequestInput::Value(value) => {
+                let _: &EvaluatedValue = value;
+            }
+            SpecializationRequestInput::Failed(error) => {
+                let _: &TaskHalt = error;
+            }
+        }
+    }
+
+    fn assert_specialization_request_poll_inventory(poll: &SpecializationRequestPoll) {
+        match poll {
+            SpecializationRequestPoll::Continue => {}
+            SpecializationRequestPoll::Demand(value) => {
+                let _: &PublicValue = value;
+            }
+            SpecializationRequestPoll::Wait(wait) => {
+                let SpecializationRequestWait(wait) = wait;
+                let _: &EvaluationWaitToken = wait;
+            }
+            SpecializationRequestPoll::Complete(result) => {
+                let _: &RequestResult = result;
+            }
         }
     }
 
@@ -1003,6 +1175,8 @@ mod root_inventory_tests {
     fn reflection_protocol_root_inventory_is_complete() {
         let _: fn(&EffectRequestSpec<Infallible>) = assert_effect_request_spec_inventory;
         let _: fn(&RequestResult) = assert_request_result_inventory;
+        let _: fn(&SpecializationRequestInput) = assert_specialization_request_input_inventory;
+        let _: fn(&SpecializationRequestPoll) = assert_specialization_request_poll_inventory;
         let _: fn(&ReasoningSessionId, &RequestActivity, &CommitResult) =
             assert_edge_free_protocol_inventory;
         let _: fn(
@@ -1015,6 +1189,51 @@ mod root_inventory_tests {
             &TransactionContext<'_, ProtocolRootTestEffects>,
         ) = assert_borrowed_protocol_context_inventory;
         let _: fn(&TaskOutcome) = assert_task_outcome_inventory;
+    }
+
+    #[test]
+    fn every_specialization_declares_owned_request_work_during_migration() {
+        let sources = [
+            include_str!("protocol.rs"),
+            include_str!("machine/tests.rs"),
+            include_str!("search.rs"),
+            include_str!("../g_syntax/macro_expansion/effects.rs"),
+            include_str!("../eval/builtins/net/construction.rs"),
+            include_str!("../bin/glam/configuration/logger/effects.rs"),
+            include_str!("../bin/glam/command_line/configured/effects.rs"),
+            include_str!("../bin/glam/command_line/configured/token/effects.rs"),
+            include_str!("../../tests/effect_embedding.rs"),
+        ];
+        let count = |needle: &str| {
+            sources
+                .iter()
+                .map(|source| source.matches(needle).count())
+                .sum::<usize>()
+        };
+
+        assert_eq!(count(concat!("impl Task", "Specialization for ")), 11);
+        assert_eq!(count(concat!("type Request", "Work =")), 11);
+        // One declaration belongs to the trait; every implementation supplies
+        // the remaining eleven constructors.
+        assert_eq!(count(concat!("fn start", "_request(")), 12);
+        // Ten in-tree implementations use the deliberately temporary bridge;
+        // the external embedding fixture exercises a real pollable owner.
+        assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 10);
+        assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 10);
+
+        let task_specialization = sources[0]
+            .split("pub trait TaskSpecialization")
+            .nth(1)
+            .expect("task-specialization trait declaration")
+            .split("/// One specialization-owned request machine.")
+            .next()
+            .expect("request-work protocol follows task specialization");
+        assert!(!task_specialization.contains("handle_request"));
+
+        let reflection_facade = include_str!("../reflection.rs");
+        assert!(reflection_facade.contains(
+            "pub(crate) use protocol::{SynchronousRequestWork, SynchronousTaskSpecialization};"
+        ));
     }
 
     fn retained_protocol_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
