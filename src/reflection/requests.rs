@@ -49,6 +49,7 @@ pub struct ReflectionRequestWork {
 
 enum ReflectionRequestOperation {
     Eval(EvalRequestWork),
+    Inspection(InspectionRequestWork),
     Synchronous {
         request: ReflectionRequest,
         arguments: Vec<Value>,
@@ -61,11 +62,37 @@ enum EvalRequestWork {
     Awaiting,
 }
 
+enum InspectionRequestWork {
+    Start {
+        request: InspectionRequest,
+        arguments: Vec<Value>,
+    },
+    Awaiting(InspectionRequest),
+}
+
+#[derive(Clone, Copy)]
+enum InspectionRequest {
+    DictItems,
+    Metadata,
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
             ReflectionRequest::Eval => {
                 ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments))
+            }
+            ReflectionRequest::DictItems => {
+                ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
+                    request: InspectionRequest::DictItems,
+                    arguments,
+                })
+            }
+            ReflectionRequest::MetadataInspect => {
+                ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
+                    request: InspectionRequest::Metadata,
+                    arguments,
+                })
             }
             request => ReflectionRequestOperation::Synchronous { request, arguments },
         };
@@ -119,6 +146,37 @@ where
                     result,
                 )))
             }
+            ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
+                request,
+                arguments,
+            }) => {
+                assert!(
+                    input.is_none(),
+                    "new inspection work cannot have demand input"
+                );
+                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new(match request {
+                        InspectionRequest::DictItems => {
+                            "`.dict_items` received the wrong number of arguments"
+                        }
+                        InspectionRequest::Metadata => {
+                            "`.meta.inspect` received the wrong number of arguments"
+                        }
+                    })
+                })?;
+                self.operation = ReflectionRequestOperation::Inspection(
+                    InspectionRequestWork::Awaiting(request),
+                );
+                Ok(SpecializationRequestPoll::Demand(value))
+            }
+            ReflectionRequestOperation::Inspection(InspectionRequestWork::Awaiting(request)) => {
+                let value = demand_value(input, "resumed inspection work")?;
+                let result = match request {
+                    InspectionRequest::DictItems => inspect_dict_items(context, &value)?,
+                    InspectionRequest::Metadata => inspect_metadata(context, &value)?,
+                };
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
             ReflectionRequestOperation::Synchronous { request, arguments } => {
                 assert!(
                     input.is_none(),
@@ -132,6 +190,50 @@ where
             }
         }
     }
+}
+
+fn demand_value(
+    input: Option<SpecializationRequestInput>,
+    resumed: &str,
+) -> Result<crate::api::EvaluatedValue, TaskHalt> {
+    match input.expect(resumed) {
+        SpecializationRequestInput::Value(value) => Ok(value),
+        SpecializationRequestInput::Failed(error) => Err(error),
+    }
+}
+
+fn inspect_dict_items<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
+    dict: &crate::api::EvaluatedValue,
+) -> Result<RequestResult, TaskHalt> {
+    let values = context.values();
+    let items = dict.with_core(|value| {
+        let CoreValue::Dict(dict) = value else {
+            return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
+        };
+        Ok(CoreValue::List(crate::core::List::from_values(
+            dict.iter()
+                .map(|(key, value)| {
+                    CoreValue::Dict(
+                        Dict::new_sync()
+                            .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
+                            .insert((*keys::VALUE).clone(), value.clone()),
+                    )
+                })
+                .collect(),
+        )))
+    })??;
+    Ok(RequestResult::Return(values.wrap(items)))
+}
+
+fn inspect_metadata<S: TaskSpecialization>(
+    context: &RequestContext<'_, S>,
+    value: &crate::api::EvaluatedValue,
+) -> Result<RequestResult, TaskHalt> {
+    let Some(metadata) = value.with_core(CoreValue::associated_metadata)? else {
+        return Ok(RequestResult::Fail);
+    };
+    Ok(RequestResult::Return(context.values().wrap(metadata)))
 }
 
 #[derive(Clone)]
@@ -388,24 +490,7 @@ where
                 TaskHalt::new("`.dict_items` received the wrong number of arguments")
             })?;
             let dict = context.evaluate(&dict)?;
-            let values = context.values();
-            let items = dict.with_core(|value| {
-                let CoreValue::Dict(dict) = value else {
-                    return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
-                };
-                Ok(CoreValue::List(crate::core::List::from_values(
-                    dict.iter()
-                        .map(|(key, value)| {
-                            CoreValue::Dict(
-                                Dict::new_sync()
-                                    .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
-                                    .insert((*keys::VALUE).clone(), value.clone()),
-                            )
-                        })
-                        .collect(),
-                )))
-            })??;
-            Ok(RequestResult::Return(values.wrap(items)))
+            inspect_dict_items(context, &dict)
         }
         ReflectionRequest::Eval => evaluate_request(arguments, context),
         ReflectionRequest::MetadataInspect => {
@@ -413,10 +498,7 @@ where
                 TaskHalt::new("`.meta.inspect` received the wrong number of arguments")
             })?;
             let value = context.evaluate(&value)?;
-            let Some(metadata) = value.with_core(CoreValue::associated_metadata)? else {
-                return Ok(RequestResult::Fail);
-            };
-            Ok(RequestResult::Return(context.values().wrap(metadata)))
+            inspect_metadata(context, &value)
         }
         ReflectionRequest::Log => {
             let [severity, message]: [Value; 2] = arguments

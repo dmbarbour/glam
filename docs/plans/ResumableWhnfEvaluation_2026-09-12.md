@@ -3235,10 +3235,15 @@ Partition this work as follows:
    deliberate conversion of permanent evaluation failure into
    `{err:Diagnostic}` while lazy and promise dependencies suspend the enclosing
    request. Force both completion dispositions and prove one request phase.
-3. **W5C.5b.2 — Pure reusable preparation.** Migrate environment key-path and
-   value-path traversal, dictionary and metadata inspection, and logging
-   severity/message preparation. Preserve completed prefixes across every
-   sequential demand.
+3. **W5C.5b.2 — Pure reusable preparation.** Preserve completed prefixes
+   across every sequential demand, split into:
+   - **W5C.5b.2a — Complete (2026-09-14): Dictionary and metadata inspection.** Migrate the two
+     single-demand projection requests first.
+   - **W5C.5b.2b — Logging preparation.** Migrate message, optional message
+     interface, and severity demand in established order without repeating a
+     completed prefix or host emission.
+   - **W5C.5b.2c — Environment traversal.** Migrate key-path conversion and
+     value-path selection as resumable recursive preparation.
 4. **W5C.5b.3 — Task request family.** Migrate task-handle preparation, query
    lookup/state decoding, acknowledgement/cancellation, and task join. Query
    observation must precede its owned value-path demand; join must use an
