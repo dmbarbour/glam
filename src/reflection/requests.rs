@@ -55,6 +55,7 @@ enum ReflectionRequestOperation {
     Log(LogRequestWork),
     TaskCreate(Vec<Value>),
     TaskControl(TaskControlRequestWork),
+    TaskQuery(TaskQueryRequestWork),
     Synchronous {
         request: ReflectionRequest,
         arguments: Vec<Value>,
@@ -159,6 +160,26 @@ enum TaskControlRequest {
     Cancel,
 }
 
+enum TaskQueryRequestWork {
+    Start {
+        request: TaskQueryRequest,
+        arguments: Vec<Value>,
+    },
+    Handle(TaskQueryRequest),
+    State {
+        request: TaskQueryRequest,
+        handle: Arc<TaskHandleCell>,
+        generation: u64,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum TaskQueryRequest {
+    Status,
+    Value,
+    Halt,
+}
+
 impl ReflectionRequestWork {
     pub fn new(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
         let operation = match request {
@@ -193,6 +214,24 @@ impl ReflectionRequestWork {
             ReflectionRequest::TaskCancel => {
                 ReflectionRequestOperation::TaskControl(TaskControlRequestWork::Start {
                     request: TaskControlRequest::Cancel,
+                    arguments,
+                })
+            }
+            ReflectionRequest::TaskStatus => {
+                ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Start {
+                    request: TaskQueryRequest::Status,
+                    arguments,
+                })
+            }
+            ReflectionRequest::TaskValue => {
+                ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Start {
+                    request: TaskQueryRequest::Value,
+                    arguments,
+                })
+            }
+            ReflectionRequest::TaskHalt => {
+                ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Start {
+                    request: TaskQueryRequest::Halt,
                     arguments,
                 })
             }
@@ -422,6 +461,47 @@ where
                     RequestResult::ReturnUnit,
                 ))
             }
+            ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Start {
+                request,
+                arguments,
+            }) => {
+                assert!(input.is_none(), "new task query cannot have demand input");
+                let name = task_query_name(request);
+                let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new(format!("`.{name}` received the wrong number of arguments"))
+                })?;
+                self.operation =
+                    ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Handle(request));
+                Ok(SpecializationRequestPoll::Demand(handle))
+            }
+            ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::Handle(request)) => {
+                let handle = demand_value(input, "resumed task query handle")?;
+                let handle = evaluated_task_handle(context, &handle, task_query_name(request))?;
+                ensure_runtime_task(context.eval_context(), &handle)?;
+                let (state, generation) = read_query_value(context, &handle.status)?;
+                self.operation =
+                    ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::State {
+                        request,
+                        handle,
+                        generation,
+                    });
+                Ok(SpecializationRequestPoll::Demand(state))
+            }
+            ReflectionRequestOperation::TaskQuery(TaskQueryRequestWork::State {
+                request,
+                handle,
+                generation,
+            }) => {
+                let state = demand_value(input, "resumed task query state")?;
+                let values = context.values();
+                let state = match state.with_core(|state| decode_query_state(&values, state))? {
+                    Some(EvaluationQueryState::Pending) => None,
+                    Some(EvaluationQueryState::Complete(result)) => Some(result),
+                    None => return Err(TaskHalt::new("query handle has been retired")),
+                };
+                let result = finish_task_query(context, request, &handle, state, generation)?;
+                Ok(SpecializationRequestPoll::Complete(result))
+            }
             ReflectionRequestOperation::Synchronous { request, arguments } => {
                 assert!(
                     input.is_none(),
@@ -441,6 +521,85 @@ fn task_control_name(request: TaskControlRequest) -> &'static str {
     match request {
         TaskControlRequest::AcknowledgeError => "task.ack_error",
         TaskControlRequest::Cancel => "task.cancel",
+    }
+}
+
+fn task_query_name(request: TaskQueryRequest) -> &'static str {
+    match request {
+        TaskQueryRequest::Status => "task.status",
+        TaskQueryRequest::Value => "task.value",
+        TaskQueryRequest::Halt => "task.error",
+    }
+}
+
+fn read_query_value<S: TaskSpecialization>(
+    context: &mut RequestContext<'_, S>,
+    handle: &Arc<EvaluationQueryHandle>,
+) -> Result<(Value, u64), TaskHalt> {
+    let transaction_generation = context.transaction_generation();
+    let (result, generation) = if let Some(mut transaction) = context.transaction() {
+        let generation =
+            transaction_generation.expect("active transaction must have a snapshot generation");
+        (transaction.store().peek_query(handle), generation)
+    } else {
+        let snapshot = context.host().snapshot();
+        (snapshot.store().poll_query(handle), snapshot.generation())
+    };
+    let EvaluationQueryPoll::State { value, .. } = result else {
+        return Err(TaskHalt::new(
+            "query handle does not belong to this runtime's protected query domain",
+        ));
+    };
+    Ok((value, generation))
+}
+
+fn finish_task_query<S: TaskSpecialization>(
+    context: &mut RequestContext<'_, S>,
+    request: TaskQueryRequest,
+    handle: &Arc<TaskHandleCell>,
+    state: Option<Value>,
+    generation: u64,
+) -> Result<RequestResult, TaskHalt> {
+    let Some(state) = state else {
+        observe_query_change(context, &handle.status, generation);
+        return Ok(RequestResult::Fail);
+    };
+    if matches!(request, TaskQueryRequest::Status) {
+        return Ok(RequestResult::Return(state));
+    }
+    match (request, tagged_task_state(&context.values(), &state)?) {
+        (TaskQueryRequest::Value, TaggedTaskState::Complete(value)) => {
+            Ok(RequestResult::Return(value))
+        }
+        (TaskQueryRequest::Halt, TaggedTaskState::Failed(error)) => {
+            Ok(RequestResult::Return(error))
+        }
+        (TaskQueryRequest::Halt, TaggedTaskState::Cancelled) => Ok(RequestResult::Return(
+            context.values().text("reflection task was cancelled"),
+        )),
+        (
+            TaskQueryRequest::Value | TaskQueryRequest::Halt,
+            TaggedTaskState::Launched | TaggedTaskState::Blocked,
+        ) => {
+            observe_query_change(context, &handle.status, generation);
+            Ok(RequestResult::Fail)
+        }
+        (
+            TaskQueryRequest::Value,
+            TaggedTaskState::Failed(_)
+            | TaggedTaskState::Cancelled
+            | TaggedTaskState::Abandoned
+            | TaggedTaskState::Exited
+            | TaggedTaskState::Killed,
+        )
+        | (
+            TaskQueryRequest::Halt,
+            TaggedTaskState::Complete(_)
+            | TaggedTaskState::Abandoned
+            | TaggedTaskState::Exited
+            | TaggedTaskState::Killed,
+        ) => Ok(RequestResult::Fail),
+        (TaskQueryRequest::Status, _) => unreachable!("status returns before tagged decoding"),
     }
 }
 

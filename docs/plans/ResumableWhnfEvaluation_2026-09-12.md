@@ -3248,7 +3248,7 @@ Partition this work as follows:
    - **W5C.5b.3a — Complete (2026-09-14): Creation and control.** Migrate non-demanding task creation
      plus resumable task-handle preparation for acknowledgement and
      cancellation.
-   - **W5C.5b.3b — Query requests.** Migrate query lookup and state decoding.
+   - **W5C.5b.3b — Complete (2026-09-14): Query requests.** Migrate query lookup and state decoding.
      Query observation must precede its owned value demand and must not repeat
      after suspension.
    - **W5C.5b.3c — Join.** Migrate task join using an explicit shared-completion
