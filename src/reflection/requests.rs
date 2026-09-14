@@ -57,10 +57,6 @@ enum ReflectionRequestOperation {
     TaskControl(TaskControlRequestWork),
     TaskJoin(TaskJoinRequestWork),
     TaskQuery(TaskQueryRequestWork),
-    Synchronous {
-        request: ReflectionRequest,
-        arguments: Vec<Value>,
-    },
     Poisoned,
 }
 
@@ -245,7 +241,6 @@ impl ReflectionRequestWork {
                     arguments,
                 })
             }
-            request => ReflectionRequestOperation::Synchronous { request, arguments },
         };
         Self { operation }
     }
@@ -253,7 +248,7 @@ impl ReflectionRequestWork {
 
 impl<S> SpecializationRequestWork<S> for ReflectionRequestWork
 where
-    S: TaskSpecialization<Request = ReflectionRequest>,
+    S: TaskSpecialization,
     S::Host: ReflectionHost<S>,
     S::Journal: ReflectionTransaction,
 {
@@ -531,14 +526,6 @@ where
                     None => return Err(TaskHalt::new("query handle has been retired")),
                 };
                 let result = finish_task_query(context, request, &handle, state, generation)?;
-                Ok(SpecializationRequestPoll::Complete(result))
-            }
-            ReflectionRequestOperation::Synchronous { request, arguments } => {
-                assert!(
-                    input.is_none(),
-                    "synchronous reusable request cannot receive demand input"
-                );
-                let result = handle_reflection_request(request, arguments, context)?;
                 Ok(SpecializationRequestPoll::Complete(result))
             }
             ReflectionRequestOperation::Poisoned => {
@@ -1426,282 +1413,6 @@ pub fn environment_diagnostic_request_specs() -> Vec<EffectRequestSpec<Reflectio
 }
 
 /// Handles one reusable reflection request inside a composed task.
-pub fn handle_reflection_request<S>(
-    request: ReflectionRequest,
-    arguments: Vec<Value>,
-    context: &mut RequestContext<'_, S>,
-) -> Result<RequestResult, TaskHalt>
-where
-    S: TaskSpecialization,
-    S::Host: ReflectionHost<S>,
-    S::Journal: ReflectionTransaction,
-{
-    match request {
-        ReflectionRequest::Environment => {
-            let [path]: [Value; 1] = arguments
-                .try_into()
-                .map_err(|_| TaskHalt::new("`.env` received the wrong number of arguments"))?;
-            let path = context.evaluate_key_path(&path)?;
-            let environment = context.host().reflection_environment();
-            Ok(RequestResult::Return(
-                context.evaluate_path(&environment, &path)?,
-            ))
-        }
-        ReflectionRequest::DictItems => {
-            let [dict]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskHalt::new("`.dict_items` received the wrong number of arguments")
-            })?;
-            let dict = context.evaluate(&dict)?;
-            inspect_dict_items(context, &dict)
-        }
-        ReflectionRequest::Eval => evaluate_request(arguments, context),
-        ReflectionRequest::MetadataInspect => {
-            let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
-                TaskHalt::new("`.meta.inspect` received the wrong number of arguments")
-            })?;
-            let value = context.evaluate(&value)?;
-            inspect_metadata(context, &value)
-        }
-        ReflectionRequest::Log => {
-            let [severity, message]: [Value; 2] = arguments
-                .try_into()
-                .map_err(|_| TaskHalt::new("`.log` received the wrong number of arguments"))?;
-            let message = prepare_message(context, message)?;
-            let severity = parse_severity(context, severity)?;
-            emit_log(context, severity, message)?;
-            Ok(RequestResult::ReturnUnit)
-        }
-        ReflectionRequest::TaskNew => {
-            let [effect]: [Value; 1] = arguments
-                .try_into()
-                .map_err(|_| TaskHalt::new("`.task.new` received the wrong number of arguments"))?;
-            let eval_context = context.eval_context().clone();
-            let query_writer = context.host().query_writer().ok_or_else(|| {
-                TaskHalt::new("current reflection host does not support task status queries")
-            })?;
-            let values = context.values();
-            let effect = values.clone_core(&effect)?;
-            let launched = values.wrap(task_status_query_value(
-                &values,
-                EvaluationTaskStatus::Launched,
-            ));
-            let handle =
-                if let Some(mut transaction) = context.transaction() {
-                    let result = transaction
-                        .store()
-                        .reserve_query_with(launched.clone())
-                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let pending = eval_context
-                        .reserve_reflection_task(effect)
-                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let handle = Arc::new(TaskHandleCell {
-                        runtime: eval_context.values().runtime_id(),
-                        task: pending.handle().clone(),
-                        status: result.clone(),
-                    });
-                    let publisher =
-                        task_status_publisher(query_writer, result, eval_context.values().clone());
-                    transaction.parts().1.reflection_journal().updates.push(
-                        ReflectionUpdate::Launch {
-                            task: pending,
-                            publisher,
-                        },
-                    );
-                    handle
-                } else {
-                    let snapshot = context.host().snapshot();
-                    let mut store = StoreJournal::new(snapshot.store().clone());
-                    let result = store
-                        .reserve_query_with(launched)
-                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let pending = eval_context
-                        .reserve_reflection_task(effect)
-                        .map_err(|error| TaskHalt::new(error.as_ref()))?;
-                    let handle = Arc::new(TaskHandleCell {
-                        runtime: eval_context.values().runtime_id(),
-                        task: pending.handle().clone(),
-                        status: result.clone(),
-                    });
-                    let publisher =
-                        task_status_publisher(query_writer, result, eval_context.values().clone());
-                    let mut journal = S::Journal::default();
-                    journal
-                        .reflection_journal()
-                        .updates
-                        .push(ReflectionUpdate::Launch {
-                            task: pending,
-                            publisher,
-                        });
-                    match context.host().commit(TaskCommit::new(
-                        store,
-                        snapshot.extra().clone(),
-                        journal,
-                    )) {
-                        CommitResult::Committed => context.committed(),
-                        CommitResult::Conflict => {
-                            return Err(TaskHalt::new("fresh task reservation conflicted"));
-                        }
-                        CommitResult::MissingVolume(volume) => {
-                            return Err(TaskHalt::new(format!(
-                                "private query volume {} is unavailable",
-                                volume.get()
-                            )));
-                        }
-                        CommitResult::Closed => return Ok(RequestResult::Cancelled),
-                    }
-                    handle
-                };
-            Ok(RequestResult::Return(task_handle_value(
-                context.eval_context(),
-                handle,
-            )))
-        }
-        ReflectionRequest::TaskJoin => {
-            let handle = task_handle_argument(context, arguments, "task.join")?;
-            ensure_runtime_task(context.eval_context(), &handle)?;
-            match context.eval_context().poll_reflection_task(&handle.task) {
-                EvaluationWaitPoll::Pending(wait) => Err(TaskHalt::blocked(wait)),
-                EvaluationWaitPoll::Complete(value) => {
-                    Ok(RequestResult::Return(Value::from_runtime_root(*value)))
-                }
-                EvaluationWaitPoll::Failed(error) => {
-                    handle.task.acknowledge_propagated_failure();
-                    Err(TaskHalt::rooted_failure(error)
-                        .with_core_context(task_join_context(handle.task.id())))
-                }
-                EvaluationWaitPoll::Cancelled => {
-                    Err(TaskHalt::new("joined reflection task was cancelled"))
-                }
-                EvaluationWaitPoll::Abandoned => Err(TaskHalt::new(
-                    "joined reflection task was abandoned when its evaluation session closed",
-                )
-                .with_core_context(task_join_context(handle.task.id()))),
-                EvaluationWaitPoll::Exited => Err(TaskHalt::new(
-                    "joined reflection task exited without producing a result",
-                )
-                .with_core_context(task_join_context(handle.task.id()))),
-                EvaluationWaitPoll::Killed(error) => Err(TaskHalt::rooted_failure(error)
-                    .with_core_context(task_join_context(handle.task.id()))),
-            }
-        }
-        ReflectionRequest::TaskStatus => {
-            let (handle, query) = read_task_status(context, arguments, "task.status")?;
-            let Some(state) = query.value else {
-                observe_query_change(context, &handle.status, query.generation);
-                return Ok(RequestResult::Fail);
-            };
-            Ok(RequestResult::Return(state))
-        }
-        ReflectionRequest::TaskValue => {
-            let (handle, query) = read_task_status(context, arguments, "task.value")?;
-            let Some(state) = query.value else {
-                observe_query_change(context, &handle.status, query.generation);
-                return Ok(RequestResult::Fail);
-            };
-            match tagged_task_state(&context.values(), &state)? {
-                TaggedTaskState::Complete(value) => Ok(RequestResult::Return(value)),
-                TaggedTaskState::Launched | TaggedTaskState::Blocked => {
-                    observe_query_change(context, &handle.status, query.generation);
-                    Ok(RequestResult::Fail)
-                }
-                TaggedTaskState::Failed(_)
-                | TaggedTaskState::Cancelled
-                | TaggedTaskState::Abandoned
-                | TaggedTaskState::Exited
-                | TaggedTaskState::Killed => Ok(RequestResult::Fail),
-            }
-        }
-        ReflectionRequest::TaskHalt => {
-            let (handle, query) = read_task_status(context, arguments, "task.error")?;
-            let Some(state) = query.value else {
-                observe_query_change(context, &handle.status, query.generation);
-                return Ok(RequestResult::Fail);
-            };
-            match tagged_task_state(&context.values(), &state)? {
-                TaggedTaskState::Failed(error) => Ok(RequestResult::Return(error)),
-                TaggedTaskState::Cancelled => Ok(RequestResult::Return(
-                    context.values().text("reflection task was cancelled"),
-                )),
-                TaggedTaskState::Launched | TaggedTaskState::Blocked => {
-                    observe_query_change(context, &handle.status, query.generation);
-                    Ok(RequestResult::Fail)
-                }
-                TaggedTaskState::Complete(_)
-                | TaggedTaskState::Abandoned
-                | TaggedTaskState::Exited
-                | TaggedTaskState::Killed => Ok(RequestResult::Fail),
-            }
-        }
-        ReflectionRequest::TaskAcknowledgeError => {
-            let handle = task_handle_argument(context, arguments, "task.ack_error")?;
-            ensure_runtime_task(context.eval_context(), &handle)?;
-            if let Some(mut transaction) = context.transaction() {
-                transaction
-                    .parts()
-                    .1
-                    .reflection_journal()
-                    .updates
-                    .push(ReflectionUpdate::AcknowledgeError(handle.task.clone()));
-            } else {
-                handle.task.acknowledge_failure();
-                context.committed();
-            }
-            Ok(RequestResult::ReturnUnit)
-        }
-        ReflectionRequest::TaskCancel => {
-            let handle = task_handle_argument(context, arguments, "task.cancel")?;
-            ensure_runtime_task(context.eval_context(), &handle)?;
-            if let Some(mut transaction) = context.transaction() {
-                transaction
-                    .parts()
-                    .1
-                    .reflection_journal()
-                    .updates
-                    .push(ReflectionUpdate::Cancel(handle.task.clone()));
-            } else {
-                match handle.task.cancel() {
-                    EvaluationTaskCancellation::Requested => context.committed(),
-                    EvaluationTaskCancellation::Late => {}
-                }
-            }
-            Ok(RequestResult::ReturnUnit)
-        }
-    }
-}
-
-fn evaluate_request<S: TaskSpecialization>(
-    arguments: Vec<Value>,
-    context: &RequestContext<'_, S>,
-) -> Result<RequestResult, TaskHalt> {
-    let [value]: [Value; 1] = arguments
-        .try_into()
-        .map_err(|_| TaskHalt::new("`.eval` received the wrong number of arguments"))?;
-    let value = match context.evaluate(&value) {
-        Ok(value) => value,
-        Err(error) if error.blocked_on().is_some() => return Err(error),
-        Err(error) => {
-            let failure = error
-                .permanent_failure()
-                .expect("non-blocked request evaluation must retain a permanent failure");
-            return Ok(RequestResult::Return(tagged_result(
-                &context.values(),
-                &keys::ERR,
-                context
-                    .values()
-                    .wrap(crate::diagnostic::failure_diagnostic_value_with(
-                        context.eval_context().values(),
-                        failure,
-                    )),
-            )));
-        }
-    };
-    Ok(RequestResult::Return(tagged_result(
-        &context.values(),
-        &keys::OK,
-        value.into_value(),
-    )))
-}
-
 fn tagged_result(values: &Values, tag: &Key, value: Value) -> Value {
     values.wrap(CoreValue::Dict(
         Dict::new_sync().insert(
@@ -1865,29 +1576,6 @@ fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, 
     Err(TaskHalt::new("reflection task status is malformed"))
 }
 
-fn task_handle_argument<S: TaskSpecialization>(
-    context: &RequestContext<'_, S>,
-    arguments: Vec<Value>,
-    request: &str,
-) -> Result<Arc<TaskHandleCell>, TaskHalt> {
-    let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
-        TaskHalt::new(format!(
-            "`.{request}` received the wrong number of arguments"
-        ))
-    })?;
-    let handle = context.evaluate(&handle)?;
-    handle.with_core(|value| {
-        let CoreValue::Opaque(handle) = value else {
-            return Err(TaskHalt::new(format!(
-                "`.{request}` requires a reflection task handle"
-            )));
-        };
-        handle
-            .downcast::<TaskHandleCell>(context.eval_context().values())
-            .ok_or_else(|| TaskHalt::new(format!("`.{request}` requires a reflection task handle")))
-    })?
-}
-
 fn ensure_runtime_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {
     if handle.runtime != context.values().runtime_id() {
         Err(TaskHalt::new(
@@ -1896,50 +1584,6 @@ fn ensure_runtime_task(context: &EvalContext, handle: &TaskHandleCell) -> Result
     } else {
         Ok(())
     }
-}
-
-struct QueryRead {
-    value: Option<Value>,
-    generation: u64,
-}
-
-fn read_task_status<S: TaskSpecialization>(
-    context: &mut RequestContext<'_, S>,
-    arguments: Vec<Value>,
-    request: &str,
-) -> Result<(Arc<TaskHandleCell>, QueryRead), TaskHalt> {
-    let handle = task_handle_argument(context, arguments, request)?;
-    ensure_runtime_task(context.eval_context(), &handle)?;
-    let status = read_query(context, &handle.status)?;
-    Ok((handle, status))
-}
-
-fn read_query<S: TaskSpecialization>(
-    context: &mut RequestContext<'_, S>,
-    handle: &Arc<EvaluationQueryHandle>,
-) -> Result<QueryRead, TaskHalt> {
-    let transaction_generation = context.transaction_generation();
-    let (result, generation) = if let Some(mut transaction) = context.transaction() {
-        let generation =
-            transaction_generation.expect("active transaction must have a snapshot generation");
-        (transaction.store().peek_query(handle), generation)
-    } else {
-        let snapshot = context.host().snapshot();
-        (snapshot.store().poll_query(handle), snapshot.generation())
-    };
-    let EvaluationQueryPoll::State { value, .. } = result else {
-        return Err(TaskHalt::new(
-            "query handle does not belong to this runtime's protected query domain",
-        ));
-    };
-    let state = context.evaluate(&value)?;
-    let values = context.values();
-    let value = match state.with_core(|state| decode_query_state(&values, state))? {
-        Some(EvaluationQueryState::Pending) => None,
-        Some(EvaluationQueryState::Complete(result)) => Some(result),
-        None => return Err(TaskHalt::new("query handle has been retired")),
-    };
-    Ok(QueryRead { value, generation })
 }
 
 fn observe_query_change<S: TaskSpecialization>(
@@ -2085,10 +1729,18 @@ mod tests {
         }
     }
 
-    fn assert_query_read_inventory(read: &QueryRead) {
-        let QueryRead { value, generation } = read;
-        let _: &Option<Value> = value;
-        let _: &u64 = generation;
+    fn assert_reflection_work_inventory(work: &ReflectionRequestWork) {
+        match &work.operation {
+            ReflectionRequestOperation::Environment(_)
+            | ReflectionRequestOperation::Eval(_)
+            | ReflectionRequestOperation::Inspection(_)
+            | ReflectionRequestOperation::Log(_)
+            | ReflectionRequestOperation::TaskCreate(_)
+            | ReflectionRequestOperation::TaskControl(_)
+            | ReflectionRequestOperation::TaskJoin(_)
+            | ReflectionRequestOperation::TaskQuery(_)
+            | ReflectionRequestOperation::Poisoned => {}
+        }
     }
 
     fn assert_query_mutation_inventory(mutation: &ReflectionQueryMutation<'_>) {
@@ -2102,7 +1754,7 @@ mod tests {
         let _: fn(&ReflectionUpdate, &ReflectionJournal) = assert_reflection_journal_inventory;
         assert_task_handle_family_shape();
         let _: fn(&TaggedTaskState) = assert_tagged_task_state_inventory;
-        let _: fn(&QueryRead) = assert_query_read_inventory;
+        let _: fn(&ReflectionRequestWork) = assert_reflection_work_inventory;
         let _: fn(&ReflectionQueryMutation<'_>) = assert_query_mutation_inventory;
     }
 
@@ -2146,13 +1798,10 @@ mod tests {
         }
 
         let (value, retained) = retained_request_value(&domain);
-        let read = QueryRead {
-            value: Some(value),
-            generation: 1,
-        };
+        let work = ReflectionRequestWork::new(ReflectionRequest::Eval, vec![value]);
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
-        drop(read);
+        drop(work);
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_none());
     }

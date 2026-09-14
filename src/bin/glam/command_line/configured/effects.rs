@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use glam::reflection::{
     EffectRequestSpec, ReflectionRequest, RequestContext, RequestResult, TaskHalt,
-    TaskSpecialization, environment_diagnostic_request_specs, handle_reflection_request,
+    TaskSpecialization, environment_diagnostic_request_specs,
 };
 use glam::{ModuleInput, Value};
 
@@ -12,7 +12,7 @@ use super::super::model::CommandEdit;
 use super::host::{CliHost, CliJournal};
 use super::path::{self, PathAccess, PathKind};
 use super::token;
-use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
+use crate::request_work::{ReflectionOrSynchronousRequestWork, SynchronousTaskSpecialization};
 
 const CASE_EXIT_TAG: [&str; 5] = ["cli_runtime", "v0", "request", "case", "exit"];
 
@@ -41,7 +41,7 @@ pub(super) enum CliRequest {
 impl TaskSpecialization for CliEffects {
     type Host = CliHost;
     type Request = CliRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = ReflectionOrSynchronousRequestWork<Self>;
     type Snapshot = super::host::CliSnapshot;
     type Journal = CliJournal;
 
@@ -112,7 +112,12 @@ impl TaskSpecialization for CliEffects {
     }
 
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
+        match request {
+            CliRequest::Reflection(request) => {
+                ReflectionOrSynchronousRequestWork::reflection(request, arguments)
+            }
+            request => ReflectionOrSynchronousRequestWork::synchronous(request, arguments),
+        }
     }
 }
 
@@ -124,9 +129,7 @@ impl SynchronousTaskSpecialization for CliEffects {
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, TaskHalt> {
         match request {
-            CliRequest::Reflection(request) => {
-                handle_reflection_request(request, arguments, context)
-            }
+            CliRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
             CliRequest::ReadKeyword => read_keyword(arguments, context),
             CliRequest::ReadText => read_text(arguments, context),
             CliRequest::ReadToken => read_token(arguments, context),

@@ -1205,10 +1205,19 @@ mod root_inventory_tests {
         // One declaration belongs to the trait; every implementation supplies
         // the remaining eleven constructors.
         assert_eq!(count(concat!("fn start", "_request(")), 12);
-        // Ten in-tree implementations use the deliberately temporary bridge;
-        // the external embedding fixture exercises a real pollable owner.
-        assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 10);
-        assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 10);
+        // Nine implementations still use the deliberately temporary bridge
+        // for specialization-specific requests. Reusable reflection arms in
+        // the three composed handlers already use durable pollable work, and
+        // the external embedding fixture is fully pollable.
+        // Six use it directly; two composed associated types contain the same
+        // substring while delegating only their non-reflection arms.
+        assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 8);
+        assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 9);
+        assert_eq!(
+            count(concat!("ReflectionOrSynchronous", "RequestWork<Self>")),
+            2
+        );
+        assert_eq!(count(concat!("type Request", "Work = TestRequestWork;")), 2);
 
         let task_specialization = sources[0]
             .split("pub trait TaskSpecialization")
@@ -1223,6 +1232,7 @@ mod root_inventory_tests {
         assert!(reflection_facade.contains(
             "pub(crate) use protocol::{SynchronousRequestWork, SynchronousTaskSpecialization};"
         ));
+        assert_eq!(count(concat!("handle_reflection", "_request")), 0);
     }
 
     fn retained_protocol_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {

@@ -3,6 +3,7 @@
 
 use glam::Value;
 use glam::reflection::{
+    ReflectionHost, ReflectionRequest, ReflectionRequestWork, ReflectionTransaction,
     RequestContext, SpecializationRequestInput, SpecializationRequestPoll,
     SpecializationRequestWork, TaskHalt, TaskSpecialization,
 };
@@ -58,5 +59,39 @@ where
         self.request = None;
         self.arguments = None;
         Ok(SpecializationRequestPoll::Complete(result))
+    }
+}
+
+pub(crate) enum ReflectionOrSynchronousRequestWork<S: TaskSpecialization> {
+    Reflection(ReflectionRequestWork),
+    Synchronous(SynchronousRequestWork<S>),
+}
+
+impl<S: TaskSpecialization> ReflectionOrSynchronousRequestWork<S> {
+    pub(crate) fn reflection(request: ReflectionRequest, arguments: Vec<Value>) -> Self {
+        Self::Reflection(ReflectionRequestWork::new(request, arguments))
+    }
+
+    pub(crate) fn synchronous(request: S::Request, arguments: Vec<Value>) -> Self {
+        Self::Synchronous(SynchronousRequestWork::new(request, arguments))
+    }
+}
+
+impl<S> SpecializationRequestWork<S> for ReflectionOrSynchronousRequestWork<S>
+where
+    S: SynchronousTaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    fn poll(
+        &mut self,
+        specialization: &S,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, S>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        match self {
+            Self::Reflection(work) => work.poll(specialization, input, context),
+            Self::Synchronous(work) => work.poll(specialization, input, context),
+        }
     }
 }

@@ -3253,7 +3253,7 @@ Partition this work as follows:
      after suspension.
    - **W5C.5b.3c — Complete (2026-09-14): Join.** Migrate task join using an explicit shared-completion
      transition rather than a blocked callback error.
-5. **W5C.5b.4 — Reusable closure.** Relatch request activity, retry, structured
+5. **W5C.5b.4 — Complete (2026-09-14): Reusable closure.** Relatch request activity, retry, structured
    failure, and runtime-root inventories. Remove the reusable family's access
    to the transitional adapter.
 

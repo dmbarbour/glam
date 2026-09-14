@@ -6,7 +6,7 @@ use glam::reflection::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReflectionJournal, ReflectionQueryWriter,
     ReflectionRequest, ReflectionServices, ReflectionTransaction, RequestContext, RequestResult,
     TaskCommit, TaskEnvironment, TaskHost, TaskSpecialization, TaskValidation, ValidationResult,
-    handle_reflection_request, reflection_request_specs,
+    reflection_request_specs,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
@@ -16,7 +16,7 @@ use glam::{
 
 use super::supervisor::LogHost;
 use crate::DiagnosticBusLocal;
-use crate::request_work::{SynchronousRequestWork, SynchronousTaskSpecialization};
+use crate::request_work::{ReflectionOrSynchronousRequestWork, SynchronousTaskSpecialization};
 
 #[derive(Clone)]
 pub(crate) struct MainEffects {
@@ -62,7 +62,7 @@ fn event_journal<'a>(
 impl TaskSpecialization for MainEffects {
     type Host = LoggerTaskHost;
     type Request = MainRequest;
-    type RequestWork = SynchronousRequestWork<Self>;
+    type RequestWork = ReflectionOrSynchronousRequestWork<Self>;
     type Snapshot = MainSnapshot;
     type Journal = MainJournal;
 
@@ -95,7 +95,12 @@ impl TaskSpecialization for MainEffects {
     }
 
     fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
-        SynchronousRequestWork::new(request, arguments)
+        match request {
+            MainRequest::Reflection(request) => {
+                ReflectionOrSynchronousRequestWork::reflection(request, arguments)
+            }
+            request => ReflectionOrSynchronousRequestWork::synchronous(request, arguments),
+        }
     }
 }
 
@@ -107,9 +112,7 @@ impl SynchronousTaskSpecialization for MainEffects {
         context: &mut RequestContext<'_, Self>,
     ) -> Result<RequestResult, glam::reflection::TaskHalt> {
         match request {
-            MainRequest::Reflection(request) => {
-                handle_reflection_request(request, arguments, context)
-            }
+            MainRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
             MainRequest::ReadLog => read_log(context),
             MainRequest::WriteStderr => {
                 let [value]: [Value; 1] = arguments.try_into().map_err(|_| {

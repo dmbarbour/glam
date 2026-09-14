@@ -21,9 +21,9 @@ use crate::reflection::{
     EffectLifecycleTerminal, EffectRun, EvaluationQueryHandle, ExactConflictAnalysis,
     FingerprintConflictAnalysis, IsolatedEffectSearch, IsolatedSearchPoll, ReasoningSessionId,
     ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionQueryMutation,
-    ReflectionQueryWriter, ReflectionRequest, ReflectionServices, ReflectionStore,
-    ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
-    ValidationResult, handle_reflection_request, reflection_request_specs,
+    ReflectionQueryWriter, ReflectionRequest, ReflectionRequestWork, ReflectionServices,
+    ReflectionStore, ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment,
+    TaskValidation, ValidationResult, reflection_request_specs,
 };
 
 fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
@@ -150,6 +150,25 @@ enum TestRequest {
     Scoped,
 }
 
+enum TestRequestWork {
+    Reflection(ReflectionRequestWork),
+    Synchronous(super::super::protocol::SynchronousRequestWork<TestEffects>),
+}
+
+impl SpecializationRequestWork<TestEffects> for TestRequestWork {
+    fn poll(
+        &mut self,
+        specialization: &TestEffects,
+        input: Option<SpecializationRequestInput>,
+        context: &mut RequestContext<'_, TestEffects>,
+    ) -> Result<SpecializationRequestPoll, TaskHalt> {
+        match self {
+            Self::Reflection(work) => work.poll(specialization, input, context),
+            Self::Synchronous(work) => work.poll(specialization, input, context),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TestSnapshot {
     diagnostics: Arc<[Diagnostic]>,
@@ -173,7 +192,7 @@ impl ReflectionTransaction for TestJournal {
 impl TaskSpecialization for TestEffects {
     type Host = TestHost;
     type Request = TestRequest;
-    type RequestWork = super::super::protocol::SynchronousRequestWork<Self>;
+    type RequestWork = TestRequestWork;
     type Snapshot = TestSnapshot;
     type Journal = TestJournal;
 
@@ -221,7 +240,14 @@ impl TaskSpecialization for TestEffects {
         request: Self::Request,
         arguments: Vec<PublicValue>,
     ) -> Self::RequestWork {
-        super::super::protocol::SynchronousRequestWork::new(request, arguments)
+        match request {
+            TestRequest::Reflection(request) => {
+                TestRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
+            }
+            request => TestRequestWork::Synchronous(
+                super::super::protocol::SynchronousRequestWork::new(request, arguments),
+            ),
+        }
     }
 }
 
@@ -236,9 +262,7 @@ impl super::super::protocol::SynchronousTaskSpecialization for TestEffects {
             .host()
             .probe_callback_boundary(CallbackProbeKind::Specialization);
         match request {
-            TestRequest::Reflection(request) => {
-                handle_reflection_request(request, arguments, context)
-            }
+            TestRequest::Reflection(_) => unreachable!("reflection requests use durable work"),
             TestRequest::ReadLog => read_test_log(context),
             TestRequest::WriteStderr => {
                 let [value]: [PublicValue; 1] = arguments

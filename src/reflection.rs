@@ -35,8 +35,8 @@ pub use search::{
 pub(crate) use requests::assert_task_handle_family_shape;
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
-    ReflectionRequest, ReflectionServices, ReflectionTransaction,
-    environment_diagnostic_request_specs, handle_reflection_request, reflection_request_specs,
+    ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
+    environment_diagnostic_request_specs, reflection_request_specs,
 };
 pub(crate) use requests::{parse_severity, prepare_message};
 pub use store::{
