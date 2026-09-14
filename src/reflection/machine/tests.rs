@@ -1723,6 +1723,37 @@ fn assert_control_root_inventory(
 type ControlRootInventoryFn =
     fn(&Control, &Continuation, &Delimiter, &CapturedContinuation, &ResetFrame, &CapturedLayer);
 
+#[test]
+fn reset_stack_legacy_helper_surface_is_latched_before_migration() {
+    let source = include_str!("../machine.rs");
+    let expected = [
+        ("value_key_in", 4),
+        ("reset_stack_value_in", 3),
+        ("reset_frames_in", 5),
+        ("reset_frames_from_value_in", 4),
+        ("with_reset_frames_in", 3),
+        ("replace_reset_frames", 4),
+        ("with_reset_stack_value_in", 3),
+    ];
+
+    for (name, expected) in expected {
+        let needle = format!("{name}(");
+        let actual = source
+            .match_indices(&needle)
+            .filter(|(index, _)| {
+                source[..*index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|prior| !prior.is_ascii_alphanumeric() && prior != '_')
+            })
+            .count();
+        assert_eq!(
+            actual, expected,
+            "reset-stack helper `{name}` changed; update W5C.4's migration inventory"
+        );
+    }
+}
+
 fn assert_fixpoint_root_inventory(
     root: &FixRoot<TestEffects>,
     active: &ActiveFix<TestEffects>,

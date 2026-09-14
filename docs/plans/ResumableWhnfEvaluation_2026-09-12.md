@@ -2729,6 +2729,8 @@ when control later applies it.
 
 ####### W5C.4a.0 — Decoder contract and source latch
 
+**Status: complete (2026-09-14).**
+
 Inventory every production read, validation, encoding, and replacement of
 `continuation_state`. Record for each caller whether it needs the original
 serialized stack, decoded `ResetFrame`s, or a newly encoded stack. Add a
@@ -2742,6 +2744,17 @@ only the source/list cursors, the current field, and completed continuation
 values need runtime roots. It returns decoded frames without observing or
 mutating `Control`, `next_control_order`, `next_continuation`, the continuation
 table, or branch state.
+
+Completion record: a source-backed fixture now latches the seven synchronous
+helper families and their remaining definition/call counts. The selected
+standalone representation is one `ResetStackMachine` containing the original
+serialized root, an explicit state enum, completed decoded frames, and at most
+one active shared WHNF/list/key submachine. Its terminal result returns both
+the original stack root and decoded frames so fixpoint restore need not
+re-encode or discard the exact saved value. W5C.4a.1--a.3 introduce the
+compile-exhaustive state vocabulary together because splitting an enum from
+its owning transitions would create deliberately nonfunctional intermediate
+states; their semantic and verification checkpoints remain separate.
 
 ####### W5C.4a.1 — Stack shell and logical frame-list traversal
 
