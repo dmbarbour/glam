@@ -2327,6 +2327,8 @@ here. Preserve referential-spec validation and source-owned net journals.
 
 #### W6G — Residual resumable-machine overhead
 
+##### W6G.1 — Existing compatibility and scheduling overhead
+
 Investigate the bounded performance regression accepted by W4E. The
 duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
 seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
@@ -2342,6 +2344,51 @@ does not remain in `work_by_session`, and the measured experiment produced no
 improvement. Close W6G by restoring comparable fixture cost or by recording a
 measured, justified residual with ownership assigned to a later performance
 phase.
+
+##### W6G.2 — Regional standard-effect fusion investigation
+
+Investigate extending the regional-WHNF principle to consecutive standard
+effect steps. A bounded sequence of callback-free effect reductions should be
+able to share one matching value-access region, retain intermediate values as
+regional raw values, and publish roots only when the quantum yields, suspends,
+or crosses an orchestration boundary. This is an optimization of the existing
+effect semantics, not permission to hide effectful host work beneath managed
+access.
+
+Begin with `.r`, `.seq`, `.get`, `.set`, and their continuation applications.
+An operation is eligible only while it is constructively known to be local and
+callback-free, requires no coordinator or host publication, encounters no
+unavailable lazy, promise, or reflection dependency, and has remaining
+deterministic work budget. Lazy or promised results, reflection and task
+operations, heap or volume operations, choice and control operations, and
+specialized requests initially leave the regional driver through an explicit
+durable boundary. Broaden the eligible set only after the same properties are
+proved for another family.
+
+First measure managed-access entries, root publications, WHNF work units, and
+request dispatches for long standard-effect chains under the current W5
+fusion. If the traffic is material, prototype a regional standard-effect work
+form analogous to `drive_regional`; do not keep a managed-access region open
+merely to satisfy the prototype. The target is root traffic proportional to
+real quantum and orchestration boundaries rather than to uninterrupted effect
+depth.
+
+Verification must compare the regional path with the unfused interpreter and
+prove that:
+
+- an uninterrupted eligible chain does not register a root per effect step;
+- every request and continuation application consumes deterministic budget;
+- budget yield publishes one complete durable checkpoint and resumes without
+  replay;
+- forced suspension after each eligible step preserves completed state and
+  the exact pending lazy or promise identity; and
+- every ineligible operation closes regional access before scheduler,
+  reflection, transaction, or host coordination begins.
+
+Resolve this investigation before W7 so its final budget, fairness, and
+small-stack verification exercises the selected effect-driver shape. If the
+measurements do not justify implementation, retain the bounded W5 path and
+record the evidence and a narrower future optimization owner.
 
 W6 closure also revisits the temporary one-ordinary-machine-per-demand-session
 admission rule introduced to contain recursive compatibility evaluation.
