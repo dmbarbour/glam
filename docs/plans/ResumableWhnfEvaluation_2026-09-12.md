@@ -2458,14 +2458,13 @@ Its atomic snapshot is its commit point: `.heap.get` and protected-volume
 including an overlapping update, may replay the read or its continuation.
 These standalone reads therefore record no retry checkpoint.
 
-Retryable absence is a third, API-declared behavior rather than a property of
-all host reads. An operation such as reading an empty input FIFO may specify
-that absence diverges after making a retry observation. A later qualifying
-state change retries that same operation without advancing `.alt`. Each such
-operation must state this behavior in its API contract and retain the
-observation needed by its chosen validation policy. An API which does not
-offer that behavior leaves users to express retry explicitly with `.cut` and
-an error or failure path.
+Retryable absence is a common instance of transactional divergence, not a
+separate conflict regime. Users can express this via a pattern such as
+`(.cut (.alt HappyPath DivergeOnFailure))`, using errors for the divergence.
+Some system-provided APIs, such as reading from a queue, may use this
+construct implicitly to enable useful optimizations such as more-precise
+read-write conflict analysis for queues. This must be clearly documented in
+the API specification.
 
 Repairs required before closing this checkpoint:
 
@@ -2477,33 +2476,45 @@ Repairs required before closing this checkpoint:
    conflict restores the appropriate cut/search checkpoint. A still-current
    transaction updates its wake baseline and re-registers the unchanged exact
    dependency.
-3. Keep API-declared retryable absence on its explicit observation path. Do
-   not infer it merely because an operation read host state or returned a lazy
-   value.
+3. Preserve retryable divergence as the composition of an optimistic
+   observation and divergence which does not advance `.alt`. A specialized
+   API may install the same observation and divergence state directly, but a
+   successful host read or returned lazy value does not imply it by itself.
 4. Perform revalidation outside managed value access and through the same
    authoritative host state and conflict rules used by commit. Preserve the
    existing observation-epoch subscribe-and-recheck protocol so a mutation
    racing validation or re-registration cannot be lost.
 
-The forced-order verification matrix is:
+The primary forced-order verification matrix is:
 
-| Read/attempt | Concurrent change | Required outcome |
+| Attempt state | Concurrent event | Required outcome |
 | --- | --- | --- |
-| Standalone heap or volume read | Disjoint path or volume | The original lazy snapshot and continuation complete once; no replay |
-| Standalone heap or volume read | Exact, ancestor, or descendant overlap | The original lazy snapshot and continuation still complete once; no replay |
-| Explicit transaction, exact strategy | Disjoint path or volume, including protected task-status updates | Broad wake may revalidate, but the suspended exact dependency and continuation are retained |
-| Explicit transaction, exact strategy | Exact, ancestor, or descendant overlap | Validation reports conflict and restores the transaction checkpoint |
-| Explicit transaction, fingerprint strategy | Any overlap | Validation must restart; conservative collision retries remain permitted |
-| Explicit transaction, coarse strategy | Any reflection-store write after an observed read | Validation restarts according to the deliberately coarse policy |
-| API-declared retryable absence | No qualifying change | The operation remains divergent and does not advance `.alt` |
-| API-declared retryable absence | Qualifying state change | The same operation retries according to its documented observation policy |
+| Standalone heap or volume read has returned | Any later change, whether disjoint or overlapping | The original lazy snapshot and continuation complete once; no replay |
+| Explicit transaction is suspended on an exact dependency | No publication | The dependency remains registered and resumes the retained continuation when completed |
+| Explicit transaction is suspended on an exact dependency | Non-conflicting publication | A broad wake may revalidate, but the dependency and continuation are retained and re-registered |
+| Explicit transaction is suspended on an exact dependency | Conflicting publication | Validation abandons the attempt and restores the transaction checkpoint |
+| Explicit transaction has reached retryable divergence | No publication | The attempt remains divergent and does not advance `.alt` |
+| Explicit transaction has reached retryable divergence | Non-conflicting publication | Revalidation retains the same divergence without replay or `.alt` advancement |
+| Explicit transaction has reached retryable divergence | Conflicting publication | Validation restores the transaction checkpoint and retries the optimistic attempt |
 
-Each concurrency row must suspend after the read but before its exact
-dependency completes, force the named state publication, then release the
-dependency. Counters must latch snapshot/read, continuation, validation, and
+Exercise those states under the configured validation policies:
+
+| Policy | Required evidence |
+| --- | --- |
+| Exact reflection-store analysis | Disjoint paths and protected volumes do not conflict; exact, ancestor, and descendant overlaps do |
+| Fingerprint reflection-store analysis | Every overlap conflicts; conservative collision retries remain permitted |
+| Coarse reflection-store analysis | Any reflection-store write after an observed read conflicts |
+| Specialization-owned analysis | The specialization's retained journal or cursor, rather than the broad wake generation, decides conflict |
+
+Each row involving publication must force that publication after the read and
+before either the exact dependency completes or retryable divergence is
+reported. Counters must latch snapshot/read, continuation, validation, and
 restart counts rather than relying on repeated scheduling. Also verify that a
 mutation between successful validation and blocked-work registration is
-observed by the existing epoch protocol.
+observed by the existing epoch protocol. Cover retryable divergence both as an
+unresolved exact dependency and as an error after an optimistic observation;
+the latter must never select another `.alt` branch merely because it is an
+error.
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
@@ -2553,6 +2564,18 @@ and any other specialization implementations. Add a hostile fixture which
 would count duplicate callback entry or duplicate host activity if a demand
 were replayed. Close the compatibility surface rather than leaving two
 different suspension contracts under the same trait.
+
+The logger migration owns the optimized-API conformance fixture. Existing
+tests already cover an empty `.read_log` suspension, retry after diagnostic
+arrival, clearing the retry checkpoint after a committed read, and an
+observed error which does not advance `.alt`. Add a paired fixture showing
+that the specialized empty-FIFO request has the same observable
+retry/divergence behavior as an explicitly authored
+`.cut (.alt HappyPath DivergeOnFailure)`. Force an unrelated-endpoint
+publication, an append at the observed empty boundary, and a competing
+consumer: the FIFO cursor must decide which events conflict while the broad
+generation merely schedules revalidation. Retain an end-to-end configured
+logger case beside the machine-level control fixture.
 
 ##### W5C.6 — Recursive helper retirement and focused verification
 
