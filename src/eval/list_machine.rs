@@ -14,18 +14,18 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::whnf::WhnfComputation;
 
-pub(super) enum ListFrontPoll {
+pub(crate) enum ListFrontPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Pending(crate::evaluation::WorkDependency),
     Yielded,
     Failed(RuntimeFailureRoot),
 }
 
-pub(super) struct ListFrontMachine {
+pub(crate) struct ListFrontMachine {
     current: RuntimeValueRoot,
     chunk: Option<WhnfComputation>,
     suffix: Option<RuntimeValueRoot>,
-    source_owner: LazyId,
+    source_owner: Option<LazyId>,
 }
 
 impl ListFrontMachine {
@@ -34,11 +34,20 @@ impl ListFrontMachine {
             current: list,
             chunk: None,
             suffix: None,
-            source_owner,
+            source_owner: Some(source_owner),
         }
     }
 
-    pub(super) fn poll(
+    pub(crate) fn unowned(list: RuntimeValueRoot) -> Self {
+        Self {
+            current: list,
+            chunk: None,
+            suffix: None,
+            source_owner: None,
+        }
+    }
+
+    pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
@@ -92,10 +101,11 @@ impl ListFrontMachine {
                 )))
             }
             ListFrontStep::Deferred { deferred, suffix } => {
-                self.chunk = Some(
-                    WhnfComputation::from_root(context.root_value(deferred))
-                        .with_source_owner(self.source_owner),
-                );
+                let mut chunk = WhnfComputation::from_root(context.root_value(deferred));
+                if let Some(source_owner) = self.source_owner {
+                    chunk = chunk.with_source_owner(source_owner);
+                }
+                self.chunk = Some(chunk);
                 self.suffix = Some(context.root_value(Value::List(suffix)));
                 ListFrontPoll::Yielded
             }

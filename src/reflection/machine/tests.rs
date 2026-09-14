@@ -982,16 +982,23 @@ fn assert_execution_root_inventory(
     let _: &Vec<CutFrame<TestEffects>> = cuts;
 
     let EffectDecodeWork {
-        computation,
-        purpose,
+        operation,
         branch,
         scope_depth,
     } = supplied_decoding;
-    let _: &crate::eval::whnf::WhnfComputation = computation;
-    match purpose {
-        EffectDecodePurpose::EffectObject
-        | EffectDecodePurpose::Function
-        | EffectDecodePurpose::ApplicationResult => {}
+    match operation {
+        EffectDecodeOperation::Whnf {
+            computation,
+            purpose,
+        } => {
+            let _: &crate::eval::whnf::WhnfComputation = computation;
+            match purpose {
+                EffectDecodePurpose::EffectObject
+                | EffectDecodePurpose::Function
+                | EffectDecodePurpose::ApplicationResult => {}
+            }
+        }
+        EffectDecodeOperation::Request(request) => assert_request_decode_inventory(request),
     }
     let _: &Branch<TestEffects> = branch;
     let _: &usize = scope_depth;
@@ -1088,6 +1095,217 @@ fn assert_execution_root_inventory(
             let _: &usize = index;
         }
         WakeAction::RestartSearch => {}
+    }
+}
+
+fn assert_request_decode_inventory(request: &RequestDecodeWork<TestRequest>) {
+    let RequestDecodeWork { state } = request;
+    match state {
+        RequestDecodeState::Select(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
+        RequestDecodeState::PayloadWhnf { selection, demand } => {
+            assert_request_selection_inventory(selection);
+            let _: &crate::eval::whnf::WhnfComputation = demand;
+        }
+        RequestDecodeState::PayloadItems {
+            selection,
+            front,
+            arguments,
+        } => {
+            assert_request_selection_inventory(selection);
+            let _: &crate::eval::ListFrontMachine = front;
+            let _: &Vec<RuntimeValueRoot> = arguments;
+        }
+        RequestDecodeState::ResumeTask {
+            continuation,
+            value,
+            demand,
+        } => {
+            let _: &RuntimeValueRoot = continuation;
+            let _: &RuntimeValueRoot = value;
+            let _: &crate::eval::whnf::WhnfComputation = demand;
+        }
+        RequestDecodeState::ResumeContinuation {
+            task,
+            value,
+            demand,
+        } => {
+            let _: &EvaluationTaskId = task;
+            let _: &RuntimeValueRoot = value;
+            let _: &crate::eval::whnf::WhnfComputation = demand;
+        }
+        RequestDecodeState::Poisoned => {}
+    }
+}
+
+fn drive_request_decode(
+    decoder: &mut RequestDecodeWork<TestRequest>,
+    context: &EvalContext,
+    tags: &Tags,
+) -> Result<Request<TestRequest>, TaskHalt> {
+    let poll_context = EvaluationPollContext::for_context(context);
+    for _ in 0..64 {
+        match decoder.poll(&poll_context, context, tags, &[], 1) {
+            RequestDecodePoll::Ready(request) => return Ok(request),
+            RequestDecodePoll::Continue => {}
+            RequestDecodePoll::Yielded => {}
+            RequestDecodePoll::Pending(WorkDependency::Wait(wait)) => {
+                assert!(matches!(
+                    context.pump_wait(&wait, 4_096),
+                    crate::evaluation::EvaluationPumpOutcome::TargetReady
+                        | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted
+                ));
+            }
+            RequestDecodePoll::Pending(WorkDependency::Promise(_)) => {
+                panic!("semantic request fixture unexpectedly exposed a resolver promise")
+            }
+            RequestDecodePoll::Pending(WorkDependency::Test(_)) => {
+                panic!("semantic request fixture unexpectedly exposed a test dependency")
+            }
+            RequestDecodePoll::Failed(error) => return Err(error),
+        }
+    }
+    panic!("bounded request decoder fixture did not terminate")
+}
+
+#[test]
+fn request_decode_resumes_the_exact_lazy_payload_without_replay() {
+    let (assembler, _) = compile_effect(".r ()");
+    let values = assembler.core_values();
+    let context = EvalContext::isolated(values.clone());
+    let tags = Tags::new();
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let request = values.construct_runtime_value_root(|access| {
+        let evaluations = evaluations.clone();
+        let payload = LazyValue::semantic_thunk_in(access, "request payload", move |_| {
+            evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::List(List::from_values(vec![Value::Number(
+                41.into(),
+            )])))
+        });
+        Value::Dict(Dict::new_sync().insert(tags.r.clone(), Value::Lazy(payload)))
+    });
+    let mut decoder = RequestDecodeWork::new(request);
+
+    let Request::Return(value) =
+        drive_request_decode(&mut decoder, &context, &tags).expect("request should decode")
+    else {
+        panic!("fixture should decode a return request")
+    };
+    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+        assert_eq!(evaluator.project_root(&value), Value::Number(41.into()));
+    });
+    assert_eq!(
+        evaluations.load(Ordering::Acquire),
+        1,
+        "resumption must retain the original payload computation"
+    );
+}
+
+#[test]
+fn request_decode_resumes_the_exact_lazy_list_chunk_without_replay() {
+    let (assembler, _) = compile_effect(".r ()");
+    let values = assembler.core_values();
+    let context = EvalContext::isolated(values.clone());
+    let tags = Tags::new();
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let request = values.construct_runtime_value_root(|access| {
+        let evaluations = evaluations.clone();
+        let chunk = LazyValue::semantic_thunk_in(access, "request list chunk", move |_| {
+            evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::List(List::from_values(vec![Value::Number(
+                42.into(),
+            )])))
+        });
+        let payload = Value::List(List::from_thunk(chunk.into()));
+        Value::Dict(Dict::new_sync().insert(tags.r.clone(), payload))
+    });
+    let mut decoder = RequestDecodeWork::new(request);
+
+    let Request::Return(value) =
+        drive_request_decode(&mut decoder, &context, &tags).expect("request should decode")
+    else {
+        panic!("fixture should decode a return request")
+    };
+    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+        assert_eq!(evaluator.project_root(&value), Value::Number(42.into()));
+    });
+    assert_eq!(
+        evaluations.load(Ordering::Acquire),
+        1,
+        "resumption must retain the original list-chunk computation"
+    );
+}
+
+#[test]
+fn resume_request_decodes_lazy_ids_once_in_source_order() {
+    let (assembler, _) = compile_effect(".r ()");
+    let values = assembler.core_values();
+    let context = EvalContext::isolated(values.clone());
+    let tags = Tags::new();
+    let task_evaluations = Arc::new(AtomicUsize::new(0));
+    let continuation_evaluations = Arc::new(AtomicUsize::new(0));
+    let request = values.construct_runtime_value_root(|access| {
+        let task_evaluations = task_evaluations.clone();
+        let task = LazyValue::semantic_thunk_in(access, "resume task ID", move |_| {
+            task_evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Number(7.into()))
+        });
+        let continuation_evaluations = continuation_evaluations.clone();
+        let continuation =
+            LazyValue::semantic_thunk_in(access, "resume continuation ID", move |_| {
+                continuation_evaluations.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::Number(8.into()))
+            });
+        let payload = Value::List(List::from_values(vec![
+            Value::Lazy(task),
+            Value::Lazy(continuation),
+            Value::Number(99.into()),
+        ]));
+        Value::Dict(Dict::new_sync().insert(tags.resume.clone(), payload))
+    });
+    let mut decoder = RequestDecodeWork::new(request);
+
+    let Request::Resume(task, continuation, value) =
+        drive_request_decode(&mut decoder, &context, &tags).expect("request should decode")
+    else {
+        panic!("fixture should decode a resume request")
+    };
+    assert_eq!(task.get(), 7);
+    assert_eq!(continuation, 8);
+    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+        assert_eq!(evaluator.project_root(&value), Value::Number(99.into()));
+    });
+    assert_eq!(task_evaluations.load(Ordering::Acquire), 1);
+    assert_eq!(continuation_evaluations.load(Ordering::Acquire), 1);
+}
+
+fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>) {
+    match selection {
+        RequestSelection::Return
+        | RequestSelection::Seq
+        | RequestSelection::Alt
+        | RequestSelection::Fail
+        | RequestSelection::Cut
+        | RequestSelection::Fix
+        | RequestSelection::Get
+        | RequestSelection::Set
+        | RequestSelection::HeapGet
+        | RequestSelection::HeapSet
+        | RequestSelection::HeapRewrite
+        | RequestSelection::Reset
+        | RequestSelection::Shift
+        | RequestSelection::Resume
+        | RequestSelection::ExitSuccess
+        | RequestSelection::ExitError => {}
+        RequestSelection::Volume(identity) => {
+            let _: &VolumeRequestIdentity = identity;
+        }
+        RequestSelection::Specialized { request, arity } => {
+            let _: &TestRequest = request;
+            let _: &usize = arity;
+        }
     }
 }
 
@@ -1810,7 +2028,7 @@ fn effect_interpreter_callbacks_do_not_inherit_evaluator_mutators() {
 }
 
 #[test]
-fn fused_standard_chains_match_unfused_results_with_fewer_request_roots() {
+fn fused_standard_chains_match_unfused_results() {
     for (source, expected) in [
         (
             ".r \"A\" >>= (\\a -> .r \"B\" >>= (\\b -> .r (a ++ b)))",
@@ -1822,7 +2040,7 @@ fn fused_standard_chains_match_unfused_results_with_fewer_request_roots() {
         ),
     ] {
         let (assembler, effect) = compile_effect(source);
-        let (unfused, unfused_probe) = run_log_test_with_fusion(
+        let (unfused, _) = run_log_test_with_fusion(
             &assembler,
             &effect,
             Arc::new(TestHost::with_values(assembler.core_values())),
@@ -1840,12 +2058,6 @@ fn fused_standard_chains_match_unfused_results_with_fewer_request_roots() {
         assert!(
             fused_probe.fused_requests() > 0,
             "fixture did not fuse: {source}"
-        );
-        assert!(
-            fused_probe.request_roots() < unfused_probe.request_roots(),
-            "fusion should root fewer phase-local values for {source}: fused {}, unfused {}",
-            fused_probe.request_roots(),
-            unfused_probe.request_roots()
         );
     }
 }

@@ -2249,10 +2249,12 @@ tests for all three boundaries.
 The scheduled-machine surface publishes exact lazy or promise dependencies to
 the coordinator. The older direct-poll and isolated-search conveniences pump
 locally runnable wait tokens without hiding a genuinely unavailable
-dependency. Standard-request fusion now begins from the rooted parsed request;
-it retains result equivalence and its lower handoff-root count. Payload parsing
-still uses its local recursive helper and may replay only that parse phase;
-W5C owns the remaining payload, continuation, and assertion demand sites.
+dependency. Standard-request fusion now begins from the rooted parsed request
+and retains result equivalence. W5C.1 gives fused and generic dispatch the same
+single rooted request-argument handoff, eliminating the older redundant
+unfused handoff rather than retaining a misleading relative-root probe. W6G.2
+owns eliminating per-step argument roots across one uninterrupted regional
+effect quantum.
 
 The forced-suspension regression now asserts that the first application-lazy
 identity occurs exactly once across resumption. A cancellation fixture now
@@ -2308,6 +2310,8 @@ the corresponding demand owner completes.
 
 ##### W5C.1 — Request payload and identity decoding
 
+**Status: complete (2026-09-14).**
+
 Make request payload-list WHNF, list-spine extraction, and `.resume` task and
 continuation ID conversion explicit resumable decode phases. Select the
 request tag before suspending when possible, retain the exact selected payload,
@@ -2318,6 +2322,20 @@ Preserve malformed request, unknown tag, wrong arity, non-list payload, and
 invalid ID diagnostics. Force suspension independently at payload WHNF, list
 extraction, task ID, and continuation ID, and assert one application result,
 one selected request, and no duplicate nested reflection activation.
+
+Completion record: `RequestDecodeWork` now owns the selected request, exact
+payload computation, resumable logical-list front, completed rooted arguments,
+and the two ordered `.resume` ID computations. Local decoder transitions use a
+non-scheduling `Continue` result; only an exhausted child WHNF/list computation
+yields the reflection machine. This distinction preserves the existing task
+quantum instead of spending one scheduler claim per request argument.
+
+Forced-order fixtures independently suspend a lazy payload, a lazy list chunk,
+and both `.resume` IDs. Each source is evaluated exactly once across resumption,
+and the broad reflection-machine suite covers the existing malformed request,
+arity, non-list, unknown-tag, and invalid-ID diagnostics. The request handoff
+now roots each argument once for both generic and fused interpretation; W6G.2
+owns any later regional elimination of those per-step roots.
 
 ##### W5C.2 — Continuation and terminal-value demands
 

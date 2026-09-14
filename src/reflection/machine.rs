@@ -131,7 +131,6 @@ enum EffectMachinePhase {
 #[derive(Default)]
 struct EffectPhaseProbe {
     phase: AtomicUsize,
-    request_roots: AtomicUsize,
     fused_requests: AtomicUsize,
     application_lazies: Mutex<Vec<LazyId>>,
 }
@@ -158,16 +157,8 @@ impl EffectPhaseProbe {
         self.phase.load(Ordering::Acquire)
     }
 
-    fn record_request_root(&self) {
-        self.request_roots.fetch_add(1, Ordering::AcqRel);
-    }
-
     fn record_fused_request(&self) {
         self.fused_requests.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn request_roots(&self) -> usize {
-        self.request_roots.load(Ordering::Acquire)
     }
 
     fn fused_requests(&self) -> usize {
@@ -359,18 +350,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return false;
         }
         true
-    }
-
-    fn root_request_value(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-        value: Value,
-    ) -> RuntimeValueRoot {
-        #[cfg(test)]
-        if let Some(probe) = &self.phase_probe {
-            probe.record_request_root();
-        }
-        context.root_value(value)
     }
 
     fn record_fused_request(&self) {
@@ -764,15 +743,47 @@ impl<S: TaskSpecialization> EffectTask<S> {
         mut decoding: EffectDecodeWork<S>,
         step_budget: usize,
     ) -> EffectDecodeStep<S> {
-        match poll_whnf_computation(
-            &mut decoding.computation,
-            context,
-            &self.eval_context,
-            step_budget.max(1),
-        ) {
+        if let EffectDecodeOperation::Request(request) = &mut decoding.operation {
+            return match request.poll(
+                context,
+                &self.eval_context,
+                &self.tags,
+                &self.specialized_requests,
+                step_budget.max(1),
+            ) {
+                RequestDecodePoll::Ready(request) => {
+                    #[cfg(test)]
+                    self.record_phase(EffectMachinePhase::RequestParsed);
+                    EffectDecodeStep::Complete(MachineWork::Interpret {
+                        request,
+                        branch: decoding.branch,
+                        scope_depth: decoding.scope_depth,
+                    })
+                }
+                RequestDecodePoll::Continue => EffectDecodeStep::Continue(decoding),
+                RequestDecodePoll::Pending(dependency) => {
+                    EffectDecodeStep::Blocked(decoding, dependency)
+                }
+                RequestDecodePoll::Yielded => EffectDecodeStep::Yielded(decoding),
+                RequestDecodePoll::Failed(error) => {
+                    let error = decoding.contextualize(error);
+                    EffectDecodeStep::Failed(decoding, error)
+                }
+            };
+        }
+
+        let EffectDecodeOperation::Whnf {
+            computation,
+            purpose,
+        } = &mut decoding.operation
+        else {
+            unreachable!("request decoding returned above")
+        };
+        let purpose = *purpose;
+        match poll_whnf_computation(computation, context, &self.eval_context, step_budget.max(1)) {
             WhnfOwnerPoll::Pending(dependency) => {
                 #[cfg(test)]
-                if matches!(decoding.purpose, EffectDecodePurpose::ApplicationResult)
+                if matches!(purpose, EffectDecodePurpose::ApplicationResult)
                     && let WorkDependency::Wait(wait) = &dependency
                 {
                     self.eval_context.pause_deferred_pump(wait);
@@ -790,7 +801,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let error = decoding.contextualize(TaskHalt::rooted_failure(failure));
                 EffectDecodeStep::Failed(decoding, error)
             }
-            WhnfOwnerPoll::Ready(value) => self.complete_decode_phase(context, decoding, value),
+            WhnfOwnerPoll::Ready(value) => {
+                self.complete_decode_phase(context, decoding, purpose, value)
+            }
         }
     }
 
@@ -798,10 +811,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         decoding: EffectDecodeWork<S>,
+        purpose: EffectDecodePurpose,
         value: RuntimeValueRoot,
     ) -> EffectDecodeStep<S> {
         let EffectDecodeWork {
-            purpose,
             branch,
             scope_depth,
             ..
@@ -879,45 +892,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             EffectDecodePurpose::ApplicationResult => {
-                let request = context.evaluate(&self.eval_context, |evaluator| {
-                    let request = evaluator.project_root(&value);
-                    parse_request_values_in(
-                        evaluator,
-                        request,
-                        &self.tags,
-                        &self.specialized_requests,
-                    )
-                    .map(|request| {
-                        request.map_values(|value| {
-                            if self.fusion_enabled() {
-                                evaluator.root_value(value)
-                            } else {
-                                self.root_request_value(evaluator, value)
-                            }
-                        })
-                    })
-                    .map_err(|halt| halt.with_core_context(effect_dispatch_context("request")))
-                });
-                match request {
-                    Ok(request) => {
-                        #[cfg(test)]
-                        self.record_phase(EffectMachinePhase::RequestParsed);
-                        EffectDecodeStep::Complete(MachineWork::Interpret {
-                            request,
-                            branch,
-                            scope_depth,
-                        })
-                    }
-                    Err(error) => EffectDecodeStep::Failed(
-                        EffectDecodeWork::from_root(
-                            value,
-                            EffectDecodePurpose::ApplicationResult,
-                            branch,
-                            scope_depth,
-                        ),
-                        error,
-                    ),
-                }
+                EffectDecodeStep::Continue(EffectDecodeWork::request(value, branch, scope_depth))
             }
         }
     }
@@ -2680,12 +2655,20 @@ impl<S: TaskSpecialization> TaskExecution<S> {
 /// decoding an effect. Unlike ordinary [`MachineWork`], this state is never
 /// cloned to preserve a retry checkpoint.
 struct EffectDecodeWork<S: TaskSpecialization> {
-    computation: WhnfComputation,
-    purpose: EffectDecodePurpose,
+    operation: EffectDecodeOperation<S::Request>,
     branch: Branch<S>,
     scope_depth: usize,
 }
 
+enum EffectDecodeOperation<R> {
+    Whnf {
+        computation: WhnfComputation,
+        purpose: EffectDecodePurpose,
+    },
+    Request(RequestDecodeWork<R>),
+}
+
+#[derive(Clone, Copy)]
 enum EffectDecodePurpose {
     EffectObject,
     Function,
@@ -2709,18 +2692,38 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
         scope_depth: usize,
     ) -> Self {
         Self {
-            computation: WhnfComputation::from_root(value),
-            purpose,
+            operation: EffectDecodeOperation::Whnf {
+                computation: WhnfComputation::from_root(value),
+                purpose,
+            },
+            branch,
+            scope_depth,
+        }
+    }
+
+    fn request(value: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
+        Self {
+            operation: EffectDecodeOperation::Request(RequestDecodeWork::new(value)),
             branch,
             scope_depth,
         }
     }
 
     fn contextualize(&self, halt: TaskHalt) -> TaskHalt {
-        let stage = match self.purpose {
-            EffectDecodePurpose::EffectObject => return halt,
-            EffectDecodePurpose::Function => "function",
-            EffectDecodePurpose::ApplicationResult => "request",
+        let stage = match &self.operation {
+            EffectDecodeOperation::Whnf {
+                purpose: EffectDecodePurpose::EffectObject,
+                ..
+            } => return halt,
+            EffectDecodeOperation::Whnf {
+                purpose: EffectDecodePurpose::Function,
+                ..
+            } => "function",
+            EffectDecodeOperation::Whnf {
+                purpose: EffectDecodePurpose::ApplicationResult,
+                ..
+            }
+            | EffectDecodeOperation::Request(_) => "request",
         };
         halt.with_core_context(effect_dispatch_context(stage))
     }
@@ -3194,41 +3197,6 @@ enum Request<R, V = RuntimeValueRoot> {
     Specialized(R, Vec<V>),
 }
 
-impl<R, V> Request<R, V> {
-    fn map_values<U>(self, mut map: impl FnMut(V) -> U) -> Request<R, U> {
-        match self {
-            Self::Return(value) => Request::Return(map(value)),
-            Self::Seq(operation, continuation) => Request::Seq(map(operation), map(continuation)),
-            Self::Alt(left, right) => Request::Alt(map(left), map(right)),
-            Self::Fail => Request::Fail,
-            Self::Cut(operation) => Request::Cut(map(operation)),
-            Self::Fix(function) => Request::Fix(map(function)),
-            Self::Get(path) => Request::Get(map(path)),
-            Self::Set(path, value) => Request::Set(map(path), map(value)),
-            Self::HeapGet(path) => Request::HeapGet(map(path)),
-            Self::HeapSet(path, value) => Request::HeapSet(map(path), map(value)),
-            Self::HeapRewrite(path, updater) => Request::HeapRewrite(map(path), map(updater)),
-            Self::VolumeGet(volume, path) => Request::VolumeGet(volume, map(path)),
-            Self::VolumeSet(volume, path, value) => {
-                Request::VolumeSet(volume, map(path), map(value))
-            }
-            Self::VolumeRewrite(volume, path, updater) => {
-                Request::VolumeRewrite(volume, map(path), map(updater))
-            }
-            Self::Reset(key, operation) => Request::Reset(map(key), map(operation)),
-            Self::Shift(key, function) => Request::Shift(map(key), map(function)),
-            Self::Resume(task, continuation, value) => {
-                Request::Resume(task, continuation, map(value))
-            }
-            Self::ExitSuccess => Request::ExitSuccess,
-            Self::ExitError(message) => Request::ExitError(map(message)),
-            Self::Specialized(request, arguments) => {
-                Request::Specialized(request, arguments.into_iter().map(map).collect())
-            }
-        }
-    }
-}
-
 struct SpecializedRequest<R> {
     tag: Key,
     arity: usize,
@@ -3248,118 +3216,401 @@ struct VolumeRequestIdentity {
     operation: VolumeOperation,
 }
 
-fn parse_request_values_in<R: Clone>(
+enum RequestSelection<R> {
+    Return,
+    Seq,
+    Alt,
+    Fail,
+    Cut,
+    Fix,
+    Get,
+    Set,
+    HeapGet,
+    HeapSet,
+    HeapRewrite,
+    Volume(VolumeRequestIdentity),
+    Reset,
+    Shift,
+    Resume,
+    ExitSuccess,
+    ExitError,
+    Specialized { request: R, arity: usize },
+}
+
+impl<R> RequestSelection<R> {
+    fn arity(&self) -> usize {
+        match self {
+            Self::Fail | Self::ExitSuccess => 0,
+            Self::Return
+            | Self::Cut
+            | Self::Fix
+            | Self::Get
+            | Self::HeapGet
+            | Self::ExitError
+            | Self::Volume(VolumeRequestIdentity {
+                operation: VolumeOperation::Get,
+                ..
+            }) => 1,
+            Self::Seq
+            | Self::Alt
+            | Self::Set
+            | Self::HeapSet
+            | Self::HeapRewrite
+            | Self::Reset
+            | Self::Shift
+            | Self::Volume(VolumeRequestIdentity {
+                operation: VolumeOperation::Set | VolumeOperation::Rewrite,
+                ..
+            }) => 2,
+            Self::Resume => 3,
+            Self::Specialized { arity, .. } => *arity,
+        }
+    }
+
+    fn into_request(self, arguments: Vec<RuntimeValueRoot>) -> Request<R> {
+        let mut arguments = arguments.into_iter();
+        let mut next = || {
+            arguments
+                .next()
+                .expect("validated request arity must retain its argument")
+        };
+        match self {
+            Self::Return => Request::Return(next()),
+            Self::Seq => Request::Seq(next(), next()),
+            Self::Alt => Request::Alt(next(), next()),
+            Self::Fail => Request::Fail,
+            Self::Cut => Request::Cut(next()),
+            Self::Fix => Request::Fix(next()),
+            Self::Get => Request::Get(next()),
+            Self::Set => Request::Set(next(), next()),
+            Self::HeapGet => Request::HeapGet(next()),
+            Self::HeapSet => Request::HeapSet(next(), next()),
+            Self::HeapRewrite => Request::HeapRewrite(next(), next()),
+            Self::Volume(VolumeRequestIdentity {
+                volume,
+                operation: VolumeOperation::Get,
+            }) => Request::VolumeGet(volume, next()),
+            Self::Volume(VolumeRequestIdentity {
+                volume,
+                operation: VolumeOperation::Set,
+            }) => Request::VolumeSet(volume, next(), next()),
+            Self::Volume(VolumeRequestIdentity {
+                volume,
+                operation: VolumeOperation::Rewrite,
+            }) => Request::VolumeRewrite(volume, next(), next()),
+            Self::Reset => Request::Reset(next(), next()),
+            Self::Shift => Request::Shift(next(), next()),
+            Self::ExitSuccess => Request::ExitSuccess,
+            Self::ExitError => Request::ExitError(next()),
+            Self::Specialized { request, .. } => Request::Specialized(request, arguments.collect()),
+            Self::Resume => unreachable!("resume IDs require WHNF conversion before dispatch"),
+        }
+    }
+}
+
+struct RequestDecodeWork<R> {
+    state: RequestDecodeState<R>,
+}
+
+enum RequestDecodeState<R> {
+    Select(RuntimeValueRoot),
+    PayloadWhnf {
+        selection: RequestSelection<R>,
+        demand: WhnfComputation,
+    },
+    PayloadItems {
+        selection: RequestSelection<R>,
+        front: eval::ListFrontMachine,
+        arguments: Vec<RuntimeValueRoot>,
+    },
+    ResumeTask {
+        continuation: RuntimeValueRoot,
+        value: RuntimeValueRoot,
+        demand: WhnfComputation,
+    },
+    ResumeContinuation {
+        task: EvaluationTaskId,
+        value: RuntimeValueRoot,
+        demand: WhnfComputation,
+    },
+    Poisoned,
+}
+
+enum RequestDecodePoll<R> {
+    Ready(Request<R>),
+    Continue,
+    Pending(WorkDependency),
+    Yielded,
+    Failed(TaskHalt),
+}
+
+impl<R: Clone> RequestDecodeWork<R> {
+    fn new(request: RuntimeValueRoot) -> Self {
+        Self {
+            state: RequestDecodeState::Select(request),
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvalContext,
+        tags: &Tags,
+        specialized: &[SpecializedRequest<R>],
+        step_budget: usize,
+    ) -> RequestDecodePoll<R> {
+        match &mut self.state {
+            RequestDecodeState::Select(request) => {
+                let selected = poll_context.evaluate(context, |evaluator| {
+                    select_request_in(
+                        evaluator,
+                        evaluator.project_root(request),
+                        tags,
+                        specialized,
+                    )
+                });
+                match selected {
+                    Ok((selection, payload)) => {
+                        self.state = RequestDecodeState::PayloadWhnf {
+                            selection,
+                            demand: WhnfComputation::from_root(payload),
+                        };
+                        RequestDecodePoll::Continue
+                    }
+                    Err(error) => RequestDecodePoll::Failed(error),
+                }
+            }
+            RequestDecodeState::PayloadWhnf { selection, demand } => {
+                let payload = match poll_whnf_computation(
+                    demand,
+                    poll_context,
+                    context,
+                    step_budget,
+                ) {
+                    WhnfOwnerPoll::Ready(payload) => payload,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return RequestDecodePoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => {
+                        return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
+                    }
+                    WhnfOwnerPoll::External(boundary) => {
+                        return RequestDecodePoll::Failed(TaskHalt::new(format!(
+                            "request payload decoding reached an unsupported {boundary:?} boundary"
+                        )));
+                    }
+                };
+                let is_list = poll_context.evaluate(context, |evaluator| {
+                    matches!(evaluator.project_root(&payload), Value::List(_))
+                });
+                if !is_list {
+                    return RequestDecodePoll::Failed(TaskHalt::new(
+                        "effect request payload must be a list",
+                    ));
+                }
+                let selection = std::mem::replace(selection, RequestSelection::Fail);
+                self.state = RequestDecodeState::PayloadItems {
+                    selection,
+                    front: eval::ListFrontMachine::unowned(payload),
+                    arguments: Vec::new(),
+                };
+                RequestDecodePoll::Continue
+            }
+            RequestDecodeState::PayloadItems {
+                selection: _,
+                front,
+                arguments,
+            } => {
+                let front_poll = poll_context.evaluate(context, |evaluator| {
+                    front.poll(poll_context, evaluator, context, step_budget)
+                });
+                match front_poll {
+                    eval::ListFrontPoll::Ready(Some((value, tail))) => {
+                        arguments.push(value);
+                        *front = eval::ListFrontMachine::unowned(tail);
+                        RequestDecodePoll::Continue
+                    }
+                    eval::ListFrontPoll::Ready(None) => self.finish_payload(),
+                    eval::ListFrontPoll::Pending(dependency) => {
+                        RequestDecodePoll::Pending(dependency)
+                    }
+                    eval::ListFrontPoll::Yielded => RequestDecodePoll::Yielded,
+                    eval::ListFrontPoll::Failed(failure) => {
+                        RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure))
+                    }
+                }
+            }
+            RequestDecodeState::ResumeTask {
+                continuation,
+                value,
+                demand,
+            } => {
+                let task = match poll_request_id(demand, poll_context, context, step_budget, "task")
+                {
+                    RequestIdPoll::Ready(id) => id,
+                    RequestIdPoll::Pending(dependency) => {
+                        return RequestDecodePoll::Pending(dependency);
+                    }
+                    RequestIdPoll::Yielded => return RequestDecodePoll::Yielded,
+                    RequestIdPoll::Failed(error) => return RequestDecodePoll::Failed(error),
+                };
+                let Some(task) = EvaluationTaskId::from_u64(task) else {
+                    return RequestDecodePoll::Failed(TaskHalt::new(
+                        "reflection task ID must be nonzero",
+                    ));
+                };
+                self.state = RequestDecodeState::ResumeContinuation {
+                    task,
+                    value: value.clone(),
+                    demand: WhnfComputation::from_root(continuation.clone()),
+                };
+                RequestDecodePoll::Continue
+            }
+            RequestDecodeState::ResumeContinuation {
+                task,
+                value,
+                demand,
+            } => {
+                match poll_request_id(demand, poll_context, context, step_budget, "continuation") {
+                    RequestIdPoll::Ready(continuation) => RequestDecodePoll::Ready(
+                        Request::Resume(*task, continuation, value.clone()),
+                    ),
+                    RequestIdPoll::Pending(dependency) => RequestDecodePoll::Pending(dependency),
+                    RequestIdPoll::Yielded => RequestDecodePoll::Yielded,
+                    RequestIdPoll::Failed(error) => RequestDecodePoll::Failed(error),
+                }
+            }
+            RequestDecodeState::Poisoned => {
+                panic!("request decoder was polled after consuming its terminal state")
+            }
+        }
+    }
+
+    fn finish_payload(&mut self) -> RequestDecodePoll<R> {
+        let RequestDecodeState::PayloadItems {
+            selection,
+            arguments,
+            ..
+        } = std::mem::replace(&mut self.state, RequestDecodeState::Poisoned)
+        else {
+            unreachable!("payload completion requires item-collection state")
+        };
+        if arguments.len() != selection.arity() {
+            return RequestDecodePoll::Failed(TaskHalt::new(
+                "effect request contained the wrong number of arguments",
+            ));
+        }
+        if matches!(selection, RequestSelection::Resume) {
+            let [task, continuation, value]: [RuntimeValueRoot; 3] = arguments
+                .try_into()
+                .expect("resume request arity was checked above");
+            self.state = RequestDecodeState::ResumeTask {
+                continuation,
+                value,
+                demand: WhnfComputation::from_root(task),
+            };
+            RequestDecodePoll::Continue
+        } else {
+            RequestDecodePoll::Ready(selection.into_request(arguments))
+        }
+    }
+}
+
+enum RequestIdPoll {
+    Ready(u64),
+    Pending(WorkDependency),
+    Yielded,
+    Failed(TaskHalt),
+}
+
+fn poll_request_id(
+    demand: &mut WhnfComputation,
+    poll_context: &EvaluationPollContext,
+    context: &EvalContext,
+    step_budget: usize,
+    kind: &str,
+) -> RequestIdPoll {
+    let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {
+        WhnfOwnerPoll::Ready(value) => value,
+        WhnfOwnerPoll::Pending(dependency) => return RequestIdPoll::Pending(dependency),
+        WhnfOwnerPoll::Yielded => return RequestIdPoll::Yielded,
+        WhnfOwnerPoll::Failed(failure) => {
+            return RequestIdPoll::Failed(TaskHalt::rooted_failure(failure));
+        }
+        WhnfOwnerPoll::External(boundary) => {
+            return RequestIdPoll::Failed(TaskHalt::new(format!(
+                "request ID decoding reached an unsupported {boundary:?} boundary"
+            )));
+        }
+    };
+    poll_context.evaluate(context, |evaluator| {
+        let Value::Number(value) = evaluator.project_root(&value) else {
+            return RequestIdPoll::Failed(TaskHalt::new(format!(
+                "resume request has an invalid {kind} ID"
+            )));
+        };
+        value.to_u64_if_integer().map_or_else(
+            || {
+                RequestIdPoll::Failed(TaskHalt::new(format!(
+                    "resume request has an invalid {kind} ID"
+                )))
+            },
+            RequestIdPoll::Ready,
+        )
+    })
+}
+
+fn select_request_in<R: Clone>(
     context: &EvaluatorStepContext<'_>,
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
-) -> Result<Request<R, Value>, TaskHalt> {
+) -> Result<(RequestSelection<R>, RuntimeValueRoot), TaskHalt> {
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
     };
-    let parse = |tag: &Key| -> Result<Option<Vec<Value>>, TaskHalt> {
-        dict.get(tag)
-            .map(|payload| {
-                let Value::List(payload) = evaluate_in(context, payload.clone())? else {
-                    return Err(TaskHalt::new("effect request payload must be a list"));
-                };
-                eval::list_to_value_items_in(context, &payload).map_err(task_eval_error)
-            })
-            .transpose()
-    };
-    macro_rules! args {
-        ($tag:expr, $n:literal, $body:expr) => {
-            if let Some(arguments) = parse($tag)? {
-                let arguments: [Value; $n] = arguments.try_into().map_err(|_| {
-                    TaskHalt::new("effect request contained the wrong number of arguments")
-                })?;
-                return Ok(($body)(arguments));
+    let selected =
+        |selection, payload: &Value| Ok((selection, context.root_value(payload.clone())));
+    macro_rules! select {
+        ($tag:expr, $selection:expr) => {
+            if let Some(payload) = dict.get($tag) {
+                return selected($selection, payload);
             }
         };
     }
-    args!(&tags.r, 1, |[value]: [Value; 1]| { Request::Return(value) });
-    args!(&tags.seq, 2, |[operation, continuation]: [Value; 2]| {
-        Request::Seq(operation, continuation)
-    });
-    args!(&tags.alt, 2, |[left, right]: [Value; 2]| {
-        Request::Alt(left, right)
-    });
-    args!(&tags.fail, 0, |[]: [Value; 0]| { Request::Fail });
-    args!(&tags.cut, 1, |[operation]: [Value; 1]| {
-        Request::Cut(operation)
-    });
-    args!(&tags.fix, 1, |[function]: [Value; 1]| {
-        Request::Fix(function)
-    });
-    args!(&tags.get, 1, |[path]: [Value; 1]| { Request::Get(path) });
-    args!(&tags.set, 2, |[path, value]: [Value; 2]| {
-        Request::Set(path, value)
-    });
-    args!(&tags.heap_get, 1, |[path]: [Value; 1]| {
-        Request::HeapGet(path)
-    });
-    args!(&tags.heap_set, 2, |[path, value]: [Value; 2]| {
-        Request::HeapSet(path, value)
-    });
-    args!(&tags.heap_rewrite, 2, |[path, updater]: [Value; 2]| {
-        Request::HeapRewrite(path, updater)
-    });
-    args!(&tags.reset, 2, |[key, operation]: [Value; 2]| {
-        Request::Reset(key, operation)
-    });
-    args!(&tags.shift, 2, |[key, function]: [Value; 2]| {
-        Request::Shift(key, function)
-    });
-    args!(&tags.exit_success, 0, |[]: [Value; 0]| {
-        Request::ExitSuccess
-    });
-    args!(&tags.exit_error, 1, |[message]: [Value; 1]| {
-        Request::ExitError(message)
-    });
-    if let Some(arguments) = parse(&tags.resume)? {
-        let [task_id, continuation_id, value]: [Value; 3] = arguments
-            .try_into()
-            .map_err(|_| TaskHalt::new("resume request contained the wrong number of arguments"))?;
-        let task_id = request_id_in(context, task_id, "task")?;
-        let task_id = EvaluationTaskId::from_u64(task_id)
-            .ok_or_else(|| TaskHalt::new("reflection task ID must be nonzero"))?;
-        return Ok(Request::Resume(
-            task_id,
-            request_id_in(context, continuation_id, "continuation")?,
-            value,
-        ));
-    }
+    select!(&tags.r, RequestSelection::Return);
+    select!(&tags.seq, RequestSelection::Seq);
+    select!(&tags.alt, RequestSelection::Alt);
+    select!(&tags.fail, RequestSelection::Fail);
+    select!(&tags.cut, RequestSelection::Cut);
+    select!(&tags.fix, RequestSelection::Fix);
+    select!(&tags.get, RequestSelection::Get);
+    select!(&tags.set, RequestSelection::Set);
+    select!(&tags.heap_get, RequestSelection::HeapGet);
+    select!(&tags.heap_set, RequestSelection::HeapSet);
+    select!(&tags.heap_rewrite, RequestSelection::HeapRewrite);
+    select!(&tags.reset, RequestSelection::Reset);
+    select!(&tags.shift, RequestSelection::Shift);
+    select!(&tags.exit_success, RequestSelection::ExitSuccess);
+    select!(&tags.exit_error, RequestSelection::ExitError);
+    select!(&tags.resume, RequestSelection::Resume);
     for specialized in specialized {
-        if let Some(arguments) = parse(&specialized.tag)? {
-            if arguments.len() != specialized.arity {
-                return Err(TaskHalt::new(
-                    "effect request contained the wrong number of arguments",
-                ));
-            }
-            return Ok(Request::Specialized(specialized.request.clone(), arguments));
+        if let Some(payload) = dict.get(&specialized.tag) {
+            return selected(
+                RequestSelection::Specialized {
+                    request: specialized.request.clone(),
+                    arity: specialized.arity,
+                },
+                payload,
+            );
         }
     }
-    for (tag, _) in dict.iter() {
+    for (tag, payload) in dict.iter() {
         let Some(identity) = parse_volume_request_tag(tag)? else {
             continue;
         };
-        let arguments = parse(tag)?.expect("the request tag came from this dictionary");
-        return match (identity.operation, arguments.as_slice()) {
-            (VolumeOperation::Get, [path]) => Ok(Request::VolumeGet(identity.volume, path.clone())),
-            (VolumeOperation::Set, [path, value]) => Ok(Request::VolumeSet(
-                identity.volume,
-                path.clone(),
-                value.clone(),
-            )),
-            (VolumeOperation::Rewrite, [path, updater]) => Ok(Request::VolumeRewrite(
-                identity.volume,
-                path.clone(),
-                updater.clone(),
-            )),
-            _ => Err(TaskHalt::new(
-                "volume capability request contained the wrong number of arguments",
-            )),
-        };
+        return selected(RequestSelection::Volume(identity), payload);
     }
     Err(TaskHalt::new("effect API returned an unknown request"))
 }
@@ -3436,21 +3687,6 @@ pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> Pub
             }),
         )
     }))
-}
-
-fn request_id_in(
-    context: &EvaluatorStepContext<'_>,
-    value: Value,
-    kind: &str,
-) -> Result<u64, TaskHalt> {
-    let Value::Number(value) = evaluate_in(context, value)? else {
-        return Err(TaskHalt::new(format!(
-            "resume request has an invalid {kind} ID"
-        )));
-    };
-    value
-        .to_u64_if_integer()
-        .ok_or_else(|| TaskHalt::new(format!("resume request has an invalid {kind} ID")))
 }
 
 fn effect_api<R: Clone>(

@@ -68,6 +68,7 @@ pub(crate) use application::*;
 #[cfg(test)]
 use builtins::apply_builtin;
 use builtins::apply_builtin_in;
+pub(crate) use list_machine::{ListFrontMachine, ListFrontPoll};
 use net::*;
 use operator::*;
 pub(crate) use sequence::*;
