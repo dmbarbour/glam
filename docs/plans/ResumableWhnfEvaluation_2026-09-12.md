@@ -2140,6 +2140,7 @@ Run the normal Rust gates for the completed repair:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
+scripts/check-interaction-net-profiling.sh
 ```
 
 Update W6's per-session-policy checkpoint, W7C's quantitative work
@@ -2166,9 +2167,16 @@ Completed verification:
 - the affected diagnostic-context fixtures, W3B.3/W4C coverage, and all four
   executable fixtures pass through the ordinary full suite;
 - the raw-value, evaluator-access, mutator-introduction, and WHNF inventories
-  were reconciled and pass; and
+  were reconciled and pass;
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
-  warnings`, the profiling fixture, and `cargo test -q` pass.
+  warnings`, `cargo test -q`, and the focused
+  `scripts/check-interaction-net-profiling.sh` gate pass;
+- W6G owns the measured bounded overhead, W7C distinguishes its production
+  task budget from W4E's test-only fuse, and W8A preserves the durable
+  application boundary while retiring recursive-halt compatibility; and
+- the dated `ResumableWhnfW4E_2026-09-14.md` review resolves the original W4
+  blocker and records the remaining performance debt without rewriting the
+  pre-remediation W4 review.
 
 The broader provisional matrix above was narrowed after the W4E.1-W4E.3
 evidence. Exact reduction and driver signatures detect semantic replay without
@@ -2188,7 +2196,9 @@ three mechanisms merely to satisfy the earlier speculative matrix.
 
 ### Phase W5 — Reflection Machine Integration
 
-**Entry gate:** W4E is complete and the bounded direct-assembly fixtures pass.
+**Entry gate:** W4E is complete, the bounded semantic replay fixtures pass,
+and the source-shaped direct-assembly diagnostic fixture terminates with its
+expected result.
 
 #### W5A — WHNF submachine work state
 
@@ -2278,7 +2288,7 @@ here. Preserve referential-spec validation and source-owned net journals.
 #### W6G — Residual resumable-machine overhead
 
 Investigate the bounded performance regression accepted by W4E. The
-duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.75
+duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
 seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
 though net-driver work is comparable (159,322 versus 159,994 work items).
 
@@ -2338,6 +2348,16 @@ Observe root registrations, allocations, and poll counts. Treat them as
 regression diagnostics initially, except enforce that uninterrupted tail
 delegation performs no per-step root registration.
 
+W4E supplies the static interaction-net counters and a test-only work-item
+fuse for stopping a net at a known pre-completion boundary. Reuse those as
+measurement and inverse-test oracles, but do not mistake the fuse for the
+production evaluation budget: W7C must connect the real task/quantum budget to
+the resumable owner, prove fair requeue among ready work, and show that the
+same checkpoint eventually completes after one or more budget yields. Keep
+the focused profiling fixtures in
+`scripts/check-interaction-net-profiling.sh` rather than rerunning the complete
+ordinary suite under instrumentation.
+
 ### Phase W8 — Compatibility Retirement and Documentation
 
 #### W8A — Retire retryable recursive-halt transport
@@ -2347,6 +2367,14 @@ and adapters which translate a bare `EvaluationHalt` after losing evaluator
 state. Decide from remaining callers whether `EvaluationHalt` becomes only a
 permanent-failure carrier, aliases `EvaluationFailure`, or remains as a narrow
 compatibility name. Do not preserve the union solely for obsolete call sites.
+
+W4E removed the synchronous nested-evaluation path from a claimed
+`ApplyArity` operator pair. Compatibility retirement must not reconstruct that
+path: over-application continues through `LazySource::Application` or an
+equivalent durable WHNF child owner whose argument cursor survives a yield.
+Retain the W4E exact-signature and pre-completion inverse fixtures; replace
+their test-only work fuse only when W7's general budget mechanism can force the
+same boundary deterministically.
 
 #### W8B — Retire direct evaluator compatibility
 

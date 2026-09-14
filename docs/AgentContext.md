@@ -82,7 +82,12 @@ After Rust edits run:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
+scripts/check-interaction-net-profiling.sh
 ```
+
+The interaction-net profiling check names only the profiling-specific and
+profiling-augmented regression fixtures. It does not repeat the complete test
+suite under instrumentation.
 
 The routine suite keeps scale-only proofs ignored. After changes to productive
 cursor materialization or its iterative driver, additionally run

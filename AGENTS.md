@@ -55,4 +55,5 @@ Run these after Rust edits:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
+scripts/check-interaction-net-profiling.sh
 ```
