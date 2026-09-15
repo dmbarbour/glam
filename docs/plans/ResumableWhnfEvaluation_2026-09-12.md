@@ -3357,7 +3357,7 @@ retry/conflict order.
 
 ##### W5C.6 — Recursive helper retirement and focused verification
 
-**Status: in progress (2026-09-15).**
+**Status: complete (2026-09-15).**
 
 W5C.5c.4d removed the local recursive `machine::evaluate_in`, `evaluate_root`,
 and equivalent production loops in `RequestContext` when their final callers
@@ -3384,14 +3384,29 @@ work here:
      unresolved demand, then resolve that discarded dependency and prove the
      callback remains retired.
    Do not treat repeated schedules as evidence.
-3. **W5C.6c — Final verification.** Run the focused reflection, embedding,
-   executable-specialization, macro, and profiling suites before the complete
-   repository gates. Relatch inventories only for reviewed source movement.
+3. **W5C.6c — Complete (2026-09-15): Final verification.** Run the focused
+   reflection, embedding, executable-specialization, macro, and profiling
+   suites before the complete repository gates. Relatch inventories only for
+   reviewed source movement.
 
 Run each family with uninterrupted, budget-yielded, lazy-suspended,
 promise-suspended, permanently failed, cancelled, and retryable branch forms
 as applicable. Update root/publication inventories at each checkpoint rather
 than relatching the aggregate only after all of W5C.
+
+Completion record: every production specialization callback is source-latched
+against nested evaluator entry, and the exact W0B census separately requires
+that reflection contain no unowned recursive WHNF demand. The private request
+selector now names its already-WHNF input contract. Current architecture and
+agent notes describe specialization-owned work rather than the deleted
+`RequestContext` evaluator service. Existing family fixtures cover strict and
+lazy demand, ordered alternatives, retryable host observations, task joins,
+macros, token/CLI parsing, logger input/output, and structured failures. New
+forced fixtures add one-step cooperative progress, promise failure after
+suspension, and cancellation followed by late dependency resolution, with
+callback counts proving that no path replays completed request preparation.
+Focused subsystem suites, exact source/root inventories, the complete routine
+suite, and interaction-net profiling all pass.
 
 #### W5D — Replay and branch verification
 
