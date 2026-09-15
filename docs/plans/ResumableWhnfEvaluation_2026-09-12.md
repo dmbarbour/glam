@@ -3357,11 +3357,28 @@ retry/conflict order.
 
 ##### W5C.6 — Recursive helper retirement and focused verification
 
-Remove the local recursive `machine::evaluate_in`, `evaluate_root`, and
-equivalent production loops in `RequestContext` after their final callers
-move. Re-run the exact W0B census and require no unowned recursive WHNF demand
-under `src/reflection`. Any helper retained as a proven already-WHNF projection
-must assert or encode that precondition instead of silently evaluating.
+**Status: in progress (2026-09-15).**
+
+W5C.5c.4d removed the local recursive `machine::evaluate_in`, `evaluate_root`,
+and equivalent production loops in `RequestContext` when their final callers
+moved. Close that surface in three checkpoints rather than recreating deletion
+work here:
+
+1. **W5C.6a — Complete (2026-09-15): Source and contract closure.** Re-run the
+   exact W0B census and require no unowned recursive WHNF demand under
+   `src/reflection`. Expand the
+   source-backed callback inventory across every production specialization,
+   remove migration-era comments, and update current architecture notes to
+   describe owned request work rather than nested `RequestContext` evaluation.
+   Any helper retained as a proven already-WHNF projection must assert or
+   encode that precondition instead of silently evaluating.
+2. **W5C.6b — Lifecycle matrix closure.** Audit the family fixtures below,
+   then add only missing forced cases. In particular, force cooperative
+   one-step progress and cancellation while specialization-owned demand is
+   suspended; do not treat repeated schedules as evidence.
+3. **W5C.6c — Final verification.** Run the focused reflection, embedding,
+   executable-specialization, macro, and profiling suites before the complete
+   repository gates. Relatch inventories only for reviewed source movement.
 
 Run each family with uninterrupted, budget-yielded, lazy-suspended,
 promise-suspended, permanently failed, cancelled, and retryable branch forms

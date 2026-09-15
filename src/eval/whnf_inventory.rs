@@ -632,7 +632,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
 const EXPECTED_OCCURRENCES: usize = 271;
-const EXPECTED_FINGERPRINT: u64 = 10_346_184_838_915_591_087;
+const EXPECTED_FINGERPRINT: u64 = 8_495_991_989_224_277_061;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 94),
     (Signal::EvalLazy, 2),
@@ -681,6 +681,29 @@ fn whnf_suspension_and_recursion_census_is_exact() {
         (EXPECTED_OCCURRENCES, EXPECTED_FINGERPRINT),
         "W0B census drifted; reviewed shapes: {:#?}",
         shape_counts(&occurrences),
+    );
+}
+
+#[test]
+fn reflection_has_no_unowned_recursive_whnf_demand() {
+    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let unowned = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.declaration.starts_with("src/reflection/"))
+        .filter(|occurrence| {
+            matches!(
+                occurrence.signal,
+                Signal::EvalValue
+                    | Signal::EvalLazy
+                    | Signal::EvalPromise
+                    | Signal::ReflectionEvaluate
+            )
+        })
+        .map(Occurrence::record)
+        .collect::<Vec<_>>();
+    assert!(
+        unowned.is_empty(),
+        "reflection must own WHNF demand in resumable computations: {unowned:#?}"
     );
 }
 

@@ -147,11 +147,14 @@ coarse retry generation, and retained structured evaluation failure.
 Each machine step alternates a bounded, callback-free evaluator phase with an
 interpreter phase. Request payloads and evaluator results are rooted before the
 evaluator phase ends; host snapshots, commits, and specialization callbacks run
-only afterward. A specialization may explicitly demand an argument through
-`RequestContext`, which opens and closes another bounded evaluator phase rather
-than exposing evaluator authority to the callback. Poll and evaluator
-authorities are thread-bound and cannot be retained by the `Send` effect
-machine.
+only afterward. A specialization constructs non-cloneable request work, whose
+short callback may advance locally, request one semantic demand, wait on an
+explicit shared completion source, or finish. The reflection machine owns that
+demand and later returns an `EvaluatedValue` or structured failure to the
+already-advanced request work. `RequestContext` exposes host/transaction state
+and value construction but no evaluator authority, so suspension cannot replay
+prior callback activity. Poll and evaluator authorities are thread-bound and
+cannot be retained by the `Send` effect machine.
 
 The production fast path may fuse a bounded chain of task-local `.seq`, `.r`,
 `.get`, and `.set` operations plus one immediately available Glam

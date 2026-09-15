@@ -22,6 +22,11 @@ and control flow.
 - `TaskSpecialization` adds a request family, private tags, and transactional
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
+- A specialization callback advances non-cloneable request work before asking
+  the reflection machine to demand a value or wait on shared completion.
+  Dependency resumption returns to that advanced owner; it must not reconstruct
+  or replay host observation or mutation. `RequestContext` deliberately has no
+  semantic evaluation methods.
 - Concrete protocol results, outcomes, environments, snapshots, commits, and
   transactions retain public/runtime roots across interpreter phases. A
   specialization is responsible for the same root contract inside its generic

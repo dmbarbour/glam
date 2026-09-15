@@ -4893,7 +4893,7 @@ impl<R: Clone> RequestDecodeWork<R> {
         match &mut self.state {
             RequestDecodeState::Select(request) => {
                 let selected = poll_context.evaluate(context, |evaluator| {
-                    select_request_in(
+                    select_request_from_whnf(
                         evaluator,
                         evaluator.project_root(request),
                         tags,
@@ -5092,7 +5092,7 @@ fn poll_request_id(
     })
 }
 
-fn select_request_in<R: Clone>(
+fn select_request_from_whnf<R: Clone>(
     context: &EvaluatorStepContext<'_>,
     value: Value,
     tags: &Tags,

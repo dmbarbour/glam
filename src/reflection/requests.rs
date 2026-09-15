@@ -41,9 +41,9 @@ pub enum ReflectionRequest {
 
 /// Durable interpretation state for one reusable reflection request.
 ///
-/// Requests migrate from the temporary synchronous arm family by family.
-/// The `.eval` arm owns its WHNF demand here, so dependency wakeup resumes
-/// after that demand rather than re-entering request dispatch.
+/// Each operation owns its completed preparation and any outstanding WHNF or
+/// shared-completion demand, so dependency wakeup resumes the operation rather
+/// than re-entering request dispatch.
 pub struct ReflectionRequestWork {
     operation: ReflectionRequestOperation,
 }

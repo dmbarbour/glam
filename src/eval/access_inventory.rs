@@ -480,6 +480,10 @@ fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
         "src/reflection/protocol.rs",
         "src/reflection/requests.rs",
         "src/g_syntax/macro_expansion/effects.rs",
+        "src/eval/builtins/net/construction.rs",
+        "src/bin/glam/configuration/logger/effects.rs",
+        "src/bin/glam/command_line/configured/effects.rs",
+        "src/bin/glam/command_line/configured/token/effects.rs",
     ] {
         let source = fs::read_to_string(manifest.join(relative))
             .expect("effect interpreter source should be readable");
@@ -491,6 +495,34 @@ fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
             EntryCounts::in_source(&source).is_empty(),
             "{relative} must not call the durable-context evaluator compatibility API"
         );
+    }
+}
+
+#[test]
+fn specialization_callbacks_have_no_nested_semantic_evaluator() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/reflection/requests.rs",
+        "src/g_syntax/macro_expansion/effects.rs",
+        "src/eval/builtins/net/construction.rs",
+        "src/bin/glam/configuration/logger/effects.rs",
+        "src/bin/glam/command_line/configured/effects.rs",
+        "src/bin/glam/command_line/configured/token/effects.rs",
+    ] {
+        let source = fs::read_to_string(manifest.join(relative))
+            .expect("specialization source should be readable");
+        for forbidden in [
+            "context.evaluate(",
+            ".evaluator().eval(",
+            "eval::eval_value(",
+            "eval::eval_value_in(",
+            "evaluate_root_whnf(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{relative} must transfer semantic demand to owned request work, not `{forbidden}`"
+            );
+        }
     }
 }
 
@@ -508,7 +540,7 @@ fn net_construction_callbacks_have_no_direct_compatibility_entry() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "{relative} must demand callback arguments through RequestContext, not `{forbidden}`"
+            "{relative} must demand callback arguments through owned request work, not `{forbidden}`"
         );
     }
     assert!(
