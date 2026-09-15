@@ -1,7 +1,7 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W2 and the post-W2 remediation are complete by 2026-09-13;
-W3-W8 planned. This is the focused implementation plan selected by
+Status: W0-W5 are complete by 2026-09-15; the mandatory post-W5 review is in
+progress and W6-W8 remain planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand and promise following now own the crate-private resumable
@@ -2200,6 +2200,8 @@ three mechanisms merely to satisfy the earlier speculative matrix.
 and the source-shaped direct-assembly diagnostic fixture terminates with its
 expected result.
 
+**Status: complete (2026-09-15).**
+
 #### W5A — WHNF submachine work state
 
 **Status: complete (2026-09-14).**
@@ -3424,7 +3426,7 @@ Close W5 in three bounded checkpoints:
    resume it before the arm fails. The fallback must run once, the discarded
    diagnostic must remain uncommitted, and parsed/dispatch/application counts
    must match the authored effect structure exactly.
-3. **W5D.3 — Verification and closure.** Run the focused replay, failure,
+3. **W5D.3 — Complete (2026-09-15): Verification and closure.** Run the focused replay, failure,
    branch, reflection, and inventory suites, followed by the routine repository
    gates and interaction-net profiling script. Record any future-phase drift
    found while closing W5; do not infer concurrency correctness from repeated
@@ -3448,6 +3450,16 @@ first arm then fails, its staged warning is discarded, and the fallback
 finishes at exactly eight parsed, dispatched, and application-lazy entries.
 Only the fallback's one information diagnostic remains. No fixture relies on
 schedule repetition.
+
+W5D.3 passes the 171-test reflection-machine suite, the focused WHNF/access/
+durable-owner/raw-value inventories, all three new schedules under aggressive
+collection, the ordinary 1,628-test library suite and every integration and
+executable fixture, format, all-target/all-feature Clippy, and the focused
+interaction-net profiling script. The complete aggressive-GC suite remains
+red at its pre-existing public-API compatibility matrix and is not claimed as
+W5 evidence; the W5D ownership boundaries themselves pass with forced
+collection. The mandatory post-W5 review records implementation and
+future-phase drift separately.
 
 Exit: reflection may suspend at any WHNF request boundary without replaying
 the enclosing effect phase.
