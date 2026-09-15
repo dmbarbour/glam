@@ -3417,7 +3417,7 @@ Close W5 in three bounded checkpoints:
    decoded request. The original application lazy must occur once, the one
    nested reflection task must activate once, and all task records and
    diagnostics must retire without replay.
-2. **W5D.2 — Failure and branch matrix.** Force the same application boundary
+2. **W5D.2 — Complete (2026-09-15): Failure and branch matrix.** Force the same application boundary
    before a request whose argument launches a nested reflection task and then
    fails with structured context. Separately block a nested reflection task in
    the first arm of a cut, observe the exact parent/child reservation set, and
@@ -3436,6 +3436,18 @@ applications (`seq`, `.eval`, and `.r`), their three parse/dispatch entries,
 the single nested reflection activation, empty diagnostic output, and complete
 task-record retirement. The original application lazy appears exactly once;
 later requests are counted separately rather than mistaken for replay.
+
+W5D.2 adds two deterministic schedules. The failure fixture pauses before its
+only outer request parses, then resumes through exactly one nested reflection
+activation and retains the ordered `log_message` and authored argument
+contexts without publishing a diagnostic. The branch fixture blocks a nested
+reflection task on an empty diagnostic FIFO. At that point the coordinator
+contains exactly the parent and child records and the outer task has parsed
+and dispatched four requests. Admitting one diagnostic resumes the child; the
+first arm then fails, its staged warning is discarded, and the fallback
+finishes at exactly eight parsed, dispatched, and application-lazy entries.
+Only the fallback's one information diagnostic remains. No fixture relies on
+schedule repetition.
 
 Exit: reflection may suspend at any WHNF request boundary without replaying
 the enclosing effect phase.

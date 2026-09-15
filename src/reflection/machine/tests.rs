@@ -6037,6 +6037,165 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
 }
 
 #[test]
+fn suspended_request_failure_preserves_context_without_replay() {
+    let (assembler, effect) = compile_effect(
+        ".log 'info (anno {refl:(.r ())} (anno context:\"request argument\" (anno 'error {msg:{text:\"message construction failed\"}})))",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        }))
+        .expect("fresh failure fixture should accept a reflection launcher");
+
+    let probe = Arc::new(EffectPhaseProbe::default());
+    let task_probe = probe.clone();
+    let (pause_sender, pause_receiver) = std::sync::mpsc::channel();
+    let effect = effect.clone_core_for_test();
+    let task_host = host.clone();
+    let task = context
+        .schedule_task(move |task_context| {
+            let task_context = task_context.with_deferred_pump_pause(pause_sender);
+            EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
+                .map(|task| {
+                    Box::new(ValueEffectTask(
+                        task.with_phase_probe(task_probe).forcing_unfused(),
+                    )) as Box<dyn EvaluationTaskMachine>
+                })
+                .map_err(|error| Arc::from(error.to_string()))
+        })
+        .expect("failure fixture should schedule");
+
+    let application_wait = (0..16)
+        .find_map(|_| {
+            assert_eq!(
+                context.pump_wait(task.wait(), 1),
+                crate::evaluation::EvaluationPumpOutcome::BudgetExhausted
+            );
+            pause_receiver.try_recv().ok()
+        })
+        .expect("the request must stop at its forced application-lazy boundary");
+    assert_eq!(probe.application_lazies().len(), 1);
+    assert_eq!(probe.parsed_requests(), 0);
+    assert_eq!(probe.dispatched_requests(), 0);
+    assert_eq!(builds.load(Ordering::Acquire), 0);
+
+    assert_eq!(
+        context.pump_wait(&application_wait, 4_096),
+        crate::evaluation::EvaluationPumpOutcome::TargetReady
+    );
+    assert_eq!(
+        context.pump_wait(task.wait(), 16_384),
+        crate::evaluation::EvaluationPumpOutcome::TargetReady
+    );
+    let EvaluationWaitPoll::Failed(error) = context.poll_reflection_task(&task) else {
+        panic!("the resumed log-message demand should fail")
+    };
+
+    assert_eq!(
+        error.as_failure().contexts(),
+        [
+            crate::diagnostic::evaluation_context_frame("log_message"),
+            Value::binary_from_text("request argument"),
+        ]
+    );
+    assert_eq!(probe.application_lazies().len(), 1);
+    assert_eq!(probe.parsed_requests(), 1);
+    assert_eq!(probe.dispatched_requests(), 1);
+    assert_eq!(builds.load(Ordering::Acquire), 1);
+    assert_eq!(context.reflection_task_count(), 0);
+    assert!(host.diagnostics().is_empty());
+}
+
+#[test]
+fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
+    let (assembler, effect) = compile_effect(
+        ".cut (.alt ((.log 'warn (anno {refl:(.read_log >>= (\\_message -> .r ()))} {msg:{text:\"discarded\"}})) =>> .fail) ((.log 'info {msg:{text:\"kept\"}}) =>> .r \"ready\"))",
+    );
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let context = EvalContext::isolated(assembler.core_values());
+    let builds = Arc::new(AtomicUsize::new(0));
+    context
+        .install_reflection_launcher(Arc::new(CountingLauncher {
+            inner: task_launcher(TestEffects, host.clone()),
+            builds: builds.clone(),
+        }))
+        .expect("fresh branch fixture should accept a reflection launcher");
+    let probe = Arc::new(EffectPhaseProbe::default());
+    let task_probe = probe.clone();
+    let effect = effect.clone_core_for_test();
+    let task_host = host.clone();
+    let task = context
+        .schedule_task(move |task_context| {
+            EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
+                .map(|task| {
+                    Box::new(ValueEffectTask(
+                        task.with_phase_probe(task_probe).forcing_unfused(),
+                    )) as Box<dyn EvaluationTaskMachine>
+                })
+                .map_err(|error| Arc::from(error.to_string()))
+        })
+        .expect("branch fixture should schedule");
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 16_384),
+        crate::evaluation::EvaluationPumpOutcome::NoProgress,
+        "the nested empty log read must suspend the selected first branch"
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert_eq!(builds.load(Ordering::Acquire), 1);
+    assert_eq!(
+        context.reflection_task_count(),
+        2,
+        "the blocked boundary must retain exactly the parent and nested reflection reservations"
+    );
+    assert_eq!(probe.application_lazies().len(), 4);
+    assert_eq!(probe.parsed_requests(), 4);
+    assert_eq!(probe.dispatched_requests(), 4);
+
+    host.emit_diagnostic(Diagnostic::new(
+        &assembler.values(),
+        crate::diagnostic::Severity::Warning,
+        "release nested reflection",
+    ));
+    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        panic!("the resumed fallback branch should complete")
+    };
+    assert_eq!(
+        assembler
+            .to_binary(&PublicValue::from_runtime_root(*value))
+            .unwrap(),
+        b"ready".as_slice()
+    );
+    assert_eq!(probe.application_lazies().len(), 8);
+    assert_eq!(probe.parsed_requests(), 8);
+    assert_eq!(probe.dispatched_requests(), 8);
+    assert_eq!(builds.load(Ordering::Acquire), 1);
+    assert_eq!(context.reflection_task_count(), 0);
+
+    let diagnostics = host.diagnostics();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the nested input and discarded branch diagnostic must leave only the committed fallback"
+    );
+    assert_eq!(diagnostics[0].severity(), crate::diagnostic::Severity::Info);
+    let enriched = diagnostics[0].enrich(&assembler.values()).unwrap();
+    assert_eq!(
+        assembler
+            .to_binary(&assembler.get(&enriched, "msg.text").unwrap())
+            .unwrap(),
+        b"kept".as_slice()
+    );
+}
+
+#[test]
 fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let (assembler, function) = compile_effect("\\value -> .eval value");
     let session = EvalContext::isolated(assembler.core_values());
