@@ -3536,9 +3536,9 @@ delta is the required reduction in the parent D.2c violation count.
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
 | **W6A.1b — Cross-family effect-value closure (after W6E.6)** | 1 F | Move context-free effect-value callers in their assigned family checkpoints, then require access on the shared constructor after the last caller moves. `-1` at closure. |
-| **W6A.2 — Application work** | 5 S | Convert dictionary/function application, staging, and multi-argument application to resumable work; introduce the shared tagged-payload owner contributing to W6A.0c closure. `-5`. |
+| **W6A.2 — Cross-family application closure (after W6F.4)** | 5 S | Migrate callers to the existing resumable WHNF application owner as their family checkpoints execute; introduce shared tagged-payload work at the first dictionary consumer, then delete the five synchronous application helpers after the last consumer moves. `-5` at closure. |
 | **W6A.3 — Complete (2026-09-15): Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
-| **W6A.4 — Sequence work** | 2 S | Convert key-path and value-list traversal, preserving lazy-list boundaries and contributing consumers to W6A.0c/W6A.0d closure. `-2`. |
+| **W6A.4 — Cross-family key-sequence closure (after W6E.5)** | 2 S | Migrate key-path and list-to-key consumers to owned traversal as their family checkpoints execute, preserving lazy-list boundaries; delete the two synchronous helpers with the W6A.0c key-conversion closure. `-2` at closure. |
 
 Preserve currying, applicative dictionary behavior, list order, binary/list
 streaming boundaries, and non-forcing constructors. The consumer checkpoints
@@ -3630,14 +3630,44 @@ access only around this immediate conversion, and the direct promise fixture
 uses one matching runtime throughout. The D.2c manifest falls from 169 to 167
 declarations and `ApplicationAndSequence` from 10 to 8.
 
+##### W6A.2/W6A.4 — Cross-family consumer order
+
+W3B already provides the authoritative resumable application implementation
+in `WhnfComputation`. W6A.2 must not wrap that owner in a synchronous polling
+loop merely to retain `apply_value_in` or `apply_values_in`. Migrate consumers
+in this order: W6B.2 owns operator application and function instantiation;
+W6D.4 owns list-map application; W6E.5-W6E.8 own effect API, effect-map, and
+list-effect application; and W6F.4 owns object composition/instantiation
+application. Each consumer stores or delegates to the same child WHNF
+computation and surfaces its pending/yielded/ready/failed result through its
+own machine poll.
+
+The reflection machine's `apply_in` compatibility bridge is not a separate
+application semantics. Before W6A.2 closes, migrate that already-resumable
+reflection owner to retain a child `WhnfComputation`; do not pull unrelated
+D.2f reflection value projections into W6. After W6F.4 and this reflection
+bridge move the final consumers, remove `apply_value_in`, `apply_values_in`,
+`apply_function_values_in`, `apply_dict_value_in`, and `instantiate_function`.
+Direct evaluator tests must drive the production application owner rather than
+preserve those helpers solely as fixtures.
+
+W6A.4 follows the key-conversion/list-front ownership established for
+W6A.0c/W6A.0d. W6B.4 owns runtime-net path-index traversal, W6D.1 owns
+dictionary-update paths, and W6D.5a owns pattern paths. The remaining
+list-to-key consumer disappears only when W6E.5 completes the shared
+W6A.0c key-conversion migration. Then remove `eval_key_path_list_in` and
+`list_to_key_items_in` together and record W6A.4's `-2` delta. Forced fixtures
+must suspend within a path element and within a lazy list segment without
+restarting earlier converted keys.
+
 #### W6B — Operators and runtime nets
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6B.1 — Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
-| **W6B.2 — Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination. `-2`. |
+| **W6B.2 — Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
-| **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c key-conversion consumer. `-5`. |
+| **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c/W6A.4 key/path-conversion consumers. `-5`. |
 
 Keep topology and claim state in their existing net owners. Force suspension
 after callable lowering and after the first attached argument, and retain the
@@ -3669,11 +3699,11 @@ checks.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion work for singleton keys. `-4`. |
+| **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
 | **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
 | **W6D.3 — List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
-| **W6D.4 — List transformation and dispatch** | 5 S | Convert concat/map/text-lines/list-like conversion and the family dispatcher, contributing its consumers to W6A.0d closure. `-5`. |
-| **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal. `-10`. |
+| **W6D.4 — List transformation and dispatch** | 5 S | Convert concat/map/text-lines/list-like conversion and the family dispatcher, contributing list demand to W6A.0d and map application to W6A.2 closure. `-5`. |
+| **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal, moving the pattern path consumers toward W6A.4 closure. `-10`. |
 | **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
 
@@ -3693,10 +3723,10 @@ show its exact checkpoint delta before proceeding.
 | **W6E.2 — Annotation collections** | 3 S | Convert array, deque, and binary extraction with resumable list traversal. `-3`. |
 | **W6E.3 — Pure metadata** | 3 S | Convert input collection, pure update application, and output selection while preserving sealed carriers. `-3`. |
 | **W6E.4 — Reflection annotations** | 5 S | Convert annotation dispatch plus `refl`/`meta_refl` deferral; reservation and reflection work begin outside access. `-5`. |
-| **W6E.5 — Effect dispatch and fixpoint** | 4 S | Convert effect API application, family dispatch, and fixpoint construction; move the final key-conversion and lazy-list consumers, then execute W6A.0c/W6A.0d closure. `-4`, followed by closure deltas `-3` and `-2`. |
+| **W6E.5 — Effect dispatch and fixpoint** | 4 S | Convert effect API application, family dispatch, and fixpoint construction; move application into W6A.2 and the final key-conversion/lazy-list consumers, then execute W6A.0c/W6A.0d/W6A.4 closure. `-4`, followed by closure deltas `-3`, `-2`, and `-2`. |
 | **W6E.6 — Effect map** | 1 S, 2 F | Convert the suspendable map step and access-qualify continuation/result constructors. `-3`. |
 | **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
-| **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order. `-6`. |
+| **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order and move callback application into the W6A.2 owner. `-6`. |
 | **W6E.9 — List-effect source** | 4 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-4`. |
 
 The W3 lazy list-effect recipes and source owner are already complete and are
@@ -3713,7 +3743,7 @@ list-effect, reflection-reservation, and backtracking suites in both GC modes.
 | **W6F.1 — Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
 | **W6F.2 — Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`. |
 | **W6F.3 — Object composition** | 4 S | Convert composed/override/extended definitions and dictionary override. `-4`. |
-| **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, and managed spec-member projection. `-5`. |
+| **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
