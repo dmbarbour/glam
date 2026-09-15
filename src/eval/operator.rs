@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::RuntimeValueAccess;
+use crate::evaluation::EvaluationValueAccess;
 
 pub(crate) fn apply_arity_operator(
     _access: &RuntimeValueAccess<'_>,
@@ -95,18 +96,20 @@ pub(crate) fn request_operator(
 }
 
 pub(super) fn apply_core_operator(
-    context: &EvaluatorStepContext<'_>,
+    access: &EvaluationValueAccess<'_>,
     operator: &CoreOperator,
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
-    let operand = data.clone();
+    let operand = access.values().duplicate_value(data);
     match operator {
         CoreOperator::ApplyArity { arity, supplied } => {
             let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
             operands.push(operand);
             if operands.len() < *arity + 1 {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| apply_arity_operator(access.values(), *arity, Arc::from(operands)),
+                return Ok(OperatorYield::Operator(apply_arity_operator(
+                    access.values(),
+                    *arity,
+                    Arc::from(operands),
                 )));
             }
             let function = operands.remove(0);
@@ -120,56 +123,50 @@ pub(super) fn apply_core_operator(
             // operator pair is claimed would lose the intermediate state when
             // the nested evaluation yields, causing the restored pair to replay
             // the application from its beginning.
-            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
-                |access| LazyValue::from_application_in(access, function, Arc::from(operands)),
-            ))))
+            Ok(OperatorYield::Data(Value::Lazy(
+                LazyValue::from_application_in(access.values(), function, Arc::from(operands)),
+            )))
         }
         CoreOperator::FunctionCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| {
-                        function_capture_operator(
-                            access.values(),
-                            code.clone(),
-                            Arc::from(captures),
-                        )
-                    },
+                return Ok(OperatorYield::Operator(function_capture_operator(
+                    access.values(),
+                    code.clone(),
+                    Arc::from(captures),
                 )));
             }
             Ok(OperatorYield::Data(instantiate_function(
-                context, code, captures,
+                access.values(),
+                code,
+                captures,
             )?))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| {
-                        computation_capture_operator(
-                            access.values(),
-                            code.clone(),
-                            Arc::from(captures),
-                        )
-                    },
+                return Ok(OperatorYield::Operator(computation_capture_operator(
+                    access.values(),
+                    code.clone(),
+                    Arc::from(captures),
                 )));
             }
-            let stage = context.with_value_access(|access| {
-                NetValue::new(code.duplicate_runtime_in(access.values()))
-            });
-            let stage = attach_net_many(context, stage, captures);
-            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
-                |access| LazyValue::from_net_computation_in(access, stage),
-            ))))
+            let stage = NetValue::new(code.duplicate_runtime_in(access.values()));
+            let stage = attach_net_many_in(access.values(), stage, captures);
+            Ok(OperatorYield::Data(Value::Lazy(
+                LazyValue::from_net_computation_in(access.values(), stage),
+            )))
         }
         CoreOperator::Dict { keys, supplied } => {
             let mut values = supplied.iter().cloned().collect::<Vec<_>>();
             values.push(operand);
             if values.len() < keys.len() {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| dict_operator(access.values(), keys.clone(), Arc::from(values)),
+                return Ok(OperatorYield::Operator(dict_operator(
+                    access.values(),
+                    keys.clone(),
+                    Arc::from(values),
                 )));
             }
             let dict = keys
@@ -185,15 +182,11 @@ pub(super) fn apply_core_operator(
             let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < call.builtin.arity() {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| {
-                        builtin_operator(
-                            access.values(),
-                            BuiltinCall {
-                                builtin: call.builtin,
-                                arguments: Arc::from(arguments),
-                            },
-                        )
+                return Ok(OperatorYield::Operator(builtin_operator(
+                    access.values(),
+                    BuiltinCall {
+                        builtin: call.builtin,
+                        arguments: Arc::from(arguments),
                     },
                 )));
             }
@@ -202,29 +195,31 @@ pub(super) fn apply_core_operator(
                     "builtin operator received too many arguments",
                 ));
             }
-            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
-                |access| {
-                    LazyValue::from_builtin_in(
-                        access,
-                        BuiltinCall {
-                            builtin: call.builtin,
-                            arguments: Arc::from(arguments),
-                        },
-                    )
-                },
-            ))))
+            Ok(OperatorYield::Data(Value::Lazy(
+                LazyValue::from_builtin_in(
+                    access.values(),
+                    BuiltinCall {
+                        builtin: call.builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                ),
+            )))
         }
-        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(apply_value_in(
-            context,
-            function.clone(),
-            operand,
-        )?)),
+        CoreOperator::Applicable(function) => Ok(OperatorYield::Data(Value::Lazy(
+            LazyValue::from_application_in(
+                access.values(),
+                access.values().duplicate_value(function),
+                Arc::from([operand]),
+            ),
+        ))),
         CoreOperator::List { arity, supplied } => {
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| list_operator(access.values(), *arity, Arc::from(arguments)),
+                return Ok(OperatorYield::Operator(list_operator(
+                    access.values(),
+                    *arity,
+                    Arc::from(arguments),
                 )));
             }
             let list = arguments.into_iter().fold(List::empty(), |list, value| {
@@ -240,12 +235,16 @@ pub(super) fn apply_core_operator(
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < arity {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| access_operator(access.values(), path.clone(), Arc::from(arguments)),
+                return Ok(OperatorYield::Operator(access_operator(
+                    access.values(),
+                    path.clone(),
+                    Arc::from(arguments),
                 )));
             }
-            Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
-                |access| LazyValue::from_access_in(access, path.clone(), Arc::from(arguments)),
+            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access_in(
+                access.values(),
+                path.clone(),
+                Arc::from(arguments),
             ))))
         }
         CoreOperator::Request {
@@ -257,16 +256,12 @@ pub(super) fn apply_core_operator(
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
-                return Ok(OperatorYield::Operator(context.with_value_access(
-                    |access| {
-                        request_operator(
-                            access.values(),
-                            tag.clone(),
-                            *arity,
-                            Arc::from(arguments),
-                            *wrap_effect,
-                        )
-                    },
+                return Ok(OperatorYield::Operator(request_operator(
+                    access.values(),
+                    tag.clone(),
+                    *arity,
+                    Arc::from(arguments),
+                    *wrap_effect,
                 )));
             }
             let request = Value::Dict(
@@ -274,7 +269,7 @@ pub(super) fn apply_core_operator(
                     .insert(tag.clone(), Value::List(List::from_values(arguments))),
             );
             Ok(OperatorYield::Data(if *wrap_effect {
-                constant_effect_in_step(context, request)
+                constant_effect_in(access.values(), request)
             } else {
                 request
             }))
@@ -306,16 +301,6 @@ pub(crate) fn constant_effect_in(
                 .construct_managed_core_net(template.instantiate())
                 .expect("managed core-net representation must fit one collector run"),
         ),
-        1,
-    ));
-    Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
-}
-
-pub(crate) fn constant_effect_in_step(context: &EvaluatorStepContext<'_>, request: Value) -> Value {
-    let template =
-        context.with_value_access(|access| constant_effect_template(access.values(), request));
-    let function = Value::Function(FunctionValue::new(
-        NetValue::new(context.construct_core_net(template.instantiate())),
         1,
     ));
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))

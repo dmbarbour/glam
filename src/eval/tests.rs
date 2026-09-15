@@ -917,7 +917,7 @@ fn zero_arity_apply_operator_is_data_identity() {
 
     assert_eq!(
         with_direct_evaluator(&context, |evaluator| {
-            apply_core_operator(evaluator, &operator, &data)
+            evaluator.with_value_access(|access| apply_core_operator(&access, &operator, &data))
         })
         .unwrap(),
         OperatorYield::Data(data)
@@ -6159,18 +6159,20 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let wait = blocked
         .blocked_on()
         .expect("operator should report its exact task wait");
-    let blocked = runtime
-        .test_with(&crate::core::test_value_factory(), |net| {
-            net.blocked_operator_call(pair)
-        })
-        .expect("operator should retain its exact task wait");
+    assert!(
+        runtime
+            .test_with(&crate::core::test_value_factory(), |net| net
+                .operator_call(pair))
+            .is_none(),
+        "operator application should hand demand to the emitted lazy value"
+    );
     assert_eq!(
         runtime.active_normalization_batch(&crate::core::test_value_factory()),
         None,
         "operator evaluation must begin after normalization closes"
     );
     assert!(matches!(
-        context.poll_wait(&blocked.wait.0),
+        context.poll_wait(&wait.0),
         EvaluationWaitPoll::Pending(_)
     ));
 

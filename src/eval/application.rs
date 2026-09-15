@@ -173,20 +173,18 @@ pub(super) fn effect_value(function: Value) -> Value {
 }
 
 pub(super) fn instantiate_function(
-    context: &EvaluatorStepContext<'_>,
+    access: &RuntimeValueAccess<'_>,
     code: &FunctionCode,
     captures: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     if captures.len() != code.capture_count() {
         return Err(EvaluationHalt::new("function capture arity mismatch"));
     }
+    let stage = NetValue::new(code.duplicate_runtime_in(access));
     let stage = if captures.is_empty() {
-        context
-            .with_value_access(|access| NetValue::new(code.duplicate_runtime_in(access.values())))
+        stage
     } else {
-        let stage = context
-            .with_value_access(|access| NetValue::new(code.duplicate_runtime_in(access.values())));
-        attach_function_stage(context, stage, captures)
+        attach_net_many_in(access, stage, captures)
     };
     Ok(Value::Function(FunctionValue::new(stage, code.arity())))
 }

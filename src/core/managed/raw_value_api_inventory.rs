@@ -1403,13 +1403,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        563,
+        562,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        3_122_660_697_100_368_265,
+        8_177_684_847_413_964_097,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1420,9 +1420,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 112),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 114),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 25),
-        ((ApiKind::Function, ApiDisposition::Violation), 416),
+        ((ApiKind::Function, ApiDisposition::Violation), 413),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1492,7 +1492,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            158,
+            155,
         ),
         (
             (
@@ -1633,8 +1633,8 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         family_counts,
         BTreeMap::from([
             (D2cFamily::ValueDemand, 12),
-            (D2cFamily::ApplicationAndSequence, 8),
-            (D2cFamily::OperatorAndNet, 9),
+            (D2cFamily::ApplicationAndSequence, 7),
+            (D2cFamily::OperatorAndNet, 7),
             (D2cFamily::DispatchScalarAndStrategy, 25),
             (D2cFamily::CollectionsAndPatterns, 43),
             (D2cFamily::AnnotationsAndEffects, 36),
@@ -1659,7 +1659,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 127),
+            (D2cCurrentContext::EvaluatorStep, 124),
             (D2cCurrentContext::DurableEval, 7),
             (D2cCurrentContext::ContextFree, 24),
         ]),
@@ -1682,7 +1682,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [24, 134, 0],
+        [24, 131, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1710,9 +1710,9 @@ fn d2c_family_fingerprints_are_exact() {
         (D2cFamily::ValueDemand, 16_603_655_789_842_265_632),
         (
             D2cFamily::ApplicationAndSequence,
-            15_726_924_403_242_565_655,
+            11_551_636_234_692_466_987,
         ),
-        (D2cFamily::OperatorAndNet, 351_338_158_742_933_465),
+        (D2cFamily::OperatorAndNet, 16_573_128_699_200_778_206),
         (
             D2cFamily::DispatchScalarAndStrategy,
             18_123_437_161_959_930_221,
@@ -1759,9 +1759,8 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A0dLazyListProjection, 2),
         (W8ValueCompatibility, 7),
         (W6A1ApplicationLeaves, 1),
-        (W6A2ApplicationWork, 5),
+        (W6A2ApplicationWork, 4),
         (W6A4SequenceWork, 2),
-        (W6B2OperatorExecution, 2),
         (W6B3NetClaimProjection, 2),
         (W6B4NetApplication, 5),
         (W6C1DispatchAndArity, 2),
@@ -1808,9 +1807,8 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A0dLazyListProjection, 7_696_218_449_487_864_870),
         (W8ValueCompatibility, 15_067_824_851_424_263_475),
         (W6A1ApplicationLeaves, 4_928_394_332_436_527_125),
-        (W6A2ApplicationWork, 1_411_758_141_064_199_867),
+        (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
-        (W6B2OperatorExecution, 9_196_798_427_925_844_066),
         (W6B3NetClaimProjection, 15_900_003_573_206_966_045),
         (W6B4NetApplication, 8_447_387_171_768_179_270),
         (W6C1DispatchAndArity, 10_640_725_338_893_605_103),

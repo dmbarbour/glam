@@ -3665,7 +3665,7 @@ restarting earlier converted keys.
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6B.1 — Complete (2026-09-15): Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
-| **W6B.2 — Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
+| **W6B.2 — Complete (2026-09-15): Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
 | **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c/W6A.4 key/path-conversion consumers. `-5`. |
 
@@ -3687,6 +3687,22 @@ from the prose enumeration. The exact manifest still confirms the planned
 `-9` delta: `OperatorAndNet` falls from 18 to 9 and the complete D.2c manifest
 from 167 to 158 declarations. No durable root or net-topology change was
 introduced.
+
+W6B.2 completion record: one claimed operator pair is now projected, reduced,
+and terminalized beneath one matching `EvaluationValueAccess`; no driver or
+scheduler coordination occurs before that region closes. Saturated applicable
+operators emit a lazy application into the net instead of synchronously
+demanding their function while the pair is claimed. The existing WHNF owner
+therefore retains and resumes the exact promise, reflection, or intermediate
+application state without restoring and replaying the pair. Function capture
+instantiation and constant-effect construction reuse the same regional access.
+The generic blocked-operator protocol remains test-only for exact restoration
+coverage, while production operator waits now belong to emitted WHNF work.
+The complete D.2c manifest falls from 158 to 155 declarations:
+`OperatorAndNet` falls from 9 to 7 and `ApplicationAndSequence` from 8 to 7,
+closing W6B.2 and moving `instantiate_function` out of W6A.2. Forced promise
+and reflection-gate fixtures verify both the emitted lazy boundary and exact
+resumption ordinarily and under aggressive collection.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 

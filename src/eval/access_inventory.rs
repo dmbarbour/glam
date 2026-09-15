@@ -136,7 +136,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/application.rs",
-        [5, 3],
+        [4, 3],
         "I3B.2 and I3D/I3E direct callers"
     ),
     context_entry!(
@@ -283,11 +283,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/object_machine.rs",
         [14, 3],
         "W3B.2b explicit C3, composed-definition, and object-mixin source owner"
-    ),
-    context_entry!(
-        "src/eval/operator.rs",
-        [2, 0],
-        "I3D.4 scoped core-net operator application"
     ),
     context_entry!(
         "src/eval/sequence.rs",

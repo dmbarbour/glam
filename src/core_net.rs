@@ -790,6 +790,13 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::OperatorCall);
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "core operator execution now emits suspendable WHNF work; the generic blocked-pair protocol remains available for exact compatibility fixtures"
+        )
+    )]
     pub(crate) fn block_claimed_operator_call(
         &self,
         call: crate::interaction_net::OperatorCall,
