@@ -1,7 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W5 and their mandatory reviews are complete by 2026-09-15; W6-W8
-remain planned. This is the focused implementation plan selected by
+Status: W0-W5 and their mandatory reviews plus W6.0 are complete by
+2026-09-15; W6A-W8 remain planned. This is the focused implementation plan
+selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -3474,6 +3475,8 @@ temporary recursive wrapper for a later pass.
 
 #### W6.0 — Inventory reconciliation and low-risk partitioning
 
+**Status: complete (2026-09-15).**
+
 Before editing production behavior, reconcile the exact W0B WHNF census with
 the parent D.2c raw-value manifest and partition W6A-W6F into independently
 verifiable checkpoints. At post-W5 review the D.2c manifest contains 176
@@ -3494,44 +3497,145 @@ aggressive verification subset, and inventory delta before implementation.
 Reconcile the parent plan's dated prose counts at the same time. W6A-W6F are
 scope headings, not single implementation spikes.
 
+Completion record: the source-backed D.2c inventory assigns all 176 live
+declarations to 42 exact checkpoint owners and latches each group with its own
+signature fingerprint. Forty-one W6 checkpoints own 169 violations; the seven
+legacy value-demand compatibility declarations are named individually and
+remain assigned to W8. Current signature shape is 132 step-context, 7 durable-
+context, and 37 context-free operations. The tables below record target shape,
+and inventory delta for every implementation group; each family record adds
+its forced fixtures and focused ordinary/aggressive verification. The parent
+D.2c current-phase counts and W1-W3 versus W6/W8 responsibility are
+reconciled. No production behavior changes in W6.0.
+
+Verification record: the nine-test raw-value inventory and five-test WHNF
+inventory pass, the checkpoint manifest passes with aggressive collection,
+and format, all-target/all-feature Clippy, the complete routine suite, and the
+focused interaction-net profiling script pass. The routine library partition
+reports 1,629 passed and two ignored tests, followed by every integration and
+executable partition.
+
 #### W6A — Application and sequences
 
-Convert the complete application and sequence families. Preserve currying,
-applicative dictionary behavior, list order, binary/list streaming boundaries,
-and non-forcing constructors.
+Complete the foundational value signatures before converting application and
+sequence callers. `S`, `D`, and `F` below mean an existing
+`EvaluatorStepContext`, durable `EvalContext`, or context-free signature. The
+delta is the required reduction in the parent D.2c violation count.
+
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6A.0a — Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
+| **W6A.0b — Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
+| **W6A.0c — Key, tag, and undefined work** | 3 S | Give recursive key/undefined traversal explicit resumable work and keep singleton-tag inspection as its consumer. `-3`. |
+| **W6A.0d — Lazy-list projection** | 2 S | Make thunk forcing and front extraction one owned collection step with no access spanning the force. `-2`. |
+| **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
+| **W6A.1 — Application leaves** | 3 F | Access-qualify effect wrapping and non-callable diagnostics without introducing suspension. `-3`. |
+| **W6A.2 — Application work** | 5 S | Convert dictionary/function application, staging, and multi-argument application to resumable work. `-5`. |
+| **W6A.3 — Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
+| **W6A.4 — Sequence work** | 2 S | Convert key-path and value-list traversal, preserving lazy-list boundaries. `-2`. |
+
+Preserve currying, applicative dictionary behavior, list order, binary/list
+streaming boundaries, and non-forcing constructors. W6A.0c and W6A.0d each
+need a forced lazy tail or nested deferred value; W6A.2 needs partial,
+saturated, and over-application suspension; W6A.4 needs a forced lazy list
+chunk. Run the focused value, application, and sequence suites ordinarily and
+with `aggressive-gc-verification`. Relatch both checkpoint and family
+fingerprints after each delta.
 
 #### W6B — Operators and runtime nets
 
-Convert operator descriptors/execution and the remaining runtime-net evaluator
-bridges. Keep topology and claim state in their existing net owners.
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6B.1 — Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
+| **W6B.2 — Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination. `-2`. |
+| **W6B.3 — Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
+| **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, and function-call machine construction. `-5`. |
+
+Keep topology and claim state in their existing net owners. Force suspension
+after callable lowering and after the first attached argument, and retain the
+cursor-claim restoration/contention fixtures. Run operator, runtime-net,
+function-binding, and interaction-net profiling subsets ordinarily and under
+aggressive collection; committed rule signatures must not change merely
+because access ownership changes.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
-Convert builtin dispatch, arity/assertion/conditional operations, numeric and
-comparison operands, `seq`, `spark`, and provenance boundaries. Operations
-which require only immediate data should become immediate-data helpers rather
-than artificial WHNF frames.
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6C.1 — Dispatch and arity** | 1 S, 1 F | Thread the caller's regional leaf through callback-free dispatch and make exact-arity extraction access-qualified. `-2`. |
+| **W6C.2 — Assertions and conditionals** | 3 S | Separate operand demand from unit/kind validation and preserve structured assertion context. `-3`. |
+| **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; keep condition/effect constructors immediate. `-9`. |
+| **W6C.4 — Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
+| **W6C.5 — Provenance** | 1 D | Replace the durable evaluator facade with an explicit reflection/provenance handoff. `-1`. |
+| **W6C.6 — Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
+
+Operations which require only immediate data become immediate-data helpers,
+not artificial WHNF frames. Force suspension on the second comparison/numeric
+operand, inside assertion context construction, and immediately before
+strategy scheduling. Run builtin dispatch, assertion, conditional, numeric,
+comparison, provenance, `seq`, and `spark` suites in both GC modes. W6C.5 and
+W6C.6 must retain the source-backed no-callback/no-scheduler-under-access
+checks.
 
 #### W6D — Dictionaries, lists, and patterns
 
-Convert collection and pattern families, including collection folds and view
-or predicate application. Preserve `.fail` mismatch semantics separately from
-permanent evaluation failure.
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points. `-4`. |
+| **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
+| **W6D.3 — List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand. `-7`. |
+| **W6D.4 — List transformation and dispatch** | 5 S | Convert concat/map/text-lines/list-like conversion and the family dispatcher. `-5`. |
+| **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal. `-10`. |
+| **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction. `-5`. |
+| **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
+
+Preserve `.fail` mismatch semantics separately from permanent evaluation
+failure and preserve optional-dictionary-key behavior. Force lazy dictionary
+members, lazy list chunks on both sides of a split, refutable remainder
+patterns, and view/predicate application. Run focused dict/list/pattern suites
+and syntax-backed pattern samples ordinarily and aggressively. Each
+collection checkpoint must retain sharing/root-registration observations and
+show its exact checkpoint delta before proceeding.
 
 #### W6E — Annotations and effect values
 
-Convert pure annotations, reflection/strategy annotation recognition, general
-effect construction, and the remaining list-effect builtin dispatch. The W3
-lazy list-effect recipes and source owner are already complete and are not
-reimplemented here. Preserve sealed metadata and the distinction between pure
-metadata updates and reflection boundaries.
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6E.1 — Annotation recognition** | 5 S, 2 F | Convert name/value/assertion parsing and diagnostics; keep unit/undefined recognition as regional leaves. `-7`. |
+| **W6E.2 — Annotation collections** | 3 S | Convert array, deque, and binary extraction with resumable list traversal. `-3`. |
+| **W6E.3 — Pure metadata** | 3 S | Convert input collection, pure update application, and output selection while preserving sealed carriers. `-3`. |
+| **W6E.4 — Reflection annotations** | 5 S | Convert annotation dispatch plus `refl`/`meta_refl` deferral; reservation and reflection work begin outside access. `-5`. |
+| **W6E.5 — Effect dispatch and fixpoint** | 4 S | Convert effect API application, family dispatch, and fixpoint construction. `-4`. |
+| **W6E.6 — Effect map** | 1 S, 2 F | Convert the suspendable map step and access-qualify continuation/result constructors. `-3`. |
+| **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
+| **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order. `-6`. |
+| **W6E.9 — List-effect source** | 4 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-4`. |
+
+The W3 lazy list-effect recipes and source owner are already complete and are
+not reimplemented here. Preserve sealed metadata, pure versus reflection
+metadata updates, and abandoned-branch behavior. Force suspension during
+container extraction, metadata input and output traversal, effect-map
+continuation, and list-effect fix/flat-map. Run annotation, metadata, effect,
+list-effect, reflection-reservation, and backtracking suites in both GC modes.
 
 #### W6F — Objects and interaction-net builtins
 
-Convert the remaining object builtins and interaction-net builtin request
-construction. Object-fixpoint C3 traversal, referential identity validation,
-and the mixin fold are already complete in W3B.2b and are not reimplemented
-here. Preserve referential-spec validation and source-owned net journals.
+| Checkpoint | Live declarations and current shape | Target and delta |
+|---|---:|---|
+| **W6F.1 — Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
+| **W6F.2 — Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`. |
+| **W6F.3 — Object composition** | 4 S | Convert composed/override/extended definitions and dictionary override. `-4`. |
+| **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, and managed spec-member projection. `-5`. |
+| **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
+| **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
+| **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
+
+Object-fixpoint C3 traversal, referential identity validation, the mixin fold,
+and the net-construction journal owner are already complete and are not
+reimplemented. Force suspension during spec dependency/member demand and
+during net-construction replay. Run object/C3/override and direct-style net
+construction/function-binding suites in both GC modes, retaining identity,
+port-family, malformed-request, and callback re-entry fixtures.
 
 #### W6G — Residual resumable-machine overhead
 

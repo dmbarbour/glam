@@ -88,6 +88,55 @@ enum D2cExecutionShape {
     ImmediateDataHelper,
 }
 
+/// Exact implementation checkpoint for each live D.2c declaration after the
+/// resumable-WHNF W5 boundary. The per-checkpoint fingerprints below prevent a
+/// broad source-family rule from silently absorbing later declarations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum D2cCheckpoint {
+    W6A0aLazyOwnerHandoff,
+    W6A0bNumericProjection,
+    W6A0cKeyTagUndefined,
+    W6A0dLazyListProjection,
+    W8ValueCompatibility,
+    W6A1ApplicationLeaves,
+    W6A2ApplicationWork,
+    W6A3SequenceLeaves,
+    W6A4SequenceWork,
+    W6B1OperatorDescriptors,
+    W6B2OperatorExecution,
+    W6B3NetClaimProjection,
+    W6B4NetApplication,
+    W6C1DispatchAndArity,
+    W6C2AssertionAndConditional,
+    W6C3Comparison,
+    W6C4Numeric,
+    W6C5Provenance,
+    W6C6Strategy,
+    W6D1DictBasic,
+    W6D2DictMerge,
+    W6D3ListObservation,
+    W6D4ListTransformAndDispatch,
+    W6D5aPatternDictAndPath,
+    W6D5bPatternList,
+    W6D5cPatternEffectAndDispatch,
+    W6E1AnnotationRecognition,
+    W6E2AnnotationCollections,
+    W6E3MetadataPure,
+    W6E4AnnotationReflection,
+    W6E5EffectDispatchAndFixpoint,
+    W6E6EffectMap,
+    W6E7ListEffectApi,
+    W6E8ListEffectControl,
+    W6E9ListEffectSource,
+    W6F1ObjectLeaves,
+    W6F2ObjectSpecification,
+    W6F3ObjectComposition,
+    W6F4ObjectInstantiation,
+    W6F5NetDispatch,
+    W6F6NetConstructionLifecycle,
+    W6F7NetConstructionValues,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RemediationAssignment {
     owner: RemediationOwner,
@@ -296,6 +345,232 @@ impl ApiOccurrence {
             }
             D2cCurrentContext::ContextFree => D2cExecutionShape::RegionalOperation,
         })
+    }
+
+    fn d2c_checkpoint(&self) -> Option<D2cCheckpoint> {
+        let family = self.d2c_family()?;
+        let path = self
+            .declaration
+            .split("::")
+            .next()
+            .expect("an inventory declaration should begin with a source path");
+        let name = self
+            .declaration
+            .rsplit("::")
+            .next()
+            .expect("an inventory declaration should end with a name");
+
+        use D2cCheckpoint::*;
+        use D2cFamily::*;
+        let checkpoint = match (family, path, name) {
+            (ValueDemand, _, "complete" | "follow_value" | "is_error_lazy_value") => {
+                W6A0aLazyOwnerHandoff
+            }
+            (ValueDemand, _, "eval_number_in" | "eval_index_number_in") => W6A0bNumericProjection,
+            (
+                ValueDemand,
+                _,
+                "value_to_key_in" | "tagged_payload_in" | "is_semantically_undefined_in",
+            ) => W6A0cKeyTagUndefined,
+            (ValueDemand, _, "force_list_thunk_in" | "pop_list_front_in") => {
+                W6A0dLazyListProjection
+            }
+            (
+                ValueDemand,
+                _,
+                "eval_value"
+                | "eval_value_in"
+                | "eval_lazy_in"
+                | "eval_promised_in"
+                | "await_deferred_task"
+                | "deferred_wait_result"
+                | "produce_lazy_source_in",
+            ) => W8ValueCompatibility,
+
+            (
+                ApplicationAndSequence,
+                "src/eval/application.rs",
+                "apply_effect_function_value" | "effect_value" | "non_callable_error",
+            ) => W6A1ApplicationLeaves,
+            (ApplicationAndSequence, "src/eval/application.rs", _) => W6A2ApplicationWork,
+            (
+                ApplicationAndSequence,
+                "src/eval/sequence.rs",
+                "append_sequence" | "append_values",
+            ) => W6A3SequenceLeaves,
+            (ApplicationAndSequence, "src/eval/sequence.rs", _) => W6A4SequenceWork,
+
+            (
+                OperatorAndNet,
+                "src/eval/operator.rs",
+                "apply_core_operator" | "constant_effect_in_step",
+            ) => W6B2OperatorExecution,
+            (OperatorAndNet, "src/eval/operator.rs", _) => W6B1OperatorDescriptors,
+            (OperatorAndNet, "src/eval/net.rs", "callable" | "parts") => W6B3NetClaimProjection,
+            (OperatorAndNet, "src/eval/net.rs", _) => W6B4NetApplication,
+
+            (DispatchScalarAndStrategy, "src/eval/builtins.rs", _) => W6C1DispatchAndArity,
+            (
+                DispatchScalarAndStrategy,
+                "src/eval/builtins/assertion.rs" | "src/eval/builtins/conditional.rs",
+                _,
+            ) => W6C2AssertionAndConditional,
+            (
+                DispatchScalarAndStrategy,
+                "src/eval/builtins/comparison.rs"
+                | "src/eval/builtins/comparison/implementation.rs",
+                _,
+            ) => W6C3Comparison,
+            (
+                DispatchScalarAndStrategy,
+                "src/eval/builtins/numeric.rs" | "src/eval/builtins/numeric/implementation.rs",
+                _,
+            ) => W6C4Numeric,
+            (DispatchScalarAndStrategy, "src/eval/builtins/provenance.rs", _) => W6C5Provenance,
+            (DispatchScalarAndStrategy, "src/eval/builtins/strategy.rs", _) => W6C6Strategy,
+
+            (
+                CollectionsAndPatterns,
+                "src/eval/builtins/dict.rs" | "src/eval/builtins/dict/basic.rs",
+                _,
+            ) => W6D1DictBasic,
+            (CollectionsAndPatterns, "src/eval/builtins/dict/merge.rs", _) => W6D2DictMerge,
+            (
+                CollectionsAndPatterns,
+                "src/eval/builtins/list/implementation.rs",
+                "eval_list_at_builtin"
+                | "eval_list_head_builtin"
+                | "eval_list_len_builtin"
+                | "eval_list_split_builtin"
+                | "eval_list_split_end_builtin"
+                | "eval_list_tail_builtin"
+                | "eval_slice_builtin",
+            ) => W6D3ListObservation,
+            (
+                CollectionsAndPatterns,
+                "src/eval/builtins/list.rs" | "src/eval/builtins/list/implementation.rs",
+                _,
+            ) => W6D4ListTransformAndDispatch,
+            (
+                CollectionsAndPatterns,
+                "src/eval/builtins/pattern.rs",
+                "dict_is_logically_empty"
+                | "pattern_dict_is_empty"
+                | "pattern_dict_try_take"
+                | "pattern_equal"
+                | "pattern_is_dict"
+                | "pattern_path_equal"
+                | "pattern_path_keys"
+                | "pattern_value_key"
+                | "take_dict_path"
+                | "value_is_logically_undefined",
+            ) => W6D5aPatternDictAndPath,
+            (
+                CollectionsAndPatterns,
+                "src/eval/builtins/pattern.rs",
+                "list_item_value"
+                | "pattern_is_list"
+                | "pattern_list_is_empty"
+                | "pattern_list_try_uncons"
+                | "pattern_list_try_unsnoc",
+            ) => W6D5bPatternList,
+            (CollectionsAndPatterns, "src/eval/builtins/pattern.rs", _) => {
+                W6D5cPatternEffectAndDispatch
+            }
+
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/annotation/implementation.rs",
+                "annotation_error_value"
+                | "annotation_name"
+                | "is_undefined_value"
+                | "parse_assertion_annotation"
+                | "parse_value_annotation"
+                | "payload_is_unit"
+                | "recognize_annotation",
+            ) => W6E1AnnotationRecognition,
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/annotation/implementation.rs",
+                "eval_array_annotation" | "eval_binary_annotation" | "eval_deque_annotation",
+            ) => W6E2AnnotationCollections,
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/annotation/implementation.rs",
+                "eval_metadata_pure_annotation"
+                | "metadata_update_inputs"
+                | "metadata_update_outputs",
+            ) => W6E3MetadataPure,
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/annotation.rs"
+                | "src/eval/builtins/annotation/implementation.rs",
+                _,
+            ) => W6E4AnnotationReflection,
+            (AnnotationsAndEffects, "src/eval/builtins/effect.rs", _)
+            | (
+                AnnotationsAndEffects,
+                "src/eval/builtins/effect/implementation.rs",
+                "apply_effect_api" | "eval_fixpoint_builtin",
+            ) => W6E5EffectDispatchAndFixpoint,
+            (AnnotationsAndEffects, "src/eval/builtins/effect/implementation.rs", _) => {
+                W6E6EffectMap
+            }
+            (AnnotationsAndEffects, "src/eval/list_effect_machine.rs", _) => W6E7ListEffectApi,
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/list_effect/implementation.rs",
+                "cut_list_effect_results"
+                | "eval_list_effect_alt_builtin"
+                | "eval_list_effect_builtin"
+                | "eval_list_effect_cut_builtin"
+                | "eval_list_effect_seq_builtin"
+                | "flat_map_list_effect_results",
+            ) => W6E8ListEffectControl,
+            (
+                AnnotationsAndEffects,
+                "src/eval/builtins/list_effect.rs"
+                | "src/eval/builtins/list_effect/implementation.rs",
+                _,
+            ) => W6E9ListEffectSource,
+
+            (
+                Objects,
+                "src/eval/builtins/object/implementation.rs",
+                "default_object_defs_value"
+                | "dict_object_spec"
+                | "object_spec_from_parts"
+                | "object_spec_name_value",
+            ) => W6F1ObjectLeaves,
+            (
+                Objects,
+                "src/eval/builtins/object/implementation.rs",
+                "eval_diagnostic_object_builtin"
+                | "eval_object_local_name_builtin"
+                | "eval_object_spec_builtin"
+                | "object_spec_dict",
+            ) => W6F2ObjectSpecification,
+            (
+                Objects,
+                "src/eval/builtins/object/implementation.rs",
+                "eval_object_composed_defs_builtin"
+                | "eval_object_override_defs_builtin"
+                | "eval_object_with_defs_builtin"
+                | "override_dict",
+            ) => W6F3ObjectComposition,
+            (Objects, _, _) => W6F4ObjectInstantiation,
+
+            (NetBuiltins, "src/eval/builtins/net.rs", _) => W6F5NetDispatch,
+            (NetBuiltins, "src/eval/builtins/net/construction.rs", "new" | "poll" | "replay") => {
+                W6F6NetConstructionLifecycle
+            }
+            (NetBuiltins, "src/eval/builtins/net/construction.rs", _) => W6F7NetConstructionValues,
+            _ => panic!(
+                "{} has no reviewed resumable-WHNF W6/W8 checkpoint",
+                self.declaration
+            ),
+        };
+        Some(checkpoint)
     }
 }
 
@@ -1454,6 +1729,131 @@ fn d2c_family_fingerprints_are_exact() {
     assert_eq!(
         actual, expected,
         "a D.2c declaration or signature moved without updating its family checkpoint"
+    );
+}
+
+#[test]
+fn d2c_w6_checkpoint_manifest_is_exact() {
+    use D2cCheckpoint::*;
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inventory = collect_occurrences(manifest);
+    let mut groups = BTreeMap::<D2cCheckpoint, Vec<ApiOccurrence>>::new();
+    for occurrence in d2c_occurrences(&inventory) {
+        groups
+            .entry(
+                occurrence
+                    .d2c_checkpoint()
+                    .expect("D.2c occurrence needs a W6 or W8 checkpoint"),
+            )
+            .or_default()
+            .push(occurrence.clone());
+    }
+
+    let actual_counts = groups
+        .iter()
+        .map(|(checkpoint, occurrences)| (*checkpoint, occurrences.len()))
+        .collect::<BTreeMap<_, _>>();
+    let expected_counts = BTreeMap::from([
+        (W6A0aLazyOwnerHandoff, 3),
+        (W6A0bNumericProjection, 2),
+        (W6A0cKeyTagUndefined, 3),
+        (W6A0dLazyListProjection, 2),
+        (W8ValueCompatibility, 7),
+        (W6A1ApplicationLeaves, 3),
+        (W6A2ApplicationWork, 5),
+        (W6A3SequenceLeaves, 2),
+        (W6A4SequenceWork, 2),
+        (W6B1OperatorDescriptors, 9),
+        (W6B2OperatorExecution, 2),
+        (W6B3NetClaimProjection, 2),
+        (W6B4NetApplication, 5),
+        (W6C1DispatchAndArity, 2),
+        (W6C2AssertionAndConditional, 3),
+        (W6C3Comparison, 9),
+        (W6C4Numeric, 5),
+        (W6C5Provenance, 1),
+        (W6C6Strategy, 5),
+        (W6D1DictBasic, 4),
+        (W6D2DictMerge, 8),
+        (W6D3ListObservation, 7),
+        (W6D4ListTransformAndDispatch, 5),
+        (W6D5aPatternDictAndPath, 10),
+        (W6D5bPatternList, 5),
+        (W6D5cPatternEffectAndDispatch, 4),
+        (W6E1AnnotationRecognition, 7),
+        (W6E2AnnotationCollections, 3),
+        (W6E3MetadataPure, 3),
+        (W6E4AnnotationReflection, 5),
+        (W6E5EffectDispatchAndFixpoint, 4),
+        (W6E6EffectMap, 3),
+        (W6E7ListEffectApi, 1),
+        (W6E8ListEffectControl, 6),
+        (W6E9ListEffectSource, 4),
+        (W6F1ObjectLeaves, 4),
+        (W6F2ObjectSpecification, 4),
+        (W6F3ObjectComposition, 4),
+        (W6F4ObjectInstantiation, 5),
+        (W6F5NetDispatch, 2),
+        (W6F6NetConstructionLifecycle, 3),
+        (W6F7NetConstructionValues, 3),
+    ]);
+    assert_eq!(
+        actual_counts, expected_counts,
+        "every D.2c declaration needs one bounded W6/W8 implementation checkpoint"
+    );
+
+    let actual_fingerprints = groups
+        .iter()
+        .map(|(checkpoint, occurrences)| (*checkpoint, occurrence_fingerprint(occurrences)))
+        .collect::<BTreeMap<_, _>>();
+    let expected_fingerprints = BTreeMap::from([
+        (W6A0aLazyOwnerHandoff, 14_648_787_817_010_432_750),
+        (W6A0bNumericProjection, 3_916_486_408_388_338_150),
+        (W6A0cKeyTagUndefined, 13_459_851_214_100_325_735),
+        (W6A0dLazyListProjection, 7_696_218_449_487_864_870),
+        (W8ValueCompatibility, 15_067_824_851_424_263_475),
+        (W6A1ApplicationLeaves, 2_243_885_857_537_299_306),
+        (W6A2ApplicationWork, 1_411_758_141_064_199_867),
+        (W6A3SequenceLeaves, 13_322_641_789_109_355_785),
+        (W6A4SequenceWork, 15_567_590_830_686_767_581),
+        (W6B1OperatorDescriptors, 5_340_116_325_603_204_610),
+        (W6B2OperatorExecution, 9_196_798_427_925_844_066),
+        (W6B3NetClaimProjection, 15_900_003_573_206_966_045),
+        (W6B4NetApplication, 8_447_387_171_768_179_270),
+        (W6C1DispatchAndArity, 10_640_725_338_893_605_103),
+        (W6C2AssertionAndConditional, 509_629_874_793_238_271),
+        (W6C3Comparison, 1_125_825_947_678_604_093),
+        (W6C4Numeric, 12_669_970_952_197_990_896),
+        (W6C5Provenance, 17_695_223_598_988_661_885),
+        (W6C6Strategy, 7_226_560_668_498_362_880),
+        (W6D1DictBasic, 3_953_826_480_194_787_850),
+        (W6D2DictMerge, 17_524_228_289_460_621_433),
+        (W6D3ListObservation, 1_141_124_844_497_395_933),
+        (W6D4ListTransformAndDispatch, 16_264_885_387_125_707_701),
+        (W6D5aPatternDictAndPath, 4_701_694_396_283_851_948),
+        (W6D5bPatternList, 13_481_016_508_580_392_350),
+        (W6D5cPatternEffectAndDispatch, 7_938_764_653_056_697_587),
+        (W6E1AnnotationRecognition, 15_863_802_739_852_521_816),
+        (W6E2AnnotationCollections, 5_152_331_018_857_617_448),
+        (W6E3MetadataPure, 8_965_714_601_448_224_494),
+        (W6E4AnnotationReflection, 9_119_478_075_463_295_836),
+        (W6E5EffectDispatchAndFixpoint, 2_047_908_102_180_799_399),
+        (W6E6EffectMap, 32_026_630_358_957_828),
+        (W6E7ListEffectApi, 1_964_017_467_539_357_249),
+        (W6E8ListEffectControl, 5_599_189_213_790_407_454),
+        (W6E9ListEffectSource, 16_763_173_768_808_435_452),
+        (W6F1ObjectLeaves, 17_471_107_961_031_657_988),
+        (W6F2ObjectSpecification, 17_557_287_365_619_708_655),
+        (W6F3ObjectComposition, 12_124_644_744_746_303_865),
+        (W6F4ObjectInstantiation, 10_760_564_769_723_657_478),
+        (W6F5NetDispatch, 4_216_785_241_083_672_531),
+        (W6F6NetConstructionLifecycle, 17_474_975_532_143_551_909),
+        (W6F7NetConstructionValues, 12_233_159_576_254_963_310),
+    ]);
+    assert_eq!(
+        actual_fingerprints, expected_fingerprints,
+        "a D.2c declaration or signature moved between W6/W8 checkpoints"
     );
 }
 

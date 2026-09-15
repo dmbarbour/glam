@@ -1468,17 +1468,19 @@ The former provisional order was D.2c.1d.0, D.2c.1d.1-.3, D.2c.1b-c, and
 D.2c.1d.4. The focused plan now supplies the authoritative order:
 
 - its W0 phase completes D.2c.1d.0;
-- W1-W3 implement the common computation state, lazy/promise suspension, and
-  D.2c.1b-c value/source migration;
+- W1-W3 implement the common computation state and lazy/promise/source
+  control-flow ownership; W6A.0 closes the ten remaining non-compatibility
+  D.2c.1 raw signatures;
 - W4-W5 implement D.2c.1d.2 and the reflection/external boundaries;
 - W6 performs D.2c.2-D.2c.8 control-flow conversion together with those
   checkpoints' raw-value migration; and
 - W2E, W4D, W5D, and W7 collectively implement D.2c.1d.4 rather than deferring
   all ordering and stack verification to one late batch.
 
-W8 closes the temporary raw-value and retryable-halt seams exposed during the
-conversion. This mapping supersedes the former provisional sequence; the
-parent checkpoint names remain the authoritative GC-remediation accounting.
+W8 closes the seven exactly inventoried value-demand compatibility declarations
+and the temporary retryable-halt seams exposed during the conversion. This
+mapping supersedes the former provisional sequence; the parent checkpoint
+names remain the authoritative GC-remediation accounting.
 
 Verification: focused `eval::value` and lazy/promise/fixpoint tests ordinarily
 and with `aggressive-gc-verification`; root-registration counters across cache
@@ -1511,12 +1513,12 @@ and installed immediately into the managed net; where a descriptor needs only
 keys, arity, or stable node IDs, narrow its signature instead. Do not add a
 durable unrooted staging descriptor.
 
-**D.2c.3b — Operator execution.** Migrate the three operator application and
+**D.2c.3b — Operator execution.** Migrate the two remaining operator application and
 effect-construction operations. One active net/value region covers an
 individual callback-free reduction, then ends before the driver may park,
 hand off a cursor claim, or report a dependency.
 
-**D.2c.3c — Net claims, attachment, and extraction.** Migrate the eight
+**D.2c.3c — Net claims, attachment, and extraction.** Migrate the seven remaining
 `src/eval/net.rs` operations, including the raw claim projections. Claims stay
 move-only; callable/operator payloads are inspected beneath matching access;
 and cursor disturbance waits retain the existing special structural
@@ -1591,10 +1593,11 @@ operations. Effect construction may be regional; interpreting an effect or
 invoking an API returns to the step coordinator. Preserve ordinary freer
 effect structure rather than treating it as a host callback.
 
-**D.2c.6d — List effects.** Migrate the seventeen list-effect operations,
-including lazy semantic computations, `alt`, `cut`, fix, map, and deferred
-tails. Semantic captures are installed into their exact traced owner before
-access ends; no callback closure may hide raw values.
+**D.2c.6d — List effects.** Migrate the eleven list-effect operations remaining
+after W3 established the lazy source owner, including the API leaf, dispatch,
+`alt`, `cut`, fix, map, and deferred-tail handoffs. Semantic captures are
+installed into their exact traced owner before access ends; no callback
+closure may hide raw values.
 
 Verification: annotation, metadata, effect, and list-effect suites in both
 modes; reflection reservation ordering; metadata trace fixtures; and

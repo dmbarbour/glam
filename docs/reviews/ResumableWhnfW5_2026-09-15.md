@@ -6,9 +6,8 @@ review.
 
 Status: review complete. W5 closes reflection request decoding and every
 production specialization callback over the resumable WHNF protocol. No open
-W5 correctness defect or semantic question was found. W6 is gated on an exact
-inventory reconciliation and checkpoint partition rather than beginning from
-its current family-sized headings.
+W5 correctness defect or semantic question was found. The W6 inventory and
+partition gate identified here was completed by W6.0 on 2026-09-15.
 
 ## Scope
 
@@ -166,11 +165,11 @@ demand failure, the remaining bounded compatibility seam, and its W8 owner.
 The temporary ordinary-machine admission rule is assigned to W6 closure rather
 than to the unrelated operator subsection.
 
-### WHNFW5R-003 — Open: W6 scope is not implementation-ready
+### WHNFW5R-003 — Resolved: W6 scope was not implementation-ready
 
 **Severity:** high planning and integration risk
 
-**Status:** assigned to W6.0; blocks W6 production edits
+**Status:** resolved by W6.0
 
 The live D.2c inventory contains 176 operations across eight families, while
 W6A-W6F are broad prose headings and omit an explicit disposition for the 17
@@ -179,6 +178,12 @@ control-flow work, but that does not prove closure of the raw-value API
 surface. W6.0 must assign those occurrences and partition every family into
 low-risk checkpoints with forced suspension and inventory deltas before
 implementation.
+
+W6.0 now assigns all 176 live declarations to fingerprinted implementation
+groups. Forty-one W6 checkpoints own 169 entries; seven named recursive
+value-demand compatibility declarations remain with W8. Each implementation
+group records its present access shape, target, inventory delta, forced
+suspension requirement, and focused ordinary/aggressive verification scope.
 
 ### WHNFW5R-004 — Resolved: parent raw-value phase counts predated W5
 
