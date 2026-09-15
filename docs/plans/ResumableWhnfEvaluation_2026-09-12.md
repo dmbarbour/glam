@@ -3534,7 +3534,8 @@ delta is the required reduction in the parent D.2c violation count.
 | **W6A.0c — Cross-family key/tag/undefined closure (after W6E.5)** | 3 S | Migrate consumers to explicit key-conversion and tagged-payload work as their family checkpoints execute; delete the three synchronous compatibility helpers after the last consumer moves. `-3` at closure. |
 | **W6A.0d — Cross-family lazy-list closure (after W6E.5)** | 2 S | Migrate consumers to owned list work as their family checkpoints execute; delete thunk-forcing/front-extraction compatibility helpers after the last consumer moves. `-2` at closure. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
-| **W6A.1 — Application leaves** | 3 F | Access-qualify effect wrapping and non-callable diagnostics without introducing suspension. `-3`. |
+| **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
+| **W6A.1b — Cross-family effect-value closure (after W6E.6)** | 1 F | Move context-free effect-value callers in their assigned family checkpoints, then require access on the shared constructor after the last caller moves. `-1` at closure. |
 | **W6A.2 — Application work** | 5 S | Convert dictionary/function application, staging, and multi-argument application to resumable work; introduce the shared tagged-payload owner contributing to W6A.0c closure. `-5`. |
 | **W6A.3 — Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
 | **W6A.4 — Sequence work** | 2 S | Convert key-path and value-list traversal, preserving lazy-list boundaries and contributing consumers to W6A.0c/W6A.0d closure. `-2`. |
@@ -3603,6 +3604,24 @@ key traversal, and lazy chunks before and after the requested list frontier.
 Until the final consumer moves, the exact D.2c manifest deliberately continues
 to assign the compatibility declarations to W6A.0c/W6A.0d; introducing their
 replacement machines alone is not the checkpoint delta.
+
+W6A.1 follows the same consumer-owned rule for `effect_value`. Requiring
+regional access on that shared constructor immediately would also migrate the
+context-free comparison, pattern, and effect-map leaves assigned to W6C.3,
+W6D.5c, and W6E.6. W6A.1a therefore closes only
+`apply_effect_function_value` and `non_callable_error`. Those later family
+checkpoints thread their own regional access through effect construction; once
+W6E.6 moves the final caller, W6A.1b access-qualifies `effect_value` and records
+its remaining `-1` delta. Do not manufacture a context-free access token or
+open nested access merely to preserve the old call shape.
+
+W6A.1a completion record: effect-function extension and non-callable
+diagnostic construction now require the caller's active regional access.
+Application and runtime-net compatibility callers open bounded access only for
+the immediate leaf; regional WHNF application reuses its existing access.
+Neither operation can demand, block, or coordinate. The D.2c manifest falls
+from 171 to 169 declarations and `ApplicationAndSequence` from 12 to 10;
+`effect_value` remains the single W6A.1b closure declaration.
 
 #### W6B — Operators and runtime nets
 

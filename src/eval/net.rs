@@ -1164,7 +1164,9 @@ fn lower_core_callable_in(
         | Value::Binary(_)
         | Value::List(_)
         | Value::Metadata(_)
-        | Value::Opaque(_)) => Err(non_callable_error(&value)),
+        | Value::Opaque(_)) => {
+            Err(context.with_value_access(|access| non_callable_error(access.values(), &value)))
+        }
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("callable value shell must be fully forced")
         }

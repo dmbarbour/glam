@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::RuntimeValueAccess;
 
 #[cfg(test)]
 pub(super) fn apply_value(
@@ -32,7 +33,9 @@ pub(super) fn apply_value_in(
             eval_value_in(context, &Value::Promised(promise))?,
             argument,
         ),
-        value => Err(non_callable_error(&value)),
+        value => {
+            Err(context.with_value_access(|access| non_callable_error(access.values(), &value)))
+        }
     }
 }
 
@@ -129,9 +132,10 @@ fn apply_dict_value_in(
     argument: Value,
 ) -> Result<Value, EvaluationHalt> {
     if let Some(function) = tagged_payload_in(&dict, context, &keys::EFF)? {
-        return Ok(effect_value(apply_effect_function_value(
-            function, argument,
-        )));
+        let function = context.with_value_access(|access| {
+            apply_effect_function_value(access.values(), function, argument)
+        });
+        return Ok(effect_value(function));
     }
 
     if let Some(function) = dict.get(&*keys::APPLY)
@@ -140,17 +144,24 @@ fn apply_dict_value_in(
         return apply_value_in(context, eval_value_in(context, function)?, argument);
     }
 
-    Err(non_callable_error(&Value::Dict(dict)))
+    Err(context.with_value_access(|access| non_callable_error(access.values(), &Value::Dict(dict))))
 }
 
-pub(super) fn non_callable_error(value: &Value) -> EvaluationHalt {
+pub(super) fn non_callable_error(
+    _access: &RuntimeValueAccess<'_>,
+    value: &Value,
+) -> EvaluationHalt {
     EvaluationHalt::new(format!(
         "application requires a function value, received {}",
         value.diagnostic_kind_name()
     ))
 }
 
-pub(super) fn apply_effect_function_value(function: Value, argument: Value) -> Value {
+pub(super) fn apply_effect_function_value(
+    _access: &RuntimeValueAccess<'_>,
+    function: Value,
+    argument: Value,
+) -> Value {
     Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::EffectApply,
         arguments: Arc::from([function, argument]),

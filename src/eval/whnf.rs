@@ -980,6 +980,7 @@ fn finish_semantic_undefined(
         _ => unreachable!("dictionary application must retain its caller frame"),
     };
     let effect = super::application::effect_value(super::application::apply_effect_function_value(
+        access.values(),
         effect_payload,
         argument,
     ));
