@@ -3373,9 +3373,16 @@ work here:
    Any helper retained as a proven already-WHNF projection must assert or
    encode that precondition instead of silently evaluating.
 2. **W5C.6b — Lifecycle matrix closure.** Audit the family fixtures below,
-   then add only missing forced cases. In particular, force cooperative
-   one-step progress and cancellation while specialization-owned demand is
-   suspended; do not treat repeated schedules as evidence.
+   then add only missing forced cases:
+   - **W5C.6b.1 — Complete (2026-09-15): Cooperative and failed demand.**
+     Force one-step polling through a complete specialization request and
+     terminate a separately suspended request through its exact promise
+     failure. Count callback entry
+     so neither yield nor terminal resumption can replay preparation.
+   - **W5C.6b.2 — Cancellation.** Cancel a coordinator-owned task while its
+     specialization request owns an unresolved demand, then resolve that
+     discarded dependency and prove the callback remains retired.
+   Do not treat repeated schedules as evidence.
 3. **W5C.6c — Final verification.** Run the focused reflection, embedding,
    executable-specialization, macro, and profiling suites before the complete
    repository gates. Relatch inventories only for reviewed source movement.

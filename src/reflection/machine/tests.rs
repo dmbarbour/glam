@@ -6126,6 +6126,102 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
 }
 
 #[test]
+fn specialization_request_completes_under_one_step_polling_without_replay() {
+    let (assembler, effect) = compile_effect(".evaluate (\"left\" ++ \"right\")");
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+    )
+    .unwrap();
+    let mut yields = 0;
+    let value = loop {
+        match task.poll(1) {
+            EffectTaskPoll::Yielded => yields += 1,
+            EffectTaskPoll::Complete(value) => break value,
+            EffectTaskPoll::Blocked(_) => {
+                panic!("strict one-step specialization request became blocked")
+            }
+            EffectTaskPoll::Failed(error) => panic!("one-step request failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("one-step request was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("one-step request voted to exit"),
+        }
+    };
+
+    assert!(
+        yields > 0,
+        "one-step polling must exercise cooperative yield"
+    );
+    assert_eq!(
+        assembler.to_binary(&value).unwrap(),
+        b"leftright".as_slice()
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "cooperative yields must not replay specialization preparation"
+    );
+}
+
+#[test]
+fn specialization_request_propagates_terminal_demand_failure_without_replay() {
+    let (assembler, function) = compile_effect("\\value -> .evaluate value");
+    let session = EvalContext::isolated(assembler.core_values());
+    let (promised, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("failed specialization dependency"))
+        .unwrap();
+    let observer = session.with_new_task().unwrap();
+    let effect = eval::apply_values(
+        &observer,
+        function.clone_core_for_test(),
+        vec![Value::Promised(promised.clone())],
+    )
+    .unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
+
+    let blocked = loop {
+        match task.poll(64) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            _ => panic!("unresolved specialization demand must block"),
+        }
+    };
+    assert!(blocked.dependency.is_some());
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1
+    );
+
+    crate::core::fail_test_promise_message(
+        session.values(),
+        &promised,
+        "specialization dependency failed",
+    )
+    .expect("specialization dependency should fail once");
+    let error = loop {
+        match task.poll(64) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Failed(error) => break error,
+            EffectTaskPoll::Blocked(_) => panic!("terminal dependency remained blocked"),
+            _ => panic!("terminal specialization failure produced another disposition"),
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("specialization dependency failed")
+    );
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "terminal resumption must not replay specialization preparation"
+    );
+}
+
+#[test]
 fn effect_map_runs_left_to_right_and_preserves_result_order() {
     let (assembler, effect) = compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
     let (context, task) = schedule_composed_test_task(
