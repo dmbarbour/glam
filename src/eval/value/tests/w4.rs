@@ -119,6 +119,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
         observed_forces.fetch_add(1, Ordering::SeqCst);
         Ok(number(44))
     });
+    assert_eq!(eval_value(&context, &result).unwrap(), number(44));
     let observed_calls = Arc::clone(&calls);
     let lazy = LazyValue::external_host_call(
         context.values(),
@@ -137,10 +138,27 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
                 .expect("the explicit capture bundle must contain the lazy result"))
         },
     );
-    let value = Value::Lazy(lazy);
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let value = loop {
+        match machine.poll(&poll, 1) {
+            EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
+            EvaluationMachinePoll::Complete(value) => break value,
+            EvaluationMachinePoll::Blocked(_) => {
+                panic!("the local semantic thunk must not block")
+            }
+            EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
+            EvaluationMachinePoll::Exit(_) | EvaluationMachinePoll::Cancelled => {
+                panic!("the local semantic thunk must not terminate its task")
+            }
+        }
+    };
+    assert_eq!(value.clone_core_for_test(), number(44));
 
-    assert_eq!(eval_value(&context, &value).unwrap(), number(44));
-    assert_eq!(eval_value(&context, &value).unwrap(), number(44));
+    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+        panic!("a repeated poll must use the lazy cache")
+    };
+    assert_eq!(value.clone_core_for_test(), number(44));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(result_forces.load(Ordering::SeqCst), 1);
 }

@@ -24,10 +24,10 @@ pub(super) fn eval_merge_duplicate_builtin(
     if is_undefined_value(&right) {
         return Ok(left);
     }
-    if is_error_lazy_value(context, &left) {
+    if context.with_value_access(|access| is_error_lazy_value(access.values(), &left)) {
         return Ok(left);
     }
-    if is_error_lazy_value(context, &right) {
+    if context.with_value_access(|access| is_error_lazy_value(access.values(), &right)) {
         return Ok(right);
     }
 

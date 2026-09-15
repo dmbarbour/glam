@@ -365,15 +365,29 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn complete(&self, context: &EvaluatorStepContext<'_>, value: Value) -> EvaluationMachinePoll {
-        let value = EvaluatedValue::try_from(value)
-            .expect("WHNF demand must eliminate the outer deferred variant");
+    fn complete(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        value: EvaluatedValue,
+    ) -> EvaluationMachinePoll {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
         match result {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
+    }
+
+    fn complete_root(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        value: &crate::runtime::RuntimeValueRoot,
+    ) -> EvaluationMachinePoll {
+        self.complete(
+            context,
+            EvaluatedValue::try_from(context.project_root(value))
+                .expect("WHNF owner completion must eliminate the outer deferred variant"),
+        )
     }
 
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
@@ -384,14 +398,8 @@ impl LazyTaskMachine {
         }
     }
 
-    fn follow_value(
-        &mut self,
-        context: &EvaluatorStepContext<'_>,
-        value: Value,
-    ) -> EvaluationMachinePoll {
-        self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_root(
-            context.root_value(value),
-        ));
+    fn follow_value(&mut self, value: crate::runtime::RuntimeValueRoot) -> EvaluationMachinePoll {
+        self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_root(value));
         EvaluationMachinePoll::Yielded
     }
 }
@@ -587,17 +595,16 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             )),
                         )
                     }
-                    Ok(value) => {
-                        let value = context.project_root(&value);
-                        self.follow_value(context, value)
-                    }
+                    Ok(value) => self.follow_value(value),
                     Err(failure) => self.fail(context, EvaluationHalt::failure(failure)),
                 };
             }
 
             if let LazyTaskWork::Reflection(machine) = &mut self.work {
                 return match machine.poll(context) {
-                    ReflectionSourcePoll::Ready(value) => self.follow_value(context, value),
+                    ReflectionSourcePoll::Ready(value) => {
+                        self.follow_value(context.root_value(value))
+                    }
                     ReflectionSourcePoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -612,7 +619,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(context, step_budget) {
-                    Ok(Some(value)) => self.complete(context, value),
+                    Ok(Some(value)) => self.complete(
+                        context,
+                        EvaluatedValue::try_from(value).expect(
+                            "net-construction completion must eliminate the outer deferred variant",
+                        ),
+                    ),
                     Ok(None) => EvaluationMachinePoll::Yielded,
                     Err(error) => self.fail(context, error),
                 };
@@ -624,7 +636,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             } = &mut self.work
             {
                 return match machine.poll(context) {
-                    Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context, value),
+                    Ok(NetWhnfPoll::Ready(value)) => {
+                        self.follow_value(context.root_value(value))
+                    }
                     Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
                     Err(error) => {
                         let error = if let Some(operation) = failure_context {
@@ -644,9 +658,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if let LazyTaskWork::Access(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    AccessMachinePoll::Ready(value) => {
-                        self.complete(context, context.project_root(&value))
-                    }
+                    AccessMachinePoll::Ready(value) => self.complete_root(context, &value),
                     AccessMachinePoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -663,9 +675,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if let LazyTaskWork::ObjectFixpoint(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    ObjectFixpointPoll::Ready(value) => {
-                        self.complete(context, context.project_root(&value))
-                    }
+                    ObjectFixpointPoll::Ready(value) => self.complete_root(context, &value),
                     ObjectFixpointPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -682,9 +692,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if let LazyTaskWork::ListEffect(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    ListEffectSourcePoll::Ready(value) => {
-                        self.complete(context, context.project_root(&value))
-                    }
+                    ListEffectSourcePoll::Ready(value) => self.complete_root(context, &value),
                     ListEffectSourcePoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -727,7 +735,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             if let Some(source_result) = source_result {
                 let value = context.project_root(&source_result);
                 return match eval_value_in(context, &value) {
-                    Ok(value) => self.complete(context, value),
+                    Ok(value) => self.complete(
+                        context,
+                        EvaluatedValue::try_from(value)
+                            .expect("source WHNF must eliminate the outer deferred variant"),
+                    ),
                     Err(error) => self.fail(context, error),
                 };
             }
@@ -736,7 +748,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };
             match poll_whnf_computation(computation, poll_context, &durable_context, step_budget) {
-                WhnfOwnerPoll::Ready(value) => self.complete(context, context.project_root(&value)),
+                WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
                 WhnfOwnerPoll::Pending(dependency) => {
                     EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                         dependency: Some(dependency),
@@ -1231,9 +1243,9 @@ pub(super) fn is_deferred_value(_access: &RuntimeValueAccess<'_>, value: &Value)
     matches!(value, Value::Lazy(_) | Value::Promised(_))
 }
 
-pub(super) fn is_error_lazy_value(context: &EvaluatorStepContext<'_>, value: &Value) -> bool {
+pub(super) fn is_error_lazy_value(access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
     matches!(value, Value::Lazy(lazy)
-        if context.with_value_access(|access| access.lazy(lazy).cached())
+        if lazy.access(access).cached()
             .is_some_and(|result| result.is_err()))
 }
 

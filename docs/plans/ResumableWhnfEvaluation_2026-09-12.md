@@ -3524,7 +3524,7 @@ delta is the required reduction in the parent D.2c violation count.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6A.0a — Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
+| **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
 | **W6A.0b — Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
 | **W6A.0c — Key, tag, and undefined work** | 3 S | Give recursive key/undefined traversal explicit resumable work and keep singleton-tag inspection as its consumer. `-3`. |
 | **W6A.0d — Lazy-list projection** | 2 S | Make thunk forcing and front extraction one owned collection step with no access spanning the force. `-2`. |
@@ -3541,6 +3541,17 @@ saturated, and over-application suspension; W6A.4 needs a forced lazy list
 chunk. Run the focused value, application, and sequence suites ordinarily and
 with `aggressive-gc-verification`. Relatch both checkpoint and family
 fingerprints after each delta.
+
+W6A.0a completion record: lazy completion now accepts only `EvaluatedValue`,
+rooted machine completions project through one explicit checked adapter, and a
+host callback's existing runtime root moves directly into resumable WHNF work
+instead of being projected and immediately re-rooted. Cached-error inspection
+is a callback-free access-qualified leaf. The host-call fixture now caches a
+managed lazy result first, then forces collection after every callback/WHNF
+handoff; this deterministically verifies root transfer without confusing the
+returned lazy's separate coordinator-owned production with the handoff under
+test. The D.2c manifest falls from 176 to 173 declarations and `ValueDemand`
+from 17 to 14.
 
 #### W6B — Operators and runtime nets
 
