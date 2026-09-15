@@ -2533,18 +2533,21 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 
 #[test]
 fn promised_list_chunks_remain_assignable_after_early_observation() {
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "promised list tail");
-    let list = append_sequence(Value::Promised(promise.clone()))
-        .expect("a promise remains a valid deferred list tail");
+    let context = test_context();
+    let promise = PromisedValue::new(context.values(), "promised list tail");
+    let list = context.values().with_runtime_value_access(|access| {
+        append_sequence(&access, Value::Promised(promise.clone()))
+            .expect("a promise remains a valid deferred list tail")
+    });
 
     assert!(
-        list_output_bytes(&test_context(), &list)
+        list_output_bytes(&context, &list)
             .expect_err("an empty list promise should fail fast")
             .to_string()
             .contains("promised value was observed before initialization")
     );
     set_promise(
-        &test_context(),
+        &context,
         &promise,
         Value::Binary(Bytes::from_static(b"assigned")),
     )

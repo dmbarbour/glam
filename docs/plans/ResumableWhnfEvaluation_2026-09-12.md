@@ -3537,7 +3537,7 @@ delta is the required reduction in the parent D.2c violation count.
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
 | **W6A.1b — Cross-family effect-value closure (after W6E.6)** | 1 F | Move context-free effect-value callers in their assigned family checkpoints, then require access on the shared constructor after the last caller moves. `-1` at closure. |
 | **W6A.2 — Application work** | 5 S | Convert dictionary/function application, staging, and multi-argument application to resumable work; introduce the shared tagged-payload owner contributing to W6A.0c closure. `-5`. |
-| **W6A.3 — Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
+| **W6A.3 — Complete (2026-09-15): Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
 | **W6A.4 — Sequence work** | 2 S | Convert key-path and value-list traversal, preserving lazy-list boundaries and contributing consumers to W6A.0c/W6A.0d closure. `-2`. |
 
 Preserve currying, applicative dictionary behavior, list order, binary/list
@@ -3622,6 +3622,13 @@ the immediate leaf; regional WHNF application reuses its existing access.
 Neither operation can demand, block, or coordinate. The D.2c manifest falls
 from 171 to 169 declarations and `ApplicationAndSequence` from 12 to 10;
 `effect_value` remains the single W6A.1b closure declaration.
+
+W6A.3 completion record: append validation and list construction now require
+the caller's active regional access while preserving deferred lazy and promise
+segments without demand. List dispatch and list concatenation open bounded
+access only around this immediate conversion, and the direct promise fixture
+uses one matching runtime throughout. The D.2c manifest falls from 169 to 167
+declarations and `ApplicationAndSequence` from 10 to 8.
 
 #### W6B — Operators and runtime nets
 

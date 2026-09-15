@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::RuntimeValueAccess;
 
 pub(crate) fn eval_key_path_list_in(
     context: &EvaluatorStepContext<'_>,
@@ -157,13 +158,20 @@ pub(crate) fn list_output_bytes(
     list_to_binary_bytes(context, list, "`value`")
 }
 
-pub(super) fn append_values(left: Value, right: Value) -> Result<Value, EvaluationHalt> {
-    let left = append_sequence(left)?;
-    let right = append_sequence(right)?;
+pub(super) fn append_values(
+    access: &RuntimeValueAccess<'_>,
+    left: Value,
+    right: Value,
+) -> Result<Value, EvaluationHalt> {
+    let left = append_sequence(access, left)?;
+    let right = append_sequence(access, right)?;
     Ok(Value::List(List::concat(left, right)))
 }
 
-pub(super) fn append_sequence(value: Value) -> Result<List, EvaluationHalt> {
+pub(super) fn append_sequence(
+    _access: &RuntimeValueAccess<'_>,
+    value: Value,
+) -> Result<List, EvaluationHalt> {
     match value {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),

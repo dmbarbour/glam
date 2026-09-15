@@ -116,7 +116,12 @@ pub(super) fn eval_list_concat_builtin(
     let concatenated = list_to_value_items_in(context, &list)?
         .into_iter()
         .try_fold(List::empty(), |result, item| {
-            Ok::<_, EvaluationHalt>(List::concat(result, append_sequence(item)?))
+            context.with_value_access(|access| {
+                Ok::<_, EvaluationHalt>(List::concat(
+                    result,
+                    append_sequence(access.values(), item)?,
+                ))
+            })
         })?;
     Ok(Value::List(concatenated))
 }

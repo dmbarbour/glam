@@ -13,7 +13,7 @@ pub(super) fn apply(
     match builtin {
         Builtin::Append => {
             let [left, right] = super::exact(arguments, "append")?;
-            append_values(left, right)
+            context.with_value_access(|access| append_values(access.values(), left, right))
         }
         Builtin::Slice => {
             let [start, end, value] = super::exact(arguments, "slice")?;
