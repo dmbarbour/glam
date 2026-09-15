@@ -3410,10 +3410,32 @@ suite, and interaction-net profiling all pass.
 
 #### W5D — Replay and branch verification
 
-Land the W0A regression as a passing test. Add forced suspension to a nested
-reflection request, a failing request with contexts, and alternative branches.
-Assert exact lazy construction, task reservation, request dispatch, and
-diagnostic counts.
+Close W5 in three bounded checkpoints:
+
+1. **W5D.1 — Complete (2026-09-15): W0A replay closure.** Keep the forced W0A ordering and strengthen
+   the repaired fixture to count every outer effect-application lazy and
+   decoded request. The original application lazy must occur once, the one
+   nested reflection task must activate once, and all task records and
+   diagnostics must retire without replay.
+2. **W5D.2 — Failure and branch matrix.** Force the same application boundary
+   before a request whose argument launches a nested reflection task and then
+   fails with structured context. Separately block a nested reflection task in
+   the first arm of a cut, observe the exact parent/child reservation set, and
+   resume it before the arm fails. The fallback must run once, the discarded
+   diagnostic must remain uncommitted, and parsed/dispatch/application counts
+   must match the authored effect structure exactly.
+3. **W5D.3 — Verification and closure.** Run the focused replay, failure,
+   branch, reflection, and inventory suites, followed by the routine repository
+   gates and interaction-net profiling script. Record any future-phase drift
+   found while closing W5; do not infer concurrency correctness from repeated
+   schedules.
+
+W5D.1 retains the exact one-shot deferred-producer boundary from W0A. Its
+passing assertion now accounts for the three authored outer request
+applications (`seq`, `.eval`, and `.r`), their three parse/dispatch entries,
+the single nested reflection activation, empty diagnostic output, and complete
+task-record retirement. The original application lazy appears exactly once;
+later requests are counted separately rather than mistaken for replay.
 
 Exit: reflection may suspend at any WHNF request boundary without replaying
 the enclosing effect phase.

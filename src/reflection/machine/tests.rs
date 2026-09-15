@@ -5938,10 +5938,11 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
     let task_probe = probe.clone();
     let (pause_sender, pause_receiver) = std::sync::mpsc::channel();
     let effect = effect.clone_core_for_test();
+    let task_host = host.clone();
     let task = context
         .schedule_task(move |task_context| {
             let task_context = task_context.with_deferred_pump_pause(pause_sender);
-            EffectTask::new_in_context(effect, TestEffects, host, task_context)
+            EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
                 .map(|task| {
                     Box::new(ValueEffectTask(
                         task.with_phase_probe(task_probe).forcing_unfused(),
@@ -6006,6 +6007,21 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
         "replaying request decoding must not duplicate the nested reflection task"
     );
     assert_eq!(
+        application_lazies.len(),
+        3,
+        "the authored sequence, eval, and return requests must each construct one application lazy"
+    );
+    assert_eq!(
+        probe.parsed_requests(),
+        3,
+        "the outer sequence, eval, and return requests must each parse once"
+    );
+    assert_eq!(
+        probe.dispatched_requests(),
+        3,
+        "the outer sequence, eval, and return requests must each dispatch once"
+    );
+    assert_eq!(
         probe.phase(),
         EffectMachinePhase::ContinuationDelivered as usize,
         "request parsing and interpretation must complete only after resumption"
@@ -6016,6 +6032,8 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
             .unwrap(),
         b"ready".as_slice()
     );
+    assert_eq!(context.reflection_task_count(), 0);
+    assert!(host.diagnostics().is_empty());
 }
 
 #[test]

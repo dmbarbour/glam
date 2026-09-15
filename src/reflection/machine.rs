@@ -138,12 +138,23 @@ enum EffectMachinePhase {
 struct EffectPhaseProbe {
     phase: AtomicUsize,
     fused_requests: AtomicUsize,
+    parsed_requests: AtomicUsize,
+    dispatched_requests: AtomicUsize,
     application_lazies: Mutex<Vec<LazyId>>,
 }
 
 #[cfg(test)]
 impl EffectPhaseProbe {
     fn record(&self, phase: EffectMachinePhase) {
+        match phase {
+            EffectMachinePhase::RequestParsed => {
+                self.parsed_requests.fetch_add(1, Ordering::AcqRel);
+            }
+            EffectMachinePhase::InterpreterEntered => {
+                self.dispatched_requests.fetch_add(1, Ordering::AcqRel);
+            }
+            EffectMachinePhase::ContinuationDelivered => {}
+        }
         let target = phase as usize;
         let previous = target - 1;
         let current = self.phase.load(Ordering::Acquire);
@@ -169,6 +180,14 @@ impl EffectPhaseProbe {
 
     fn fused_requests(&self) -> usize {
         self.fused_requests.load(Ordering::Acquire)
+    }
+
+    fn parsed_requests(&self) -> usize {
+        self.parsed_requests.load(Ordering::Acquire)
+    }
+
+    fn dispatched_requests(&self) -> usize {
+        self.dispatched_requests.load(Ordering::Acquire)
     }
 
     fn record_application_lazy(&self, context: &EvaluatorStepContext<'_>, request: &Value) {
