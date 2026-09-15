@@ -957,8 +957,8 @@ impl<'claim, 'step> CoreCallClaim<'claim, 'step> {
         })
     }
 
-    fn callable(&self) -> Value {
-        self.context.project_root(&self.callable)
+    fn callable(&self, access: &crate::evaluation::EvaluationValueAccess<'_>) -> Value {
+        access.clone_root(&self.callable)
     }
 
     fn finish(mut self, disposition: CallDisposition) -> Result<bool, EvaluationHalt> {
@@ -1087,7 +1087,10 @@ impl<'claim, 'step> CoreOperatorClaim<'claim, 'step> {
         })
     }
 
-    fn parts(&self) -> (&CoreOperator, &Value) {
+    fn parts<'access>(
+        &'access self,
+        _access: &'access crate::evaluation::EvaluationValueAccess<'_>,
+    ) -> (&'access CoreOperator, &'access Value) {
         (&self.operator, &self.data)
     }
 
@@ -1212,7 +1215,8 @@ fn progress_core_call_claim(
     context: &EvaluatorStepContext<'_>,
     claim: CoreCallClaim<'_, '_>,
 ) -> Result<bool, EvaluationHalt> {
-    let disposition = match lower_core_callable_in(context, claim.callable()) {
+    let callable = context.with_value_access(|access| claim.callable(&access));
+    let disposition = match lower_core_callable_in(context, callable) {
         Ok(CoreCallable::Net(source)) => {
             let source =
                 with_core_net_access(context, &source, |source| source.prepare_copy_source());
@@ -1289,7 +1293,7 @@ fn progress_core_operator_claim(
     claim: CoreOperatorClaim<'_, '_>,
 ) -> Result<bool, EvaluationHalt> {
     context.with_value_access(|access| {
-        let (operator, data) = claim.parts();
+        let (operator, data) = claim.parts(&access);
         let disposition = match apply_core_operator(&access, operator, data) {
             Ok(result) => OperatorDisposition::Yield(result),
             Err(error) => {

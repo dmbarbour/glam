@@ -3666,7 +3666,7 @@ restarting earlier converted keys.
 |---|---:|---|
 | **W6B.1 — Complete (2026-09-15): Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
 | **W6B.2 — Complete (2026-09-15): Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
-| **W6B.3 — Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
+| **W6B.3 — Complete (2026-09-15): Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
 | **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c/W6A.4 key/path-conversion consumers. `-5`. |
 
 Keep topology and claim state in their existing net owners. Force suspension
@@ -3703,6 +3703,16 @@ The complete D.2c manifest falls from 158 to 155 declarations:
 closing W6B.2 and moving `instantiate_function` out of W6A.2. Forced promise
 and reflection-gate fixtures verify both the emitted lazy boundary and exact
 resumption ordinarily and under aggressive collection.
+
+W6B.3 completion record: callable roots and cloned operator/data payloads can
+now be projected from their stack-bound claims only while a matching
+`EvaluationValueAccess` is present. Callable projection closes its short
+region before suspendable callable lowering; operator projection reuses the
+single reduction/terminalization region established by W6B.2. Claims continue
+to own only exact restoration state, while their originating rooted runtime
+net remains the semantic owner of operator payload edges. The D.2c manifest
+falls from 155 to 153 declarations and `OperatorAndNet` from 7 to 5, leaving
+only W6B.4's runtime-net application seams.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
