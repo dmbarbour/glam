@@ -3525,7 +3525,7 @@ delta is the required reduction in the parent D.2c violation count.
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
-| **W6A.0b — Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
+| **W6A.0b — Complete (2026-09-15): Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
 | **W6A.0c — Key, tag, and undefined work** | 3 S | Give recursive key/undefined traversal explicit resumable work and keep singleton-tag inspection as its consumer. `-3`. |
 | **W6A.0d — Lazy-list projection** | 2 S | Make thunk forcing and front extraction one owned collection step with no access spanning the force. `-2`. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
@@ -3552,6 +3552,13 @@ handoff; this deterministically verifies root transfer without confusing the
 returned lazy's separate coordinator-owned production with the handoff under
 test. The D.2c manifest falls from 176 to 173 declarations and `ValueDemand`
 from 17 to 14.
+
+W6A.0b completion record: number and non-negative-index validation now consume
+`EvaluatedValue` without owning demand or evaluator coordination. Numeric,
+list, and net-arity callers perform their existing ordered demand first and
+then pass the proven WHNF shell to these immediate validators; list-index and
+net-arity failures retain their existing evaluation-context frames. The D.2c
+manifest falls from 173 to 171 declarations and `ValueDemand` from 14 to 12.
 
 #### W6B — Operators and runtime nets
 

@@ -1,4 +1,5 @@
 use super::super::super::*;
+use crate::core::EvaluatedValue;
 use crate::list::ListItem;
 
 pub(in crate::eval::builtins) fn list_like_value_in(
@@ -21,8 +22,30 @@ pub(super) fn eval_slice_builtin(
     end: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let start = eval_index_number_in(context, start, "slice", "list_index")?;
-    let end = eval_index_number_in(context, end, "slice", "list_index")?;
+    let start = eval_value_in(context, start).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "list_index"),
+            )
+        })
+    })?;
+    let start = index_from_evaluated(
+        EvaluatedValue::try_from(start).expect("slice start demand must reach WHNF"),
+        "slice",
+    )?;
+    let end = eval_value_in(context, end).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "list_index"),
+            )
+        })
+    })?;
+    let end = index_from_evaluated(
+        EvaluatedValue::try_from(end).expect("slice end demand must reach WHNF"),
+        "slice",
+    )?;
     if start > end {
         return Err(EvaluationHalt::new(
             "slice builtin requires start to be less than or equal to end",
@@ -118,7 +141,18 @@ pub(super) fn eval_list_split_builtin(
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let index = eval_index_number_in(context, index, "split", "list_index")?;
+    let index = eval_value_in(context, index).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "list_index"),
+            )
+        })
+    })?;
+    let index = index_from_evaluated(
+        EvaluatedValue::try_from(index).expect("split index demand must reach WHNF"),
+        "split",
+    )?;
     match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if index > bytes.len() {
@@ -153,7 +187,18 @@ pub(super) fn eval_list_split_end_builtin(
     count: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let count = eval_index_number_in(context, count, "split_end", "list count")?;
+    let count = eval_value_in(context, count).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "list count"),
+            )
+        })
+    })?;
+    let count = index_from_evaluated(
+        EvaluatedValue::try_from(count).expect("split-end count demand must reach WHNF"),
+        "split_end",
+    )?;
     match eval_value_in(context, value)? {
         Value::Binary(bytes) => {
             if count > bytes.len() {
@@ -193,7 +238,18 @@ pub(super) fn eval_list_at_builtin(
     index: &Value,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    let index = eval_index_number_in(context, index, "list at", "list_index")?;
+    let index = eval_value_in(context, index).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "list_index"),
+            )
+        })
+    })?;
+    let index = index_from_evaluated(
+        EvaluatedValue::try_from(index).expect("list-at index demand must reach WHNF"),
+        "list at",
+    )?;
     let item = match eval_value_in(context, value)? {
         Value::Binary(bytes) => bytes.get(index).copied().map(ListItem::Byte),
         Value::List(list) => list.try_at_by(

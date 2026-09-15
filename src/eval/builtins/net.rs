@@ -1,6 +1,7 @@
 //! Lambda-style interfaces for opaque interaction-net values.
 
 use super::super::*;
+use crate::core::EvaluatedValue;
 
 mod construction;
 
@@ -30,7 +31,18 @@ fn apply_net_arity(
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     let [arity, net] = super::exact(arguments, "net_arity")?;
-    let arity = eval_index_number_in(context, &arity, "net_arity", "net_arity")?;
+    let arity = eval_value_in(context, &arity).map_err(|error| {
+        context.with_value_access(|access| {
+            error.with_context(
+                access.values(),
+                evaluation_context_frame_in(access.values(), "net_arity"),
+            )
+        })
+    })?;
+    let arity = index_from_evaluated(
+        EvaluatedValue::try_from(arity).expect("net arity demand must reach WHNF"),
+        "net_arity",
+    )?;
     let net = eval_value_in(context, &net)?;
     let Value::Net(net) = net else {
         return Err(EvaluationHalt::new(

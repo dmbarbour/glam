@@ -1199,12 +1199,11 @@ pub(super) fn split_result_value(
     )
 }
 
-pub(super) fn eval_number_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
+pub(super) fn number_from_evaluated(
+    value: EvaluatedValue,
     builtin_name: &str,
 ) -> Result<Number, EvaluationHalt> {
-    let value = eval_value_in(context, value)?;
+    let value = value.into_value();
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
@@ -1213,20 +1212,11 @@ pub(super) fn eval_number_in(
     Ok(number)
 }
 
-pub(super) fn eval_index_number_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
+pub(super) fn index_from_evaluated(
+    value: EvaluatedValue,
     builtin_name: &str,
-    evaluation_label: &str,
 ) -> Result<usize, EvaluationHalt> {
-    let value = eval_value_in(context, value).map_err(|error| {
-        context.with_value_access(|access| {
-            error.with_context(
-                access.values(),
-                evaluation_context_frame_in(access.values(), evaluation_label),
-            )
-        })
-    })?;
+    let value = value.into_value();
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
