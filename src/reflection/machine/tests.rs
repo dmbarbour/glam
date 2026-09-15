@@ -6222,6 +6222,53 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
 }
 
 #[test]
+fn cancellation_retires_specialization_owned_demand_without_resumption() {
+    let (assembler, function) = compile_effect("\\value -> .evaluate value");
+    let (promise, resolver) = assembler.promise("cancelled specialization dependency");
+    let effect = assembler.apply(&function, [promise]).unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
+
+    assert_eq!(
+        context.pump_wait(task.wait(), 4_096),
+        crate::evaluation::EvaluationPumpOutcome::NoProgress,
+        "unresolved request demand should reach a stable blocked state"
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "request preparation should run exactly once before cancellation"
+    );
+
+    assert_eq!(
+        task.cancel(),
+        crate::evaluation::EvaluationTaskCancellation::Requested
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Cancelled
+    ));
+
+    resolver
+        .resolve(assembler.values().integer(42))
+        .expect("discarded request dependency should remain independently resolvable");
+    context.run_until_quiescent();
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Cancelled
+    ));
+    assert_eq!(
+        host.callback_probe_count(CallbackProbeKind::Specialization),
+        1,
+        "resolving a discarded dependency must not resurrect request work"
+    );
+}
+
+#[test]
 fn effect_map_runs_left_to_right_and_preserves_result_order() {
     let (assembler, effect) = compile_effect("eff.map (\\item -> .r item) [\"A\",\"B\",\"C\"]");
     let (context, task) = schedule_composed_test_task(
