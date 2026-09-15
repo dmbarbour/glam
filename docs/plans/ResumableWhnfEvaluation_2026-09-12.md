@@ -1,12 +1,13 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W5 are complete by 2026-09-15; the mandatory post-W5 review is in
-progress and W6-W8 remain planned. This is the focused implementation plan selected by
+Status: W0-W5 and their mandatory reviews are complete by 2026-09-15; W6-W8
+remain planned. This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-Client demand and promise following now own the crate-private resumable
-protocol; lazy-source production and deeper evaluator callers remain on the
-legacy recursive path until W3 and later checkpoints.
+Client demand, lazy and promise following, external-source owners, and
+reflection request work now use the crate-private resumable protocol. The
+remaining builtin evaluator families and compatibility retirement belong to
+W6-W8.
 
 ## Purpose
 
@@ -3471,6 +3472,28 @@ value/access migration. Perform each family once: a D.2c checkpoint which
 needs resumable demand adopts the WHNF work form here rather than retaining a
 temporary recursive wrapper for a later pass.
 
+#### W6.0 — Inventory reconciliation and low-risk partitioning
+
+Before editing production behavior, reconcile the exact W0B WHNF census with
+the parent D.2c raw-value manifest and partition W6A-W6F into independently
+verifiable checkpoints. At post-W5 review the D.2c manifest contains 176
+operations: 17 value-demand, 12 application/sequence, 18 operator/net, 25
+dispatch/scalar/strategy, 43 collection/pattern, 36 annotation/effect, 17
+object, and 8 net-builtin operations.
+
+The 17 `ValueDemand` operations require an explicit disposition. W1-W3 own
+their resumable control flow, but the live raw-value inventory still classifies
+them as D.2c violations. Assign each to an early W6 closure checkpoint or
+prove that it is a downstream compatibility declaration with a different
+named owner; do not silently treat the completed control-flow work as raw-API
+closure.
+
+For each family, record the exact declarations, existing regional/durable
+shape, required semantic conversions, forced suspension fixture, ordinary and
+aggressive verification subset, and inventory delta before implementation.
+Reconcile the parent plan's dated prose counts at the same time. W6A-W6F are
+scope headings, not single implementation spikes.
+
 #### W6A — Application and sequences
 
 Convert the complete application and sequence families. Preserve currying,
@@ -3481,8 +3504,6 @@ and non-forcing constructors.
 
 Convert operator descriptors/execution and the remaining runtime-net evaluator
 bridges. Keep topology and claim state in their existing net owners.
-
-TBD: revisit and resolve WHNFW3R-004
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
@@ -3577,8 +3598,9 @@ small-stack verification exercises the selected effect-driver shape. If the
 measurements do not justify implementation, retain the bounded W5 path and
 record the evidence and a narrower future optimization owner.
 
-W6 closure also revisits the temporary one-ordinary-machine-per-demand-session
-admission rule introduced to contain recursive compatibility evaluation.
+W6 closure also revisits `WHNFW3R-004`, the temporary
+one-ordinary-machine-per-demand-session admission rule introduced to contain
+recursive compatibility evaluation.
 Remove it once converted builtin work no longer needs that containment, or
 record a narrower surviving owner and forced justification.
 

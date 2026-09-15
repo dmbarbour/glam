@@ -1680,7 +1680,7 @@ transport it rather than project and register a replacement.
 
 ##### GCI11R-002D.2e — Built-in Front End and Compiler Values
 
-Migrate the 134 `g_syntax` violations by threading a shared
+Migrate the currently inventoried 137 `g_syntax` violations by threading a shared
 `RuntimeValueAccess` through semantic lowering, resolution, embedded-data
 handling, compiler-value composition, macro result installation, and
 diagnostic-value construction. Syntax ASTs remain ordinary Rust data; this
@@ -1696,7 +1696,8 @@ and macro boundaries.
 
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
-Migrate the 48 reflection violations. Reflection-machine decoding and pure
+Migrate the 26 reflection violations remaining after resumable-WHNF W5.
+Reflection-machine decoding and pure
 semantic substeps may use bounded access, while transaction state, query
 responses, blocked branches, task effects, and store journals retain roots or
 exact traced owners across commits, retries, waits, and callbacks. Reflection
@@ -1711,7 +1712,7 @@ transaction/wait handoff.
 
 ##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
 
-Migrate the remaining 40 public-API, compiler, source, and diagnostic
+Migrate the currently inventoried 45 public-API, compiler, source, and diagnostic
 violations. Public boundaries transport `api::Value`, `EvaluatedValue`, or
 another durable handle. Internal compiler and diagnostic transformations use
 one explicit regional access and root their output before callbacks, logging,

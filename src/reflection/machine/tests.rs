@@ -6054,6 +6054,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
     let probe = Arc::new(EffectPhaseProbe::default());
     let task_probe = probe.clone();
     let (pause_sender, pause_receiver) = std::sync::mpsc::channel();
+    let uninterrupted_effect = effect.clone_core_for_test();
     let effect = effect.clone_core_for_test();
     let task_host = host.clone();
     let task = context
@@ -6095,19 +6096,34 @@ fn suspended_request_failure_preserves_context_without_replay() {
         panic!("the resumed log-message demand should fail")
     };
 
-    assert_eq!(
-        error.as_failure().contexts(),
-        [
-            crate::diagnostic::evaluation_context_frame("log_message"),
-            Value::binary_from_text("request argument"),
-        ]
-    );
+    let expected_contexts = [
+        crate::diagnostic::evaluation_context_frame("log_message"),
+        Value::binary_from_text("request argument"),
+    ];
+    assert_eq!(error.as_failure().contexts(), expected_contexts);
     assert_eq!(probe.application_lazies().len(), 1);
     assert_eq!(probe.parsed_requests(), 1);
     assert_eq!(probe.dispatched_requests(), 1);
     assert_eq!(builds.load(Ordering::Acquire), 1);
     assert_eq!(context.reflection_task_count(), 0);
     assert!(host.diagnostics().is_empty());
+
+    let uninterrupted = EvalContext::isolated(assembler.core_values());
+    uninterrupted
+        .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
+        .expect("fresh uninterrupted fixture should accept a reflection launcher");
+    let uninterrupted_error =
+        EffectTask::new_owned_in_context(uninterrupted_effect, TestEffects, host, uninterrupted)
+            .expect("uninterrupted failure fixture should build")
+            .forcing_unfused()
+            .run()
+            .expect_err("uninterrupted message construction should fail");
+    let uninterrupted_contexts = uninterrupted_error.into_failure().contexts().to_vec();
+    assert_eq!(
+        uninterrupted_contexts,
+        error.as_failure().contexts(),
+        "forced suspension must preserve the uninterrupted structured context order"
+    );
 }
 
 #[test]

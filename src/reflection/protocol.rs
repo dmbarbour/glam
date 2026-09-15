@@ -231,7 +231,6 @@ pub enum SpecializationRequestInput {
 pub struct SpecializationRequestWait(EvaluationWaitToken);
 
 impl SpecializationRequestWait {
-    #[allow(dead_code)] // Public construction begins with explicit host waits in W5C.5b.3.
     pub(super) fn new(wait: EvaluationWaitToken) -> Self {
         Self(wait)
     }
@@ -475,8 +474,8 @@ enum TaskHaltKind {
 /// `EdgeFree` is restricted to freshly constructed text-only failures and the
 /// bounded compatibility path from an evaluator phase. Any failure retained
 /// by a lifecycle, search result, or other host-visible protocol surface is
-/// converted to `Rooted` first. I4F.1d.3 removes the evaluator compatibility
-/// case when parked machine failures adopt their final root shape.
+/// converted to `Rooted` first. W8 revisits whether the edge-free evaluator
+/// carrier remains necessary after recursive-halt compatibility retires.
 #[derive(Debug, Clone)]
 enum TaskFailure {
     EdgeFree(Arc<EvaluationFailure>),

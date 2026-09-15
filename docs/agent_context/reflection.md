@@ -10,15 +10,17 @@ and control flow.
 - `reflection::run` interprets effects outside interaction-net reduction.
   Generic request operators construct singleton dictionaries tagged by hidden
   abstract-global atoms; they do not perform host work themselves.
-- Evaluation failures crossing a specialization request use the bounded
-  `TaskHalt::from(EvaluationHalt)` compatibility path, and public facade
-  failures use `TaskHalt::from(Error)`. A failure is rooted before it enters a
-  lifecycle or direct `EffectRun` result; converting an existing coordinator
-  terminal must preserve its `RuntimeFailureRoot` rather than reconstructing
-  it from the raw failure. Isolated-search publication remains the next
-  explicit boundary. Both paths retain diagnostic values and context stacks.
-  `TaskHalt::new` is only for genuinely new text-only validation or host
-  errors.
+- A specialization's owned request work reports demanded-value failures as a
+  rooted `SpecializationRequestInput::Failed`; it does not reconstruct an
+  evaluator failure after suspension. Other bounded evaluator/interpreter
+  seams may still use `TaskHalt::from(EvaluationHalt)` until W8, and public
+  facade failures use `TaskHalt::from(Error)`. A failure is rooted before it
+  enters a lifecycle or direct `EffectRun` result; converting an existing
+  coordinator terminal must preserve its `RuntimeFailureRoot` rather than
+  reconstructing it from the raw failure. Isolated-search publication remains
+  the next explicit boundary. All paths retain diagnostic values and context
+  stacks. `TaskHalt::new` is only for genuinely new text-only validation or
+  host errors.
 - `TaskSpecialization` adds a request family, private tags, and transactional
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
