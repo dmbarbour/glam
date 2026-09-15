@@ -5423,6 +5423,7 @@ fn request_function_in(
     let remaining = arity - supplied.len();
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let exposed = net.unary_operator(eval::request_operator(
+        access,
         tag,
         arity,
         Arc::from(supplied),

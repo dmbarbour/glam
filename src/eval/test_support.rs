@@ -3,6 +3,7 @@
 //! second expression interpreter or evaluator-local environment.
 
 use super::*;
+use crate::core::RuntimeValueAccess;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TestExpr {
@@ -81,10 +82,20 @@ pub(super) fn lower_test_function_code_in(
     arity: usize,
     body: TestExpr,
 ) -> FunctionCode {
+    values.with_runtime_value_access(|access| {
+        lower_test_function_code_with_access(&access, arity, body)
+    })
+}
+
+fn lower_test_function_code_with_access(
+    access: &RuntimeValueAccess<'_>,
+    arity: usize,
+    body: TestExpr,
+) -> FunctionCode {
     let mut lowerer = FixtureNetLowerer {
         net: NetBuilder::new(),
         local_uses: Vec::new(),
-        values,
+        access,
     };
     let boundary = lowerer.net.copy(1);
     lowerer.compile_into(&body, boundary.outputs[0]);
@@ -108,17 +119,19 @@ pub(super) fn lower_test_function_code_in(
         binds.input
     };
     let template = lowerer.net.finish(exposed);
-    let runtime = values.instantiate_core_net(&template);
+    let runtime = access
+        .construct_managed_core_net(template.instantiate())
+        .expect("managed core-net representation must fit one collector run");
     FunctionCode::new(runtime, arity, capture_count)
 }
 
-struct FixtureNetLowerer<'values> {
+struct FixtureNetLowerer<'access, 'scope> {
     net: NetBuilder<CoreSpecialization>,
     local_uses: Vec<Vec<Port>>,
-    values: &'values CoreValueFactory,
+    access: &'access RuntimeValueAccess<'scope>,
 }
 
-impl FixtureNetLowerer<'_> {
+impl FixtureNetLowerer<'_, '_> {
     fn compile_into(&mut self, expr: &TestExpr, target: Port) {
         match expr {
             TestExpr::Value(value) => self.data_into(value.clone(), target),
@@ -128,7 +141,7 @@ impl FixtureNetLowerer<'_> {
                 } else {
                     let arguments = items.iter().map(Arc::as_ref).collect::<Vec<_>>();
                     self.operator_application_into(
-                        list_operator(arguments.len(), Arc::from([])),
+                        list_operator(self.access, arguments.len(), Arc::from([])),
                         &arguments,
                         target,
                     );
@@ -148,7 +161,7 @@ impl FixtureNetLowerer<'_> {
                 if captures.is_empty() {
                     self.data_into(
                         Value::Function(FunctionValue::new(
-                            NetValue::new(code.runtime().duplicate_for_test(self.values)),
+                            NetValue::new(code.duplicate_runtime_in(self.access)),
                             code.arity(),
                         )),
                         target,
@@ -156,7 +169,7 @@ impl FixtureNetLowerer<'_> {
                 } else {
                     let captures = captures.iter().map(Arc::as_ref).collect::<Vec<_>>();
                     self.operator_application_into(
-                        function_capture_operator(code.clone(), Arc::from([])),
+                        function_capture_operator(self.access, code.clone(), Arc::from([])),
                         &captures,
                         target,
                     );
@@ -181,7 +194,7 @@ impl FixtureNetLowerer<'_> {
                     })
                     .collect::<Vec<_>>();
                 self.operator_application_into(
-                    access_operator(Arc::from(path), Arc::from([])),
+                    access_operator(self.access, Arc::from(path), Arc::from([])),
                     &arguments,
                     target,
                 );
@@ -195,9 +208,11 @@ impl FixtureNetLowerer<'_> {
         arguments: &[&TestExpr],
         target: Port,
     ) {
-        let mut output = self
-            .net
-            .unary_operator(apply_arity_operator(arguments.len(), Arc::from([])));
+        let mut output = self.net.unary_operator(apply_arity_operator(
+            self.access,
+            arguments.len(),
+            Arc::from([]),
+        ));
         let [application, function_port, result] = self.net.bind();
         self.net.wire(output, application);
         self.compile_into(function, function_port);
@@ -232,12 +247,16 @@ impl FixtureNetLowerer<'_> {
             self.data_into(value.clone(), target);
             return;
         }
-        let code = Arc::new(lower_test_function_code_in(self.values, 0, expr.clone()));
+        let code = Arc::new(lower_test_function_code_with_access(
+            self.access,
+            0,
+            expr.clone(),
+        ));
         if code.capture_count() == 0 {
             self.data_into(
-                Value::Lazy(LazyValue::from_net_computation(
-                    self.values,
-                    NetValue::new(code.runtime().duplicate_for_test(self.values)),
+                Value::Lazy(LazyValue::from_net_computation_in(
+                    self.access,
+                    NetValue::new(code.duplicate_runtime_in(self.access)),
                 )),
                 target,
             );
@@ -247,7 +266,7 @@ impl FixtureNetLowerer<'_> {
                 .collect::<Vec<_>>();
             let captures = captures.iter().collect::<Vec<_>>();
             self.operator_application_into(
-                computation_capture_operator(code, Arc::from([])),
+                computation_capture_operator(self.access, code, Arc::from([])),
                 &captures,
                 target,
             );

@@ -909,9 +909,11 @@ fn saturated_function_calls_reject_a_remaining_bind() {
 
 #[test]
 fn zero_arity_apply_operator_is_data_identity() {
-    let operator = apply_arity_operator(0, Arc::from([]));
     let data = n(42);
     let context = test_context();
+    let operator = context
+        .values()
+        .with_runtime_value_access(|access| apply_arity_operator(&access, 0, Arc::from([])));
 
     assert_eq!(
         with_direct_evaluator(&context, |evaluator| {
@@ -6136,7 +6138,10 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let target = closed_function_value(1, TestExpr::Value(n(42)));
     let gate = reflection_annotation(&context, n(0), target);
     let applied = closed_net(|builder| {
-        let [input, result] = builder.operator(applicable_operator(gate));
+        let operator = context
+            .values()
+            .with_runtime_value_access(|access| applicable_operator(&access, gate));
+        let [input, result] = builder.operator(operator);
         let argument = builder.data(key.to_value_with(context.values()));
         builder.wire(input, argument);
         result

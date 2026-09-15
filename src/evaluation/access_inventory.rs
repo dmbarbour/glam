@@ -597,17 +597,30 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_driver_releases_each_runtime_before_crossing_to_the_next#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::fresh_operator_claim_release_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::fresh_operator_claim_unwind_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::net_whnf_machine_retains_one_root_across_semantic_dependency#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::operator_claim_dispositions_cover_data_operator_block_and_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::operator_claim_dispositions_cover_data_operator_block_and_failure#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::operator_claim_dispositions_cover_data_operator_block_and_failure#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::operator_claim_dispositions_cover_data_operator_block_and_failure#4|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::persistent_driver_requeues_the_exact_active_pair_before_semantic_parking#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::persistent_driver_retains_work_across_batch_admission_contention#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::persistent_driver_retains_work_across_batch_admission_contention#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::retried_operator_claim_release_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::retried_operator_claim_unwind_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::stale_fresh_operator_claim_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain#1|surface=construction|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::promised_list_chunks_remain_assignable_after_early_observation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::zero_arity_apply_operator_is_data_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -799,14 +812,15 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // concurrent normalization fixtures.
         // W4C.1's persistent-driver fixtures compare retained request roots
         // under two additional bounded test accesses.
-        ("src/eval/net.rs", GatewayCounts::new(10, 0)),
+        ("src/eval/net.rs", GatewayCounts::new(20, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
+        ("src/eval/test_support.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks
         // compare managed-net identity under matching access.
         // D.2b.2's structured deferred-failure fixture constructs its halt
         // payload in one explicit access region.
-        ("src/eval/tests.rs", GatewayCounts::new(5, 1)),
+        ("src/eval/tests.rs", GatewayCounts::new(7, 1)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         ("src/eval/value.rs", GatewayCounts::new(1, 0)),

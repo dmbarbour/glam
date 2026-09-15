@@ -3664,7 +3664,7 @@ restarting earlier converted keys.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6B.1 — Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
+| **W6B.1 — Complete (2026-09-15): Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
 | **W6B.2 — Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
 | **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c/W6A.4 key/path-conversion consumers. `-5`. |
@@ -3675,6 +3675,18 @@ cursor-claim restoration/contention fixtures. Run operator, runtime-net,
 function-binding, and interaction-net profiling subsets ordinarily and under
 aggressive collection; committed rule signatures must not change merely
 because access ownership changes.
+
+W6B.1 completion record: every operator constructor which carries captured or
+supplied semantic values now requires the caller's active
+`RuntimeValueAccess`. Front-end lowering reuses its existing access region;
+the reflection request builder reuses its request-construction region; and
+evaluator/test callers open only bounded, callback-free regions. The closure
+also found that `constant_effect_template`, a temporary net descriptor which
+embeds its request value, belonged to this checkpoint despite being omitted
+from the prose enumeration. The exact manifest still confirms the planned
+`-9` delta: `OperatorAndNet` falls from 18 to 9 and the complete D.2c manifest
+from 167 to 158 declarations. No durable root or net-topology change was
+introduced.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 

@@ -1150,27 +1150,29 @@ fn lower_core_callable_in(
     } else {
         value
     };
-    match value {
+    context.with_value_access(|access| match value {
         Value::Net(net) => Ok(CoreCallable::Net(net.into_runtime())),
-        Value::Builtin(builtin) => Ok(CoreCallable::Operator(builtin_operator(BuiltinCall::new(
-            builtin,
-        )))),
-        Value::PartialBuiltin(call) => Ok(CoreCallable::Operator(builtin_operator(call))),
-        value @ (Value::Function(_) | Value::Dict(_)) => {
-            Ok(CoreCallable::Operator(applicable_operator(value)))
-        }
+        Value::Builtin(builtin) => Ok(CoreCallable::Operator(builtin_operator(
+            access.values(),
+            BuiltinCall::new(builtin),
+        ))),
+        Value::PartialBuiltin(call) => Ok(CoreCallable::Operator(builtin_operator(
+            access.values(),
+            call,
+        ))),
+        value @ (Value::Function(_) | Value::Dict(_)) => Ok(CoreCallable::Operator(
+            applicable_operator(access.values(), value),
+        )),
         value @ (Value::Atom(_)
         | Value::Number(_)
         | Value::Binary(_)
         | Value::List(_)
         | Value::Metadata(_)
-        | Value::Opaque(_)) => {
-            Err(context.with_value_access(|access| non_callable_error(access.values(), &value)))
-        }
+        | Value::Opaque(_)) => Err(non_callable_error(access.values(), &value)),
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("callable value shell must be fully forced")
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2624,7 +2626,9 @@ mod driver_tests {
     #[test]
     fn fresh_operator_claim_release_restores_ready_work() {
         let context = test_context();
-        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let operator = context.values().with_runtime_value_access(|access| {
+            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         let before = runtime
             .test_with_revisions(&crate::core::test_value_factory(), |_| ())
@@ -2654,7 +2658,9 @@ mod driver_tests {
     #[test]
     fn fresh_operator_claim_unwind_restores_ready_work() {
         let context = test_context();
-        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let operator = context.values().with_runtime_value_access(|access| {
+            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         let before = runtime
             .test_with_revisions(&crate::core::test_value_factory(), |_| ())
@@ -2687,7 +2693,9 @@ mod driver_tests {
     #[test]
     fn stale_fresh_operator_claim_fails_quietly_before_guard_issuance() {
         let context = test_context();
-        let operator = builtin_operator(BuiltinCall::new(Builtin::Add));
+        let operator = context.values().with_runtime_value_access(|access| {
+            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         runtime.test_with_mut(&crate::core::test_value_factory(), |net| {
             assert!(net.release_claimed_operator_call(call))
@@ -2712,7 +2720,9 @@ mod driver_tests {
     fn retried_operator_claim_release_restores_the_exact_wait() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "operator-claim wait");
-        let operator = applicable_operator(Value::Promised(promise));
+        let operator = context.values().with_runtime_value_access(|access| {
+            applicable_operator(&access, Value::Promised(promise))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -2747,7 +2757,9 @@ mod driver_tests {
     fn retried_operator_claim_unwind_restores_the_exact_wait() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "unwound operator-claim wait");
-        let operator = applicable_operator(Value::Promised(promise));
+        let operator = context.values().with_runtime_value_access(|access| {
+            applicable_operator(&access, Value::Promised(promise))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -2777,7 +2789,9 @@ mod driver_tests {
     fn mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "current operator wait");
-        let operator = applicable_operator(Value::Promised(promise));
+        let operator = context.values().with_runtime_value_access(|access| {
+            applicable_operator(&access, Value::Promised(promise))
+        });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         assert!(progress_exact_core_operator_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -2824,8 +2838,10 @@ mod driver_tests {
 
         let function = closed_function_value(1, TestExpr::Local(0));
         let data = Value::Number(Number::from(42));
-        let (data_runtime, data_call) =
-            claimed_core_operator_call(applicable_operator(function), data);
+        let data_operator = context
+            .values()
+            .with_runtime_value_access(|access| applicable_operator(&access, function));
+        let (data_runtime, data_call) = claimed_core_operator_call(data_operator, data);
         assert!(progress_exact_core_operator_call(&context, &data_runtime, data_call).unwrap());
         assert!(
             data_runtime.test_with(&crate::core::test_value_factory(), |net| net
@@ -2833,10 +2849,11 @@ mod driver_tests {
                 .is_none())
         );
 
-        let (operator_runtime, operator_call) = claimed_core_operator_call(
-            builtin_operator(BuiltinCall::new(Builtin::Add)),
-            Value::Number(Number::from(19)),
-        );
+        let operator = context.values().with_runtime_value_access(|access| {
+            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
+        });
+        let (operator_runtime, operator_call) =
+            claimed_core_operator_call(operator, Value::Number(Number::from(19)));
         assert!(
             progress_exact_core_operator_call(&context, &operator_runtime, operator_call).unwrap()
         );
@@ -2847,10 +2864,11 @@ mod driver_tests {
         );
 
         let promise = PromisedValue::new(context.values(), "blocked operator disposition");
-        let (blocked_runtime, blocked_call) = claimed_core_operator_call(
-            applicable_operator(Value::Promised(promise)),
-            context.values().unit(),
-        );
+        let blocked_operator = context.values().with_runtime_value_access(|access| {
+            applicable_operator(&access, Value::Promised(promise))
+        });
+        let (blocked_runtime, blocked_call) =
+            claimed_core_operator_call(blocked_operator, context.values().unit());
         assert!(
             progress_exact_core_operator_call(&context, &blocked_runtime, blocked_call).unwrap()
         );
@@ -2860,10 +2878,11 @@ mod driver_tests {
                 .is_some())
         );
 
-        let (failed_runtime, failed_call) = claimed_core_operator_call(
-            applicable_operator(context.values().unit()),
-            context.values().unit(),
-        );
+        let failed_operator = context.values().with_runtime_value_access(|access| {
+            applicable_operator(&access, context.values().unit())
+        });
+        let (failed_runtime, failed_call) =
+            claimed_core_operator_call(failed_operator, context.values().unit());
         let failure = progress_exact_core_operator_call(&context, &failed_runtime, failed_call)
             .expect_err("unit is permanently non-callable");
         assert!(

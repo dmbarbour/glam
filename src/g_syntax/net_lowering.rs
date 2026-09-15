@@ -138,7 +138,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                 } else {
                     let arity = items.len();
                     self.lazy_operator_application_into(
-                        crate::eval::list_operator(arity, Arc::from([])),
+                        crate::eval::list_operator(self.values, arity, Arc::from([])),
                         items,
                         target,
                     );
@@ -161,7 +161,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                     })
                     .collect::<Vec<_>>();
                 self.operator_application_into(
-                    crate::eval::access_operator(Arc::from(path), Arc::from([])),
+                    crate::eval::access_operator(self.values, Arc::from(path), Arc::from([])),
                     arguments,
                     target,
                 );
@@ -208,7 +208,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                 target,
             );
         } else {
-            let operator = crate::eval::function_capture_operator(code, Arc::from([]));
+            let operator = crate::eval::function_capture_operator(self.values, code, Arc::from([]));
             self.binding_operator_application_into(operator, captures, target);
         }
     }
@@ -220,6 +220,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         target: Port,
     ) {
         let mut output = self.net.unary_operator(crate::eval::apply_arity_operator(
+            self.values,
             arguments.len(),
             Arc::from([]),
         ));
@@ -304,7 +305,8 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                         target,
                     );
                 } else {
-                    let operator = crate::eval::computation_capture_operator(code, Arc::from([]));
+                    let operator =
+                        crate::eval::computation_capture_operator(self.values, code, Arc::from([]));
                     self.binding_operator_application_into(operator, captures, target);
                 }
             }

@@ -1,11 +1,17 @@
 use super::*;
+use crate::core::RuntimeValueAccess;
 
-pub(crate) fn apply_arity_operator(arity: usize, supplied: Arc<[Value]>) -> CoreOperator {
+pub(crate) fn apply_arity_operator(
+    _access: &RuntimeValueAccess<'_>,
+    arity: usize,
+    supplied: Arc<[Value]>,
+) -> CoreOperator {
     assert!(supplied.len() < arity + 1);
     CoreOperator::ApplyArity { arity, supplied }
 }
 
 pub(crate) fn function_capture_operator(
+    _access: &RuntimeValueAccess<'_>,
     code: Arc<FunctionCode>,
     supplied: Arc<[Value]>,
 ) -> CoreOperator {
@@ -15,6 +21,7 @@ pub(crate) fn function_capture_operator(
 }
 
 pub(crate) fn computation_capture_operator(
+    _access: &RuntimeValueAccess<'_>,
     code: Arc<FunctionCode>,
     supplied: Arc<[Value]>,
 ) -> CoreOperator {
@@ -24,26 +31,44 @@ pub(crate) fn computation_capture_operator(
     CoreOperator::ComputationCaptures { code, supplied }
 }
 
-pub(crate) fn dict_operator(keys: Arc<[Key]>, supplied: Arc<[Value]>) -> CoreOperator {
+pub(crate) fn dict_operator(
+    _access: &RuntimeValueAccess<'_>,
+    keys: Arc<[Key]>,
+    supplied: Arc<[Value]>,
+) -> CoreOperator {
     assert!(!keys.is_empty());
     assert!(supplied.len() < keys.len());
     CoreOperator::Dict { keys, supplied }
 }
 
-pub(crate) fn builtin_operator(call: BuiltinCall) -> CoreOperator {
+pub(crate) fn builtin_operator(
+    _access: &RuntimeValueAccess<'_>,
+    call: BuiltinCall,
+) -> CoreOperator {
     CoreOperator::Builtin(call)
 }
 
-pub(super) fn applicable_operator(function: Value) -> CoreOperator {
+pub(super) fn applicable_operator(
+    _access: &RuntimeValueAccess<'_>,
+    function: Value,
+) -> CoreOperator {
     CoreOperator::Applicable(function)
 }
 
-pub(crate) fn list_operator(arity: usize, supplied: Arc<[Value]>) -> CoreOperator {
+pub(crate) fn list_operator(
+    _access: &RuntimeValueAccess<'_>,
+    arity: usize,
+    supplied: Arc<[Value]>,
+) -> CoreOperator {
     assert!(supplied.len() < arity);
     CoreOperator::List { arity, supplied }
 }
 
-pub(crate) fn access_operator(path: Arc<[CoreDataKey]>, supplied: Arc<[Value]>) -> CoreOperator {
+pub(crate) fn access_operator(
+    _access: &RuntimeValueAccess<'_>,
+    path: Arc<[CoreDataKey]>,
+    supplied: Arc<[Value]>,
+) -> CoreOperator {
     let arity = 1 + path
         .iter()
         .filter(|key| !matches!(key, CoreDataKey::Key(_)))
@@ -53,6 +78,7 @@ pub(crate) fn access_operator(path: Arc<[CoreDataKey]>, supplied: Arc<[Value]>) 
 }
 
 pub(crate) fn request_operator(
+    _access: &RuntimeValueAccess<'_>,
     tag: Key,
     arity: usize,
     supplied: Arc<[Value]>,
@@ -79,9 +105,8 @@ pub(super) fn apply_core_operator(
             let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
             operands.push(operand);
             if operands.len() < *arity + 1 {
-                return Ok(OperatorYield::Operator(apply_arity_operator(
-                    *arity,
-                    Arc::from(operands),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| apply_arity_operator(access.values(), *arity, Arc::from(operands)),
                 )));
             }
             let function = operands.remove(0);
@@ -103,9 +128,14 @@ pub(super) fn apply_core_operator(
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(function_capture_operator(
-                    code.clone(),
-                    Arc::from(captures),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| {
+                        function_capture_operator(
+                            access.values(),
+                            code.clone(),
+                            Arc::from(captures),
+                        )
+                    },
                 )));
             }
             Ok(OperatorYield::Data(instantiate_function(
@@ -116,9 +146,14 @@ pub(super) fn apply_core_operator(
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(computation_capture_operator(
-                    code.clone(),
-                    Arc::from(captures),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| {
+                        computation_capture_operator(
+                            access.values(),
+                            code.clone(),
+                            Arc::from(captures),
+                        )
+                    },
                 )));
             }
             let stage = context.with_value_access(|access| {
@@ -133,9 +168,8 @@ pub(super) fn apply_core_operator(
             let mut values = supplied.iter().cloned().collect::<Vec<_>>();
             values.push(operand);
             if values.len() < keys.len() {
-                return Ok(OperatorYield::Operator(dict_operator(
-                    keys.clone(),
-                    Arc::from(values),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| dict_operator(access.values(), keys.clone(), Arc::from(values)),
                 )));
             }
             let dict = keys
@@ -151,10 +185,17 @@ pub(super) fn apply_core_operator(
             let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < call.builtin.arity() {
-                return Ok(OperatorYield::Operator(builtin_operator(BuiltinCall {
-                    builtin: call.builtin,
-                    arguments: Arc::from(arguments),
-                })));
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| {
+                        builtin_operator(
+                            access.values(),
+                            BuiltinCall {
+                                builtin: call.builtin,
+                                arguments: Arc::from(arguments),
+                            },
+                        )
+                    },
+                )));
             }
             if arguments.len() > call.builtin.arity() {
                 return Err(EvaluationHalt::new(
@@ -182,9 +223,8 @@ pub(super) fn apply_core_operator(
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
-                return Ok(OperatorYield::Operator(list_operator(
-                    *arity,
-                    Arc::from(arguments),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| list_operator(access.values(), *arity, Arc::from(arguments)),
                 )));
             }
             let list = arguments.into_iter().fold(List::empty(), |list, value| {
@@ -200,9 +240,8 @@ pub(super) fn apply_core_operator(
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < arity {
-                return Ok(OperatorYield::Operator(access_operator(
-                    path.clone(),
-                    Arc::from(arguments),
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| access_operator(access.values(), path.clone(), Arc::from(arguments)),
                 )));
             }
             Ok(OperatorYield::Data(Value::Lazy(context.construct_lazy(
@@ -218,11 +257,16 @@ pub(super) fn apply_core_operator(
             let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
-                return Ok(OperatorYield::Operator(request_operator(
-                    tag.clone(),
-                    *arity,
-                    Arc::from(arguments),
-                    *wrap_effect,
+                return Ok(OperatorYield::Operator(context.with_value_access(
+                    |access| {
+                        request_operator(
+                            access.values(),
+                            tag.clone(),
+                            *arity,
+                            Arc::from(arguments),
+                            *wrap_effect,
+                        )
+                    },
                 )));
             }
             let request = Value::Dict(
@@ -238,7 +282,10 @@ pub(super) fn apply_core_operator(
     }
 }
 
-fn constant_effect_template(request: Value) -> crate::core_net::CoreInteractionNet {
+fn constant_effect_template(
+    _access: &RuntimeValueAccess<'_>,
+    request: Value,
+) -> crate::core_net::CoreInteractionNet {
     let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
     let [input, argument, result] = net.bind();
     let erase = net.copy(0).input;
@@ -252,7 +299,7 @@ pub(crate) fn constant_effect_in(
     access: &crate::core::RuntimeValueAccess<'_>,
     request: Value,
 ) -> Value {
-    let template = constant_effect_template(request);
+    let template = constant_effect_template(access, request);
     let function = Value::Function(FunctionValue::new(
         NetValue::new(
             access
@@ -265,7 +312,8 @@ pub(crate) fn constant_effect_in(
 }
 
 pub(crate) fn constant_effect_in_step(context: &EvaluatorStepContext<'_>, request: Value) -> Value {
-    let template = constant_effect_template(request);
+    let template =
+        context.with_value_access(|access| constant_effect_template(access.values(), request));
     let function = Value::Function(FunctionValue::new(
         NetValue::new(context.construct_core_net(template.instantiate())),
         1,
