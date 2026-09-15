@@ -11,16 +11,6 @@ use crate::interaction_net::{
     DemandEndpoint, InterfaceDemand, RuntimeNet,
 };
 
-pub(super) fn attach_net_many(
-    context: &EvaluatorStepContext<'_>,
-    function: NetValue,
-    arguments: Vec<Value>,
-) -> NetValue {
-    let runtime = context
-        .with_value_access(|access| attached_net_runtime(access.values(), function, arguments));
-    NetValue::new(context.construct_core_net(runtime))
-}
-
 pub(super) fn attach_net_many_in(
     access: &RuntimeValueAccess<'_>,
     function: NetValue,
@@ -34,7 +24,7 @@ pub(super) fn attach_net_many_in(
     )
 }
 
-fn attached_net_runtime(
+pub(super) fn attached_net_runtime(
     _access: &RuntimeValueAccess<'_>,
     function: NetValue,
     arguments: Vec<Value>,
@@ -70,28 +60,35 @@ impl NetWhnfMachine {
         interface: Port,
         operation: impl Into<Arc<str>>,
     ) -> Self {
-        let request = NormalizationRequest::cursor_whnf(&runtime, interface, context);
+        context
+            .with_value_access(|access| Self::new_in(&access, runtime, interface, operation.into()))
+    }
+
+    fn new_in(
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
+        runtime: CoreRuntimeNet,
+        interface: Port,
+        operation: Arc<str>,
+    ) -> Self {
+        let request = NormalizationRequest::cursor_whnf_in(&runtime, interface, access);
         let driver = NetDriver::new(&request);
         Self {
             request,
             driver,
-            operation: operation.into(),
+            operation,
         }
     }
 
     pub(super) fn from_function_call(
-        context: &EvaluatorStepContext<'_>,
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
         function: &FunctionValue,
         arguments: &[Value],
     ) -> Self {
-        let stage =
-            context.with_value_access(|access| function.duplicate_stage_in(access.values()));
-        let net = attach_net_many(context, stage, arguments.to_vec());
+        let stage = function.duplicate_stage_in(access.values());
+        let net = attach_net_many_in(access.values(), stage, arguments.to_vec());
         let runtime = net.into_runtime();
-        let exposed = with_core_net_access(context, &runtime, |runtime| {
-            runtime.with(|runtime| runtime.exposed())
-        });
-        Self::new(context, runtime, exposed, "function call")
+        let exposed = access.net(&runtime).with(|runtime| runtime.exposed());
+        Self::new_in(access, runtime, exposed, Arc::from("function call"))
     }
 
     pub(super) fn poll(
@@ -157,14 +154,6 @@ fn with_core_net_access<R>(
     operation: impl FnOnce(CoreRuntimeNetAccess<'_, '_>) -> R,
 ) -> R {
     context.with_value_access(|access| operation(access.net(runtime)))
-}
-
-pub(super) fn attach_function_stage(
-    context: &EvaluatorStepContext<'_>,
-    function: NetValue,
-    arguments: Vec<Value>,
-) -> NetValue {
-    attach_net_many(context, function, arguments)
 }
 
 #[cfg(test)]
@@ -798,13 +787,22 @@ fn assert_semantic_step_is_unbatched(runtime: &CoreRuntimeNet) {
 fn assert_semantic_step_is_unbatched(_runtime: &CoreRuntimeNet) {}
 
 impl NormalizationRequest {
+    #[cfg(test)]
     fn cursor_whnf(
         runtime: &CoreRuntimeNet,
         root_interface: Port,
         context: &EvaluatorStepContext<'_>,
     ) -> Self {
+        context.with_value_access(|access| Self::cursor_whnf_in(runtime, root_interface, &access))
+    }
+
+    fn cursor_whnf_in(
+        runtime: &CoreRuntimeNet,
+        root_interface: Port,
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
+    ) -> Self {
         Self {
-            root: context.with_value_access(|access| runtime.root_in(access.values())),
+            root: runtime.root_in(access.values()),
             root_interface,
         }
     }

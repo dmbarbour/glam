@@ -3667,7 +3667,8 @@ restarting earlier converted keys.
 | **W6B.1 — Complete (2026-09-15): Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
 | **W6B.2 — Complete (2026-09-15): Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Complete (2026-09-15): Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
-| **W6B.4 — Net application** | 5 S | Convert callable lowering, function-stage attachment, argument attachment, access resolution, function-call machine construction, and its W6A.0c/W6A.4 key/path-conversion consumers. `-5`. |
+| **W6B.4a — Complete (2026-09-15): Net attachment** | 3 S | Access-qualify function-stage attachment, argument attachment, and function-call machine construction without changing demand semantics. `-3`. |
+| **W6B.4b — Suspendable net application** | 2 S | Convert callable lowering and access resolution, including the W6A.0c/W6A.4 key/path-conversion consumers, into state retained by their actual machine owners. `-2`. |
 
 Keep topology and claim state in their existing net owners. Force suspension
 after callable lowering and after the first attached argument, and retain the
@@ -3713,6 +3714,17 @@ to own only exact restoration state, while their originating rooted runtime
 net remains the semantic owner of operator payload edges. The D.2c manifest
 falls from 155 to 153 declarations and `OperatorAndNet` from 7 to 5, leaving
 only W6B.4's runtime-net application seams.
+
+W6B.4a completion record: function-stage and multi-argument attachment now
+build their runtime net beneath matching access. A compatibility partial
+application publishes that completed runtime through its evaluator-step owner;
+the production function-call source constructs, roots, and installs its
+`NetWhnfMachine` before the access region closes. `NetWhnfMachine` and
+`NormalizationRequest` consequently have regional constructors rather than
+reopening nested access. The D.2c manifest falls from 153 to 150 declarations
+and `OperatorAndNet` from 5 to 2. The remaining two declarations are genuinely
+suspendable callable/path operations assigned to W6B.4b, not attachment
+leaves.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 

@@ -498,9 +498,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         function,
                         arguments,
                     } => LazyTaskWork::NetWhnf {
-                        machine: Box::new(NetWhnfMachine::from_function_call(
-                            context, &function, &arguments,
-                        )),
+                        machine: Box::new(context.with_value_access(|access| {
+                            NetWhnfMachine::from_function_call(&access, &function, &arguments)
+                        })),
                         failure_context: None,
                     },
                     LazySource::NetComputation(net) => {

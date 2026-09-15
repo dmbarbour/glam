@@ -105,9 +105,11 @@ fn apply_function_values_in(
     let remaining = function.remaining_arity();
     if arguments.len() < remaining {
         let supplied = arguments.len();
-        let stage =
-            context.with_value_access(|access| function.duplicate_stage_in(access.values()));
-        let stage = attach_function_stage(context, stage, arguments);
+        let runtime = context.with_value_access(|access| {
+            let stage = function.duplicate_stage_in(access.values());
+            attached_net_runtime(access.values(), stage, arguments)
+        });
+        let stage = NetValue::new(context.construct_core_net(runtime));
         return Ok(Value::Function(FunctionValue::new(
             stage,
             remaining - supplied,
