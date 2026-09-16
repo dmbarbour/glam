@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
@@ -464,4 +465,152 @@ fn cached_lazy_failure_is_already_evaluated_by_construction() {
         observe_current_callable_path(&runtime, call),
         CurrentCallablePath::DirectOperator
     );
+}
+
+fn install_ready_checkpoint(
+    context: &EvalContext,
+    focus: Value,
+) -> (
+    CoreRuntimeNet,
+    Call,
+    crate::interaction_net::CallableCheckpointCall,
+) {
+    let (runtime, call) = claimed_core_call_in(context.values(), context.values().unit());
+    let checkpoint = super::super::with_direct_evaluator(context, |evaluator| {
+        evaluator.with_value_access(|access| {
+            let state = crate::eval::whnf::NetWhnfState::from_regional(
+                &access,
+                crate::eval::whnf::RegionalWhnfWork::from_focus(&access, focus),
+            );
+            let Ok(checkpoint) = access
+                .net(&runtime)
+                .install_claimed_call_checkpoint(call, state)
+            else {
+                panic!("claimed call accepts one checkpoint")
+            };
+            checkpoint
+        })
+    });
+    (runtime, call, checkpoint)
+}
+
+#[test]
+fn two_workers_contend_for_one_linear_checkpoint_payload() {
+    let fixture = SameRuntimeFixture::new();
+    let setup = fixture.context();
+    let (runtime, call, checkpoint) =
+        install_ready_checkpoint(&setup, Value::Builtin(Builtin::Add));
+    reduce_checkpoint(setup.values(), &runtime, call.pair);
+
+    let first_context = fixture.context();
+    let second_context = fixture.context();
+    let first_runtime = runtime.clone();
+    let second_runtime = runtime.clone();
+    let interlock = Arc::new(Barrier::new(2));
+    let first_interlock = Arc::clone(&interlock);
+    let first = std::thread::spawn(move || {
+        super::super::with_direct_evaluator(&first_context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let claim = CoreCheckpointClaim::take(&access, &first_runtime, call.pair)
+                    .expect("first worker must acquire the exact checkpoint payload");
+                first_interlock.wait();
+                first_interlock.wait();
+                drop(claim);
+            });
+        });
+    });
+    let second_interlock = Arc::clone(&interlock);
+    let second = std::thread::spawn(move || {
+        second_interlock.wait();
+        super::super::with_direct_evaluator(&second_context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                assert!(
+                    CoreCheckpointClaim::take(&access, &second_runtime, call.pair).is_none(),
+                    "a contender cannot acquire a moved checkpoint payload"
+                );
+            });
+        });
+        second_interlock.wait();
+    });
+    first.join().expect("checkpoint owner must restore cleanly");
+    second.join().expect("stale contender must return cleanly");
+
+    assert_eq!(
+        runtime.test_with(setup.values(), |net| net.callable_checkpoint(call.pair)),
+        Some(checkpoint)
+    );
+    assert!(!runtime.test_with(setup.values(), |net| net.pair_is_claimed(call.pair)));
+    reduce_checkpoint(setup.values(), &runtime, call.pair);
+    super::super::with_direct_evaluator(&setup, |evaluator| {
+        evaluator.with_value_access(|access| {
+            drop(
+                CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("restored payload must remain claimable"),
+            );
+        });
+    });
+    assert!(!runtime.test_with(setup.values(), |net| net.pair_is_claimed(call.pair)));
+}
+
+#[test]
+fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
+    let context = test_context();
+    let (runtime, call, original) =
+        install_ready_checkpoint(&context, Value::Builtin(Builtin::Add));
+    reduce_checkpoint(context.values(), &runtime, call.pair);
+
+    let before_publication = catch_unwind(AssertUnwindSafe(|| {
+        super::super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let _claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("pre-publication unwind must own the payload");
+                panic!("forced unwind before checkpoint publication");
+            });
+        });
+    }));
+    assert!(before_publication.is_err());
+    assert_eq!(
+        runtime.test_with(context.values(), |net| net.callable_checkpoint(call.pair)),
+        Some(original),
+        "pre-publication unwind restores the exact predecessor"
+    );
+    assert!(!runtime.test_with(context.values(), |net| net.pair_is_claimed(call.pair)));
+
+    reduce_checkpoint(context.values(), &runtime, call.pair);
+    let after_publication = catch_unwind(AssertUnwindSafe(|| {
+        super::super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("restored predecessor must remain claimable");
+                let successor = claim.publish().expect("publication must succeed");
+                assert_eq!(successor.generation, original.generation + 1);
+                panic!("forced unwind after checkpoint publication");
+            });
+        });
+    }));
+    assert!(after_publication.is_err());
+    let successor = runtime
+        .test_with(context.values(), |net| net.callable_checkpoint(call.pair))
+        .expect("post-publication unwind retains the successor");
+    assert_eq!(successor.generation, original.generation + 1);
+    assert_ne!(successor, original);
+    assert!(!runtime.test_with(context.values(), |net| net.pair_is_claimed(call.pair)));
+
+    reduce_checkpoint(context.values(), &runtime, call.pair);
+    super::super::with_direct_evaluator(&context, |evaluator| {
+        evaluator.with_value_access(|access| {
+            assert!(
+                access
+                    .net(&runtime)
+                    .take_claimed_callable_checkpoint(original)
+                    .is_none(),
+                "the predecessor generation must remain stale"
+            );
+            drop(
+                CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("the successor remains the sole authoritative payload"),
+            );
+        });
+    });
+    assert!(!runtime.test_with(context.values(), |net| net.pair_is_claimed(call.pair)));
 }

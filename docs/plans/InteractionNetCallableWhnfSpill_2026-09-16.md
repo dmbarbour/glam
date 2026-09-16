@@ -1138,10 +1138,22 @@ a second checkpoint or producer.
 
 #### NC5B — Contention and stale work
 
+Status: complete on 2026-09-16.
+
 Use barriers rather than repetition to force two workers toward the same
 checkpoint. Verify one authoritative state, harmless stale admission, exact
 blocked retries, no restored predecessor, and no claim after either worker
 returns. Cover unwind before and after publication.
+
+Completion record: a two-thread barrier fixture moves the payload into one
+worker's regional claim before admitting the contender. The contender cannot
+observe or acquire the absent payload, and the owner's guard restores the
+exact generation before either thread exits. Forced unwind before publication
+restores that predecessor; forced unwind after publication leaves only the
+incremented successor. An explicit stale predecessor take fails while the
+successor remains claimable, and every return path is checked with no claimed
+pair left behind. NC5A's forced terminal matrix covers exact blocked retry and
+the new atomic blocked-failure transition.
 
 #### NC5C — Cursor deferral and GC ownership
 
