@@ -3669,7 +3669,9 @@ consumer, remove `value_to_key_in` and its direct compatibility wrapper and
 record W6A.0c's key-conversion share of the delta.
 
 Migrate **singleton-tag inspection** by introducing one owned tagged-payload
-work form at W6A.2. That owner performs the recursive semantic-undefined walk,
+work form at its first real consumer. W6C.3 became that first consumer after
+W6A.2's application migration did not need tag inspection. That owner performs
+the recursive semantic-undefined walk,
 retains its dictionary cursor and candidate values durably, and exposes normal
 pending/yielded/ready/failed polls. W6C.3 reuses it for tuple comparison.
 After that final consumer moves, remove `tagged_payload_in` and
@@ -4018,7 +4020,8 @@ until W6G.3 aggregates it.
 | **W6C.1b — Final builtin dispatcher closure (after W6F.7)** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
 | **W6C.2a — Complete (2026-09-16): Builtin assertions and conditionals** | 2 S | Separate builtin operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-2`. |
 | **W6C.2b — Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
-| **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; reuse W6A.0c tagged-payload work and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
+| **W6C.3a — Complete (2026-09-16): Shared tagged payload** | prerequisite | Introduce the first shared tagged-payload owner and its iterative semantic-undefined stack; retain the compatibility helpers until W6A.0c closes. |
+| **W6C.3b — Complete (2026-09-16): Comparison** | 6 S, 3 F | Convert ordered/equality operand work, reuse W6C.3a tagged-payload work, and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
 | **W6C.5 — Complete (2026-09-16): Provenance** | 1 D | Replace the durable evaluator facade with an explicit provenance owner and bounded opaque-origin inspection. `-1`. |
 | **W6C.6 — Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
@@ -4085,6 +4088,22 @@ deferred failure with its context intact; public round-trip and wrong-family
 fixtures pass in both GC modes. The old provenance module is removed, the
 dispatcher retains only strategy's deliberate durable-context downgrade, and
 the D.2c manifest falls from 140 to 139 declarations with W6C.5 at zero.
+
+W6C.3 completion record, 2026-09-16: saturated comparisons now install a
+durable stack machine. Ordered operands, recursive lists, dictionary members,
+and tuple payloads retain exact rooted progress across pending and yielded
+polls; the forced fixtures suspend on operand two and on a lazy tail without
+replaying an already-observed prefix. The shared tagged-payload owner uses an
+explicit iterative semantic-undefined stack, so nested ignored members can
+suspend without Rust recursion or re-reading prior members. Conditional
+effect construction remains immediate, selected results remain lazy, and
+comparison failures are terminally cached through the containing lazy just as
+other builtin failures are. That last rule repairs a deterministic restart
+loop exposed by nested function-comparison failure. The old comparison module
+and obsolete list-like compatibility leaf are removed. The D.2c manifest
+falls from 139 to 129 declarations: W6C.3 reaches zero and W6D.4 falls from
+five declarations to four. Focused comparison, tagged-payload, inventory, and
+aggressive-collection fixtures pass.
 
 #### W6D — Dictionaries, lists, and patterns
 

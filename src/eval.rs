@@ -28,12 +28,14 @@ mod access_machine;
 mod application;
 mod builtin_machine;
 mod builtins;
+mod comparison_machine;
 mod list_effect_machine;
 mod list_machine;
 mod net;
 mod object_machine;
 mod operator;
 mod sequence;
+mod tagged_machine;
 #[cfg(test)]
 mod test_support;
 mod value;

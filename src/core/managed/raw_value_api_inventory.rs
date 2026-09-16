@@ -1409,13 +1409,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        555,
+        548,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        15_568_492_304_260_502_761,
+        18_153_118_362_668_637_025,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1426,9 +1426,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 120),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 123),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        ((ApiKind::Function, ApiDisposition::Violation), 397),
+        ((ApiKind::Function, ApiDisposition::Violation), 387),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1502,7 +1502,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            139,
+            129,
         ),
         (
             (
@@ -1644,8 +1644,8 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         BTreeMap::from([
             (D2cFamily::ValueDemand, 12),
             (D2cFamily::ApplicationAndSequence, 7),
-            (D2cFamily::DispatchScalarAndStrategy, 16),
-            (D2cFamily::CollectionsAndPatterns, 43),
+            (D2cFamily::DispatchScalarAndStrategy, 7),
+            (D2cFamily::CollectionsAndPatterns, 42),
             (D2cFamily::AnnotationsAndEffects, 36),
             (D2cFamily::Objects, 17),
             (D2cFamily::NetBuiltins, 8),
@@ -1668,9 +1668,9 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 112),
+            (D2cCurrentContext::EvaluatorStep, 105),
             (D2cCurrentContext::DurableEval, 6),
-            (D2cCurrentContext::ContextFree, 21),
+            (D2cCurrentContext::ContextFree, 18),
         ]),
         "the D.2c signature baseline drifted"
     );
@@ -1691,7 +1691,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [21, 118, 0],
+        [18, 111, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1723,11 +1723,11 @@ fn d2c_family_fingerprints_are_exact() {
         ),
         (
             D2cFamily::DispatchScalarAndStrategy,
-            15_820_081_141_347_621_772,
+            13_819_104_458_029_276_580,
         ),
         (
             D2cFamily::CollectionsAndPatterns,
-            16_633_895_905_255_689_776,
+            17_096_297_955_841_742_270,
         ),
         (D2cFamily::AnnotationsAndEffects, 5_637_277_238_344_972_318),
         (D2cFamily::Objects, 14_243_874_767_540_971_701),
@@ -1771,12 +1771,11 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 2),
         (W6C1DispatchAndArity, 1),
         (W6C2AssertionAndConditional, 1),
-        (W6C3Comparison, 9),
         (W6C6Strategy, 5),
         (W6D1DictBasic, 4),
         (W6D2DictMerge, 8),
         (W6D3ListObservation, 7),
-        (W6D4ListTransformAndDispatch, 5),
+        (W6D4ListTransformAndDispatch, 4),
         (W6D5aPatternDictAndPath, 10),
         (W6D5bPatternList, 5),
         (W6D5cPatternEffectAndDispatch, 4),
@@ -1815,12 +1814,11 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
         (W6C2AssertionAndConditional, 11_178_720_452_358_268_189),
-        (W6C3Comparison, 1_125_825_947_678_604_093),
         (W6C6Strategy, 7_226_560_668_498_362_880),
         (W6D1DictBasic, 3_953_826_480_194_787_850),
         (W6D2DictMerge, 17_524_228_289_460_621_433),
         (W6D3ListObservation, 1_141_124_844_497_395_933),
-        (W6D4ListTransformAndDispatch, 16_264_885_387_125_707_701),
+        (W6D4ListTransformAndDispatch, 937_907_731_239_525_859),
         (W6D5aPatternDictAndPath, 4_701_694_396_283_851_948),
         (W6D5bPatternList, 13_481_016_508_580_392_350),
         (W6D5cPatternEffectAndDispatch, 7_938_764_653_056_697_587),

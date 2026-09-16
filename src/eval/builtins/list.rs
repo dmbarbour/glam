@@ -2,7 +2,6 @@ use super::super::*;
 
 mod implementation;
 
-pub(super) use implementation::list_like_value_in;
 use implementation::*;
 
 pub(super) fn apply(

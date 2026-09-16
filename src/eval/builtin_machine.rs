@@ -14,6 +14,7 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
+use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
@@ -28,6 +29,7 @@ pub(crate) enum BuiltinTaskPoll {
 pub(crate) enum BuiltinTaskMachine {
     Assertion(AssertionBuiltinMachine),
     Conditional(ConditionalBuiltinMachine),
+    Comparison(ComparisonBuiltinMachine),
     Numeric(NumericBuiltinMachine),
     Provenance(ProvenanceBuiltinMachine),
 }
@@ -39,6 +41,12 @@ impl BuiltinTaskMachine {
             Builtin::AssertUnit
                 | Builtin::IfResult
                 | Builtin::MatchResult
+                | Builtin::Greater
+                | Builtin::GreaterEqual
+                | Builtin::Equal
+                | Builtin::NotEqual
+                | Builtin::LessEqual
+                | Builtin::Less
                 | Builtin::Add
                 | Builtin::Subtract
                 | Builtin::Multiply
@@ -61,6 +69,12 @@ impl BuiltinTaskMachine {
             Builtin::IfResult | Builtin::MatchResult => {
                 Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
             }
+            Builtin::Greater
+            | Builtin::GreaterEqual
+            | Builtin::Equal
+            | Builtin::NotEqual
+            | Builtin::LessEqual
+            | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
             Builtin::InspectOrigin => Self::Provenance(ProvenanceBuiltinMachine::new(arguments)),
             _ => Self::Numeric(NumericBuiltinMachine::new(builtin, arguments)),
         }
@@ -79,6 +93,16 @@ impl BuiltinTaskMachine {
             }
             Self::Conditional(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::Comparison(machine) => {
+                match machine.poll(poll_context, context, durable_context, step_budget) {
+                    ComparisonBuiltinPoll::Ready(value) => BuiltinTaskPoll::Ready(value),
+                    ComparisonBuiltinPoll::Pending(dependency) => {
+                        BuiltinTaskPoll::Pending(dependency)
+                    }
+                    ComparisonBuiltinPoll::Yielded => BuiltinTaskPoll::Yielded,
+                    ComparisonBuiltinPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                }
             }
             Self::Numeric(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
@@ -453,7 +477,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::core::{CoreValueFactory, PromisedValue};
+    use crate::core::{CoreValueFactory, ListThunk, PromisedValue};
     use crate::evaluation::EvalContext;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
@@ -636,5 +660,66 @@ mod tests {
                 "compilation_origin"
             )]
         );
+    }
+
+    #[test]
+    fn comparison_machine_resumes_second_operand_without_replaying_the_first() {
+        let context = context();
+        let first_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&first_demands);
+        let first =
+            Value::semantic_thunk(context.values(), "first comparison operand", move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Number(7.into()))
+            });
+        let second = PromisedValue::new(context.values(), "second comparison operand");
+        let comparison = Value::builtin_call(
+            context.values(),
+            Builtin::Equal,
+            vec![first, Value::Promised(second.clone())],
+        );
+
+        crate::eval::eval_value(&context, &comparison)
+            .expect_err("the second comparison operand must suspend");
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        crate::core::set_test_promise(context.values(), &second, Value::Number(7.into()))
+            .expect("the second operand should accept its assignment");
+        crate::eval::eval_value(&context, &comparison).expect("comparison must resume");
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn comparison_machine_resumes_a_lazy_list_tail_without_replaying_its_prefix() {
+        let context = context();
+        let prefix_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&prefix_demands);
+        let prefix = Value::semantic_thunk(context.values(), "comparison list prefix", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Number(1.into()))
+        });
+        let tail = PromisedValue::new(context.values(), "comparison list tail");
+        let left = Value::List(crate::core::List::concat(
+            crate::core::List::from_values(vec![prefix]),
+            crate::core::List::from_thunk(ListThunk::Promised(tail.clone())),
+        ));
+        let right = Value::List(crate::core::List::from_values(vec![
+            Value::Number(1.into()),
+            Value::Number(2.into()),
+        ]));
+        let comparison = Value::builtin_call(context.values(), Builtin::Equal, vec![left, right]);
+
+        crate::eval::eval_value(&context, &comparison)
+            .expect_err("the deferred list tail must suspend comparison");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        crate::core::set_test_promise(
+            context.values(),
+            &tail,
+            Value::List(crate::core::List::from_values(vec![Value::Number(
+                2.into(),
+            )])),
+        )
+        .expect("the list tail should accept its assignment");
+        crate::eval::eval_value(&context, &comparison).expect("list comparison must resume");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
     }
 }

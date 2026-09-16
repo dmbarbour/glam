@@ -135,6 +135,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W3C.2-W3C.3 rooted source progress"
     ),
     entry!(
+        "src/eval/comparison_machine.rs",
+        0,
+        0,
+        9,
+        "durable comparison operands, recursive list/dictionary members, and tuple payloads",
+        "W6C.3 resumable recursive comparison ownership"
+    ),
+    entry!(
         "src/eval/list_effect_machine.rs",
         0,
         0,
@@ -157,6 +165,14 @@ const INVENTORY: &[InventoryEntry] = &[
         4,
         "pollable C3 traversal, composed-definition expansion, and object-mixin completion",
         "W3B.2b explicit object-fixpoint source owner"
+    ),
+    entry!(
+        "src/eval/tagged_machine.rs",
+        0,
+        0,
+        3,
+        "tagged payload and recursive semantic-undefined traversal",
+        "W6C.3 shared resumable tagged-payload owner"
     ),
     entry!(
         "src/eval/value.rs",
@@ -431,6 +447,10 @@ impl RootPublicationOccurrence {
                 | "src/eval/access_machine.rs::classify_key_value"
                 | "src/eval/access_machine.rs::select_dict_member"
                 | "src/eval/access_machine.rs::value_as_list_root"
+                | "src/eval/comparison_machine.rs::classify_equality"
+                | "src/eval/comparison_machine.rs::classify_ordering"
+                | "src/eval/comparison_machine.rs::demand_tuple_payload"
+                | "src/eval/comparison_machine.rs::impl DictEqualityFrame::new"
                 | "src/eval/list_effect_machine.rs::effect_function"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
@@ -439,6 +459,8 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
                 | "src/eval/object_machine.rs::spec_member_root"
+                | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
+                | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
                 | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
@@ -688,6 +710,15 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/access_machine.rs::classify_key_value#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::value_as_list_root#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::classify_equality#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::classify_equality#2|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::classify_ordering#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::classify_ordering#2|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::demand_tuple_payload#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#2|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#3|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#4|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",
@@ -703,6 +734,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::spec_member_root#1|surface=access-publication|scope=production",
+    "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#1|surface=access-publication|scope=production",
+    "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#2|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",

@@ -2,7 +2,6 @@
 
 mod annotation;
 mod assertion;
-mod comparison;
 mod dict;
 mod effect;
 mod list;
@@ -53,7 +52,13 @@ pub(super) fn apply_builtin_in(
         | Builtin::Multiply
         | Builtin::Divide
         | Builtin::Floor
-        | Builtin::Mod => Ok(Value::Lazy(context.construct_lazy(move |access| {
+        | Builtin::Mod
+        | Builtin::Greater
+        | Builtin::GreaterEqual
+        | Builtin::Equal
+        | Builtin::NotEqual
+        | Builtin::LessEqual
+        | Builtin::Less => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,
                 BuiltinCall {
@@ -62,12 +67,6 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::Greater
-        | Builtin::GreaterEqual
-        | Builtin::Equal
-        | Builtin::NotEqual
-        | Builtin::LessEqual
-        | Builtin::Less => comparison::apply(context, builtin, arguments),
         Builtin::Append
         | Builtin::Slice
         | Builtin::Map

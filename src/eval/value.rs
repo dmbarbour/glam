@@ -706,7 +706,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         })
                     }
                     BuiltinTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
-                    BuiltinTaskPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    BuiltinTaskPoll::Failed(failure) => {
+                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                    }
                 };
             }
 

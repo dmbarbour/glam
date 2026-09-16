@@ -160,16 +160,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3B.1 scoped annotation assertion compatibility pending W6E.1"
     ),
     context_entry!(
-        "src/eval/builtins/comparison.rs",
-        [1, 0],
-        "I3B.1 scoped comparison dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/comparison/implementation.rs",
-        [7, 0],
-        "I3B.1 scoped recursive comparisons"
-    ),
-    context_entry!(
         "src/eval/builtins/dict.rs",
         [1, 0],
         "I3B.1 scoped dictionary dispatch"
@@ -201,7 +191,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list/implementation.rs",
-        [11, 0],
+        [10, 0],
         "I3B.1 scoped list operations"
     ),
     context_entry!(
@@ -228,6 +218,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/builtin_machine.rs",
         [6, 6],
         "W6C.2/W6C.4/W6C.5 durable conditional, assertion, numeric, and provenance owners with callback-free regional result projection"
+    ),
+    context_entry!(
+        "src/eval/comparison_machine.rs",
+        [9, 6],
+        "W6C.3 durable recursive comparison owner with scoped classification and result projection"
     ),
     context_entry!(
         "src/eval/builtins/object.rs",
@@ -273,6 +268,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/sequence.rs",
         [4, 3],
         "I3B.2 and I3D/I3E direct sequence callers"
+    ),
+    context_entry!(
+        "src/eval/tagged_machine.rs",
+        [2, 3],
+        "W6C.3 shared tagged-payload and semantic-undefined owner"
     ),
     context_entry!(
         "src/eval/value.rs",
@@ -549,12 +549,11 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         1,
         "only strategies may downgrade in the dispatcher"
     );
-    for durable_call in ["strategy::apply(context.context(), builtin, arguments)"] {
-        assert!(
-            dispatcher.contains(durable_call),
-            "missing durable builtin boundary `{durable_call}`"
-        );
-    }
+    let durable_call = "strategy::apply(context.context(), builtin, arguments)";
+    assert!(
+        dispatcher.contains(durable_call),
+        "missing durable builtin boundary `{durable_call}`"
+    );
     assert!(
         dispatcher.contains("Builtin::Anno => annotation::apply(context, arguments)"),
         "annotation dispatch must retain evaluator-step authority"

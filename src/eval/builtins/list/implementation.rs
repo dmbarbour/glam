@@ -2,20 +2,6 @@ use super::super::super::*;
 use crate::core::EvaluatedValue;
 use crate::list::ListItem;
 
-pub(in crate::eval::builtins) fn list_like_value_in(
-    context: &EvaluatorStepContext<'_>,
-    value: Value,
-    name: &str,
-) -> Result<List, EvaluationHalt> {
-    match eval_value_in(context, &value)? {
-        Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
-        Value::List(list) => Ok(list),
-        other => Err(EvaluationHalt::new(format!(
-            "{name} builtin requires tuple payloads to be lists or binaries, got {other:?}"
-        ))),
-    }
-}
-
 pub(super) fn eval_slice_builtin(
     context: &EvaluatorStepContext<'_>,
     start: &Value,

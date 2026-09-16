@@ -318,7 +318,10 @@ fn claimed_evaluator_dispatches_comparison_and_pattern_builtins() {
             .expect("direct builtin application should succeed");
         let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
             .expect("claimed builtin application should succeed");
-        assert_eq!(claimed, direct);
+        assert_eq!(
+            eval_value(&context, &claimed).expect("claimed builtin result should evaluate"),
+            eval_value(&context, &direct).expect("direct builtin result should evaluate")
+        );
     }
 }
 

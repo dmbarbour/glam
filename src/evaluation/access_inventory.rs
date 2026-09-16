@@ -618,6 +618,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_usage_distinguishes_production_from_frame_fixture#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tagged_machine.rs::tests::tagged_payload_resumes_nested_undefined_work_at_the_exact_member#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain#1|surface=construction|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -827,6 +828,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // between construction and its terminal-state observation.
         ("src/eval/net/tests/nc5.rs", GatewayCounts::new(4, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
+        // W6C.3's tagged-payload fixture constructs its managed dictionary
+        // beneath one explicit matching-runtime access region.
+        ("src/eval/tagged_machine.rs", GatewayCounts::new(1, 0)),
         ("src/eval/test_support.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks
