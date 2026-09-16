@@ -14,6 +14,10 @@ tests=(
   core_net::tests::profiling_counts_calls_only_when_the_claimed_rewrite_commits
   core_net::tests::profiling_counts_operator_calls_only_when_completion_commits
   eval::net::driver_tests::current_callable_profile_counts_only_terminal_call_rewrites
+  eval::net::driver_tests::callable_profile_keeps_immediate_and_cached_paths_checkpoint_free
+  eval::net::driver_tests::callable_profile_records_checkpoint_install_resume_replace_and_terminalize
+  eval::net::driver_tests::callable_profile_records_exact_dependency_retry_and_stale_admission
+  eval::net::driver_tests::unsupported_checkpoint_boundary_terminalizes_the_exact_generation
   eval::tests::wrapper_returning_function_then_accepts_remaining_application
   eval::tests::wrapper_application_budget_probe_yields_without_publishing_a_cache
 )

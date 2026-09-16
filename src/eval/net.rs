@@ -2125,6 +2125,139 @@ mod driver_tests {
         );
     }
 
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn callable_profile_keeps_immediate_and_cached_paths_checkpoint_free() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+
+        let (runtime, call) = claimed_core_call_in(&values, Value::Builtin(Builtin::Add));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+        let immediate = context.values().interaction_net_profile_snapshot().driver;
+        assert_eq!(immediate.callable_whnf_inline_transitions, 0);
+        assert_eq!(immediate.callable_checkpoint_installs, 0);
+
+        let lazy = LazyValue::from_access(
+            context.values(),
+            Arc::from([]),
+            Arc::from([context.values().unit()]),
+        );
+        crate::core::cache_test_lazy(
+            context.values(),
+            &lazy,
+            Ok(
+                crate::core::EvaluatedValue::try_from(Value::Builtin(Builtin::Add))
+                    .expect("a builtin is already in WHNF"),
+            ),
+        )
+        .expect("fresh callable lazy accepts its cached result");
+        let (runtime, call) = claimed_core_call_in(&values, Value::Lazy(lazy));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+
+        let cached = context.values().interaction_net_profile_snapshot().driver;
+        assert!(cached.callable_whnf_inline_transitions > 0);
+        assert_eq!(cached.callable_checkpoint_installs, 0);
+        assert_eq!(cached.callable_checkpoint_resumptions, 0);
+        assert_eq!(cached.callable_checkpoint_terminalizations, 0);
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn callable_profile_records_checkpoint_install_resume_replace_and_terminalize() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+        let terminal = PromisedValue::new(context.values(), "profiled terminal callable");
+        crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
+            .expect("terminal promise accepts its callable result");
+        let mut focus = terminal;
+        for label in ["third", "second", "first"] {
+            let prior = context
+                .values()
+                .with_runtime_value_access(|access| Value::Promised(focus.duplicate_in(&access)));
+            let next = PromisedValue::new(context.values(), format!("{label} profiled callable"));
+            crate::core::set_test_promise(context.values(), &next, prior)
+                .expect("promise accepts its delegated focus");
+            focus = next;
+        }
+        let (runtime, call) = claimed_core_call_in(&values, Value::Promised(focus));
+
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(2);
+            assert!(progress_exact_core_call_in(evaluator, &runtime, call, &mut budget).unwrap());
+        });
+        let installed = context.values().interaction_net_profile_snapshot().driver;
+        assert_eq!(installed.callable_whnf_inline_transitions, 2);
+        assert_eq!(installed.callable_checkpoint_installs, 1);
+        assert_eq!(installed.callable_checkpoint_resumptions, 0);
+
+        for budget in [2, 1] {
+            runtime
+                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .expect("published checkpoint remains runnable");
+            super::with_direct_evaluator(&context, |evaluator| {
+                let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
+                progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+            })
+            .unwrap();
+        }
+
+        let finished = context.values().interaction_net_profile_snapshot().driver;
+        assert_eq!(finished.callable_checkpoint_resumptions, 2);
+        assert_eq!(finished.callable_checkpoint_replacements, 1);
+        assert_eq!(finished.callable_checkpoint_terminalizations, 1);
+        assert_eq!(finished.callable_checkpoint_dependency_blocks, 0);
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn callable_profile_records_exact_dependency_retry_and_stale_admission() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+        let promise = PromisedValue::new(context.values(), "profiled dependency");
+        let (runtime, call) = claimed_core_call_in(&values, Value::Promised(promise));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+        let blocked = runtime
+            .test_with(context.values(), |net| {
+                net.blocked_callable_checkpoint(call.pair)
+            })
+            .expect("unassigned callable promise blocks its exact checkpoint");
+
+        super::with_direct_evaluator(&context, |evaluator| {
+            assert!(with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            }));
+        });
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("retried checkpoint is claimable");
+        let successor = super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("exact checkpoint state is claimable")
+                    .publish()
+                    .expect("claimed checkpoint accepts one successor generation")
+            })
+        });
+        assert_ne!(successor.generation, blocked.call.generation);
+        super::with_direct_evaluator(&context, |evaluator| {
+            assert_eq!(
+                with_core_net_access(evaluator, &runtime, |runtime| {
+                    runtime.block_callable_checkpoint(blocked.call, blocked.wait.clone())
+                }),
+                crate::interaction_net::CheckpointBlockResult::Disturbed
+            );
+        });
+
+        let profile = context.values().interaction_net_profile_snapshot().driver;
+        assert_eq!(profile.callable_checkpoint_installs, 1);
+        assert_eq!(profile.callable_checkpoint_dependency_blocks, 1);
+        assert_eq!(profile.callable_checkpoint_dependency_retries, 1);
+        assert_eq!(profile.callable_checkpoint_resumptions, 1);
+        assert_eq!(profile.callable_checkpoint_replacements, 1);
+        assert_eq!(profile.callable_checkpoint_stale_admissions, 1);
+        assert_eq!(profile.callable_checkpoint_terminalizations, 0);
+    }
+
     fn claimed_core_operator_call(
         operator: CoreOperator,
         data: Value,
@@ -3491,8 +3624,9 @@ mod driver_tests {
 
     #[test]
     fn unsupported_checkpoint_boundary_terminalizes_the_exact_generation() {
-        let context = test_context();
-        let (runtime, call) = claimed_core_call(context.values().unit());
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+        let (runtime, call) = claimed_core_call_in(&values, context.values().unit());
         let checkpoint = super::with_direct_evaluator(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let state = crate::eval::whnf::NetWhnfState::from_regional(
@@ -3530,9 +3664,16 @@ mod driver_tests {
                 .contains("unsupported external boundary")
         );
         assert_eq!(
-            observe_current_callable_path(&runtime, call),
+            observe_current_callable_path_in(&runtime, &values, call),
             CurrentCallablePath::Failed
         );
+        #[cfg(feature = "interaction-net-profiling")]
+        {
+            let profile = values.interaction_net_profile_snapshot().driver;
+            assert_eq!(profile.callable_checkpoint_installs, 1);
+            assert_eq!(profile.callable_checkpoint_terminalizations, 1);
+            assert_eq!(profile.callable_checkpoint_stale_admissions, 0);
+        }
     }
 
     #[test]

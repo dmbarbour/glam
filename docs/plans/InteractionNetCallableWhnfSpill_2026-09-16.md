@@ -1309,6 +1309,14 @@ observer lookup, branch, or atomic update.
 Update the focused profiling script with named tests. Immediate and
 within-budget cached callables must install zero checkpoints.
 
+Completed. Four fresh-runtime fixtures now latch: zero checkpoint traffic for
+immediate and cached callables; exact install/resume/replace/terminalize
+counts across two forced quanta; exact dependency block/retry plus a
+deliberately stale generation admission; and terminal failure of the exact
+published generation. The profiling script names each fixture explicitly, so
+ordinary parallel test activity cannot contaminate their counters and a
+renamed or dropped regression fails the script's discovery gate.
+
 ##### NC6B.3 — Assembly baseline and residual-cost handoff
 
 Compare direct-style assembly fixtures against the pre-NC baseline and feed residual
