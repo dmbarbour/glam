@@ -2713,6 +2713,40 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         true
     }
 
+    pub(crate) fn fail_blocked_callable_checkpoint(
+        &mut self,
+        blocked: &BlockedCallableCheckpoint<S::WaitToken>,
+        reason: S::StuckReason,
+    ) -> Result<S::CallableCheckpoint, S::StuckReason> {
+        if !matches!(self.node(blocked.call.bind), Some(RuntimeNode::Bind))
+            || !matches!(
+                self.active.get(&blocked.call.pair),
+                Some(ActivePairState::BlockedCallableCheckpoint { generation, wait })
+                    if *generation == blocked.call.generation && wait == &blocked.wait
+            )
+        {
+            return Err(reason);
+        }
+        let Some(RuntimeNode::CallableCheckpoint(checkpoint)) = self
+            .nodes
+            .get_mut(&blocked.call.checkpoint)
+            .map(|entry| &mut entry.node)
+        else {
+            return Err(reason);
+        };
+        if checkpoint.generation != blocked.call.generation {
+            return Err(reason);
+        }
+        let Some(payload) = checkpoint.payload.take() else {
+            return Err(reason);
+        };
+        self.active.insert(
+            blocked.call.pair,
+            ActivePairState::Stuck(StuckReason::Specialization(reason)),
+        );
+        Ok(payload)
+    }
+
     pub(crate) fn release_claimed_callable_checkpoint(&mut self, pair: ActivePairKey) -> bool {
         let Some(call) = self.callable_checkpoint(pair) else {
             return false;

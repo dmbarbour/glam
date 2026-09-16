@@ -1077,7 +1077,37 @@ the corresponding exact checkpoint-generation contract.
 
 ### NC5 — Concurrency, ownership, and state-usage audit
 
+Execution checkpoints:
+
+- **NC5A.1 — Deferred-chain and terminal matrix.** Force lazy, promise, mixed,
+  repeated-identity, first/later unresolved, cached/assigned failure, and task
+  cancellation/abandonment/failure paths through the production callable
+  checkpoint driver.
+- **NC5A.2 — Canonical producer families.** Admit application, reflection,
+  static-access, host, and net-backed lazy sources through callable demand;
+  latch the original lazy identity and exact producer task across stale polls
+  and spills without executing the producer twice.
+- **NC5B.1 — Exact contention.** Use barriers to put two workers at one ready
+  checkpoint and prove that only one moves the payload into regional work.
+- **NC5B.2 — Stale and unwind closure.** Force restoration before publication,
+  staleness after publication, and unwind after publication; prove that the
+  predecessor cannot reappear and no claim survives either worker.
+- **NC5C.1 — Cursor deferral.** Exercise both ready and blocked source
+  checkpoints through a logical copy, then terminalize the source and prove
+  the target materializes only the semantic result.
+- **NC5C.2 — Collection phase matrix.** Force collection at claim,
+  publication, dependency admission, wake, cursor deferral, source
+  terminalization, result materialization, and retirement.
+- **NC5D.1 — Usage record.** Add test-only observations and source-backed
+  inventory latches for `frames`, `source_owner`, and `cycle_promise`, then
+  record their production callable occurrences.
+- **NC5D.2 — Representation measurement.** Rerun and latch the NC0B node,
+  managed-wrapper, checkpoint, and GC-slot measurements without specializing
+  the canonical state.
+
 #### NC5A — Cycle, producer, and dependency matrix
+
+Status: complete on 2026-09-16.
 
 Force:
 
@@ -1091,6 +1121,20 @@ Force:
 Every producer-backed fixture records its canonical lazy/task identity. Budget
 splits and stale retries must retain one producer and, where applicable, one
 reflection task rather than reconstructing source work.
+
+Completion record: bounded callable demand now covers lazy-to-lazy,
+promise-to-promise, mixed lazy/promise, repeated-promise, first/later
+unresolved, cached-failure, and assigned-failure paths. Repeated promises
+retain one externally resolvable follower rather than being poisoned as pure
+lazy cycles. Failed or killed exact followers atomically retire the blocked
+checkpoint and publish its structured failure; cancellation, abandonment, and
+successful completion still retry because reclaimable lazy work or a
+task-owned promise assignment remains authoritative. Forced task cancellation,
+owner abandonment, and task failure all wake and fail the same checkpoint.
+Application, reflection, static-access, host, and net-backed lazy sources each
+retain the original lazy ID, wait ID, and producer task across stale demand;
+the host callback remains uninvoked during admission and no family constructs
+a second checkpoint or producer.
 
 #### NC5B — Contention and stale work
 

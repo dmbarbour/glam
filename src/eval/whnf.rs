@@ -8,6 +8,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::core::RuntimeValueAccess;
 use crate::core::{
     CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyId, LazyValue,
     ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
@@ -115,6 +117,16 @@ pub(crate) struct RegionalWhnfWork(WhnfState);
 /// The type is public only because the public generic interaction-net trait
 /// names specialization payloads. Its state and constructors remain internal.
 pub struct NetWhnfState(WhnfState);
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NetWhnfObservation {
+    pub(crate) focus: Option<DeferredValueId>,
+    pub(crate) followed: BTreeSet<DeferredValueId>,
+    pub(crate) frames: usize,
+    pub(crate) source_owner: Option<LazyId>,
+    pub(crate) cycle_promise: Option<crate::core::PromiseId>,
+}
 
 /// Regional counterpart of [`DurableWhnfFrame`].
 ///
@@ -607,6 +619,29 @@ impl NetWhnfState {
     #[cfg(test)]
     pub(crate) fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
         self.0.container_identities_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observation_for_test(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> NetWhnfObservation {
+        let focus = match &self.0.focus {
+            Value::Lazy(lazy) => Some(lazy.access(access).id().into()),
+            Value::Promised(promise) => Some(promise.access(access).id().into()),
+            _ => None,
+        };
+        NetWhnfObservation {
+            focus,
+            followed: self.0.followed.clone(),
+            frames: self.0.frames.len(),
+            source_owner: self.0.source_owner,
+            cycle_promise: self
+                .0
+                .cycle_promise
+                .as_ref()
+                .map(|promise| promise.access(access).id()),
+        }
     }
 
     /// Drives one bounded callback-free quantum using the same regional

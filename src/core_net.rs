@@ -812,6 +812,27 @@ impl CoreRuntimeNetAccess<'_, '_> {
             })
     }
 
+    pub(crate) fn fail_blocked_callable_checkpoint(
+        &self,
+        blocked: &crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>,
+        error: EvaluationHalt,
+    ) -> Result<crate::eval::whnf::NetWhnfState, EvaluationHalt> {
+        let mut error = Some(error);
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.fail_published_checkpoint_edge_transition(blocked.call),
+            |runtime| match runtime.fail_blocked_callable_checkpoint(
+                blocked,
+                error
+                    .take()
+                    .expect("checkpoint error is consumed exactly once"),
+            ) {
+                Ok(state) => RuntimeNetMutation::Changed(Ok(*state)),
+                Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
+            },
+        )
+    }
+
     pub(crate) fn release_claimed_callable_checkpoint(&self, pair: ActivePairKey) -> bool {
         self.runtime
             .cell()

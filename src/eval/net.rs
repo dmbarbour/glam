@@ -829,16 +829,30 @@ fn drive_active_pair_semantic_step(
                 .context()
                 .values()
                 .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
-            match context.context().poll_wait(&blocked.wait.0) {
+            let terminal_failure = match context.context().poll_wait(&blocked.wait.0) {
                 crate::evaluation::EvaluationWaitPoll::Pending(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
+                crate::evaluation::EvaluationWaitPoll::Failed(failure)
+                | crate::evaluation::EvaluationWaitPoll::Killed(failure) => {
+                    Some(EvaluationHalt::failure(failure.into_failure()))
+                }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)
-                | crate::evaluation::EvaluationWaitPoll::Failed(_)
                 | crate::evaluation::EvaluationWaitPoll::Cancelled
                 | crate::evaluation::EvaluationWaitPoll::Abandoned
-                | crate::evaluation::EvaluationWaitPoll::Exited
-                | crate::evaluation::EvaluationWaitPoll::Killed(_) => {}
+                | crate::evaluation::EvaluationWaitPoll::Exited => None,
+            };
+            if let Some(failure) = terminal_failure {
+                let retired = with_core_net_access(context, &runtime, |runtime| {
+                    runtime.fail_blocked_callable_checkpoint(&blocked, failure.clone())
+                });
+                let Ok(state) = retired else {
+                    return Err(EvaluationHalt::new(
+                        "interaction-net checkpoint lost its exact failed generation",
+                    ));
+                };
+                drop(state);
+                return Err(failure);
             }
             let retried = with_core_net_access(context, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
@@ -1968,7 +1982,15 @@ mod driver_tests {
     }
 
     fn observe_current_callable_path(runtime: &CoreRuntimeNet, call: Call) -> CurrentCallablePath {
-        runtime.test_with(&crate::core::test_value_factory(), |net| {
+        observe_current_callable_path_in(runtime, &crate::core::test_value_factory(), call)
+    }
+
+    fn observe_current_callable_path_in(
+        runtime: &CoreRuntimeNet,
+        values: &CoreValueFactory,
+        call: Call,
+    ) -> CurrentCallablePath {
+        runtime.test_with(values, |net| {
             if net.blocked_call(call.pair).is_some() {
                 return CurrentCallablePath::BlockedDependency;
             }
@@ -2008,6 +2030,30 @@ mod driver_tests {
                 .as_ref()
                 .expect("published checkpoint must retain its dormant state");
             (call, state.container_identities_for_test())
+        })
+    }
+
+    fn checkpoint_semantic_observation(
+        runtime: &CoreRuntimeNet,
+        values: &CoreValueFactory,
+        pair: ActivePairKey,
+    ) -> crate::eval::whnf::NetWhnfObservation {
+        runtime.with_test_access(values, |access| {
+            access.with(|net| {
+                let call = net
+                    .callable_checkpoint(pair)
+                    .expect("fixture must retain one callable checkpoint");
+                let Some(crate::interaction_net::RuntimeNode::CallableCheckpoint(checkpoint)) =
+                    net.node(call.checkpoint)
+                else {
+                    panic!("checkpoint token must identify its payload node")
+                };
+                checkpoint
+                    .payload
+                    .as_ref()
+                    .expect("published checkpoint must retain its dormant state")
+                    .observation_for_test(access.values())
+            })
         })
     }
 
@@ -4066,5 +4112,9 @@ mod driver_tests {
                     .is_none()
             })
         }));
+    }
+
+    mod nc5_tests {
+        include!("net/nc5_tests.rs");
     }
 }
