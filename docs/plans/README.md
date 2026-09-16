@@ -29,8 +29,8 @@ when their historical value no longer justifies keeping them.
   durable owner checkpoints.
 - [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md)
   is the W6B.4b.2 subplan for inline-first callable evaluation and managed-net
-  `CallableCheckpoint(NetWhnfState)` topology only when a quantum must
-  suspend.
+  linear `CallableCheckpoint(NetWhnfState)` topology only when a quantum must
+  suspend; its only reducing partner is the original `Bind`.
 
 ## Recent Completed Plans
 

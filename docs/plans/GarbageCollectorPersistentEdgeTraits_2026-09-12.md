@@ -621,6 +621,19 @@ unfinished D.2b implementation. Their exact declaration/operation manifest
 is unchanged; downstream phases reduce it and P4 performs final trait
 removal.
 
+Planned W6B.4b.2 interlock, 2026-09-16: the private runtime-only
+`CallableCheckpoint` is a linear progress carrier, not another cloneable
+value shell. Its associated type has no `Clone`, `Debug`, `PartialEq`, or `Eq`
+bound. Only `Bind >< CallableCheckpoint` reduces; fan, erase, and other
+principal interactions are stuck, and cursor/source materialization waits for
+the source active pair rather than copying checkpoint state. Before adding the
+variant, focused checkpoint NC0D inventories every `NetSpecialization` bound,
+`RuntimeNode` derive, whole-node clone, and equality/formatting assumption
+which could transmit the old trait surface. NC2 removes or narrows the
+checkpoint-path occurrences, and NC6 reconciles their exact manifest here.
+P4 may not close if the new carrier has created a replacement compatibility
+trait, even if the older occurrence count still reaches zero.
+
 ## Phase P4 — Trait Removal Cutover
 
 ### P4A — Remove implicit duplication

@@ -3751,6 +3751,16 @@ forced stale-admission/lost-wakeup verification. The parent plan remains
 authoritative for the raw-value inventory and records the combined W6B.4b
 closure only after both subcheckpoints pass.
 
+W6B.4b.2 must not add `Clone`, `Debug`, `PartialEq`, or `Eq` to
+`NetWhnfState`, `CallableCheckpoint`, or their retained values. The checkpoint
+has only the `Bind >< CallableCheckpoint` reducing rule; fan, erase, and every
+other principal partner are stuck, while cursor copying waits for the source
+active pair to produce semantic topology. Focused NC0D inventories the current
+`NetSpecialization` bounds, `RuntimeNode` derives, whole-node clones, and
+test-only equality/formatting assumptions before the variant lands. NC2 owns
+their checkpoint-path repair, and NC6 must reconcile the result with both the
+D.2c raw-value manifest and persistent-edge P3/P4 cutover.
+
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
 | Checkpoint | Live declarations and current shape | Target and delta |

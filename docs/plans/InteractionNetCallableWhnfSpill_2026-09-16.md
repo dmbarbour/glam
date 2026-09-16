@@ -25,12 +25,13 @@ Suspended work has this logical topology:
 Bind >< CallableCheckpoint(NetWhnfState)
 ```
 
-`CallableCheckpoint` is one internal, data-like runtime node. The managed net
-is the liveness owner for every ordinary `Value` edge in `NetWhnfState`; the
-state must not contain runtime roots merely to survive suspension. A later
-worker may briefly claim the pair, project the checkpoint into ephemeral
-regional work, use another bounded quantum, and either lower the completed
-call directly or publish one replacement checkpoint before yielding again.
+`CallableCheckpoint` is one internal, linear runtime-progress node. The
+managed net is the liveness owner for every ordinary `Value` edge in
+`NetWhnfState`; the state must not contain runtime roots merely to survive
+suspension. A later worker may briefly claim the pair, project the checkpoint
+into ephemeral regional work, use another bounded quantum, and either lower
+the completed call directly or publish one replacement checkpoint before
+yielding again.
 
 This is a spill protocol:
 
@@ -128,10 +129,13 @@ NetWhnfState --project under access--> RegionalWhnfWork
 RegionalWhnfWork --publish via barrier--> NetWhnfState
 ```
 
-Projection duplicates managed edges through the current access. Publication
-moves or duplicates the complete successor work into the checkpoint before
-the claim is released. Every field which can contain a `Value` participates in
-the runtime-net edge visitor and mutation transition.
+Claim projection moves the complete state into regional work beneath current
+access; the claim guard owns enough exact state to restore the same payload if
+the transition unwinds before publishing a successor. Publication moves the
+complete successor work back into the checkpoint before the claim is
+released. This boundary does not clone the checkpoint or its retained values.
+Every field which can contain a `Value` participates in the runtime-net edge
+visitor and mutation transition.
 
 Only after this complete representation passes forced split-point tests may
 NC5D remove fields which are proven unreachable for callable normalization.
@@ -146,7 +150,7 @@ payload, conceptually:
 
 ```rust
 trait NetSpecialization {
-    type CallableCheckpoint: Clone + Debug + Eq + 'static;
+    type CallableCheckpoint: 'static;
     // existing associated types...
 }
 
@@ -156,18 +160,53 @@ enum RuntimeNode<S: NetSpecialization> {
 }
 ```
 
-The exact name and boxing are implementation details. The node is not added to
-the public/template `Node` vocabulary unless copying mechanics prove that
-necessary. Users cannot construct it; only a running callable reduction may
-spill one.
+The exact name and boxing are implementation details. The node is never added
+to the public/template `Node` vocabulary. Users cannot construct it; only a
+running `Bind >< Data` callable reduction may spill one.
 
-The payload is one-port and data-like:
+The payload is a one-port, linear runtime checkpoint rather than data:
 
-- `Bind >< CallableCheckpoint` is a resumable semantic call;
-- `Fan >< CallableCheckpoint` duplicates the checkpoint coherently;
-- `Erase >< CallableCheckpoint` drops it;
-- cursor/source copying clones it as one node; and
-- other principal interactions are stuck unless explicitly justified.
+- `Bind >< CallableCheckpoint` is the only reducing interaction;
+- `Fan >< CallableCheckpoint` is stuck;
+- `Erase >< CallableCheckpoint` is stuck; and
+- every other principal interaction is stuck.
+
+A checkpoint remains the principal partner of the original `Bind` until that
+same pair yields another checkpoint or terminalizes. Cursor/source copying
+which reaches the pair therefore waits for the active pair to reduce and
+copies its eventual semantic result; it never materializes or duplicates the
+checkpoint itself. Latch this topology rule so a later generic interaction
+cannot accidentally turn checkpoint state into copyable data.
+
+### Standard-trait interlock
+
+`CallableCheckpoint` must not require `Clone`, `Debug`, `PartialEq`, or `Eq`.
+The parent GC remediation is deliberately removing those unqualified traits
+from raw `Value`, managed edges, and eventually the generic runtime carriers
+which contain them. Adding the bounds here would create a new transitive
+interlock immediately before that cutover.
+
+The current generic `RuntimeNode` derives and `NetSpecialization` bounds are
+transition scaffolding, not the checkpoint contract. NC0D inventories every
+derive, bound, formatting path, equality use, and whole-node clone which the
+new variant would otherwise inherit. NC2 then makes the checkpoint path obey
+these rules:
+
+- checkpoint state moves between the claimed pair and regional work; it is
+  never cloned;
+- stale admission compares pair identity plus checkpoint generation/revision,
+  never checkpoint payload equality;
+- generic debug output may name the opaque node variant but cannot format its
+  payload; and
+- semantic tests inspect a projected state beneath matching value access
+  instead of using ordinary equality.
+
+If adding a non-trait-bearing variant prevents a blanket `RuntimeNode` derive,
+replace that blanket operation with variant-specific operations. Do not add a
+wrapper whose manual traits merely recreate raw `Value` cloning, formatting,
+or equality. Record every affected declaration in the parent D.2c and
+persistent-edge P3 inventories so their later cutover cannot overlook this
+new carrier.
 
 Measure `size_of::<RuntimeNode<CoreSpecialization>>()`, its managed wrapper,
 and the applicable GC slot class before selecting storage. If an unboxed
@@ -313,10 +352,9 @@ later poll.
    existing source owner and never reconstructs its recipe or reflection work.
 8. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
    boundary cannot change cycle recognition or its structured failure.
-9. **Checkpoint copying is coherent.** Copying or materializing a partially
-   normalized closed net copies one complete checkpoint. Scheduler-local
-   blocked status need not copy; the target independently observes the same
-   semantic dependency.
+9. **Checkpoints are linear and uncopyable.** A cursor or logical net copy
+   which reaches the active checkpoint pair waits for that source pair to
+   reduce. No target net materializes a checkpoint.
 10. **No semantic value pollution.** Checkpoints are internal runtime nodes
     and cannot be observed by ordinary Glam patterns, equality, or value-kind
     diagnostics.
@@ -332,6 +370,9 @@ later poll.
     partial-function, and applicable-dictionary behavior.
 15. **No new global allocator is introduced.** Checkpoint generations use
     runtime-owned identity allocation or an existing exact runtime revision.
+16. **No standard value traits are reintroduced.** Checkpoint storage,
+    orchestration, tests, and diagnostics do not require `Clone`, `Debug`,
+    `PartialEq`, or `Eq` from checkpoint state or its retained values.
 
 ## Non-Goals
 
@@ -390,8 +431,29 @@ Prefer topology and counters over timing or thread repetition. Target tests
 may remain expected-failing only inside the NC0 commit and become ordinary
 regressions as their owning phases land.
 
+#### NC0D — Runtime-node trait and copy inventory
+
+Inventory the exact generic declarations which would make a new runtime-node
+payload inherit `Clone`, `Debug`, `PartialEq`, or `Eq`, including:
+
+- `NetSpecialization` bounds and associated-type bounds;
+- `RuntimeNode` derives and whole-node clones;
+- generic fan/erase rewrites;
+- cursor/source materialization;
+- stuck-state and diagnostic formatting; and
+- tests which compare complete nodes rather than semantic observations.
+
+Classify every occurrence as an unrelated temporary compatibility interlock,
+a checkpoint-path operation to remove in NC2, or a test to migrate to an
+explicit observation. Add these occurrences to the parent D.2c raw-value and
+persistent-edge P3 manifests before introducing the variant. Demonstrate the
+topological premise with a fixture in which a cursor reaches a source
+`Bind >< CallableCheckpoint`: it must observe the active-pair dependency and
+must not request a checkpoint clone.
+
 Exit: existing behavior, target topology, state size, and the no-checkpoint
-fast path are executable baselines.
+fast path are executable baselines, and every trait/copy interlock has one
+named migration owner.
 
 ### NC1 — Complete net-owned WHNF state and shared budget
 
@@ -458,17 +520,27 @@ net-owned storage under one bounded semantic quantum.
 Add the specialization-owned callable-checkpoint associated type and the
 runtime-only node variant. Use NC0B measurements to select boxed or unboxed
 storage. Latch the resulting `RuntimeNode` and managed wrapper size classes.
+Give the associated type no ordinary duplication, formatting, or equality
+bounds. Remove or narrow any blanket `RuntimeNode` derive which would impose
+them, using the NC0D assignment rather than introducing a compatibility shim.
 
-Extend debug rendering, exact internal equality, profiling classification,
+Extend structural variant rendering, profiling classification,
 managed-drop/ownership inventories, and the core checkpoint edge visitor.
+Structural rendering identifies the opaque checkpoint variant only. Exact
+orchestration uses its generation/revision and pair identity, not payload
+equality.
 
-#### NC2B — Generic interaction rules and copying
+#### NC2B — Linear interaction and cursor rules
 
-Implement the data-like rules for fan duplication, erasure, port counts,
-cursor/source copying, and malformed/stuck interactions. Add no public
-template constructor. Verify a copied checkpoint contains an independent
-state value whose semantic edges still point to the intended shared managed
-values.
+Implement the sole reducing rule for `Bind >< CallableCheckpoint`, the stuck
+rules for fan, erase, and all other principal partners, and the checkpoint's
+one-port shape. Add no public template constructor and no generic checkpoint
+duplication operation.
+
+Verify that logical copying or cursor materialization at this source frontier
+blocks on the active pair, then copies only the semantic topology produced
+after the source pair terminalizes. The target must never contain a
+`CallableCheckpoint`, even transiently.
 
 #### NC2C — Spill and update mutations
 
@@ -500,8 +572,9 @@ Use deterministic barriers for:
 
 Close the subscribe/observe race explicitly; no ordering may lose a wakeup.
 
-Exit: the runtime can own, copy, update, block, and terminalize a complete
-callable checkpoint without an additional graph node or durable claim.
+Exit: the runtime can own, move, update, block, and terminalize a complete
+callable checkpoint without an additional graph node, durable claim, payload
+trait, or checkpoint-copy path.
 
 ### NC3 — Inline-first original call reduction
 
@@ -558,9 +631,9 @@ dictionary/builtin behavior.
 #### NC4D — Frame-bearing resumption oracle
 
 Even if production callable entry is believed frame-free, force at least one
-checkpoint with nonempty continuation frames through yield, block, copy, and
-completion. This proves the initial full state is genuinely lossless before
-NC5D considers specialization.
+checkpoint with nonempty continuation frames through yield, block, unwind,
+and completion. This proves the initial full state is genuinely lossless
+before NC5D considers specialization.
 
 Exit: a checkpoint can cross arbitrary budget and dependency boundaries and
 terminalize without replay or temporary topology.
@@ -589,13 +662,15 @@ checkpoint. Verify one authoritative state, harmless stale admission, exact
 blocked retries, no restored predecessor, and no claim after either worker
 returns. Cover unwind before and after publication.
 
-#### NC5C — Copy and GC ownership
+#### NC5C — Cursor deferral and GC ownership
 
-Copy or materialize a closed runtime net while a checkpoint is ready and while
-its source pair is blocked. Each copy retains one coherent state without roots
-or an external side record, then independently observes the pending semantic
-dependency. Force collection at projection, publication, dependency
-admission, wake, copy, and terminal retirement.
+Attempt to copy or materialize a closed runtime net while a checkpoint pair is
+ready and while it is blocked. The target cursor must depend on source active
+pair progress; after the source terminalizes, it copies only the semantic
+result. Assert that no checkpoint payload is cloned and no target checkpoint
+exists. Force collection at projection, publication, dependency admission,
+wake, cursor deferral, source terminalization, result materialization, and
+checkpoint retirement.
 
 #### NC5D — Prove and pare unreachable fields
 
@@ -630,7 +705,9 @@ structurally proven specialization of it.
 Remove synchronous deferred callable forcing from `lower_core_callable_in` or
 retire the helper if classification now belongs directly to call progression.
 Relatch the D.2c manifest and record W6B.4b.2's `OperatorAndNet -1` delta. Keep
-the separate access-resolution declaration assigned to W6B.4b.1.
+the separate access-resolution declaration assigned to W6B.4b.1. Reconcile
+NC0D's runtime-node trait/copy occurrences with persistent-edge P3 and prove
+the checkpoint introduced no new P4 trait dependency.
 
 #### NC6B — Profiling and performance
 
@@ -665,7 +742,8 @@ a focused post-NC review of:
 - full-state versus specialized-state equivalence;
 - inline-versus-spilled results;
 - claims and dependency ownership;
-- mutation barriers and net-copy semantics;
+- mutation barriers and cursor deferral at a checkpoint pair;
+- zero checkpoint trait/copy interlocks in the D.2c and P3 inventories;
 - boxing and node-size effects;
 - profiling determinism;
 - remaining synchronous evaluator compatibility; and
@@ -688,6 +766,8 @@ Exit: W6B.4b.2 is complete, reviewed, and ready for parent W6B.4b closure.
 | Deferred non-callable | same stuck failure | same failure | optional earlier wait | stuck once |
 | Raw net result | copied source | same source | optional earlier wait | checkpoint removed directly |
 | Partial function | one ordinary application | same value | optional earlier wait | checkpoint removed directly |
+| Cursor reaches checkpoint pair | eventual copied result | same result | source-pair dependency | no target checkpoint |
+| Fan/erase reaches checkpoint | stuck | stuck | n/a | no duplication or erasure rule |
 
 Every forced split asserts semantic result, complete state continuity, claim
 absence after return, producer identity, and expected profiling counts. Thread
@@ -701,8 +781,6 @@ After correctness and profiling, consider:
 - a specialized outer-shell state if NC5D cannot yet prove all frames
   unreachable but can split a common no-frame representation safely;
 - batching several pure semantic active-pair steps within one access region;
-- sharing normalized callable work across copied nets only if measurements
-  justify another managed indirection; and
 - incorporating callable normalization into future annotated normalization or
   JIT policies.
 
