@@ -1069,8 +1069,10 @@ cargo test -q
 ```
 
 Also run the focused interaction-net profiling script, callable/function/net
-suites, forced-schedule tests, and relevant aggressive-GC partitions. Perform
-a focused post-NC review of:
+suites, forced-schedule tests, and relevant aggressive-GC partitions. Resolve
+parent finding `W5C5-002` through a forced-order disposition before accepting
+the ordinary parallel suite as clean; an isolated or repeated pass does not
+close that regression. Then perform a focused post-NC review of:
 
 - canonical-state identity across regional/net role changes;
 - inline-versus-spilled results;

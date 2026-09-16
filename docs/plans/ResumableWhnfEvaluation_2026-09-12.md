@@ -2725,6 +2725,37 @@ Remediation checkpoints:
    net, stderr, and test-specialization migration. None is needed by the
    diagnostic handoff mechanism, so W5C5-001 closes and W5C.4 may resume.
 
+##### W5C5-002 — Terminal-policy parallel regression re-audit
+
+**Status: open; investigate no later than NC6C / the mandatory post-W6
+review.**
+
+NC2.0 routine verification on 2026-09-16 exposed another indefinite park in
+`coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return`
+during the ordinary parallel `cargo test -q` run. The harness reported the
+test running for more than 60 seconds and it remained parked until the run was
+terminated. The same test completed in isolation, and the complete
+single-threaded suite passed. Those passes show that the deterministic path is
+intact; they are not evidence that the disputed parallel ordering is safe.
+
+Treat this as a possible regression or incomplete characterization of
+W5C5-001, not as an NC2 callable-state failure. Before closing it:
+
+1. determine whether the parked state reproduces W5C5-001's former
+   callback-to-client-demand cycle or names a distinct coordinator transition;
+2. add barriers or coordinator hooks which force both sides of the discovered
+   ordering and latch the exact machine, terminal-publication, retirement,
+   diagnostic-admission, and wake transitions;
+3. produce a finite failing fixture before changing the scheduler or
+   admission rule; and
+4. preserve the isolated and full single-threaded cases as semantic baselines,
+   while treating uncontrolled parallel repetition as stress evidence only.
+
+The investigation may close with a code repair or with proof that another
+named owner is responsible, but NC6C and the post-W6 review must not report the
+ordinary parallel suite as clean until this finding has a forced-order
+disposition.
+
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 
 **Status: complete (2026-09-14).**
