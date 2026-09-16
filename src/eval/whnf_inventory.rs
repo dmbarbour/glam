@@ -636,14 +636,16 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // NC2.0 removes NC1's borrowed net/regional projection walks. The remaining
 // bounded state walks are durable root conversion and the canonical managed
 // edge visitor, not recursive Rust evaluation.
-const EXPECTED_OCCURRENCES: usize = 286;
-const EXPECTED_FINGERPRINT: u64 = 17_885_897_020_878_647_130;
+// W6B.4b.1 replaces synchronous effect-API lookup and application with the
+// existing resumable static-access and application lazy owners.
+const EXPECTED_OCCURRENCES: usize = 279;
+const EXPECTED_FINGERPRINT: u64 = 16_192_971_656_711_770_796;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 104),
+    (Signal::EvalValue, 101),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
-    (Signal::ApplyValues, 5),
+    (Signal::ApplyValues, 3),
     (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 11),
     (Signal::UnassignedPromise, 2),
@@ -653,11 +655,11 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 36),
-    (Signal::UserSizedLoop, 58),
+    (Signal::UserSizedLoop, 56),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 131),
+    (WorkShape::DemandThenInspect, 124),
     (WorkShape::OrderedOperands, 11),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),

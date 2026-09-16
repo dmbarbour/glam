@@ -1655,6 +1655,7 @@ mod tests {
                     "src/eval/builtins/dict/merge.rs::builtin_apply3_value",
                     "src/eval/builtins/dict/merge.rs::merge_duplicate_dict_value",
                     "src/eval/builtins/dict/merge.rs::update_nested_dict_path",
+                    "src/eval/builtins/effect/implementation.rs::apply_effect_api",
                     "src/eval/builtins/effect/implementation.rs::eval_fixpoint_builtin",
                     "src/eval/list_effect_machine.rs::sequence_result",
                     "src/eval/builtins/net.rs::apply_net_arity",

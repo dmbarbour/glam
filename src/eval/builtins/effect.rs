@@ -21,7 +21,6 @@ pub(super) fn apply(
         Builtin::EffectCall => {
             let [name, arguments, api] = super::exact(arguments, "effect call")?;
             let name = value_to_key_in(context, &eval_value_in(context, &name)?)?;
-            let function = resolve_core_access_in(context, &[api], &[CoreDataKey::Key(name)])?;
             let arguments = match eval_value_in(context, &arguments)? {
                 Value::List(arguments) => list_to_value_items_in(context, &arguments)?,
                 _ => {
@@ -30,7 +29,7 @@ pub(super) fn apply(
                     ));
                 }
             };
-            apply_values_in(context, function, arguments)
+            apply_effect_api(context, &api, &name, arguments)
         }
         Builtin::EffectMap => {
             let [function, items] = super::exact(arguments, "effect map")?;
@@ -55,4 +54,52 @@ pub(super) fn apply_fixpoint(
 ) -> Result<Value, EvaluationHalt> {
     let [function] = super::exact(arguments, "fixpoint")?;
     eval_fixpoint_builtin(context, &function)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{CoreValueFactory, Dict, PromisedValue};
+    use crate::evaluation::EvalContext;
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+
+    fn context() -> crate::evaluation::OwnedEvalContext {
+        EvalContext::isolated(CoreValueFactory::new(
+            allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        ))
+    }
+
+    #[test]
+    fn effect_call_defers_api_lookup_and_application_to_the_access_owner() {
+        let context = context();
+        let name = Key::binary_from_text("add");
+        let method = PromisedValue::new(context.values(), "deferred effect API method");
+        let api = Value::Dict(Dict::new_sync().insert(name, Value::Promised(method.clone())));
+        let arguments = Value::List(List::from_values(vec![
+            Value::Number(1.into()),
+            Value::Number(2.into()),
+        ]));
+
+        let operation = super::super::apply_builtin(
+            &context,
+            Builtin::EffectCall,
+            vec![Value::binary_from_text("add"), arguments],
+            api,
+        )
+        .expect("effect-call construction must not demand the API method");
+        assert!(matches!(operation, Value::Lazy(_)));
+
+        let blocked = crate::eval::eval_value(&context, &operation)
+            .expect_err("demand must stop at the unresolved API method");
+        assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+
+        crate::core::set_test_promise(context.values(), &method, Value::Builtin(Builtin::Add))
+            .expect("the API method promise should accept its assignment");
+        assert_eq!(
+            crate::eval::eval_value(&context, &operation)
+                .expect("the retained access and application must resume"),
+            Value::Number(3.into())
+        );
+    }
 }

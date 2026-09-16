@@ -1761,45 +1761,6 @@ fn progress_core_operator_claim(
     })
 }
 
-pub(super) fn resolve_core_access_in(
-    context: &EvaluatorStepContext<'_>,
-    arguments: &[Value],
-    path: &[CoreDataKey],
-) -> Result<Value, EvaluationHalt> {
-    let mut current = arguments
-        .first()
-        .cloned()
-        .ok_or_else(|| EvaluationHalt::new("value access is missing its base value"))?;
-    let mut dynamic = arguments[1..].iter();
-    for part in path {
-        let keys = match part {
-            CoreDataKey::Key(key) => vec![key.clone()],
-            CoreDataKey::Index => {
-                let value = dynamic.next().expect("lowered access index must exist");
-                let value = eval_value_in(context, value)?;
-                vec![value_to_key_in(context, &value)?]
-            }
-            CoreDataKey::PathIndex => eval_key_path_list_in(
-                context,
-                dynamic
-                    .next()
-                    .expect("lowered access path index must exist"),
-            )?,
-        };
-        for key in keys {
-            let value = eval_value_in(context, &current)?;
-            let Value::Dict(dict) = value else {
-                return Err(EvaluationHalt::new("value access base is not a dictionary"));
-            };
-            current = dict
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
-        }
-    }
-    eval_value_in(context, &current)
-}
-
 #[cfg(test)]
 mod driver_tests {
     use super::*;

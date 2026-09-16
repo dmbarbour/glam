@@ -85,16 +85,21 @@ pub(super) fn eval_effect_map_continue_builtin(
     })))
 }
 
-fn apply_effect_api(
+pub(super) fn apply_effect_api(
     context: &EvaluatorStepContext<'_>,
     api: &Value,
     name: &Key,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
-    let function = resolve_core_access_in(
-        context,
-        std::slice::from_ref(api),
-        &[CoreDataKey::Key(name.clone())],
-    )?;
-    apply_values_in(context, function, arguments)
+    let path: Arc<[CoreDataKey]> = Arc::from([CoreDataKey::Key(name.clone())]);
+    let arguments: Arc<[Value]> = arguments.into();
+    Ok(Value::Lazy(context.construct_lazy(|access| {
+        let selected =
+            LazyValue::from_access_in(access, path, Arc::from([access.duplicate_value(api)]));
+        if arguments.is_empty() {
+            selected
+        } else {
+            LazyValue::from_application_in(access, Value::Lazy(selected), arguments)
+        }
+    })))
 }

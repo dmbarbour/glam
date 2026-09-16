@@ -3844,7 +3844,7 @@ the token itself owns no values and opens no access.
 | **W6B.2 — Complete (2026-09-15): Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Complete (2026-09-15): Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
 | **W6B.4a — Complete (2026-09-15): Net attachment** | 3 S | Access-qualify function-stage attachment, argument attachment, and function-call machine construction without changing demand semantics. `-3`. |
-| **W6B.4b — Suspendable net application** | 2 S | Convert access resolution through its existing machine owner, then implement inline-first, spill-on-suspension callable WHNF through the focused callable-spill plan. `-2`. |
+| **W6B.4b — Complete (2026-09-16): Suspendable net application** | 2 S | Convert access resolution through its existing machine owner, then implement inline-first, spill-on-suspension callable WHNF through the focused callable-spill plan. `-2`. |
 
 Keep topology and claim state in their existing net owners. Force suspension
 after callable lowering and after the first attached argument, and retain the
@@ -3907,7 +3907,7 @@ leaves.
 W6B.4b retains one inventory umbrella and its planned `-2` delta, but executes
 as two independently verified checkpoints:
 
-1. **W6B.4b.1 — Runtime-net access resolution (`-1`).** Replace
+1. **W6B.4b.1 — Complete (2026-09-16): Runtime-net access resolution (`-1`).** Replace
    `resolve_core_access_in` with state retained by the existing resumable
    access owner. Preserve the W6A.0c/W6A.4 key/path conversion assignments and
    force suspension after at least one completed path element.
@@ -3973,6 +3973,26 @@ pass. The focused post-NC review is recorded in
 [`InteractionNetCallableWhnfSpill_2026-09-16.md`](../reviews/InteractionNetCallableWhnfSpill_2026-09-16.md)
 and finds no open checkpoint defect or W6C-W8 drift. W6B.4b remains open only
 for the independent W6B.4b.1 access-resolution declaration.
+
+W6B.4b.1 completion record, 2026-09-16: the general synchronous
+`resolve_core_access_in` helper is removed. `EffectCall` and the effect-map API
+handoff now construct one semantic lazy composition whose inner `Access`
+source feeds an outer `Application` source. Construction does not demand the
+API member; ordinary WHNF/access owners retain the exact path and application
+state when demand later blocks. The outer lazy is temporarily rooted by the
+evaluator step, while its inner access lazy remains a traced edge allocated
+under the same managed region rather than acquiring another root.
+
+A focused fixture leaves the selected API method as an unassigned promise,
+proves operation construction succeeds without observation, then demands,
+assigns, and resumes to the expected result. The existing two-key static
+access fixture forces suspension after its first completed path element and
+proves exact-prefix resumption. Both pass under aggressive collection. The
+D.2c manifest falls from 149 to 148 declarations, `OperatorAndNet` from one
+to zero, and the scoped `eval/net.rs` context inventory from 22 to 21. Dynamic
+key/path conversion remains with W6A.0c/W6A.4, and the surviving effect
+dispatch/map work remains assigned to W6E.5/W6E.6. Together with NC6,
+W6B.4b closes its planned `-2` delta.
 
 Representation revision: NC1's parallel net/regional definitions and borrowed
 projection are correctness scaffolding only. Focused NC2.0 replaces them with
