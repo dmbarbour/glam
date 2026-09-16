@@ -457,6 +457,26 @@ fn callable_checkpoint_trait_and_copy_inventory_is_source_backed() {
     let cursor = include_str!("cursor.rs");
     let rewrite = include_str!("rewrite.rs");
     let tests = include_str!("tests.rs");
+    let whnf = include_str!("../../eval/whnf.rs");
+
+    assert_eq!(
+        model
+            .matches("type CallableCheckpoint: Send + 'static;")
+            .count(),
+        1,
+        "the checkpoint associated type must require ownership transfer, not copying"
+    );
+    for forbidden in [
+        "type CallableCheckpoint: Clone",
+        "impl Clone for NetWhnfState",
+        "impl PartialEq for NetWhnfState",
+        "impl Eq for NetWhnfState",
+    ] {
+        assert!(
+            !model.contains(forbidden) && !whnf.contains(forbidden),
+            "callable checkpoint gained a P4 trait dependency: {forbidden}"
+        );
+    }
 
     let inventory = [
         CallableCheckpointInterlock {

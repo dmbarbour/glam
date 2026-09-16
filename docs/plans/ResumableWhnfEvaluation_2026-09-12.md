@@ -3961,6 +3961,12 @@ reachability inventory keeps ordinary callable demand frame-free and leaves
 producer-only frames, source ownership, and promise breadcrumbs intact for
 NC5D rather than optimizing them prematurely.
 
+NC6A completion record, 2026-09-16: W6B.4b.2 retires the last synchronous
+deferred-callable test seam and closes its exact `OperatorAndNet -1` inventory
+delta. The remaining W6B.4 net declaration is `resolve_core_access_in`, owned
+solely by W6B.4b.1. The checkpoint needs only `Send + 'static`; source-backed
+P3/P4 latches reject copying or equality traits on `NetWhnfState`.
+
 Representation revision: NC1's parallel net/regional definitions and borrowed
 projection are correctness scaffolding only. Focused NC2.0 replaces them with
 one `WhnfState`/`WhnfContinuation` vocabulary before the runtime node becomes

@@ -1272,6 +1272,17 @@ the separate access-resolution declaration assigned to W6B.4b.1. Reconcile
 NC0D's runtime-node trait/copy occurrences with persistent-edge P3 and prove
 the checkpoint introduced no new P4 trait dependency.
 
+Completed. The raw-value inventory now classifies `trace_whnf_value` and
+`trace_whnf_values` as collector primitives: they structurally visit managed
+edges and neither demand nor interpret a value. With those false evaluator
+violations removed, `OperatorAndNet` falls from the pre-NC count of two to the
+single `resolve_core_access_in` declaration owned by W6B.4b.1. The callable
+checkpoint therefore supplies W6B.4b.2's exact `-1` delta. The source-backed
+runtime-node inventory additionally latches the checkpoint associated type at
+`Send + 'static` and rejects `Clone`, `PartialEq`, or `Eq` dependencies on
+`NetWhnfState`; all remaining copy/trait interlocks retain their preexisting
+D.2c/P3 owners.
+
 #### NC6B — Profiling and performance
 
 ##### NC6B.1 — Profiling vocabulary
