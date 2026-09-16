@@ -40,7 +40,11 @@ pub(crate) struct ClientDemandResultCell {
     result: Mutex<Option<ClientDemandResult>>,
     changed: Condvar,
     #[cfg(test)]
+    before_publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    wait_kind_probe: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
 }
 
 impl ClientDemandResultCell {
@@ -49,11 +53,24 @@ impl ClientDemandResultCell {
             result: Mutex::new(None),
             changed: Condvar::new(),
             #[cfg(test)]
+            before_publish_probe: Mutex::new(None),
+            #[cfg(test)]
             publish_probe: Mutex::new(None),
+            #[cfg(test)]
+            wait_kind_probe: Mutex::new(None),
         })
     }
 
     fn publish(&self, result: ClientDemandResult) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = self
+            .before_publish_probe
+            .lock()
+            .expect("client demand pre-publication probe was poisoned")
+            .take()
+        {
+            probe();
+        }
         let mut current = self
             .result
             .lock()
@@ -82,6 +99,36 @@ impl ClientDemandResultCell {
             .publish_probe
             .lock()
             .expect("client demand publish probe was poisoned") = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn set_before_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .before_publish_probe
+            .lock()
+            .expect("client demand pre-publication probe was poisoned") = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn set_wait_kind_probe(&self, probe: std::sync::mpsc::Sender<bool>) {
+        *self
+            .wait_kind_probe
+            .lock()
+            .expect("client demand wait-kind probe was poisoned") = Some(probe);
+    }
+
+    #[cfg(test)]
+    fn report_retirement_handoff(&self, retirement_handoff: bool) {
+        if let Some(probe) = self
+            .wait_kind_probe
+            .lock()
+            .expect("client demand wait-kind probe was poisoned")
+            .take()
+        {
+            probe
+                .send(retirement_handoff)
+                .expect("client demand wait-kind probe receiver must remain live");
+        }
     }
 
     fn poll(&self) -> Option<ClientDemandResult> {
@@ -214,6 +261,21 @@ impl ClientDemandHandle {
     #[cfg(test)]
     pub(crate) fn set_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
         self.cell.set_publish_probe(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        self.cell.set_before_publish_probe(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_wait_kind_probe(&self, probe: std::sync::mpsc::Sender<bool>) {
+        self.cell.set_wait_kind_probe(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn report_retirement_handoff_for_test(&self, retirement_handoff: bool) {
+        self.cell.report_retirement_handoff(retirement_handoff);
     }
 }
 

@@ -2727,8 +2727,7 @@ Remediation checkpoints:
 
 ##### W5C5-002 — Terminal-policy parallel regression re-audit
 
-**Status: open; investigate no later than NC6C / the mandatory post-W6
-review.**
+**Status: complete (2026-09-16).**
 
 NC2.0 routine verification on 2026-09-16 exposed another indefinite park in
 `coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return`
@@ -2751,10 +2750,33 @@ W5C5-001, not as an NC2 callable-state failure. Before closing it:
 4. preserve the isolated and full single-threaded cases as semantic baselines,
    while treating uncontrolled parallel repetition as stress evidence only.
 
-The investigation may close with a code repair or with proof that another
-named owner is responsible, but NC6C and the post-W6 review must not report the
-ordinary parallel suite as clean until this finding has a forced-order
-disposition.
+The investigation required either a code repair or proof that another named
+owner was responsible; NC6C and the post-W6 review could not report the
+ordinary parallel suite as clean without a forced-order disposition.
+
+**Resolution.** This was distinct from W5C5-001. LLDB inspection of a parked
+parallel run found every executor worker asleep and the settling thread inside
+diagnostic normalization's client-demand wait. A bounded diagnostic probe then
+captured the decisive state: the demanded work record and both ready queues
+were empty while the result cell was still unpublished.
+
+Client-demand retirement intentionally removes its coordinator record under
+the runtime mutation guard, releases all runtime locks, and only then publishes
+the result cell. The zero-worker driver already closed this tiny handoff by
+waiting directly on the result cell when the record was absent. The
+worker-backed driver instead sampled the post-retirement generation and waited
+for a *future* coordinator transition; result publication does not create one,
+so that ordering parked permanently.
+
+A forced-order fixture now latches all relevant edges: worker detachment,
+absence of the coordinator record, the client driver's wait decision, result
+publication, and completion. It failed on the old code while identifying the
+incorrect coordinator wait; a test-only generation disturbance then rescued
+the thread so the fixture remained finite. The worker-backed path now adopts
+the existing retirement handoff rule and rechecks the coordinator generation
+before every ordinary wait. The fixture selects the result-cell handoff and
+completes without rescue, and the original zero-/four-worker terminal-policy
+test passes.
 
 ##### W5C.4 — Reset, shift, and continuation-stack traversal
 

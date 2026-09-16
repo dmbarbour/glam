@@ -981,7 +981,20 @@ impl EvalContext {
             if coordinator.has_executor_workers() {
                 let generation = coordinator.work_generation();
                 if handle.poll().is_none() && coordinator.work_generation() == generation {
-                    coordinator.wait_for_change(generation);
+                    if coordinator.client_demand_snapshot(handle.work).is_none() {
+                        // Retirement removes the coordinator record before
+                        // publishing its result cell. No later coordinator
+                        // generation is required for that intentionally tiny
+                        // handoff, so wait on the result itself.
+                        #[cfg(test)]
+                        handle.report_retirement_handoff_for_test(true);
+                        return terminal_client_demand_result(handle.wait());
+                    }
+                    #[cfg(test)]
+                    handle.report_retirement_handoff_for_test(false);
+                    if coordinator.work_generation() == generation {
+                        coordinator.wait_for_change(generation);
+                    }
                 }
                 continue;
             }
@@ -1062,6 +1075,14 @@ impl EvalContext {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drive_client_demand_for_test(
+        &self,
+        handle: ClientDemandHandle,
+    ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
+        self.drive_client_demand(handle)
     }
 
     pub(crate) fn runs_scheduled_task(&self) -> bool {

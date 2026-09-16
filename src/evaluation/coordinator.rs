@@ -1612,6 +1612,18 @@ impl EvaluationWorkCoordinator {
             .count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn disturb_waiters_for_test(&self) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.work_generation = state.work_generation.wrapping_add(1);
+        }
+        self.work_available.notify_all();
+    }
+
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
         let mut state = self
             .state

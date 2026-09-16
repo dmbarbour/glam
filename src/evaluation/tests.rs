@@ -450,6 +450,82 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
 }
 
 #[test]
+fn worker_client_demand_closes_the_retirement_publication_handoff() {
+    let (coordinator, _executor) = test_execution_resources(1).expect("test executor should start");
+    let session = EvaluationSession::shared(&coordinator);
+    let context = EvalContext::new(&session);
+    let expected = context.values().unit();
+    let handle = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .expect("unit demand should be admitted");
+    let work = handle.work();
+
+    let (detached_tx, detached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    handle.set_before_publish_probe(move || {
+        detached_tx
+            .send(())
+            .expect("retirement observer must remain live");
+        release_rx
+            .recv()
+            .expect("retirement publication must be released");
+    });
+    let (published_tx, published_rx) = mpsc::channel();
+    handle.set_publish_probe(move || {
+        published_tx
+            .send(())
+            .expect("result-publication observer must remain live");
+    });
+    let (wait_kind_tx, wait_kind_rx) = mpsc::channel();
+    handle.set_wait_kind_probe(wait_kind_tx);
+
+    detached_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must detach the demand before result publication");
+    assert!(
+        coordinator.client_demand_snapshot(work).is_none(),
+        "the forced ordering must expose the retirement-to-publication handoff"
+    );
+
+    let driver = context.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let driver_thread = std::thread::spawn(move || {
+        let result = driver.drive_client_demand_for_test(handle);
+        result_tx
+            .send(result)
+            .expect("client-demand result observer must remain live");
+    });
+    let used_retirement_handoff = wait_kind_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the client must classify its post-retirement wait");
+
+    release_tx
+        .send(())
+        .expect("worker must remain paused before publication");
+    published_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must publish the client-demand result");
+    if !used_retirement_handoff {
+        coordinator.disturb_waiters_for_test();
+    }
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the client demand must finish after result publication")
+        .expect("unit demand should not fail");
+    assert!(matches!(
+        result,
+        ClientDemandResult::Complete(value) if value.clone_core_for_test() == expected
+    ));
+    driver_thread
+        .join()
+        .expect("client-demand driver must not panic");
+    assert!(
+        used_retirement_handoff,
+        "a detached client demand must wait on its result cell, not on a future coordinator change"
+    );
+}
+
+#[test]
 fn client_demand_exactly_restarts_after_promise_assignment() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
