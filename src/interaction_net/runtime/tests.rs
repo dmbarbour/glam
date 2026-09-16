@@ -2815,6 +2815,85 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
             reason: StuckReason::Specialization(error),
         }
     );
+
+    let mut checkpoint_source: RuntimeNet<&'static str> = RuntimeNet::empty();
+    let bind = checkpoint_source.add_node(RuntimeNode::Bind);
+    let checkpoint = checkpoint_source.add_node(RuntimeNode::CallableCheckpoint(()));
+    let result = checkpoint_source.add_node(RuntimeNode::Data("result"));
+    checkpoint_source.connect(Port::principal(bind), Port::principal(checkpoint));
+    checkpoint_source.connect(Port::auxiliary(bind, 2), Port::principal(result));
+    let exposed = checkpoint_source.add_interface(Port::auxiliary(bind, 1));
+    checkpoint_source.exposed = Some(exposed);
+    let pair = ActivePairKey::new(bind, checkpoint);
+    assert!(matches!(
+        checkpoint_source.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::CallableCheckpoint { .. },
+            ..
+        })
+    ));
+    let checkpoint_source = SharedRuntimeNet::new(checkpoint_source);
+
+    let mut target = target_waiting_on(checkpoint_source.clone());
+    let (cursor, progress) = reduce_next_cursor(&mut target);
+    assert_eq!(progress, CursorProgress::Blocked);
+    assert!(matches!(
+        target.cursor_dependency(cursor),
+        Some(CursorDependency::SourceFrontier(observation))
+            if observation.source().ptr_eq(&checkpoint_source)
+                && observation.endpoint() == DemandEndpoint::ActivePair(pair)
+    ));
+    assert!(
+        !target
+            .nodes
+            .values()
+            .any(|entry| matches!(entry.node, RuntimeNode::CallableCheckpoint(_))),
+        "a target cursor must wait for semantic checkpoint output"
+    );
+}
+
+#[test]
+fn callable_checkpoint_has_one_linear_interaction() {
+    let mut callable: RuntimeNet<()> = RuntimeNet::empty();
+    let bind = callable.add_node(RuntimeNode::Bind);
+    let checkpoint = callable.add_node(RuntimeNode::CallableCheckpoint(()));
+    callable.connect(Port::principal(bind), Port::principal(checkpoint));
+    let pair = ActivePairKey::new(bind, checkpoint);
+    assert_eq!(
+        callable.reduce_next(),
+        Some(Reduction {
+            pair,
+            kind: ReductionKind::CallableCheckpoint { bind, checkpoint },
+        })
+    );
+    assert_eq!(callable.active.get(&pair), Some(&ActivePairState::Claimed));
+
+    for partner in [
+        RuntimeNode::Fan {
+            identity: FanIdentity::root(FanSite::from_raw(17)),
+        },
+        RuntimeNode::Erase,
+        RuntimeNode::Data(()),
+        RuntimeNode::Operator(TestOperator::new("never", |_| unreachable!())),
+        RuntimeNode::CallableCheckpoint(()),
+    ] {
+        let mut stuck: RuntimeNet<()> = RuntimeNet::empty();
+        let checkpoint = stuck.add_node(RuntimeNode::CallableCheckpoint(()));
+        let partner = stuck.add_node(partner);
+        stuck.connect(Port::principal(checkpoint), Port::principal(partner));
+        let pair = ActivePairKey::new(checkpoint, partner);
+        assert!(matches!(
+            stuck.reduce_next(),
+            Some(Reduction {
+                kind: ReductionKind::Stuck,
+                ..
+            })
+        ));
+        assert!(matches!(
+            stuck.active.get(&pair),
+            Some(ActivePairState::Stuck(StuckReason::NoRule))
+        ));
+    }
 }
 
 #[test]

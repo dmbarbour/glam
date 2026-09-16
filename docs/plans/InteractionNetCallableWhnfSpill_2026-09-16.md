@@ -870,6 +870,8 @@ payload clones and NC2's pending observation fixture.
 
 #### NC2B — Linear interaction and cursor rules
 
+Status: complete on 2026-09-16.
+
 Execute the interaction table and the active-source cursor oracle as a
 separate checkpoint after NC2A. A source frontier may classify a checkpoint
 only as non-materializable active work; it never owns or clones its payload.
@@ -886,6 +888,14 @@ after the source pair terminalizes. The target must never contain a
 `active_source_call_is_a_dependency_and_is_never_copied` fixture with a real
 source `Bind >< CallableCheckpoint`; this is the deferred NC0 cursor oracle,
 not a new independent fixture.
+
+Completion record: the runtime keeps `Bind >< CallableCheckpoint` claimed as
+one semantic `CallableCheckpoint` reduction. Fan, erase, data, operator, and
+checkpoint partners become ordinary no-rule stuck pairs before any generic
+duplication or erasure helper runs. The runtime-only node is one-port and has
+no template constructor. The existing active-source cursor fixture now also
+uses a real checkpoint pair and proves the target records the exact source
+pair dependency without ever materializing the checkpoint payload.
 
 #### NC2C — Spill and update mutations
 

@@ -60,6 +60,10 @@ pub enum ReductionKind {
         bind: NodeId,
         data: NodeId,
     },
+    CallableCheckpoint {
+        bind: NodeId,
+        checkpoint: NodeId,
+    },
     OperatorCall {
         operator: NodeId,
         data: NodeId,
@@ -2899,6 +2903,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 kind: ReductionKind::RemoteCursor { cursor, progress },
             });
         }
+        let checkpoint = match (left, right) {
+            (RuntimeNode::Bind, RuntimeNode::CallableCheckpoint(_)) => Some((left_id, right_id)),
+            (RuntimeNode::CallableCheckpoint(_), RuntimeNode::Bind) => Some((right_id, left_id)),
+            _ => None,
+        };
+        if let Some((bind, checkpoint)) = checkpoint {
+            return Some(Reduction {
+                pair,
+                kind: ReductionKind::CallableCheckpoint { bind, checkpoint },
+            });
+        }
         if matches!(left, RuntimeNode::CallableCheckpoint(_))
             || matches!(right, RuntimeNode::CallableCheckpoint(_))
         {
@@ -3014,6 +3029,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         if !matches!(
             kind,
             ReductionKind::Call { .. }
+                | ReductionKind::CallableCheckpoint { .. }
                 | ReductionKind::OperatorCall { .. }
                 | ReductionKind::RemoteCursor { .. }
                 | ReductionKind::Stuck

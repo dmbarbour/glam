@@ -422,6 +422,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 ..
             } => Some(ReductionEvent::CursorJoined),
             ReductionKind::Call { .. }
+            | ReductionKind::CallableCheckpoint { .. }
             | ReductionKind::OperatorCall { .. }
             | ReductionKind::RemoteCursor {
                 progress: CursorProgress::Claimed | CursorProgress::Blocked,

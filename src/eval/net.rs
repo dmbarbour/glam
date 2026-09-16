@@ -684,7 +684,9 @@ fn prepare_active_pair_step(
             driver.progressed = true;
             if matches!(
                 &reduction.kind,
-                ReductionKind::Call { .. } | ReductionKind::OperatorCall { .. }
+                ReductionKind::Call { .. }
+                    | ReductionKind::CallableCheckpoint { .. }
+                    | ReductionKind::OperatorCall { .. }
             ) {
                 return Ok(Some(NetBatchOutcome::Semantic {
                     root,
