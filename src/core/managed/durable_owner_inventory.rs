@@ -399,7 +399,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "raw focus, every continuation value, followed identities, source owner, and promise breadcrumb",
         "one managed runtime-net checkpoint payload",
         CompatibilityPayload,
-        "NC1A implements the complete NetWhnfState edge walk and collects independently allocated sentinels through one rooted state fixture"
+        "NC2.0 delegates the NetWhnfState wrapper to one complete canonical WhnfState edge walk and collects independently allocated sentinels through one rooted state fixture"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -837,10 +837,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 189;
+const DECLARATION_BASELINE_COUNT: usize = 185;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([150, 140, 5, 15, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_513_005_381_702_961_522;
+    DeclarationSignals::new([143, 140, 5, 15, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_224_144_498_009_330_344;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -980,10 +980,10 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
     } else if matches!(
         declaration,
-        "src/eval/whnf.rs::NetWhnfContinuation"
-            | "src/eval/whnf.rs::NetWhnfFrame"
-            | "src/eval/whnf.rs::NetWhnfState"
-            | "src/eval/whnf.rs::NetUndefinedDictionary"
+        "src/eval/whnf.rs::WhnfContinuation"
+            | "src/eval/whnf.rs::WhnfFrame"
+            | "src/eval/whnf.rs::WhnfState"
+            | "src/eval/whnf.rs::WhnfUndefinedDictionary"
     ) {
         "net-owned WHNF checkpoint state"
     } else if matches!(

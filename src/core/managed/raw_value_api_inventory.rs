@@ -1413,7 +1413,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        12_528_629_874_392_549_264,
+        12_229_472_873_584_480_641,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1718,7 +1718,7 @@ fn d2c_family_fingerprints_are_exact() {
             D2cFamily::ApplicationAndSequence,
             11_551_636_234_692_466_987,
         ),
-        (D2cFamily::OperatorAndNet, 6_901_268_698_508_156_085),
+        (D2cFamily::OperatorAndNet, 1_680_016_663_990_423_563),
         (
             D2cFamily::DispatchScalarAndStrategy,
             18_123_437_161_959_930_221,
@@ -1814,7 +1814,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A1ApplicationLeaves, 4_928_394_332_436_527_125),
         (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
-        (W6B4NetApplication, 6_901_268_698_508_156_085),
+        (W6B4NetApplication, 1_680_016_663_990_423_563),
         (W6C1DispatchAndArity, 10_640_725_338_893_605_103),
         (W6C2AssertionAndConditional, 509_629_874_793_238_271),
         (W6C3Comparison, 1_125_825_947_678_604_093),

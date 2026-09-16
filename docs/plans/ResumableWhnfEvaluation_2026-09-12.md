@@ -178,12 +178,12 @@ enum RegionalWhnfStep {
 }
 ```
 
-The implementation currently retains the older `RegionalWhnfWork` and
-`RegionalWhnfFrame` declarations. Focused callable-spill checkpoint NC2.0
-introduces the canonical `WhnfState`/`WhnfContinuation` vocabulary and makes
-regional and net-owned forms zero-walk ownership wrappers around it. A role
-change consumes and rewraps the same state; it must not iterate frames,
-duplicate values, register roots, or allocate replacement containers.
+Focused callable-spill checkpoint NC2.0 introduced the canonical
+`WhnfState`/`WhnfContinuation` vocabulary and made regional and net-owned forms
+zero-walk ownership wrappers around it. A role change consumes and rewraps the
+same state without iterating frames, duplicating values, registering roots, or
+allocating replacement containers. The older parallel regional/net frame
+declarations and borrowed projection scaffold are gone.
 
 `Delegate` remains a direct focus replacement and does not push a frame.
 Repeated nested work uses shared frames for demand-and-inspect, ordered
@@ -3916,6 +3916,13 @@ state without walking continuations, duplicating values, registering roots, or
 allocating containers. NC5D records which fields production callable demand
 actually exercises, but does not pare this rare transitory checkpoint merely
 to save a few words.
+
+NC2.0 completion record, 2026-09-16: the parallel definitions and projection
+walk have been removed. Repeated regional/net role handoffs preserve every
+tested outer and nested allocation identity and create no roots, while the
+single canonical edge visitor passes the forced-collection liveness fixture.
+The fine-grained rooted durable representation remains intentionally separate
+until W6G.3 aggregates it.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 

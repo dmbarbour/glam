@@ -24,13 +24,13 @@ fn lazy_id(access: &EvaluationValueAccess<'_>, value: &Value) -> crate::core::La
     access.lazy(lazy).id()
 }
 
-fn retained_values(work: &RegionalWhnfWork) -> Vec<&Value> {
+fn retained_values(work: &WhnfState) -> Vec<&Value> {
     let mut values = vec![&work.focus];
     for frame in &work.frames {
         match frame {
-            RegionalWhnfContinuation::Generic(frame) => values.extend(&frame.retained),
-            RegionalWhnfContinuation::Application { arguments, .. } => values.extend(arguments),
-            RegionalWhnfContinuation::DictionaryApplication {
+            WhnfContinuation::Generic(frame) => values.extend(&frame.retained),
+            WhnfContinuation::Application { arguments, .. } => values.extend(arguments),
+            WhnfContinuation::DictionaryApplication {
                 effect_payload,
                 remaining_effect_values,
                 apply_member,
@@ -40,12 +40,12 @@ fn retained_values(work: &RegionalWhnfWork) -> Vec<&Value> {
                 values.extend(remaining_effect_values);
                 values.extend(apply_member);
             }
-            RegionalWhnfContinuation::SemanticUndefined { ancestors, .. } => {
+            WhnfContinuation::SemanticUndefined { ancestors, .. } => {
                 for ancestor in ancestors {
                     values.extend(&ancestor.members);
                 }
             }
-            RegionalWhnfContinuation::StaticAccess { .. } => {}
+            WhnfContinuation::StaticAccess { .. } => {}
         }
     }
     values
@@ -58,15 +58,16 @@ fn net_state_round_trip_preserves_empty_frames_and_scalar_identity() {
     let poll = EvaluationPollContext::for_context(&context);
 
     poll.with_value_access(&context, |access| {
-        let regional = RegionalWhnfWork {
-            focus: Value::Number(17.into()),
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        };
+        let regional = RegionalWhnfWork::from_parts(
+            &access,
+            Value::Number(17.into()),
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            None,
+        );
         let state = NetWhnfState::from_regional(&access, regional);
-        let projected = state.project(&access);
+        let projected = state.into_regional(&access);
 
         assert_eq!(projected.focus, Value::Number(17.into()));
         assert!(projected.frames.is_empty());
@@ -74,6 +75,143 @@ fn net_state_round_trip_preserves_empty_frames_and_scalar_identity() {
         assert_eq!(projected.source_owner, None);
         assert!(projected.cycle_promise.is_none());
     });
+}
+
+fn container_identities(work: &WhnfState) -> Vec<(&'static str, usize, usize, usize)> {
+    let mut identities = vec![(
+        "frames",
+        work.frames.as_ptr() as usize,
+        work.frames.len(),
+        work.frames.capacity(),
+    )];
+    for frame in &work.frames {
+        match frame {
+            WhnfContinuation::Generic(frame) => identities.push((
+                "generic retained",
+                frame.retained.as_ptr() as usize,
+                frame.retained.len(),
+                frame.retained.capacity(),
+            )),
+            WhnfContinuation::Application { arguments, .. } => identities.push((
+                "application arguments",
+                arguments.as_ptr() as usize,
+                arguments.len(),
+                arguments.capacity(),
+            )),
+            WhnfContinuation::DictionaryApplication {
+                remaining_effect_values,
+                ..
+            } => identities.push((
+                "remaining effect values",
+                remaining_effect_values.as_ptr() as usize,
+                remaining_effect_values.len(),
+                remaining_effect_values.capacity(),
+            )),
+            WhnfContinuation::SemanticUndefined { ancestors, .. } => {
+                identities.push((
+                    "undefined ancestors",
+                    ancestors.as_ptr() as usize,
+                    ancestors.len(),
+                    ancestors.capacity(),
+                ));
+                for ancestor in ancestors {
+                    identities.push((
+                        "undefined members",
+                        ancestor.members.as_ptr() as usize,
+                        ancestor.members.len(),
+                        ancestor.members.capacity(),
+                    ));
+                }
+            }
+            WhnfContinuation::StaticAccess { keys, .. } => identities.push((
+                "static keys",
+                keys.as_ptr() as usize,
+                keys.len(),
+                keys.len(),
+            )),
+        }
+    }
+    identities
+}
+
+#[test]
+fn regional_net_role_handoffs_preserve_every_container_allocation() {
+    let values = isolated_values();
+    let context = EvalContext::isolated(values.clone());
+    let poll = EvaluationPollContext::for_context(&context);
+
+    poll.with_value_access(&context, |access| {
+        let frames = Vec::with_capacity(8);
+        let mut regional = RegionalWhnfWork::from_parts(
+            &access,
+            Value::Number(0.into()),
+            frames,
+            BTreeSet::new(),
+            None,
+            None,
+        );
+        regional.frames.extend([
+            WhnfContinuation::Generic(WhnfFrame {
+                kind: WhnfFrameKind::OrderedOperands,
+                cursor: 1,
+                retained: Vec::with_capacity(3),
+            }),
+            WhnfContinuation::Application {
+                arguments: Vec::with_capacity(4),
+                next: 0,
+            },
+            WhnfContinuation::DictionaryApplication {
+                effect_payload: Value::Number(1.into()),
+                remaining_effect_values: Vec::with_capacity(5),
+                next_effect_value: 0,
+                apply_member: None,
+            },
+            WhnfContinuation::SemanticUndefined {
+                purpose: UndefinedPurpose::EffectExtra,
+                ancestors: vec![WhnfUndefinedDictionary {
+                    members: Vec::with_capacity(6),
+                    next: 0,
+                }],
+                phase: UndefinedPhase::Inspect,
+            },
+            WhnfContinuation::StaticAccess {
+                keys: Arc::from([crate::core::Key::atom_from_text("key")]),
+                next: 0,
+            },
+        ]);
+        let expected = container_identities(&regional);
+        let roots_before = values.managed_root_registrations_for_test();
+
+        let net = NetWhnfState::from_regional(&access, regional);
+        assert_eq!(container_identities(&net.0), expected);
+        let regional = net.into_regional(&access);
+        assert_eq!(container_identities(&regional), expected);
+        let net = NetWhnfState::from_regional(&access, regional);
+        assert_eq!(container_identities(&net.0), expected);
+        let regional = net.into_regional(&access);
+        assert_eq!(container_identities(&regional), expected);
+        assert_eq!(values.managed_root_registrations_for_test(), roots_before);
+    });
+
+    let source = include_str!("../../whnf.rs");
+    let publish = source_section(
+        source,
+        "pub(crate) fn from_regional(",
+        "/// Claims the complete state",
+    );
+    let claim = source_section(
+        source,
+        "pub(crate) fn into_regional(",
+        "/// Drives one bounded callback-free quantum",
+    );
+    for handoff in [publish, claim] {
+        for forbidden in [".iter()", ".map(", ".collect(", "duplicate_value", "clone("] {
+            assert!(
+                !handoff.contains(forbidden),
+                "a regional/net role handoff must not contain `{forbidden}`"
+            );
+        }
+    }
 }
 
 #[test]
@@ -126,39 +264,40 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             ]
             .into_iter()
             .collect();
-            let regional = RegionalWhnfWork {
+            let regional = RegionalWhnfWork::from_parts(
+                &access,
                 focus,
-                frames: vec![
-                    RegionalWhnfContinuation::Generic(RegionalWhnfFrame {
+                vec![
+                    WhnfContinuation::Generic(WhnfFrame {
                         kind: WhnfFrameKind::OrderedOperands,
                         cursor: 2,
                         retained: generic,
                     }),
-                    RegionalWhnfContinuation::Application {
+                    WhnfContinuation::Application {
                         arguments: application,
                         next: 1,
                     },
-                    RegionalWhnfContinuation::DictionaryApplication {
+                    WhnfContinuation::DictionaryApplication {
                         effect_payload,
                         remaining_effect_values,
                         next_effect_value: 1,
                         apply_member: Some(apply_member),
                     },
-                    RegionalWhnfContinuation::SemanticUndefined {
+                    WhnfContinuation::SemanticUndefined {
                         purpose: UndefinedPurpose::EffectExtra,
                         ancestors: vec![
-                            RegionalUndefinedDictionary {
+                            WhnfUndefinedDictionary {
                                 members: first_ancestor,
                                 next: 1,
                             },
-                            RegionalUndefinedDictionary {
+                            WhnfUndefinedDictionary {
                                 members: second_ancestor,
                                 next: 2,
                             },
                         ],
                         phase: UndefinedPhase::ReturnTrue,
                     },
-                    RegionalWhnfContinuation::StaticAccess {
+                    WhnfContinuation::StaticAccess {
                         keys: Arc::from([
                             crate::core::Key::atom_from_text("first"),
                             crate::core::Key::atom_from_text("second"),
@@ -167,9 +306,9 @@ fn net_state_trace_retains_every_value_position_through_collection() {
                     },
                 ],
                 followed,
-                source_owner: Some(source_owner),
-                cycle_promise: Some(promise),
-            };
+                Some(source_owner),
+                Some(promise),
+            );
             let state = NetWhnfState::from_regional(&access, regional);
             let allocator = access
                 .values()
@@ -193,23 +332,23 @@ fn net_state_trace_retains_every_value_position_through_collection() {
 
     poll.with_value_access(&context, |access| {
         let state = access.values().get(&state_root);
-        let projected = state.project(&access);
-        let actual_lazy_ids = retained_values(&projected)
+        let actual_lazy_ids = retained_values(&state.0)
             .into_iter()
             .map(|value| lazy_id(&access, value))
             .collect::<Vec<_>>();
         assert_eq!(actual_lazy_ids, expected_lazy_ids);
-        assert_eq!(projected.frames.len(), 5);
-        assert_eq!(projected.source_owner, Some(source_owner));
+        assert_eq!(state.0.frames.len(), 5);
+        assert_eq!(state.0.source_owner, Some(source_owner));
         assert_eq!(
-            projected
+            state
+                .0
                 .cycle_promise
                 .as_ref()
                 .map(|promise| access.promise(promise).id()),
             Some(promise_id)
         );
         assert_eq!(
-            projected.followed,
+            state.0.followed,
             [
                 DeferredValueId::Lazy(expected_lazy_ids[0]),
                 DeferredValueId::Promise(promise_id),
@@ -217,29 +356,20 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             .into_iter()
             .collect()
         );
-
-        let republished = NetWhnfState::from_regional(&access, projected);
-        let round_trip = republished.project(&access);
-        assert_eq!(
-            retained_values(&round_trip)
-                .into_iter()
-                .map(|value| lazy_id(&access, value))
-                .collect::<Vec<_>>(),
-            expected_lazy_ids
-        );
     });
 }
 
 fn shell_work(access: &EvaluationValueAccess<'_>) -> NetWhnfState {
     NetWhnfState::from_regional(
         access,
-        RegionalWhnfWork {
-            focus: Value::Number(0.into()),
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        },
+        RegionalWhnfWork::from_parts(
+            access,
+            Value::Number(0.into()),
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            None,
+        ),
     )
 }
 
@@ -312,20 +442,21 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         let make_state = || {
             NetWhnfState::from_regional(
                 &access,
-                RegionalWhnfWork {
-                    focus: Value::Number(0.into()),
-                    frames: vec![RegionalWhnfContinuation::Application {
+                RegionalWhnfWork::from_parts(
+                    &access,
+                    Value::Number(0.into()),
+                    vec![WhnfContinuation::Application {
                         arguments: vec![Value::Number(10.into()), Value::Number(11.into())],
                         next: 0,
                     }],
-                    followed: BTreeSet::new(),
-                    source_owner: None,
-                    cycle_promise: None,
-                },
+                    BTreeSet::new(),
+                    None,
+                    None,
+                ),
             )
         };
         let advance_frame = |_access: &EvaluationValueAccess<'_>, work: &mut RegionalWhnfWork| {
-            let RegionalWhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
+            let WhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
                 unreachable!()
             };
             *next = 1;
@@ -338,8 +469,8 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         else {
             panic!("zero allowance must yield before frame mutation")
         };
-        let unchanged = unchanged.project(&access);
-        let RegionalWhnfContinuation::Application { arguments, next } = &unchanged.frames[0] else {
+        let unchanged = unchanged.into_regional(&access);
+        let WhnfContinuation::Application { arguments, next } = &unchanged.frames[0] else {
             unreachable!()
         };
         assert_eq!(*next, 0);
@@ -354,9 +485,9 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         else {
             panic!("one completed transition must yield its complete successor")
         };
-        let advanced = advanced.project(&access);
+        let advanced = advanced.into_regional(&access);
         assert_eq!(advanced.focus, Value::Number(1.into()));
-        let RegionalWhnfContinuation::Application { arguments, next } = &advanced.frames[0] else {
+        let WhnfContinuation::Application { arguments, next } = &advanced.frames[0] else {
             unreachable!()
         };
         assert_eq!(*next, 1);
@@ -367,7 +498,7 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
 
         let boundary_reducer = |_access: &EvaluationValueAccess<'_>,
                                 work: &mut RegionalWhnfWork| {
-            let RegionalWhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
+            let WhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
                 unreachable!()
             };
             *next = 1;
@@ -386,9 +517,9 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             request,
             RegionalBoundaryRequest::External(WhnfExternalBoundary::Reflection)
         ));
-        let state = state.project(&access);
+        let state = state.into_regional(&access);
         assert_eq!(state.focus, Value::Number(1.into()));
-        let RegionalWhnfContinuation::Application { arguments, next } = &state.frames[0] else {
+        let WhnfContinuation::Application { arguments, next } = &state.frames[0] else {
             unreachable!()
         };
         assert_eq!(*next, 1);
@@ -469,7 +600,7 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
         "enum DirectApplicationStep",
     );
     assert_eq!(
-        semantic.matches("work.cycle_promise = Some(").count(),
+        semantic.matches(".cycle_promise = Some(").count(),
         1,
         "only following an assigned promise may create the promise breadcrumb"
     );

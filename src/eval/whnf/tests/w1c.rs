@@ -38,7 +38,7 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
             assert!(work.frames.is_empty());
             work.focus = text("replacement");
             work.frames.push(
-                RegionalWhnfFrame {
+                WhnfFrame {
                     kind: WhnfFrameKind::OrderedOperands,
                     cursor: 7,
                     retained: vec![text("left"), text("right")],
@@ -78,7 +78,7 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
         computation.poll_in(&access, &mut resume_budget, |_access, work| {
             assert_eq!(work.focus, text("replacement"));
             assert_eq!(work.frames.len(), 1);
-            let RegionalWhnfContinuation::Generic(frame) = &work.frames[0] else {
+            let WhnfContinuation::Generic(frame) = &work.frames[0] else {
                 panic!("expected a generic ordered-operands frame")
             };
             assert_eq!(frame.kind, WhnfFrameKind::OrderedOperands);
@@ -137,7 +137,7 @@ fn unwind_preserves_a_nonempty_prior_checkpoint() {
         computation.poll_in(&access, &mut install_budget, |_access, work| {
             work.focus = text("prior");
             work.frames.push(
-                RegionalWhnfFrame {
+                WhnfFrame {
                     kind: WhnfFrameKind::AccessPath,
                     cursor: 11,
                     retained: vec![text("retained")],
@@ -174,7 +174,7 @@ fn unwind_preserves_a_nonempty_prior_checkpoint() {
         computation.poll_in(&access, &mut resume_budget, |_access, work| {
             assert_eq!(work.focus, text("prior"));
             assert_eq!(work.frames.len(), 1);
-            let RegionalWhnfContinuation::Generic(frame) = &work.frames[0] else {
+            let WhnfContinuation::Generic(frame) = &work.frames[0] else {
                 panic!("expected a generic access-path frame")
             };
             assert_eq!(frame.kind, WhnfFrameKind::AccessPath);
@@ -198,21 +198,22 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
 
     let mut budget = WhnfStepBudget::new(1);
     let yielded = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut budget, |_access, _work| {
-            RegionalWhnfStep::Continue(RegionalWhnfWork {
-                focus: text("replacement"),
-                frames: vec![
-                    RegionalWhnfFrame {
+        computation.poll_in(&access, &mut budget, |access, _work| {
+            RegionalWhnfStep::Continue(RegionalWhnfWork::from_parts(
+                access,
+                text("replacement"),
+                vec![
+                    WhnfFrame {
                         kind: WhnfFrameKind::CollectionWalk,
                         cursor: 3,
                         retained: vec![text("first"), text("second")],
                     }
                     .into(),
                 ],
-                followed: BTreeSet::new(),
-                source_owner: None,
-                cycle_promise: None,
-            })
+                BTreeSet::new(),
+                None,
+                None,
+            ))
         })
     });
     assert!(matches!(yielded, WhnfPoll::Yielded));
@@ -265,13 +266,14 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
             assert_eq!(access.lazy(prior).id(), prior_id);
             let replacement = LazyValue::error_in(access.values(), "replacement checkpoint");
             replacement_id = Some(access.lazy(&replacement).id());
-            RegionalWhnfStep::Continue(RegionalWhnfWork {
-                focus: Value::Lazy(replacement),
-                frames: Vec::new(),
-                followed: BTreeSet::new(),
-                source_owner: None,
-                cycle_promise: None,
-            })
+            RegionalWhnfStep::Continue(RegionalWhnfWork::from_parts(
+                access,
+                Value::Lazy(replacement),
+                Vec::new(),
+                BTreeSet::new(),
+                None,
+                None,
+            ))
         })
     });
     assert!(matches!(yielded, WhnfPoll::Yielded));

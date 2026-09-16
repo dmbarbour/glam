@@ -398,18 +398,11 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "poll-spanning WHNF state retains its optional source-cycle promise as a registered root"
     ),
     owner!(
-        "src/eval/whnf.rs::RegionalWhnfWork",
-        [0, 1, 0],
-        BoundedAccess,
-        None,
-        "regional WHNF state may inspect its source-cycle promise only beneath matching evaluator access"
-    ),
-    owner!(
-        "src/eval/whnf.rs::NetWhnfState",
+        "src/eval/whnf.rs::WhnfState",
         [0, 1, 0],
         ExactManagedEdge,
         None,
-        "net-owned WHNF state traces its optional source-cycle promise as an interior edge"
+        "canonical raw-edge WHNF state is traced when net-owned and inspected only beneath matching access when regional"
     ),
     owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyCell",
@@ -805,7 +798,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [14, 23, 10],
+        [14, 23, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

@@ -86,46 +86,48 @@ struct DurableUndefinedDictionary {
     next: usize,
 }
 
-/// Callback-free working state projected beneath one managed-access region.
-pub(crate) struct RegionalWhnfWork {
+/// Complete raw-edge WHNF state shared by regional execution and net-owned
+/// suspension.
+///
+/// The role wrappers below move this state without inspecting its semantic
+/// edges or rebuilding its continuation containers. Only regional work may be
+/// evaluated; only net-owned state may outlive its matching access region.
+pub(crate) struct WhnfState {
     focus: Value,
-    frames: Vec<RegionalWhnfContinuation>,
+    frames: Vec<WhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
     source_owner: Option<LazyId>,
     cycle_promise: Option<PromisedValue>,
 }
+
+/// Callback-free working state beneath one managed-access region.
+pub(crate) struct RegionalWhnfWork(WhnfState);
 
 /// Complete WHNF state stored as traced edges inside a runtime net.
 ///
 /// Unlike [`DurableWhnfState`], this representation owns no registered roots.
 /// Unlike [`RegionalWhnfWork`], it may outlive one access region because its
-/// enclosing managed net traces every semantic edge below. Regional execution
-/// always projects a temporary copy under matching access and publishes the
-/// complete successor before that access closes.
+/// enclosing managed net traces every semantic edge below. Claiming and
+/// publishing this state consume one role wrapper and install the other; they
+/// never project a copy or rebuild a continuation.
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "NC2.0 defines the canonical net-owned state before NC2A installs its runtime node"
 )]
-pub(crate) struct NetWhnfState {
-    focus: Value,
-    frames: Vec<NetWhnfContinuation>,
-    followed: BTreeSet<DeferredValueId>,
-    source_owner: Option<LazyId>,
-    cycle_promise: Option<PromisedValue>,
-}
+pub(crate) struct NetWhnfState(WhnfState);
 
 /// Regional counterpart of [`DurableWhnfFrame`].
 ///
 /// These raw values may be copied and rearranged only while the evaluator's
 /// matching mutator remains active. This type never enters a machine field.
-pub(crate) struct RegionalWhnfFrame {
+pub(crate) struct WhnfFrame {
     kind: WhnfFrameKind,
     cursor: usize,
     retained: Vec<Value>,
 }
 
-enum RegionalWhnfContinuation {
-    Generic(RegionalWhnfFrame),
+enum WhnfContinuation {
+    Generic(WhnfFrame),
     Application {
         arguments: Vec<Value>,
         next: usize,
@@ -138,7 +140,7 @@ enum RegionalWhnfContinuation {
     },
     SemanticUndefined {
         purpose: UndefinedPurpose,
-        ancestors: Vec<RegionalUndefinedDictionary>,
+        ancestors: Vec<WhnfUndefinedDictionary>,
         phase: UndefinedPhase,
     },
     StaticAccess {
@@ -147,53 +149,7 @@ enum RegionalWhnfContinuation {
     },
 }
 
-struct RegionalUndefinedDictionary {
-    members: Vec<Value>,
-    next: usize,
-}
-
-#[allow(
-    dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
-)]
-enum NetWhnfContinuation {
-    Generic(NetWhnfFrame),
-    Application {
-        arguments: Vec<Value>,
-        next: usize,
-    },
-    DictionaryApplication {
-        effect_payload: Value,
-        remaining_effect_values: Vec<Value>,
-        next_effect_value: usize,
-        apply_member: Option<Value>,
-    },
-    SemanticUndefined {
-        purpose: UndefinedPurpose,
-        ancestors: Vec<NetUndefinedDictionary>,
-        phase: UndefinedPhase,
-    },
-    StaticAccess {
-        keys: Arc<[crate::core::Key]>,
-        next: usize,
-    },
-}
-
-#[allow(
-    dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
-)]
-struct NetWhnfFrame {
-    kind: WhnfFrameKind,
-    cursor: usize,
-    retained: Vec<Value>,
-}
-
-#[allow(
-    dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
-)]
-struct NetUndefinedDictionary {
+struct WhnfUndefinedDictionary {
     members: Vec<Value>,
     next: usize,
 }
@@ -210,9 +166,42 @@ enum UndefinedPhase {
     ReturnTrue,
 }
 
-impl From<RegionalWhnfFrame> for RegionalWhnfContinuation {
-    fn from(frame: RegionalWhnfFrame) -> Self {
+impl From<WhnfFrame> for WhnfContinuation {
+    fn from(frame: WhnfFrame) -> Self {
         Self::Generic(frame)
+    }
+}
+
+impl RegionalWhnfWork {
+    fn from_parts(
+        _access: &EvaluationValueAccess<'_>,
+        focus: Value,
+        frames: Vec<WhnfContinuation>,
+        followed: BTreeSet<DeferredValueId>,
+        source_owner: Option<LazyId>,
+        cycle_promise: Option<PromisedValue>,
+    ) -> Self {
+        Self(WhnfState {
+            focus,
+            frames,
+            followed,
+            source_owner,
+            cycle_promise,
+        })
+    }
+}
+
+impl std::ops::Deref for RegionalWhnfWork {
+    type Target = WhnfState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for RegionalWhnfWork {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -378,23 +367,23 @@ pub(crate) enum WhnfPoll {
 
 impl DurableWhnfState {
     fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
-        RegionalWhnfWork {
-            focus: access.clone_root(&self.focus),
-            frames: self
-                .frames
+        RegionalWhnfWork::from_parts(
+            access,
+            access.clone_root(&self.focus),
+            self.frames
                 .iter()
                 .map(|frame| frame.project(access))
                 .collect(),
-            followed: self.followed.clone(),
-            source_owner: self.source_owner,
-            cycle_promise: self
-                .cycle_promise
+            self.followed.clone(),
+            self.source_owner,
+            self.cycle_promise
                 .as_ref()
                 .map(|promise| PromisedValue::from_root(promise, access.values())),
-        }
+        )
     }
 
     fn from_regional(access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) -> Self {
+        let RegionalWhnfWork(work) = work;
         Self {
             focus: access.values().root_runtime_value(work.focus),
             frames: work
@@ -412,8 +401,8 @@ impl DurableWhnfState {
 }
 
 impl DurableWhnfFrame {
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfFrame {
-        RegionalWhnfFrame {
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> WhnfFrame {
+        WhnfFrame {
             kind: self.kind,
             cursor: self.cursor,
             retained: self
@@ -424,7 +413,7 @@ impl DurableWhnfFrame {
         }
     }
 
-    fn root_regional(access: &EvaluationValueAccess<'_>, frame: RegionalWhnfFrame) -> Self {
+    fn root_regional(access: &EvaluationValueAccess<'_>, frame: WhnfFrame) -> Self {
         Self {
             kind: frame.kind,
             cursor: frame.cursor,
@@ -438,10 +427,10 @@ impl DurableWhnfFrame {
 }
 
 impl DurableWhnfContinuation {
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfContinuation {
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> WhnfContinuation {
         match self {
-            Self::Generic(frame) => RegionalWhnfContinuation::Generic(frame.project(access)),
-            Self::Application { arguments, next } => RegionalWhnfContinuation::Application {
+            Self::Generic(frame) => WhnfContinuation::Generic(frame.project(access)),
+            Self::Application { arguments, next } => WhnfContinuation::Application {
                 arguments: arguments
                     .iter()
                     .map(|argument| access.clone_root(argument))
@@ -453,7 +442,7 @@ impl DurableWhnfContinuation {
                 remaining_effect_values,
                 next_effect_value,
                 apply_member,
-            } => RegionalWhnfContinuation::DictionaryApplication {
+            } => WhnfContinuation::DictionaryApplication {
                 effect_payload: access.clone_root(effect_payload),
                 remaining_effect_values: remaining_effect_values
                     .iter()
@@ -466,11 +455,11 @@ impl DurableWhnfContinuation {
                 purpose,
                 ancestors,
                 phase,
-            } => RegionalWhnfContinuation::SemanticUndefined {
+            } => WhnfContinuation::SemanticUndefined {
                 purpose: *purpose,
                 ancestors: ancestors
                     .iter()
-                    .map(|ancestor| RegionalUndefinedDictionary {
+                    .map(|ancestor| WhnfUndefinedDictionary {
                         members: ancestor
                             .members
                             .iter()
@@ -481,29 +470,26 @@ impl DurableWhnfContinuation {
                     .collect(),
                 phase: *phase,
             },
-            Self::StaticAccess { keys, next } => RegionalWhnfContinuation::StaticAccess {
+            Self::StaticAccess { keys, next } => WhnfContinuation::StaticAccess {
                 keys: Arc::clone(keys),
                 next: *next,
             },
         }
     }
 
-    fn root_continuation(
-        access: &EvaluationValueAccess<'_>,
-        frame: RegionalWhnfContinuation,
-    ) -> Self {
+    fn root_continuation(access: &EvaluationValueAccess<'_>, frame: WhnfContinuation) -> Self {
         match frame {
-            RegionalWhnfContinuation::Generic(frame) => {
+            WhnfContinuation::Generic(frame) => {
                 Self::Generic(DurableWhnfFrame::root_regional(access, frame))
             }
-            RegionalWhnfContinuation::Application { arguments, next } => Self::Application {
+            WhnfContinuation::Application { arguments, next } => Self::Application {
                 arguments: arguments
                     .into_iter()
                     .map(|argument| access.values().root_runtime_value(argument))
                     .collect(),
                 next,
             },
-            RegionalWhnfContinuation::DictionaryApplication {
+            WhnfContinuation::DictionaryApplication {
                 effect_payload,
                 remaining_effect_values,
                 next_effect_value,
@@ -517,7 +503,7 @@ impl DurableWhnfContinuation {
                 next_effect_value,
                 apply_member: apply_member.map(|value| access.values().root_runtime_value(value)),
             },
-            RegionalWhnfContinuation::SemanticUndefined {
+            WhnfContinuation::SemanticUndefined {
                 purpose,
                 ancestors,
                 phase,
@@ -536,16 +522,14 @@ impl DurableWhnfContinuation {
                     .collect(),
                 phase,
             },
-            RegionalWhnfContinuation::StaticAccess { keys, next } => {
-                Self::StaticAccess { keys, next }
-            }
+            WhnfContinuation::StaticAccess { keys, next } => Self::StaticAccess { keys, next },
         }
     }
 }
 
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "NC2.0 defines the canonical net-owned state before NC2A installs its runtime node"
 )]
 impl NetWhnfState {
     /// Publishes one complete regional successor into net-owned storage.
@@ -558,47 +542,23 @@ impl NetWhnfState {
         _access: &EvaluationValueAccess<'_>,
         work: RegionalWhnfWork,
     ) -> Self {
-        Self {
-            focus: work.focus,
-            frames: work
-                .frames
-                .into_iter()
-                .map(NetWhnfContinuation::from_regional)
-                .collect(),
-            followed: work.followed,
-            source_owner: work.source_owner,
-            cycle_promise: work.cycle_promise,
-        }
+        Self(work.0)
     }
 
-    /// Projects a temporary regional copy while the enclosing net remains
-    /// traced and live.
-    pub(crate) fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
-        RegionalWhnfWork {
-            focus: access.values().duplicate_value(&self.focus),
-            frames: self
-                .frames
-                .iter()
-                .map(|frame| frame.project(access))
-                .collect(),
-            followed: self.followed.clone(),
-            source_owner: self.source_owner,
-            cycle_promise: self
-                .cycle_promise
-                .as_ref()
-                .map(|promise| promise.duplicate_in(access.values())),
-        }
+    /// Claims the complete state for regional execution without walking it.
+    pub(crate) fn into_regional(self, _access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
+        RegionalWhnfWork(self.0)
     }
 
     /// Drives one bounded callback-free quantum using the same regional
     /// transition loop as ordinary WHNF computation.
     pub(crate) fn drive_in(
-        &self,
+        self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
         reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
     ) -> NetWhnfDrive {
-        match drive_regional(access, self.project(access), budget, reduce) {
+        match drive_regional(access, self.into_regional(access), budget, reduce) {
             RegionalWhnfDrive::Ready(value) => NetWhnfDrive::Ready(value),
             RegionalWhnfDrive::Boundary { work, request } => NetWhnfDrive::Boundary {
                 state: Self::from_regional(access, work),
@@ -610,9 +570,15 @@ impl NetWhnfState {
             RegionalWhnfDrive::Failed(failure) => NetWhnfDrive::Failed(failure),
         }
     }
+}
 
+#[allow(
+    dead_code,
+    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
+)]
+impl WhnfState {
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
-        trace_net_value(&self.focus, visitor);
+        trace_whnf_value(&self.focus, visitor);
         for frame in &self.frames {
             frame.trace_managed_edges(visitor);
         }
@@ -624,116 +590,28 @@ impl NetWhnfState {
 
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
 )]
-impl NetWhnfContinuation {
-    fn from_regional(frame: RegionalWhnfContinuation) -> Self {
-        match frame {
-            RegionalWhnfContinuation::Generic(frame) => Self::Generic(NetWhnfFrame {
-                kind: frame.kind,
-                cursor: frame.cursor,
-                retained: frame.retained,
-            }),
-            RegionalWhnfContinuation::Application { arguments, next } => {
-                Self::Application { arguments, next }
-            }
-            RegionalWhnfContinuation::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            } => Self::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            },
-            RegionalWhnfContinuation::SemanticUndefined {
-                purpose,
-                ancestors,
-                phase,
-            } => Self::SemanticUndefined {
-                purpose,
-                ancestors: ancestors
-                    .into_iter()
-                    .map(|ancestor| NetUndefinedDictionary {
-                        members: ancestor.members,
-                        next: ancestor.next,
-                    })
-                    .collect(),
-                phase,
-            },
-            RegionalWhnfContinuation::StaticAccess { keys, next } => {
-                Self::StaticAccess { keys, next }
-            }
-        }
-    }
-
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfContinuation {
-        match self {
-            Self::Generic(frame) => RegionalWhnfContinuation::Generic(RegionalWhnfFrame {
-                kind: frame.kind,
-                cursor: frame.cursor,
-                retained: duplicate_net_values(access, &frame.retained),
-            }),
-            Self::Application { arguments, next } => RegionalWhnfContinuation::Application {
-                arguments: duplicate_net_values(access, arguments),
-                next: *next,
-            },
-            Self::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            } => RegionalWhnfContinuation::DictionaryApplication {
-                effect_payload: access.values().duplicate_value(effect_payload),
-                remaining_effect_values: duplicate_net_values(access, remaining_effect_values),
-                next_effect_value: *next_effect_value,
-                apply_member: apply_member
-                    .as_ref()
-                    .map(|value| access.values().duplicate_value(value)),
-            },
-            Self::SemanticUndefined {
-                purpose,
-                ancestors,
-                phase,
-            } => RegionalWhnfContinuation::SemanticUndefined {
-                purpose: *purpose,
-                ancestors: ancestors
-                    .iter()
-                    .map(|ancestor| RegionalUndefinedDictionary {
-                        members: duplicate_net_values(access, &ancestor.members),
-                        next: ancestor.next,
-                    })
-                    .collect(),
-                phase: *phase,
-            },
-            Self::StaticAccess { keys, next } => RegionalWhnfContinuation::StaticAccess {
-                keys: Arc::clone(keys),
-                next: *next,
-            },
-        }
-    }
-
+impl WhnfContinuation {
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
-            Self::Generic(frame) => trace_net_values(&frame.retained, visitor),
-            Self::Application { arguments, .. } => trace_net_values(arguments, visitor),
+            Self::Generic(frame) => trace_whnf_values(&frame.retained, visitor),
+            Self::Application { arguments, .. } => trace_whnf_values(arguments, visitor),
             Self::DictionaryApplication {
                 effect_payload,
                 remaining_effect_values,
                 apply_member,
                 ..
             } => {
-                trace_net_value(effect_payload, visitor);
-                trace_net_values(remaining_effect_values, visitor);
+                trace_whnf_value(effect_payload, visitor);
+                trace_whnf_values(remaining_effect_values, visitor);
                 if let Some(value) = apply_member {
-                    trace_net_value(value, visitor);
+                    trace_whnf_value(value, visitor);
                 }
             }
             Self::SemanticUndefined { ancestors, .. } => {
                 for ancestor in ancestors {
-                    trace_net_values(&ancestor.members, visitor);
+                    trace_whnf_values(&ancestor.members, visitor);
                 }
             }
             Self::StaticAccess { .. } => {}
@@ -743,30 +621,19 @@ impl NetWhnfContinuation {
 
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
 )]
-fn duplicate_net_values(access: &EvaluationValueAccess<'_>, values: &[Value]) -> Vec<Value> {
-    values
-        .iter()
-        .map(|value| access.values().duplicate_value(value))
-        .collect()
-}
-
-#[allow(
-    dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
-)]
-fn trace_net_value(value: &Value, visitor: &mut glam_gc::Visitor<'_>) {
+fn trace_whnf_value(value: &Value, visitor: &mut glam_gc::Visitor<'_>) {
     crate::core::trace_compatibility_value_managed_edges(value, visitor);
 }
 
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
 )]
-fn trace_net_values(values: &[Value], visitor: &mut glam_gc::Visitor<'_>) {
+fn trace_whnf_values(values: &[Value], visitor: &mut glam_gc::Visitor<'_>) {
     for value in values {
-        trace_net_value(value, visitor);
+        trace_whnf_value(value, visitor);
     }
 }
 
@@ -776,7 +643,7 @@ fn trace_net_values(values: &[Value], visitor: &mut glam_gc::Visitor<'_>) {
 // no managed edge. The representation performs no active work during Drop.
 unsafe impl glam_gc::Trace for NetWhnfState {
     fn trace(&self, visitor: &mut glam_gc::Visitor<'_>) {
-        self.trace_managed_edges(visitor);
+        self.0.trace_managed_edges(visitor);
     }
 }
 
@@ -786,10 +653,10 @@ unsafe impl glam_gc::Trace for NetWhnfState {
 // contract above; no callback or runtime capability is invoked by Drop.
 unsafe impl crate::core::ManagedFamily for NetWhnfState {
     const DROP_RECORD: crate::core::ManagedDropRecord = crate::core::ManagedDropRecord::passive(
-        "NC1A net-owned WHNF fixture",
+        "NC2.0 canonical net-owned WHNF fixture",
         "src/eval/whnf.rs",
         "direct Drop releases passive compatibility values",
-        "every managed identity is reported by NetWhnfState::trace",
+        "every managed identity is reported by WhnfState's canonical edge walk",
     );
 }
 
@@ -989,17 +856,17 @@ fn reduce_semantic_shell(
     access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfWork,
 ) -> RegionalWhnfStep {
-    match &work.focus {
+    match &work.0.focus {
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
             Some(Ok(value)) => {
-                work.followed.insert(access.lazy(lazy).id().into());
+                work.0.followed.insert(access.lazy(lazy).id().into());
                 RegionalWhnfStep::Delegate(value.into_value())
             }
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
             None => {
                 let id = access.lazy(lazy).id();
-                if work.source_owner == Some(id)
-                    && let Some(promise) = &work.cycle_promise
+                if work.0.source_owner == Some(id)
+                    && let Some(promise) = &work.0.cycle_promise
                 {
                     RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
                         WhnfDeferredRequest::PromiseFollow(promise.root_in(access.values())),
@@ -1013,8 +880,8 @@ fn reduce_semantic_shell(
         },
         Value::Promised(promise) => match access.promise(promise).assignment() {
             Some(Ok(value)) => {
-                work.cycle_promise = Some(promise.duplicate_in(access.values()));
-                if work.followed.insert(access.promise(promise).id().into()) {
+                work.0.cycle_promise = Some(promise.duplicate_in(access.values()));
+                if work.0.followed.insert(access.promise(promise).id().into()) {
                     RegionalWhnfStep::Delegate(value)
                 } else {
                     RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
@@ -1027,8 +894,8 @@ fn reduce_semantic_shell(
                 WhnfDeferredRequest::Promise(promise.root_in(access.values())),
             )),
         },
-        _ if work.frames.is_empty() => {
-            RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus))
+        _ if work.0.frames.is_empty() => {
+            RegionalWhnfStep::Ready(access.values().duplicate_value(&work.0.focus))
         }
         _ => resume_semantic_frame(access, work),
     }
@@ -1045,17 +912,17 @@ fn resume_semantic_frame(
     work: &mut RegionalWhnfWork,
 ) -> RegionalWhnfStep {
     match work.frames.last() {
-        Some(RegionalWhnfContinuation::SemanticUndefined { .. }) => {
+        Some(WhnfContinuation::SemanticUndefined { .. }) => {
             return resume_semantic_undefined(access, work);
         }
-        Some(RegionalWhnfContinuation::Application { .. }) => {}
-        Some(RegionalWhnfContinuation::DictionaryApplication { .. }) => {
+        Some(WhnfContinuation::Application { .. }) => {}
+        Some(WhnfContinuation::DictionaryApplication { .. }) => {
             unreachable!("dictionary application must be evaluating an undefined candidate")
         }
-        Some(RegionalWhnfContinuation::StaticAccess { .. }) => {
+        Some(WhnfContinuation::StaticAccess { .. }) => {
             return resume_static_access(access, work);
         }
-        Some(RegionalWhnfContinuation::Generic(_)) => {
+        Some(WhnfContinuation::Generic(_)) => {
             unreachable!("W3C has not activated the remaining generic frame families")
         }
         None => unreachable!("a semantic frame resume requires one frame"),
@@ -1063,7 +930,7 @@ fn resume_semantic_frame(
 
     let function = access.values().duplicate_value(&work.focus);
     let (arguments, next) = match work.frames.last() {
-        Some(RegionalWhnfContinuation::Application { arguments, next }) => (arguments, *next),
+        Some(WhnfContinuation::Application { arguments, next }) => (arguments, *next),
         _ => unreachable!(),
     };
     let step = apply_whnf_callable(access, function, &arguments[next..]);
@@ -1084,7 +951,7 @@ fn resume_static_access(
         .frames
         .pop()
         .expect("static access must retain its path frame");
-    let RegionalWhnfContinuation::StaticAccess { keys, next } = frame else {
+    let WhnfContinuation::StaticAccess { keys, next } = frame else {
         unreachable!()
     };
     let Value::Dict(dict) = &work.focus else {
@@ -1099,7 +966,7 @@ fn resume_static_access(
     let next = next + 1;
     if next < keys.len() {
         work.frames
-            .push(RegionalWhnfContinuation::StaticAccess { keys, next });
+            .push(WhnfContinuation::StaticAccess { keys, next });
     }
     RegionalWhnfStep::Delegate(value)
 }
@@ -1110,8 +977,7 @@ fn advance_application(
     value: Value,
     consumed: usize,
 ) -> RegionalWhnfStep {
-    let Some(RegionalWhnfContinuation::Application { arguments, next }) = work.frames.last_mut()
-    else {
+    let Some(WhnfContinuation::Application { arguments, next }) = work.frames.last_mut() else {
         unreachable!("an application result requires its application frame")
     };
     *next += consumed;
@@ -1143,13 +1009,12 @@ fn begin_dictionary_application(
         .map(|(_, value)| access.values().duplicate_value(value))
         .collect();
     let candidate = access.values().duplicate_value(&effect_payload);
-    work.frames
-        .push(RegionalWhnfContinuation::DictionaryApplication {
-            effect_payload,
-            remaining_effect_values,
-            next_effect_value: 0,
-            apply_member,
-        });
+    work.frames.push(WhnfContinuation::DictionaryApplication {
+        effect_payload,
+        remaining_effect_values,
+        next_effect_value: 0,
+        apply_member,
+    });
     begin_semantic_undefined(access, work, candidate, UndefinedPurpose::EffectPayload)
 }
 
@@ -1159,12 +1024,11 @@ fn begin_semantic_undefined(
     candidate: Value,
     purpose: UndefinedPurpose,
 ) -> RegionalWhnfStep {
-    work.frames
-        .push(RegionalWhnfContinuation::SemanticUndefined {
-            purpose,
-            ancestors: Vec::new(),
-            phase: UndefinedPhase::Inspect,
-        });
+    work.frames.push(WhnfContinuation::SemanticUndefined {
+        purpose,
+        ancestors: Vec::new(),
+        phase: UndefinedPhase::Inspect,
+    });
     RegionalWhnfStep::Delegate(candidate)
 }
 
@@ -1176,7 +1040,7 @@ fn resume_semantic_undefined(
         .frames
         .pop()
         .expect("semantic-undefined work must retain its frame");
-    let RegionalWhnfContinuation::SemanticUndefined {
+    let WhnfContinuation::SemanticUndefined {
         purpose,
         mut ancestors,
         phase,
@@ -1195,22 +1059,20 @@ fn resume_semantic_undefined(
                 .map(|(_, value)| access.values().duplicate_value(value))
                 .collect::<Vec<_>>();
             let Some(first) = members.first() else {
-                work.frames
-                    .push(RegionalWhnfContinuation::SemanticUndefined {
-                        purpose,
-                        ancestors,
-                        phase: UndefinedPhase::ReturnTrue,
-                    });
+                work.frames.push(WhnfContinuation::SemanticUndefined {
+                    purpose,
+                    ancestors,
+                    phase: UndefinedPhase::ReturnTrue,
+                });
                 return RegionalWhnfStep::Delegate(retained_focus);
             };
             let first = access.values().duplicate_value(first);
-            ancestors.push(RegionalUndefinedDictionary { members, next: 1 });
-            work.frames
-                .push(RegionalWhnfContinuation::SemanticUndefined {
-                    purpose,
-                    ancestors,
-                    phase: UndefinedPhase::Inspect,
-                });
+            ancestors.push(WhnfUndefinedDictionary { members, next: 1 });
+            work.frames.push(WhnfContinuation::SemanticUndefined {
+                purpose,
+                ancestors,
+                phase: UndefinedPhase::Inspect,
+            });
             RegionalWhnfStep::Delegate(first)
         }
         UndefinedPhase::ReturnTrue => {
@@ -1223,21 +1085,19 @@ fn resume_semantic_undefined(
                     .values()
                     .duplicate_value(&ancestor.members[ancestor.next]);
                 ancestor.next += 1;
-                work.frames
-                    .push(RegionalWhnfContinuation::SemanticUndefined {
-                        purpose,
-                        ancestors,
-                        phase: UndefinedPhase::Inspect,
-                    });
+                work.frames.push(WhnfContinuation::SemanticUndefined {
+                    purpose,
+                    ancestors,
+                    phase: UndefinedPhase::Inspect,
+                });
                 RegionalWhnfStep::Delegate(next)
             } else {
                 ancestors.pop();
-                work.frames
-                    .push(RegionalWhnfContinuation::SemanticUndefined {
-                        purpose,
-                        ancestors,
-                        phase: UndefinedPhase::ReturnTrue,
-                    });
+                work.frames.push(WhnfContinuation::SemanticUndefined {
+                    purpose,
+                    ancestors,
+                    phase: UndefinedPhase::ReturnTrue,
+                });
                 RegionalWhnfStep::Delegate(retained_focus)
             }
         }
@@ -1254,7 +1114,7 @@ fn finish_semantic_undefined(
         .frames
         .pop()
         .expect("dictionary application must underlie its undefined walk");
-    let RegionalWhnfContinuation::DictionaryApplication {
+    let WhnfContinuation::DictionaryApplication {
         effect_payload,
         remaining_effect_values,
         mut next_effect_value,
@@ -1276,18 +1136,17 @@ fn finish_semantic_undefined(
             .values()
             .duplicate_value(&remaining_effect_values[next_effect_value]);
         next_effect_value += 1;
-        work.frames
-            .push(RegionalWhnfContinuation::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            });
+        work.frames.push(WhnfContinuation::DictionaryApplication {
+            effect_payload,
+            remaining_effect_values,
+            next_effect_value,
+            apply_member,
+        });
         return begin_semantic_undefined(access, work, candidate, UndefinedPurpose::EffectExtra);
     }
 
     let argument = match work.frames.last() {
-        Some(RegionalWhnfContinuation::Application { arguments, next }) => {
+        Some(WhnfContinuation::Application { arguments, next }) => {
             access.values().duplicate_value(&arguments[*next])
         }
         _ => unreachable!("dictionary application must retain its caller frame"),
@@ -1423,13 +1282,13 @@ mod tests {
     #[allow(dead_code)]
     enum UnboxedCallableCheckpointPrototype {
         Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
-        CallableCheckpoint(RegionalWhnfWork),
+        CallableCheckpoint(NetWhnfState),
     }
 
     #[allow(dead_code)]
     enum BoxedCallableCheckpointPrototype {
         Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
-        CallableCheckpoint(Box<RegionalWhnfWork>),
+        CallableCheckpoint(Box<NetWhnfState>),
     }
 
     fn assert_send<T: Send>() {}
@@ -1437,30 +1296,31 @@ mod tests {
     #[test]
     fn regional_whnf_and_callable_checkpoint_layout_baseline() {
         assert_send::<RegionalWhnfWork>();
+        assert_send::<NetWhnfState>();
         assert_send::<BoxedCallableCheckpointPrototype>();
 
         let continuation_families = [
-            RegionalWhnfContinuation::Generic(RegionalWhnfFrame {
+            WhnfContinuation::Generic(WhnfFrame {
                 kind: WhnfFrameKind::DemandThenInspect,
                 cursor: 0,
                 retained: Vec::new(),
             }),
-            RegionalWhnfContinuation::Application {
+            WhnfContinuation::Application {
                 arguments: Vec::new(),
                 next: 0,
             },
-            RegionalWhnfContinuation::DictionaryApplication {
+            WhnfContinuation::DictionaryApplication {
                 effect_payload: Value::Number(0.into()),
                 remaining_effect_values: Vec::new(),
                 next_effect_value: 0,
                 apply_member: None,
             },
-            RegionalWhnfContinuation::SemanticUndefined {
+            WhnfContinuation::SemanticUndefined {
                 purpose: UndefinedPurpose::EffectPayload,
                 ancestors: Vec::new(),
                 phase: UndefinedPhase::Inspect,
             },
-            RegionalWhnfContinuation::StaticAccess {
+            WhnfContinuation::StaticAccess {
                 keys: Arc::from([]),
                 next: 0,
             },
@@ -1468,7 +1328,7 @@ mod tests {
         for continuation in &continuation_families {
             assert_eq!(
                 std::mem::size_of_val(continuation),
-                std::mem::size_of::<RegionalWhnfContinuation>()
+                std::mem::size_of::<WhnfContinuation>()
             );
         }
 
@@ -1488,10 +1348,12 @@ mod tests {
         #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
         {
             assert_eq!(std::mem::size_of::<Value>(), 64);
-            assert_eq!(std::mem::size_of::<RegionalWhnfFrame>(), 40);
-            assert_eq!(std::mem::size_of::<RegionalUndefinedDictionary>(), 32);
-            assert_eq!(std::mem::size_of::<RegionalWhnfContinuation>(), 160);
+            assert_eq!(std::mem::size_of::<WhnfFrame>(), 40);
+            assert_eq!(std::mem::size_of::<WhnfUndefinedDictionary>(), 32);
+            assert_eq!(std::mem::size_of::<WhnfContinuation>(), 160);
+            assert_eq!(std::mem::size_of::<WhnfState>(), 128);
             assert_eq!(std::mem::size_of::<RegionalWhnfWork>(), 128);
+            assert_eq!(std::mem::size_of::<NetWhnfState>(), 128);
             assert_eq!(runtime_node, 96);
             assert_eq!(
                 std::mem::size_of::<UnboxedCallableCheckpointPrototype>(),
@@ -1523,7 +1385,7 @@ mod tests {
             declaration(
                 source,
                 "pub(crate) struct DurableWhnfFrame",
-                "/// Callback-free working state",
+                "/// Complete raw-edge WHNF state",
             ),
         ] {
             for forbidden in [

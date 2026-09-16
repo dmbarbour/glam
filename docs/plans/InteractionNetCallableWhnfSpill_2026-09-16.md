@@ -1,6 +1,6 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: in progress; NC0-NC1 completed on 2026-09-16. The plan was revised on
+Status: in progress; NC0-NC2.0 completed on 2026-09-16. The plan was revised on
 2026-09-16 first to use one net-owned callable checkpoint rather than an
 `Operator >< Data` encoding, then to make regional and net-owned roles
 zero-walk wrappers around one canonical `WhnfState`. This is the focused
@@ -95,10 +95,11 @@ The reusable WHNF evaluator already has the required semantic information:
   access.
 
 NC1 introduced a separate `NetWhnfState`/`NetWhnfContinuation` correctness
-scaffold and proved its exhaustive edge walk. Its borrowed projection still
-duplicates values and reconstructs continuation containers; that is a test
-oracle, not an acceptable production transition. NC2.0 replaces the duplicate
-representations before the runtime node becomes live.
+scaffold and proved its exhaustive edge walk. NC2.0 has now replaced that
+scaffold with one canonical `WhnfState`/`WhnfContinuation` representation.
+Regional and net-owned forms are consuming role wrappers; changing roles no
+longer duplicates values, reconstructs continuation containers, or uses the
+borrowed projection oracle.
 
 `DurableWhnfState` cannot be embedded in the managed net. Its runtime roots
 are correct for an outer Rust machine, but a root stored inside the traced heap
@@ -790,6 +791,8 @@ net-owned storage under one bounded semantic quantum.
 
 #### NC2.0 — Canonical state and zero-walk role wrappers
 
+Status: complete on 2026-09-16.
+
 Replace the parallel regional/net state and continuation definitions with one
 `WhnfState` and one `WhnfContinuation` vocabulary. Keep
 `RegionalWhnfWork(WhnfState)` and `NetWhnfState(WhnfState)` as explicit
@@ -809,6 +812,17 @@ bounded NC1 `dead_code` allowance only when NC2A installs the runtime payload.
 Record the current `DurableWhnfState` conversion as the one intentionally
 remaining isomorphism. Assign its aggregation to parent W6G.3 rather than
 generalizing the net wrappers back into a storage-policy abstraction.
+
+Completion record: `WhnfState` and `WhnfContinuation` now own the complete
+raw-edge vocabulary. `RegionalWhnfWork` and `NetWhnfState` consume and rewrap
+that exact state; their transition bodies contain no traversal, collection,
+duplication, or root construction. The role-handoff fixture preserves the
+outer frame buffer and every representative nested buffer's pointer, length,
+and capacity across repeated transitions, while root-registration counts stay
+unchanged. The forced-collection fixture traces the same canonical state and
+retains every focus, frame, followed identity, source owner, and promise
+breadcrumb. The durable rooted representation remains the sole intentional
+isomorphism and stays assigned to parent W6G.3.
 
 #### NC2A — Specialization payload and boxing decision
 

@@ -58,13 +58,14 @@ fn immediate_completion_returns_whnf_in_one_step() {
     let poll = EvaluationPollContext::for_context(&context);
     poll.with_value_access(&context, |access| {
         let expected = Value::binary_from_text("immediate");
-        let work = RegionalWhnfWork {
-            focus: access.values().duplicate_value(&expected),
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        };
+        let work = RegionalWhnfWork::from_parts(
+            &access,
+            access.values().duplicate_value(&expected),
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            None,
+        );
         let mut budget = WhnfStepBudget::new(1);
         let outcome = drive_regional(&access, work, &mut budget, |access, work| {
             RegionalWhnfStep::Ready(access.values().duplicate_value(&work.focus))
@@ -89,13 +90,14 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
         let expected = Value::binary_from_text("tail");
         let frames = Vec::with_capacity(8);
         let frame_capacity = frames.capacity();
-        let work = RegionalWhnfWork {
-            focus: access.values().duplicate_value(&expected),
+        let work = RegionalWhnfWork::from_parts(
+            &access,
+            access.values().duplicate_value(&expected),
             frames,
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        };
+            BTreeSet::new(),
+            None,
+            None,
+        );
         let mut transitions = 0;
         let mut budget = WhnfStepBudget::new(DELEGATIONS + 1);
         let outcome = drive_regional(&access, work, &mut budget, |access, work| {
@@ -127,13 +129,14 @@ fn budget_yield_retains_work_without_inventing_a_dependency() {
     let context = EvalContext::isolated(isolated_values());
     let poll = EvaluationPollContext::for_context(&context);
     poll.with_value_access(&context, |access| {
-        let work = RegionalWhnfWork {
-            focus: Value::binary_from_text("yield"),
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        };
+        let work = RegionalWhnfWork::from_parts(
+            &access,
+            Value::binary_from_text("yield"),
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            None,
+        );
         let mut transitions = 0;
         let mut budget = WhnfStepBudget::new(3);
         let outcome = drive_regional(&access, work, &mut budget, |access, work| {
@@ -207,7 +210,7 @@ impl SyntheticAlgebra {
             } => {
                 self.events.push(event);
                 work.frames.push(
-                    RegionalWhnfFrame {
+                    WhnfFrame {
                         kind: WhnfFrameKind::DiagnosticContext,
                         cursor: usize::MAX,
                         retained: vec![Value::binary_from_text(context)],
@@ -223,7 +226,7 @@ impl SyntheticAlgebra {
             } => {
                 self.events.push(event);
                 work.frames.push(
-                    RegionalWhnfFrame {
+                    WhnfFrame {
                         kind: WhnfFrameKind::DemandThenInspect,
                         cursor: continuation,
                         retained: Vec::new(),
@@ -249,7 +252,7 @@ impl SyntheticAlgebra {
                 let Some(frame) = work.frames.pop() else {
                     return RegionalWhnfStep::Ready(Value::binary_from_text(result));
                 };
-                let RegionalWhnfContinuation::Generic(frame) = frame else {
+                let WhnfContinuation::Generic(frame) = frame else {
                     panic!("synthetic return encountered an application frame")
                 };
                 match frame.kind {
@@ -268,7 +271,7 @@ impl SyntheticAlgebra {
                 self.events.push(event);
                 let mut failure = EvaluationFailure::message(message);
                 while let Some(frame) = work.frames.pop() {
-                    let RegionalWhnfContinuation::Generic(mut frame) = frame else {
+                    let WhnfContinuation::Generic(mut frame) = frame else {
                         panic!("synthetic failure encountered an application frame")
                     };
                     assert_eq!(frame.kind, WhnfFrameKind::DiagnosticContext);
@@ -325,13 +328,14 @@ fn dependency_resumes_at_the_recorded_phase_without_replaying_completed_work() {
             dependency_ready: false,
             events: Vec::new(),
         };
-        let work = RegionalWhnfWork {
-            focus: instruction(0),
-            frames: Vec::new(),
-            followed: BTreeSet::new(),
-            source_owner: None,
-            cycle_promise: None,
-        };
+        let work = RegionalWhnfWork::from_parts(
+            &access,
+            instruction(0),
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            None,
+        );
         let mut budget = WhnfStepBudget::new(10);
         let first = drive_regional(&access, work, &mut budget, |access, work| {
             algebra.reduce(access, work)
@@ -341,10 +345,10 @@ fn dependency_resumes_at_the_recorded_phase_without_replaying_completed_work() {
         };
         assert_eq!(instruction_index(&work.focus), 2);
         assert_eq!(work.frames.len(), 2);
-        let RegionalWhnfContinuation::Generic(outer) = &work.frames[0] else {
+        let WhnfContinuation::Generic(outer) = &work.frames[0] else {
             panic!("expected a generic diagnostic frame")
         };
-        let RegionalWhnfContinuation::Generic(inner) = &work.frames[1] else {
+        let WhnfContinuation::Generic(inner) = &work.frames[1] else {
             panic!("expected a generic demand frame")
         };
         assert_eq!(outer.kind, WhnfFrameKind::DiagnosticContext);
