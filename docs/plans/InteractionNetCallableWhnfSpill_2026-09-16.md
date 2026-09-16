@@ -617,6 +617,8 @@ named migration owner.
 
 ### NC1 — Complete net-owned WHNF state and shared budget
 
+Status: complete on 2026-09-16.
+
 #### NC1A — Full regional/net isomorphism
 
 Introduce `NetWhnfState` and `NetWhnfContinuation` with every field and variant
@@ -639,6 +641,19 @@ state. Give each value-bearing frame position and the optional promise
 breadcrumb an independently collectible sentinel so omitting any one edge
 fails deterministically.
 
+Completion record: `NetWhnfState` now mirrors all five regional continuation
+families plus `focus`, `followed`, `source_owner`, and `cycle_promise`. It owns
+raw semantic edges rather than registered roots. Explicit publication consumes
+one complete `RegionalWhnfWork`; projection duplicates every raw value only
+under matching `EvaluationValueAccess`. Its `Trace` implementation composes
+the same compile-exhaustive compatibility walk as the existing managed value
+families and directly reports the promise breadcrumb. A temporary managed
+fixture roots only the state itself, collects, then verifies independently
+allocated lazy sentinels in every value-bearing position and the promise
+breadcrumb all survive before a second publication/projection round trip. The
+representation and its narrow trace adapter carry a bounded `dead_code`
+allowance until NC2 installs the corresponding runtime node.
+
 #### NC1B — Shared callback-free driver
 
 Factor the regional driver so general `WhnfComputation` and net checkpoint
@@ -650,6 +665,13 @@ Force budget splits before and after every transition in frame-free shell
 chains and representative frame-bearing work. Results, failures, remaining
 frames, cursors, and retained values must match uninterrupted evaluation.
 
+Completion record: both durable and net-owned work use `drive_regional` as the
+single callback-free transition loop. `NetWhnfState::drive_in` projects once,
+uses that loop, and returns complete net-owned successors on yield and
+boundary. Forced splits at zero and after each transition match uninterrupted
+ready results and exact spent/remaining budget. Separate frame-bearing tests
+retain focus, cursor, arguments, boundary state, and failure identity.
+
 #### NC1C — Net-machine semantic budget
 
 Pass the outer mutable poll budget into `NetWhnfMachine::poll` and charge that
@@ -657,6 +679,15 @@ same token for call/operator dispatch and WHNF transitions. Preserve the
 existing structural normalization-batch policy. Add a deterministic
 zero/one/many matrix, assert exact `spent` and `remaining` observations, and
 prove one outer poll cannot grant a fresh full budget to every retry.
+
+Completion record: `NetWhnfMachine::poll` now borrows the caller's
+`EvaluationStepBudget`; structural cursor/frontier normalization remains
+uncharged while each call, operator-call, or blocked semantic retry consumes
+one shared token. Because semantic discovery has already claimed a fresh call
+pair, denied budget explicitly releases that exact call/operator claim before
+requeueing it. The deterministic zero/one/many fixture forces denial and
+resumption, checks exact spent/remaining observations, and reuses an exhausted
+budget across another poll to prove there is no nested allowance renewal.
 
 #### NC1D — Reachability inventory, not optimization
 
@@ -671,6 +702,30 @@ Record the apparent proof that ordinary call-site demand begins frame-free and
 that lazy-source application/reflection/access work belongs to the canonical
 producer. Do not remove fields in NC1; retain the proof obligations for NC5D
 after the full-state topology works end to end.
+
+Completion record: the source-backed inventory records the following current
+creation paths without optimizing any field away:
+
+- ordinary `Bind >< Data` callable lowering receives one value and contains no
+  application/static-access constructor, source-owner attachment, frame push,
+  or promise breadcrumb;
+- application frames enter through `from_application_checkpoint_in`, while
+  static-access frames enter through `from_static_access_checkpoint_in`;
+- `with_source_owner` is used only by lazy producer machines (access, list,
+  list-effect, object, and their application submachines), not call-site
+  lowering;
+- dictionary-application and semantic-undefined frames are created only while
+  resuming the corresponding application, and static-access/undefined frames
+  requeue only their own successor state;
+- the promise breadcrumb is created only after following an assigned promise;
+  and
+- `LazySource::Application`, `ReflectionTask`, and `Access` remain dispatched
+  by the canonical lazy producer in `value.rs`.
+
+The focused inventory test latches the frame-free callable seam and those
+producer-owned source families. NC3 deliberately replaces the synchronous
+`eval_value_in` call named by that latch; NC5D remains responsible for proving
+which complete fields can then be pared from the installed topology.
 
 Exit: complete WHNF state can move losslessly between regional execution and
 net-owned storage under one bounded semantic quantum.

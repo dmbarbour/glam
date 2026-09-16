@@ -883,6 +883,22 @@ mod persistent_edge_trait_inventory;
 
 mod payload_edges;
 
+/// Reports every managed identity reachable through one compatibility value.
+///
+/// This narrow adapter lets evaluator-owned managed containers compose the
+/// same exhaustive value walk used by the core managed families. It performs
+/// no semantic observation and does not retain the visitor.
+#[allow(
+    dead_code,
+    reason = "NC1 defines the traced net-WHNF payload before NC2 installs its runtime node"
+)]
+pub(crate) fn trace_compatibility_value_managed_edges(
+    value: &super::Value,
+    visitor: &mut Visitor<'_>,
+) {
+    payload_edges::visit_compatibility_managed_edges(value, visitor);
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

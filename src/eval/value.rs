@@ -635,7 +635,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 failure_context,
             } = &mut self.work
             {
-                return match machine.poll(context) {
+                return match machine.poll(context, step_budget) {
                     Ok(NetWhnfPoll::Ready(value)) => {
                         self.follow_value(context.root_value(value))
                     }

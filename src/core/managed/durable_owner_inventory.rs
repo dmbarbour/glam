@@ -393,6 +393,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         RootSurface,
         "W1A"
     ),
+    exact_managed!(
+        "src/eval/whnf.rs",
+        "net-owned WHNF checkpoint state",
+        "raw focus, every continuation value, followed identities, source owner, and promise breadcrumb",
+        "one managed runtime-net checkpoint payload",
+        CompatibilityPayload,
+        "NC1A implements the complete NetWhnfState edge walk and collects independently allocated sentinels through one rooted state fixture"
+    ),
     closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
@@ -829,10 +837,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 184;
+const DECLARATION_BASELINE_COUNT: usize = 189;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([142, 140, 5, 14, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 7_676_065_153_881_662_658;
+    DeclarationSignals::new([150, 140, 5, 15, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_513_005_381_702_961_522;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -970,6 +978,14 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "src/eval/value.rs::LazyTaskWork" | "src/eval/value.rs::HostCallSourceState"
     ) {
         "LazyTaskMachine / PromiseFollower poll-spanning state"
+    } else if matches!(
+        declaration,
+        "src/eval/whnf.rs::NetWhnfContinuation"
+            | "src/eval/whnf.rs::NetWhnfFrame"
+            | "src/eval/whnf.rs::NetWhnfState"
+            | "src/eval/whnf.rs::NetUndefinedDictionary"
+    ) {
+        "net-owned WHNF checkpoint state"
     } else if matches!(
         declaration,
         "src/eval/whnf.rs::DurableWhnfCheckpoint"

@@ -37,7 +37,7 @@ pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, ManagedCoreNetAccess, ManagedCoreNetEdge,
     ManagedCoreNetRoot, ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess,
     ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot,
-    RuntimeValueAccess, RuntimeValueObserver,
+    RuntimeValueAccess, RuntimeValueObserver, trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};

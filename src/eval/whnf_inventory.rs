@@ -633,8 +633,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // classification substitutions which leave those counts unchanged.
 // W6B.0 removed two copied-budget adapter occurrences while preserving their
 // resumable owners; nested WHNF now borrows the outer poll budget directly.
-const EXPECTED_OCCURRENCES: usize = 280;
-const EXPECTED_FINGERPRINT: u64 = 2_489_930_610_344_343_526;
+// NC1 adds three bounded walks over net-owned frame/value edges; they are
+// complete-state projection/tracing loops, not recursive Rust evaluation.
+const EXPECTED_OCCURRENCES: usize = 283;
+const EXPECTED_FINGERPRINT: u64 = 10_726_960_500_753_914_021;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 105),
     (Signal::EvalLazy, 2),
@@ -650,11 +652,11 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 35),
-    (Signal::UserSizedLoop, 54),
+    (Signal::UserSizedLoop, 57),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 126),
+    (WorkShape::DemandThenInspect, 129),
     (WorkShape::OrderedOperands, 11),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),

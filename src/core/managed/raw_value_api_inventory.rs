@@ -186,6 +186,7 @@ impl ApiOccurrence {
         } else if self
             .declaration
             .starts_with("src/core/managed/payload_edges")
+            || self.declaration == "src/core/managed.rs::trace_compatibility_value_managed_edges"
             || self.declaration == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
         {
             ApiDisposition::CollectorPrimitive
@@ -286,7 +287,9 @@ impl ApiOccurrence {
         let family = match path {
             "src/eval/value.rs" => D2cFamily::ValueDemand,
             "src/eval/application.rs" | "src/eval/sequence.rs" => D2cFamily::ApplicationAndSequence,
-            "src/eval/operator.rs" | "src/eval/net.rs" => D2cFamily::OperatorAndNet,
+            "src/eval/operator.rs" | "src/eval/net.rs" | "src/eval/whnf.rs" => {
+                D2cFamily::OperatorAndNet
+            }
             "src/eval/builtins.rs"
             | "src/eval/builtins/assertion.rs"
             | "src/eval/builtins/comparison.rs"
@@ -408,6 +411,7 @@ impl ApiOccurrence {
             (OperatorAndNet, "src/eval/operator.rs", _) => W6B1OperatorDescriptors,
             (OperatorAndNet, "src/eval/net.rs", "callable" | "parts") => W6B3NetClaimProjection,
             (OperatorAndNet, "src/eval/net.rs", _) => W6B4NetApplication,
+            (OperatorAndNet, "src/eval/whnf.rs", _) => W6B4NetApplication,
 
             (DispatchScalarAndStrategy, "src/eval/builtins.rs", _) => W6C1DispatchAndArity,
             (
@@ -1403,13 +1407,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        560,
+        564,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        10_958_071_472_309_411_628,
+        12_528_629_874_392_549_264,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1420,9 +1424,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 117),
-        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 25),
-        ((ApiKind::Function, ApiDisposition::Violation), 408),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 118),
+        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 26),
+        ((ApiKind::Function, ApiDisposition::Violation), 410),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1472,6 +1476,8 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
                 .starts_with("src/core/managed/payload_edges")
             || occurrence.declaration
                 == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
+            || occurrence.declaration
+                == "src/core/managed.rs::trace_compatibility_value_managed_edges"
     }));
 }
 
@@ -1492,7 +1498,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            150,
+            152,
         ),
         (
             (
@@ -1634,7 +1640,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         BTreeMap::from([
             (D2cFamily::ValueDemand, 12),
             (D2cFamily::ApplicationAndSequence, 7),
-            (D2cFamily::OperatorAndNet, 2),
+            (D2cFamily::OperatorAndNet, 4),
             (D2cFamily::DispatchScalarAndStrategy, 25),
             (D2cFamily::CollectionsAndPatterns, 43),
             (D2cFamily::AnnotationsAndEffects, 36),
@@ -1661,7 +1667,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         BTreeMap::from([
             (D2cCurrentContext::EvaluatorStep, 121),
             (D2cCurrentContext::DurableEval, 7),
-            (D2cCurrentContext::ContextFree, 22),
+            (D2cCurrentContext::ContextFree, 24),
         ]),
         "the D.2c signature baseline drifted"
     );
@@ -1682,7 +1688,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [22, 128, 0],
+        [24, 128, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1712,7 +1718,7 @@ fn d2c_family_fingerprints_are_exact() {
             D2cFamily::ApplicationAndSequence,
             11_551_636_234_692_466_987,
         ),
-        (D2cFamily::OperatorAndNet, 17_875_572_835_706_272_864),
+        (D2cFamily::OperatorAndNet, 6_901_268_698_508_156_085),
         (
             D2cFamily::DispatchScalarAndStrategy,
             18_123_437_161_959_930_221,
@@ -1761,7 +1767,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A1ApplicationLeaves, 1),
         (W6A2ApplicationWork, 4),
         (W6A4SequenceWork, 2),
-        (W6B4NetApplication, 2),
+        (W6B4NetApplication, 4),
         (W6C1DispatchAndArity, 2),
         (W6C2AssertionAndConditional, 3),
         (W6C3Comparison, 9),
@@ -1808,7 +1814,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A1ApplicationLeaves, 4_928_394_332_436_527_125),
         (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
-        (W6B4NetApplication, 17_875_572_835_706_272_864),
+        (W6B4NetApplication, 6_901_268_698_508_156_085),
         (W6C1DispatchAndArity, 10_640_725_338_893_605_103),
         (W6C2AssertionAndConditional, 509_629_874_793_238_271),
         (W6C3Comparison, 1_125_825_947_678_604_093),

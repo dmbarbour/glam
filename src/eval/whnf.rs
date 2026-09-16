@@ -95,6 +95,25 @@ pub(crate) struct RegionalWhnfWork {
     cycle_promise: Option<PromisedValue>,
 }
 
+/// Complete WHNF state stored as traced edges inside a runtime net.
+///
+/// Unlike [`DurableWhnfState`], this representation owns no registered roots.
+/// Unlike [`RegionalWhnfWork`], it may outlive one access region because its
+/// enclosing managed net traces every semantic edge below. Regional execution
+/// always projects a temporary copy under matching access and publishes the
+/// complete successor before that access closes.
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+pub(crate) struct NetWhnfState {
+    focus: Value,
+    frames: Vec<NetWhnfContinuation>,
+    followed: BTreeSet<DeferredValueId>,
+    source_owner: Option<LazyId>,
+    cycle_promise: Option<PromisedValue>,
+}
+
 /// Regional counterpart of [`DurableWhnfFrame`].
 ///
 /// These raw values may be copied and rearranged only while the evaluator's
@@ -129,6 +148,52 @@ enum RegionalWhnfContinuation {
 }
 
 struct RegionalUndefinedDictionary {
+    members: Vec<Value>,
+    next: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+enum NetWhnfContinuation {
+    Generic(NetWhnfFrame),
+    Application {
+        arguments: Vec<Value>,
+        next: usize,
+    },
+    DictionaryApplication {
+        effect_payload: Value,
+        remaining_effect_values: Vec<Value>,
+        next_effect_value: usize,
+        apply_member: Option<Value>,
+    },
+    SemanticUndefined {
+        purpose: UndefinedPurpose,
+        ancestors: Vec<NetUndefinedDictionary>,
+        phase: UndefinedPhase,
+    },
+    StaticAccess {
+        keys: Arc<[crate::core::Key]>,
+        next: usize,
+    },
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+struct NetWhnfFrame {
+    kind: WhnfFrameKind,
+    cursor: usize,
+    retained: Vec<Value>,
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+struct NetUndefinedDictionary {
     members: Vec<Value>,
     next: usize,
 }
@@ -197,6 +262,25 @@ pub(crate) enum RegionalWhnfDrive {
         request: RegionalBoundaryRequest,
     },
     Yielded(RegionalWhnfWork),
+    Failed(Arc<EvaluationFailure>),
+}
+
+/// Net-owned counterpart of [`RegionalWhnfDrive`].
+///
+/// Yield and boundary outcomes contain the complete replacement state. Ready
+/// and failed outcomes are consumed by the caller while matching access is
+/// still active and therefore need no intermediate roots.
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+pub(crate) enum NetWhnfDrive {
+    Ready(Value),
+    Boundary {
+        state: NetWhnfState,
+        request: RegionalBoundaryRequest,
+    },
+    Yielded(NetWhnfState),
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -457,6 +541,256 @@ impl DurableWhnfContinuation {
             }
         }
     }
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+impl NetWhnfState {
+    /// Publishes one complete regional successor into net-owned storage.
+    ///
+    /// Requiring the matching access makes the ownership handoff explicit even
+    /// though every raw value moves rather than being duplicated. The caller
+    /// must install the returned state beneath its traced net owner before the
+    /// region closes.
+    pub(crate) fn from_regional(
+        _access: &EvaluationValueAccess<'_>,
+        work: RegionalWhnfWork,
+    ) -> Self {
+        Self {
+            focus: work.focus,
+            frames: work
+                .frames
+                .into_iter()
+                .map(NetWhnfContinuation::from_regional)
+                .collect(),
+            followed: work.followed,
+            source_owner: work.source_owner,
+            cycle_promise: work.cycle_promise,
+        }
+    }
+
+    /// Projects a temporary regional copy while the enclosing net remains
+    /// traced and live.
+    pub(crate) fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
+        RegionalWhnfWork {
+            focus: access.values().duplicate_value(&self.focus),
+            frames: self
+                .frames
+                .iter()
+                .map(|frame| frame.project(access))
+                .collect(),
+            followed: self.followed.clone(),
+            source_owner: self.source_owner,
+            cycle_promise: self
+                .cycle_promise
+                .as_ref()
+                .map(|promise| promise.duplicate_in(access.values())),
+        }
+    }
+
+    /// Drives one bounded callback-free quantum using the same regional
+    /// transition loop as ordinary WHNF computation.
+    pub(crate) fn drive_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        budget: &mut WhnfStepBudget,
+        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+    ) -> NetWhnfDrive {
+        match drive_regional(access, self.project(access), budget, reduce) {
+            RegionalWhnfDrive::Ready(value) => NetWhnfDrive::Ready(value),
+            RegionalWhnfDrive::Boundary { work, request } => NetWhnfDrive::Boundary {
+                state: Self::from_regional(access, work),
+                request,
+            },
+            RegionalWhnfDrive::Yielded(work) => {
+                NetWhnfDrive::Yielded(Self::from_regional(access, work))
+            }
+            RegionalWhnfDrive::Failed(failure) => NetWhnfDrive::Failed(failure),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        trace_net_value(&self.focus, visitor);
+        for frame in &self.frames {
+            frame.trace_managed_edges(visitor);
+        }
+        if let Some(promise) = &self.cycle_promise {
+            promise.trace_managed_edge(visitor);
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+impl NetWhnfContinuation {
+    fn from_regional(frame: RegionalWhnfContinuation) -> Self {
+        match frame {
+            RegionalWhnfContinuation::Generic(frame) => Self::Generic(NetWhnfFrame {
+                kind: frame.kind,
+                cursor: frame.cursor,
+                retained: frame.retained,
+            }),
+            RegionalWhnfContinuation::Application { arguments, next } => {
+                Self::Application { arguments, next }
+            }
+            RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            } => Self::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            },
+            RegionalWhnfContinuation::SemanticUndefined {
+                purpose,
+                ancestors,
+                phase,
+            } => Self::SemanticUndefined {
+                purpose,
+                ancestors: ancestors
+                    .into_iter()
+                    .map(|ancestor| NetUndefinedDictionary {
+                        members: ancestor.members,
+                        next: ancestor.next,
+                    })
+                    .collect(),
+                phase,
+            },
+            RegionalWhnfContinuation::StaticAccess { keys, next } => {
+                Self::StaticAccess { keys, next }
+            }
+        }
+    }
+
+    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfContinuation {
+        match self {
+            Self::Generic(frame) => RegionalWhnfContinuation::Generic(RegionalWhnfFrame {
+                kind: frame.kind,
+                cursor: frame.cursor,
+                retained: duplicate_net_values(access, &frame.retained),
+            }),
+            Self::Application { arguments, next } => RegionalWhnfContinuation::Application {
+                arguments: duplicate_net_values(access, arguments),
+                next: *next,
+            },
+            Self::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                next_effect_value,
+                apply_member,
+            } => RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload: access.values().duplicate_value(effect_payload),
+                remaining_effect_values: duplicate_net_values(access, remaining_effect_values),
+                next_effect_value: *next_effect_value,
+                apply_member: apply_member
+                    .as_ref()
+                    .map(|value| access.values().duplicate_value(value)),
+            },
+            Self::SemanticUndefined {
+                purpose,
+                ancestors,
+                phase,
+            } => RegionalWhnfContinuation::SemanticUndefined {
+                purpose: *purpose,
+                ancestors: ancestors
+                    .iter()
+                    .map(|ancestor| RegionalUndefinedDictionary {
+                        members: duplicate_net_values(access, &ancestor.members),
+                        next: ancestor.next,
+                    })
+                    .collect(),
+                phase: *phase,
+            },
+            Self::StaticAccess { keys, next } => RegionalWhnfContinuation::StaticAccess {
+                keys: Arc::clone(keys),
+                next: *next,
+            },
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        match self {
+            Self::Generic(frame) => trace_net_values(&frame.retained, visitor),
+            Self::Application { arguments, .. } => trace_net_values(arguments, visitor),
+            Self::DictionaryApplication {
+                effect_payload,
+                remaining_effect_values,
+                apply_member,
+                ..
+            } => {
+                trace_net_value(effect_payload, visitor);
+                trace_net_values(remaining_effect_values, visitor);
+                if let Some(value) = apply_member {
+                    trace_net_value(value, visitor);
+                }
+            }
+            Self::SemanticUndefined { ancestors, .. } => {
+                for ancestor in ancestors {
+                    trace_net_values(&ancestor.members, visitor);
+                }
+            }
+            Self::StaticAccess { .. } => {}
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+fn duplicate_net_values(access: &EvaluationValueAccess<'_>, values: &[Value]) -> Vec<Value> {
+    values
+        .iter()
+        .map(|value| access.values().duplicate_value(value))
+        .collect()
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+fn trace_net_value(value: &Value, visitor: &mut glam_gc::Visitor<'_>) {
+    crate::core::trace_compatibility_value_managed_edges(value, visitor);
+}
+
+#[allow(
+    dead_code,
+    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+)]
+fn trace_net_values(values: &[Value], visitor: &mut glam_gc::Visitor<'_>) {
+    for value in values {
+        trace_net_value(value, visitor);
+    }
+}
+
+// SAFETY: every semantic `Value` position is traversed through the core's
+// compile-exhaustive compatibility walk, and the promise breadcrumb reports
+// its exact managed edge. Scalar cursors, IDs, enum tags, and key paths contain
+// no managed edge. The representation performs no active work during Drop.
+unsafe impl glam_gc::Trace for NetWhnfState {
+    fn trace(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.trace_managed_edges(visitor);
+    }
+}
+
+#[cfg(test)]
+// SAFETY: direct destruction releases only passive compatibility values and
+// ordinary collections. Managed identities are inert edges under the Trace
+// contract above; no callback or runtime capability is invoked by Drop.
+unsafe impl crate::core::ManagedFamily for NetWhnfState {
+    const DROP_RECORD: crate::core::ManagedDropRecord = crate::core::ManagedDropRecord::passive(
+        "NC1A net-owned WHNF fixture",
+        "src/eval/whnf.rs",
+        "direct Drop releases passive compatibility values",
+        "every managed identity is reported by NetWhnfState::trace",
+    );
 }
 
 impl WhnfComputation {
@@ -1290,3 +1624,7 @@ mod w3b_application_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w3c_access.rs"]
 mod w3c_access_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/nc1.rs"]
+mod nc1_tests;

@@ -3866,6 +3866,16 @@ new associated type and node variant; NC6 then owns the planned
 `OperatorAndNet -1` closure rather than treating any temporary carrier trait
 as progress.
 
+NC1 completion record, 2026-09-16: the complete raw-edge `NetWhnfState` now
+round-trips every regional frame and liveness field through matching access,
+and its edge visitor survives a forced collection without per-value roots.
+Net-owned and ordinary durable work share `drive_regional`. `NetWhnfMachine`
+also borrows the one outer semantic budget; zero-budget discovery restores an
+already claimed call/operator pair before requeueing it. The source-backed
+reachability inventory keeps ordinary callable demand frame-free and leaves
+producer-only frames, source ownership, and promise breadcrumbs intact for
+NC5D rather than optimizing them prematurely.
+
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
 | Checkpoint | Live declarations and current shape | Target and delta |

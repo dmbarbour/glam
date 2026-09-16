@@ -405,6 +405,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "regional WHNF state may inspect its source-cycle promise only beneath matching evaluator access"
     ),
     owner!(
+        "src/eval/whnf.rs::NetWhnfState",
+        [0, 1, 0],
+        ExactManagedEdge,
+        None,
+        "net-owned WHNF state traces its optional source-cycle promise as an interior edge"
+    ),
+    owner!(
         "src/core/managed/recursive_cells.rs::ManagedLazyCell",
         [1, 0, 0],
         ExactManagedEdge,
@@ -798,7 +805,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [13, 23, 10],
+        [14, 23, 10],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }
