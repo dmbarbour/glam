@@ -26,6 +26,7 @@ use crate::{evaluation::OwnedEvalContext, list::ListItem};
 mod access_inventory;
 mod access_machine;
 mod application;
+mod builtin_machine;
 mod builtins;
 mod list_effect_machine;
 mod list_machine;

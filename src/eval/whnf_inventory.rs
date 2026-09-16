@@ -376,6 +376,7 @@ fn method_signal(path: &Path, name: &str) -> Option<Signal> {
 
 fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
     let path_text = path.to_string_lossy();
+    let declaration_lower = declaration.to_ascii_lowercase();
     let is_reflection = path_text.starts_with("src/reflection/");
     let is_net = path_text == "src/eval/net.rs";
     let is_net_construction = path_text.contains("builtins/net/construction.rs");
@@ -462,6 +463,7 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
         WorkShape::CollectionWalk
     } else if path_text.contains("comparison")
         || path_text.contains("numeric")
+        || declaration_lower.contains("numeric")
         || declaration.contains("arguments")
         || declaration.contains("operands")
     {
@@ -638,10 +640,12 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // edge visitor, not recursive Rust evaluation.
 // W6B.4b.1 replaces synchronous effect-API lookup and application with the
 // existing resumable static-access and application lazy owners.
-const EXPECTED_OCCURRENCES: usize = 279;
-const EXPECTED_FINGERPRINT: u64 = 16_192_971_656_711_770_796;
+// W6C.4 replaces recursive numeric operand demand with one durable builtin
+// owner which polls each operand through the ordinary WHNF machine.
+const EXPECTED_OCCURRENCES: usize = 274;
+const EXPECTED_FINGERPRINT: u64 = 15_876_577_758_968_907_385;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 101),
+    (Signal::EvalValue, 94),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
@@ -654,13 +658,13 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 36),
-    (Signal::UserSizedLoop, 56),
+    (Signal::StructuralRecursion, 37),
+    (Signal::UserSizedLoop, 57),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 124),
-    (WorkShape::OrderedOperands, 11),
+    (WorkShape::DemandThenInspect, 125),
+    (WorkShape::OrderedOperands, 5),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 22),

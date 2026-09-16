@@ -230,14 +230,9 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3D.4 scoped result decoding; isolated-search construction takes owned durable context"
     ),
     context_entry!(
-        "src/eval/builtins/numeric.rs",
-        [1, 0],
-        "I3B.1 scoped numeric dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/numeric/implementation.rs",
-        [4, 0],
-        "I3B.1 scoped numeric operations"
+        "src/eval/builtin_machine.rs",
+        [2, 2],
+        "W6C.4 durable numeric operand owner and callback-free regional result projection"
     ),
     context_entry!(
         "src/eval/builtins/object.rs",

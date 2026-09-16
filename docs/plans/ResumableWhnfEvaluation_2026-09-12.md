@@ -4018,7 +4018,7 @@ until W6G.3 aggregates it.
 | **W6C.1b — Final builtin dispatcher closure (after W6F.7)** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
 | **W6C.2 — Assertions and conditionals** | 3 S | Separate operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-3`. |
 | **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; reuse W6A.0c tagged-payload work and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
-| **W6C.4 — Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
+| **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
 | **W6C.5 — Provenance** | 1 D | Replace the durable evaluator facade with an explicit reflection/provenance handoff. `-1`. |
 | **W6C.6 — Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
 
@@ -4044,6 +4044,17 @@ value. Existing callers retain identical arity diagnostics and array
 conversion behavior. The D.2c manifest falls from 148 to 147 declarations;
 `DispatchScalarAndStrategy` falls from 25 to 24 and W6C.1 retains only the
 final dispatcher declaration.
+
+W6C.4 completion record, 2026-09-16: saturated numeric sources now install one
+durable builtin machine. It roots each operand once, polls them in source order
+through the existing WHNF owner and retains only immediate `Number` results
+between polls. Arithmetic and number-kind validation remain callback-free;
+dependency admission occurs only after WHNF access closes. The forced fixture
+suspends on operand two after evaluating an instrumented first operand, then
+resumes without replay. Division-by-zero and wrong-kind diagnostics remain
+unchanged, and the fixtures pass with aggressive collection. The old numeric
+dispatcher and synchronous implementation are removed. The D.2c manifest
+falls from 147 to 142 declarations and the W6C.4 group reaches zero.
 
 #### W6D — Dictionaries, lists, and patterns
 

@@ -9,7 +9,6 @@ mod effect;
 mod list;
 mod list_effect;
 mod net;
-mod numeric;
 mod object;
 mod pattern;
 mod provenance;
@@ -56,7 +55,15 @@ pub(super) fn apply_builtin_in(
         | Builtin::Multiply
         | Builtin::Divide
         | Builtin::Floor
-        | Builtin::Mod => numeric::apply(context, builtin, arguments),
+        | Builtin::Mod => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::Greater
         | Builtin::GreaterEqual
         | Builtin::Equal

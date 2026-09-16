@@ -16,6 +16,7 @@ use crate::list::ListItem;
 use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessMachinePoll};
+use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
 use super::builtins::{NetConstructionMachine, apply_builtin_in, is_undefined_value};
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
@@ -192,6 +193,7 @@ enum LazyTaskWork {
         failure_context: Option<&'static str>,
     },
     Access(Box<AccessMachine>),
+    Builtin(Box<BuiltinTaskMachine>),
     ObjectFixpoint(Box<ObjectFixpointMachine>),
     ListEffect(Box<ListEffectSourceMachine>),
     HostCall(HostCallSourceMachine),
@@ -568,6 +570,22 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             arguments,
                         )))
                     }
+                    LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
+                        let arguments = context.with_value_access(|access| {
+                            call.arguments
+                                .iter()
+                                .map(|value| {
+                                    access
+                                        .values()
+                                        .root_runtime_value(access.values().duplicate_value(value))
+                                })
+                                .collect()
+                        });
+                        LazyTaskWork::Builtin(Box::new(BuiltinTaskMachine::new(
+                            call.builtin,
+                            arguments,
+                        )))
+                    }
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
                         durable_context.values().runtime_id(),
@@ -670,6 +688,21 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     AccessMachinePoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
                     }
+                };
+            }
+
+            if let LazyTaskWork::Builtin(machine) = &mut self.work {
+                return match machine.poll(poll_context, context, &durable_context, step_budget) {
+                    BuiltinTaskPoll::Ready(value) => self.complete_root(context, &value),
+                    BuiltinTaskPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    BuiltinTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    BuiltinTaskPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
                 };
             }
 
@@ -1323,6 +1356,9 @@ mod ownership_tests {
             }
             LazyTaskWork::Access(machine) => {
                 let _: &AccessMachine = machine;
+            }
+            LazyTaskWork::Builtin(machine) => {
+                let _: &BuiltinTaskMachine = machine;
             }
             LazyTaskWork::ObjectFixpoint(machine) => {
                 let _: &ObjectFixpointMachine = machine;
