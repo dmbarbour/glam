@@ -420,11 +420,16 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
         let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(lazy));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = blocked_checkpoint(context.values(), &runtime, call.pair);
+        let observation =
+            checkpoint_semantic_observation(&runtime, context.values(), call.pair);
         assert_eq!(
-            checkpoint_semantic_observation(&runtime, context.values(), call.pair).focus,
+            observation.focus,
             Some(DeferredValueId::Lazy(lazy_id)),
             "{name}"
         );
+        assert_eq!(observation.frames, 0, "{name}");
+        assert_eq!(observation.source_owner, None, "{name}");
+        assert_eq!(observation.cycle_promise, None, "{name}");
         let second = crate::eval::lazy_root_wait(&context, &lazy_root)
             .expect("canonical lazy producer remains admissible");
         assert_eq!(second.get(), blocked.wait.0.get(), "{name}");
@@ -475,13 +480,28 @@ fn install_ready_checkpoint(
     Call,
     crate::interaction_net::CallableCheckpointCall,
 ) {
+    install_checkpoint(context, |access| {
+        crate::eval::whnf::NetWhnfState::from_regional(
+            access,
+            crate::eval::whnf::RegionalWhnfWork::from_focus(access, focus),
+        )
+    })
+}
+
+fn install_checkpoint(
+    context: &EvalContext,
+    build: impl FnOnce(
+        &crate::evaluation::EvaluationValueAccess<'_>,
+    ) -> crate::eval::whnf::NetWhnfState,
+) -> (
+    CoreRuntimeNet,
+    Call,
+    crate::interaction_net::CallableCheckpointCall,
+) {
     let (runtime, call) = claimed_core_call_in(context.values(), context.values().unit());
     let checkpoint = super::super::with_direct_evaluator(context, |evaluator| {
         evaluator.with_value_access(|access| {
-            let state = crate::eval::whnf::NetWhnfState::from_regional(
-                &access,
-                crate::eval::whnf::RegionalWhnfWork::from_focus(&access, focus),
-            );
+            let state = build(&access);
             let Ok(checkpoint) = access
                 .net(&runtime)
                 .install_claimed_call_checkpoint(call, state)
@@ -492,6 +512,39 @@ fn install_ready_checkpoint(
         })
     });
     (runtime, call, checkpoint)
+}
+
+fn claimed_checkpoint_semantic_observation(
+    context: &EvalContext,
+    runtime: &CoreRuntimeNet,
+    pair: ActivePairKey,
+) -> crate::eval::whnf::NetWhnfObservation {
+    super::super::with_direct_evaluator(context, |evaluator| {
+        evaluator.with_value_access(|access| {
+            let claim = CoreCheckpointClaim::take(&access, runtime, pair)
+                .expect("ready checkpoint must expose its complete regional state");
+            let observation = claim.observation_for_test();
+            drop(claim);
+            observation
+        })
+    })
+}
+
+#[derive(Default)]
+struct CallableStateUsage {
+    samples: usize,
+    nonempty_frames: usize,
+    nonempty_source_owner: usize,
+    nonempty_cycle_promise: usize,
+}
+
+impl CallableStateUsage {
+    fn record(&mut self, observation: &crate::eval::whnf::NetWhnfObservation) {
+        self.samples += 1;
+        self.nonempty_frames += usize::from(observation.frames != 0);
+        self.nonempty_source_owner += usize::from(observation.source_owner.is_some());
+        self.nonempty_cycle_promise += usize::from(observation.cycle_promise.is_some());
+    }
 }
 
 fn claimed_applied_core_call_in(
@@ -787,4 +840,62 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
     values
         .collect_managed_for_test()
         .expect("collection after checkpoint-owner retirement must succeed");
+}
+
+#[test]
+fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
+    let context = test_context();
+    let terminal = PromisedValue::new(context.values(), "NC5D terminal promise");
+    crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
+        .expect("terminal promise accepts its callable result");
+    let first = PromisedValue::new(context.values(), "NC5D first promise");
+    let terminal_value = context
+        .values()
+        .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
+    crate::core::set_test_promise(context.values(), &first, terminal_value)
+        .expect("first promise delegates to the terminal promise");
+    let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
+
+    super::super::with_direct_evaluator(&context, |evaluator| {
+        let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
+        progress_exact_core_call_in(evaluator, &runtime, call, &mut budget)
+    })
+    .expect("one semantic step must publish the production checkpoint");
+    let mut production = CallableStateUsage::default();
+    production.record(&checkpoint_semantic_observation(
+        &runtime,
+        context.values(),
+        call.pair,
+    ));
+    reduce_checkpoint(context.values(), &runtime, call.pair);
+    production.record(&claimed_checkpoint_semantic_observation(
+        &context, &runtime, call.pair,
+    ));
+    assert_eq!(production.samples, 2);
+    assert_eq!(production.nonempty_frames, 0);
+    assert_eq!(production.nonempty_source_owner, 0);
+    assert_eq!(production.nonempty_cycle_promise, 2);
+
+    let argument = context.values().unit();
+    let (runtime, call, _) = install_checkpoint(&context, |access| {
+        crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
+            access,
+            Value::Builtin(Builtin::Add),
+            vec![argument],
+        )
+    });
+    let mut deliberate_fixture = CallableStateUsage::default();
+    deliberate_fixture.record(&checkpoint_semantic_observation(
+        &runtime,
+        context.values(),
+        call.pair,
+    ));
+    reduce_checkpoint(context.values(), &runtime, call.pair);
+    deliberate_fixture.record(&claimed_checkpoint_semantic_observation(
+        &context, &runtime, call.pair,
+    ));
+    assert_eq!(deliberate_fixture.samples, 2);
+    assert_eq!(deliberate_fixture.nonempty_frames, 2);
+    assert_eq!(deliberate_fixture.nonempty_source_owner, 0);
+    assert_eq!(deliberate_fixture.nonempty_cycle_promise, 0);
 }

@@ -119,7 +119,6 @@ pub(crate) struct RegionalWhnfWork(WhnfState);
 pub struct NetWhnfState(WhnfState);
 
 #[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NetWhnfObservation {
     pub(crate) focus: Option<DeferredValueId>,
     pub(crate) followed: BTreeSet<DeferredValueId>,
@@ -209,6 +208,14 @@ impl RegionalWhnfWork {
     #[cfg(test)]
     pub(crate) fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
         self.0.container_identities_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observation_for_test(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> NetWhnfObservation {
+        self.0.observation_for_test(access)
     }
 }
 
@@ -626,22 +633,7 @@ impl NetWhnfState {
         &self,
         access: &RuntimeValueAccess<'_>,
     ) -> NetWhnfObservation {
-        let focus = match &self.0.focus {
-            Value::Lazy(lazy) => Some(lazy.access(access).id().into()),
-            Value::Promised(promise) => Some(promise.access(access).id().into()),
-            _ => None,
-        };
-        NetWhnfObservation {
-            focus,
-            followed: self.0.followed.clone(),
-            frames: self.0.frames.len(),
-            source_owner: self.0.source_owner,
-            cycle_promise: self
-                .0
-                .cycle_promise
-                .as_ref()
-                .map(|promise| promise.access(access).id()),
-        }
+        self.0.observation_for_test(access)
     }
 
     /// Drives one bounded callback-free quantum using the same regional
@@ -666,6 +658,27 @@ impl NetWhnfState {
                 NetWhnfDrive::Yielded(Self::from_regional(access, work))
             }
             RegionalWhnfDrive::Failed(failure) => NetWhnfDrive::Failed(failure),
+        }
+    }
+}
+
+#[cfg(test)]
+impl WhnfState {
+    fn observation_for_test(&self, access: &RuntimeValueAccess<'_>) -> NetWhnfObservation {
+        let focus = match &self.focus {
+            Value::Lazy(lazy) => Some(lazy.access(access).id().into()),
+            Value::Promised(promise) => Some(promise.access(access).id().into()),
+            _ => None,
+        };
+        NetWhnfObservation {
+            focus,
+            followed: self.followed.clone(),
+            frames: self.frames.len(),
+            source_owner: self.source_owner,
+            cycle_promise: self
+                .cycle_promise
+                .as_ref()
+                .map(|promise| promise.access(access).id()),
         }
     }
 }
@@ -1466,6 +1479,11 @@ mod tests {
         let runtime_node = std::mem::size_of::<
             crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>,
         >();
+        assert_eq!(
+            std::mem::size_of::<Box<NetWhnfState>>(),
+            std::mem::size_of::<usize>(),
+            "the complete checkpoint remains one pointer in its runtime node"
+        );
         assert_eq!(
             std::mem::size_of::<BoxedCallableCheckpointPrototype>(),
             runtime_node,

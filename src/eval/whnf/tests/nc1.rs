@@ -576,6 +576,31 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
         "NC3 must deliberately replace the one current frame-free synchronous demand seam"
     );
 
+    let production_driver = source_section(
+        net,
+        "fn drive_original_callable_whnf(",
+        "#[cfg(test)]\npub(super) fn lower_core_callable(",
+    );
+    assert_eq!(
+        production_driver
+            .matches("RegionalWhnfWork::from_focus")
+            .count(),
+        1,
+        "production callable demand must have one canonical frame-free constructor"
+    );
+    for producer_only_state in [
+        "from_application_checkpoint_in",
+        "from_static_access_checkpoint_in",
+        "with_source_owner",
+        "cycle_promise",
+        "frames.push",
+    ] {
+        assert!(
+            !production_driver.contains(producer_only_state),
+            "production callable admission must not synthesize producer state: {producer_only_state}"
+        );
+    }
+
     let value = include_str!("../../value.rs");
     let producer_dispatch = source_section(
         value,
@@ -594,6 +619,27 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
     }
 
     let whnf = include_str!("../../whnf.rs");
+    let initial = source_section(whnf, "pub(crate) fn from_focus(", "    fn from_parts(");
+    assert!(initial.contains("Vec::new(), BTreeSet::new(), None, None"));
+
+    let source_owner_transition = source_section(
+        whnf,
+        "pub(crate) fn with_source_owner(",
+        "    /// Polls one bounded callback-free quantum",
+    );
+    assert_eq!(
+        source_owner_transition
+            .matches("checkpoint.source_owner = Some(source_owner)")
+            .count(),
+        1,
+        "only the canonical lazy producer constructor may add a source owner"
+    );
+    assert_eq!(
+        whnf.matches("checkpoint.source_owner = Some(").count(),
+        1,
+        "new source-owner transitions require an NC5D inventory decision"
+    );
+
     let semantic = source_section(
         whnf,
         "fn reduce_semantic_shell(",
@@ -604,4 +650,23 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
         1,
         "only following an assigned promise may create the promise breadcrumb"
     );
+    assert_eq!(
+        whnf.matches("work.0.cycle_promise = Some(").count(),
+        1,
+        "new promise-breadcrumb transitions require an NC5D inventory decision"
+    );
+
+    for frame_transition in [
+        "fn resume_static_access(",
+        "fn advance_application(",
+        "fn begin_dictionary_application(",
+        "fn begin_semantic_undefined(",
+        "fn resume_semantic_undefined(",
+        "fn finish_semantic_undefined(",
+    ] {
+        assert!(
+            whnf.contains(frame_transition),
+            "the complete frame-transition inventory must retain {frame_transition}"
+        );
+    }
 }

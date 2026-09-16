@@ -698,6 +698,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_effect_machine.rs::publish_fix_result#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::publish_fix_result#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::combine_chunk_and_suffix#1|surface=access-publication|scope=production",
+    "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
     "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",

@@ -1,6 +1,6 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: in progress; NC0-NC4 completed on 2026-09-16. The plan was revised on
+Status: in progress; NC0-NC5 completed on 2026-09-16. The plan was revised on
 2026-09-16 first to use one net-owned callable checkpoint rather than an
 `Operator >< Data` encoding, then to make regional and net-owned roles
 zero-walk wrappers around one canonical `WhnfState`. This is the focused
@@ -588,6 +588,7 @@ Completion record on x86-64/64-bit targets:
 | `RegionalUndefinedDictionary` | 32 |
 | `RegionalWhnfContinuation` | 160 |
 | `RegionalWhnfWork` | 128 |
+| `NetWhnfState` / boxed node payload | 128 / 8 |
 | `RuntimeNode<CoreSpecialization>` | 96 |
 | prototype node with unboxed `RegionalWhnfWork` | 128 |
 | prototype node with boxed `RegionalWhnfWork` | 96 |
@@ -1180,6 +1181,8 @@ checkpoint state.
 
 #### NC5D — Record actual callable-state usage
 
+Status: complete on 2026-09-16.
+
 Revisit the NC1D inventory after the complete representation passes NC3-NC5C.
 For `frames`, `source_owner`, and `cycle_promise`:
 
@@ -1210,6 +1213,41 @@ are currently unused.
 
 Exit: the complete canonical state remains authoritative, with an exact usage
 record available for diagnostics and any later measured specialization.
+
+Completion record: the same test-only observation now samples dormant
+`NetWhnfState` at publication and its zero-walk `RegionalWhnfWork` after the
+payload is claimed for resumption. In the forced production promise-chain
+fixture, both samples have zero frames, no source owner, and one promise
+breadcrumb. In the deliberately constructed completeness fixture, both
+samples have one application frame and neither producer field. All five
+canonical lazy-source families sampled by NC5A publish zero frames, no source
+owner, and no promise breadcrumb. These are local test counts, not production
+runtime counters.
+
+The source-backed inventory now latches the sole production callable entry
+through `RegionalWhnfWork::from_focus`, its empty initial state, the one lazy
+producer-only `source_owner` assignment, the one assigned-promise
+`cycle_promise` assignment, and the named frame-transition family. NC1's
+complete-state trace fixture continues to force nonempty frames, source owner,
+and promise breadcrumb together. A new producer or mutating transition must
+therefore update an executable inventory rather than silently changing this
+record.
+
+The x86-64/64-bit remeasurement remains `WhnfState`, `RegionalWhnfWork`, and
+`NetWhnfState` at 128 bytes; `Box<NetWhnfState>` is one 8-byte pointer;
+`RuntimeNode<CoreSpecialization>` and the boxed prototype remain 96 bytes; and
+`ManagedCoreNetCell` plus its requested GC slot extent remain 248 bytes. The
+complete state therefore keeps the NC0B boxing choice without enlarging every
+runtime node or managed-net slot. No specialized state or conversion walk was
+introduced.
+
+The full-suite check also exposed an NC5A stack-shape regression: retaining an
+`Option<EvaluationHalt>` in the central recursive net-driver frame made the
+existing dictionary-pattern fixture exceed Rust's default 2 MiB test-thread
+stack, while the pre-NC5 revision passed. Failed/killed checkpoint retirement
+now constructs the halt inside a cold helper and the driver match returns to
+it directly. The fixture again passes on the default stack, and the NC5A
+terminal matrix continues to prove the same exact failure publication.
 
 ### NC6 — W6 integration, profiling, and focused review
 

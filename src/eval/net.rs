@@ -829,30 +829,18 @@ fn drive_active_pair_semantic_step(
                 .context()
                 .values()
                 .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
-            let terminal_failure = match context.context().poll_wait(&blocked.wait.0) {
+            match context.context().poll_wait(&blocked.wait.0) {
                 crate::evaluation::EvaluationWaitPoll::Pending(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
                 crate::evaluation::EvaluationWaitPoll::Failed(failure)
                 | crate::evaluation::EvaluationWaitPoll::Killed(failure) => {
-                    Some(EvaluationHalt::failure(failure.into_failure()))
+                    return fail_blocked_callable_checkpoint(context, &runtime, &blocked, failure);
                 }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)
                 | crate::evaluation::EvaluationWaitPoll::Cancelled
                 | crate::evaluation::EvaluationWaitPoll::Abandoned
-                | crate::evaluation::EvaluationWaitPoll::Exited => None,
-            };
-            if let Some(failure) = terminal_failure {
-                let retired = with_core_net_access(context, &runtime, |runtime| {
-                    runtime.fail_blocked_callable_checkpoint(&blocked, failure.clone())
-                });
-                let Ok(state) = retired else {
-                    return Err(EvaluationHalt::new(
-                        "interaction-net checkpoint lost its exact failed generation",
-                    ));
-                };
-                drop(state);
-                return Err(failure);
+                | crate::evaluation::EvaluationWaitPoll::Exited => {}
             }
             let retried = with_core_net_access(context, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
@@ -902,6 +890,26 @@ fn drive_active_pair_semantic_step(
         _ => unreachable!("non-semantic active-pair work must remain inside its batch"),
     }
     Ok(())
+}
+
+#[cold]
+fn fail_blocked_callable_checkpoint(
+    context: &EvaluatorStepContext<'_>,
+    runtime: &CoreRuntimeNet,
+    blocked: &crate::interaction_net::BlockedCallableCheckpoint<crate::core_net::CoreWaitToken>,
+    failure: crate::runtime::RuntimeFailureRoot,
+) -> Result<(), EvaluationHalt> {
+    let failure = EvaluationHalt::failure(failure.into_failure());
+    let retired = with_core_net_access(context, runtime, |runtime| {
+        runtime.fail_blocked_callable_checkpoint(blocked, failure.clone())
+    });
+    let Ok(state) = retired else {
+        return Err(EvaluationHalt::new(
+            "interaction-net checkpoint lost its exact failed generation",
+        ));
+    };
+    drop(state);
+    Err(failure)
 }
 
 #[cfg(test)]
@@ -1193,6 +1201,14 @@ impl<'claim, 'scope> CoreCheckpointClaim<'claim, 'scope> {
             budget,
             crate::eval::whnf::reduce_semantic_shell,
         )
+    }
+
+    #[cfg(test)]
+    fn observation_for_test(&self) -> crate::eval::whnf::NetWhnfObservation {
+        self.work
+            .as_ref()
+            .expect("claimed checkpoint retains its complete regional state")
+            .observation_for_test(self.access.values())
     }
 
     fn publish(mut self) -> Result<crate::interaction_net::CallableCheckpointCall, EvaluationHalt> {
@@ -4115,6 +4131,6 @@ mod driver_tests {
     }
 
     mod nc5_tests {
-        include!("net/nc5_tests.rs");
+        include!("net/tests/nc5.rs");
     }
 }
