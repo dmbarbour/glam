@@ -159,10 +159,15 @@ duplicate the same child-resumption protocol across most evaluator modules.
 The selected representation is a shared explicit work stack:
 
 ```rust
-struct RegionalWhnfWork {
+struct WhnfState {
     focus: Value,
-    frames: Vec<RegionalWhnfFrame>,
+    frames: Vec<WhnfContinuation>,
+    followed: BTreeSet<DeferredValueId>,
+    source_owner: Option<LazyId>,
+    cycle_promise: Option<PromisedValue>,
 }
+
+struct RegionalWhnfWork(WhnfState);
 
 enum RegionalWhnfStep {
     Delegate(Value),
@@ -172,6 +177,13 @@ enum RegionalWhnfStep {
     Failed(Arc<EvaluationFailure>),
 }
 ```
+
+The implementation currently retains the older `RegionalWhnfWork` and
+`RegionalWhnfFrame` declarations. Focused callable-spill checkpoint NC2.0
+introduces the canonical `WhnfState`/`WhnfContinuation` vocabulary and makes
+regional and net-owned forms zero-walk ownership wrappers around it. A role
+change consumes and rewraps the same state; it must not iterate frames,
+duplicate values, register roots, or allocate replacement containers.
 
 `Delegate` remains a direct focus replacement and does not push a frame.
 Repeated nested work uses shared frames for demand-and-inspect, ordered
@@ -194,7 +206,7 @@ intermediate value. During a regional quantum, the active mutator protects raw
 working values. Roots are constructed only for state which must outlive that
 region: suspension, budget yield, callback handoff, or publication.
 
-Checkpoint replacement follows this order:
+The current fine-grained-root checkpoint replacement follows this order:
 
 1. enter with the prior durable checkpoint still live;
 2. project it beneath matching access;
@@ -203,14 +215,24 @@ Checkpoint replacement follows this order:
 5. install the replacement checkpoint; and
 6. only then retire superseded roots and perform external coordination.
 
+W6G.3 replaces steps 4-5 with one in-place, aggregate edge-state transition on
+the rooted managed cell. It preserves the same publication and unwind
+properties without constructing another set of roots or walking the state once
+per internal transition.
+
 Panic/unwind handling must never leave a machine with an empty checkpoint.
 Keeping the prior checkpoint until replacement publication is acceptable even
 if unwind ultimately terminalizes the owning machine.
 
-The first correct implementation may use one registered root per value live
-across a real suspension. A future root-frame facility may compress
-machine-adjacent roots; this plan must not invent that concurrent-GC mechanism
-or add root traffic to the ordinary non-suspending path in anticipation of it.
+The implemented correctness scaffold uses one registered root per value live
+across a real suspension. W6G.3 replaces it with one
+`Root<ManagedWhnfCell>` whose mutex protects the complete canonical
+`WhnfState`. One callback-free quantum mutates the state beneath matching
+access and reports its complete before/after edge sets through the existing
+managed transition gateway; waits, callbacks, and orchestration remain outside
+the lock and access region. A future root-frame facility may replace this
+managed cell if concurrent-GC profiling justifies trace-immediate
+machine-adjacent state, but it is not a prerequisite for aggregate roots.
 
 ### Result destinations stay outside pure evaluation
 
@@ -522,6 +544,15 @@ returns; indexes, enum tags, keys, counts, and immutable operation descriptors
 remain immediate. Application and collection frames initially root each
 retained semantic value independently. A later root-frame facility may pack
 those roots without changing the work algebra.
+
+Revision, 2026-09-16: the work algebra remains selected, but the storage
+boundary is now more concrete. Focused callable-spill NC2.0 unifies regional
+and net-owned raw work as one canonical `WhnfState` moved through zero-walk
+role wrappers. W6G.3 then aggregates the durable form into one rooted managed
+cell rather than waiting for `RootFrame`: the cell uses the same state and
+edge visitor, and its complete pre/post edge sets pass through the existing
+managed transition gateway. `RootFrame` remains a possible concurrent-GC
+replacement, not the next correctness step.
 
 Every focus transition, frame push/pop, child result delivery, and collection
 element consumes at least one deterministic work unit. A `Delegate` consumes
@@ -3836,7 +3867,8 @@ as two independently verified checkpoints:
    call or checkpoint claim becomes durable.
 
 The separate plan is required because W6B.4b.2 adds core topology, semantic
-budget sharing, a net-owned isomorphism of regional WHNF work, exact
+budget sharing, a zero-walk net-owned role wrapper around canonical regional
+WHNF state, exact
 same-pair checkpoint mutation, production blocked-checkpoint resumption, and
 forced stale-admission/lost-wakeup verification. The parent plan remains
 authoritative for the raw-value inventory and records the combined W6B.4b
@@ -3875,6 +3907,15 @@ already claimed call/operator pair before requeueing it. The source-backed
 reachability inventory keeps ordinary callable demand frame-free and leaves
 producer-only frames, source ownership, and promise breadcrumbs intact for
 NC5D rather than optimizing them prematurely.
+
+Representation revision: NC1's parallel net/regional definitions and borrowed
+projection are correctness scaffolding only. Focused NC2.0 replaces them with
+one `WhnfState`/`WhnfContinuation` vocabulary before the runtime node becomes
+live. `RegionalWhnfWork` and `NetWhnfState` then consume and rewrap the same
+state without walking continuations, duplicating values, registering roots, or
+allocating containers. NC5D records which fields production callable demand
+actually exercises, but does not pare this rare transitory checkpoint merely
+to save a few words.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
@@ -3971,7 +4012,7 @@ Determine whether the overhead comes from scheduling several thousand
 `NetWhnfMachine` polls, managed-access traffic, or another measured source.
 Do not reintroduce the rejected per-session running-machine index: retired work
 does not remain in `work_by_session`, and the measured experiment produced no
-improvement. Close W6G by restoring comparable fixture cost or by recording a
+improvement. Close W6G.1 by restoring comparable fixture cost or by recording a
 measured, justified residual with ownership assigned to a later performance
 phase.
 
@@ -4019,6 +4060,65 @@ Resolve this investigation before W7 so its final budget, fairness, and
 small-stack verification exercises the selected effect-driver shape. If the
 measurements do not justify implementation, retain the bounded W5 path and
 record the evidence and a narrower future optimization owner.
+
+##### W6G.3 — Aggregate durable WHNF state
+
+Replace the current root-per-retained-value `DurableWhnfState` with one rooted
+managed state cell after focused NC2.0 has established the canonical
+`WhnfState`/`WhnfContinuation` vocabulary:
+
+```rust
+struct ManagedWhnfCell {
+    state: Mutex<WhnfState>,
+}
+
+struct WhnfComputation {
+    checkpoint: Root<ManagedWhnfCell>,
+}
+```
+
+Before changing representation, measure root registration/removal, durable
+checkpoint reconstruction, value duplication, continuation traversal, and
+managed-access traffic for repeated budget yields and dependency boundaries
+with small and large frame stacks. The target eliminates per-value durable
+roots and representation conversion; it does not justify walking the complete
+state after every focus transition.
+
+Polling projects the single root beneath matching access, locks the cell, and
+performs one bounded callback-free quantum directly against its canonical
+state. Publish the complete pre/post edge sets through one aggregate managed
+edge-state transition for that quantum. Focus replacements and frame
+pushes/pops inside the quantum must not each trigger a full-state walk.
+Release the state lock and value access before dependency admission, waiting,
+callbacks, scheduler coordination, reflection activation, or host work.
+
+Prefer `Mutex<WhnfState>` if the regional driver can operate through a mutable
+borrow. Use `Mutex<Option<WhnfState>>` only if a by-value handoff remains
+necessary; in that case retain the mutex guard and an unwind guard until the
+state is restored, and never expose an unlocked empty cell. The cell's edge
+visitor delegates to the same exhaustive canonical visitor used by
+`NetWhnfState`. Do not introduce a second frame enum or conversion walk.
+
+Verify with deterministic fixtures that:
+
+- one computation registers one durable root regardless of retained frame
+  count;
+- uninterrupted work within one quantum performs no intermediate root traffic
+  or whole-state transition walk;
+- yield, dependency, completion, failure, cancellation, and unwind leave one
+  complete traceable state or terminal result, never an empty cell;
+- another worker can resume the same computation after a handoff without
+  replay or worker-local state;
+- forced collection sees every value-bearing focus/frame position and promise
+  breadcrumb; and
+- results and exact budget accounting match the fine-grained-root baseline.
+
+Record before/after cost for the small and large state fixtures. The current
+non-concurrent collector may optimize the mutation barrier internally, while
+the future concurrent collector may need one SATB leaving-edge walk per
+published quantum. The concurrent-GC plan owns comparison with a
+trace-immediate `RootFrame`; W6G.3 does not require that facility and must not
+block aggregate-root correctness on it.
 
 W6 closure also revisits `WHNFW3R-004`, the temporary
 one-ordinary-machine-per-demand-session admission rule introduced to contain

@@ -269,6 +269,23 @@ the frame contract. Integration should wrap this GC primitive if runtime-level
 identity or ergonomics are needed rather than teaching the generic collector
 about evaluator machines.
 
+The resumable-WHNF integration has a nearer-term, non-concurrent target which
+must remain explicit when CG0 revisits frames. Focused callable-spill NC2.0
+selects one canonical `WhnfState` shared by zero-walk regional and net-owned
+role wrappers. Parent W6G.3 then replaces fine-grained durable roots with one
+`Root<ManagedWhnfCell>`, where a mutex protects that same state and one
+aggregate transition publishes its complete pre/post edge sets per bounded
+callback-free quantum. It does not walk the state after every focus or frame
+transition.
+
+That managed-cell representation is the correctness baseline, not disposable
+parallel-root scaffolding. CG0 must compare the cost and proof obligations of
+one SATB leaving-edge walk per published WHNF quantum against replacing the
+cell with a trace-immediate `RootFrame<WhnfState>`. The comparison must preserve
+the common state vocabulary and zero-walk net/regional ownership handoff; a
+second continuation representation is not an acceptable way to optimize the
+concurrent collector.
+
 CG0 must revisit this concept against the post-refinement machine inventory and
 decide at least:
 
