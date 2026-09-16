@@ -354,8 +354,14 @@ The graph records quantum boundaries, not individual cached-shell steps.
 
 ### Budget relationship
 
-`NetWhnfMachine::poll` must receive the outer task's `step_budget`. Initially,
-the net driver uses a semantic sub-budget:
+This plan depends on parent checkpoint W6B.0's borrowed poll-budget
+foundation. `NetWhnfMachine::poll` receives the same mutable budget object as
+its outer task poll; it does not receive a copied integer or construct a fresh
+allowance per active pair. The budget records its original grant, remaining
+units, and spent units, making actual declared consumption available to tests,
+profiling, and later scheduler statistics.
+
+Initially, the net driver charges the shared semantic budget as follows:
 
 - each call or operator semantic dispatch consumes a unit;
 - each regional callable-WHNF transition consumes a unit from the same
@@ -367,6 +373,13 @@ the net driver uses a semantic sub-budget:
 A callable must never receive a fresh full budget for every active-pair retry
 within one outer poll. Budget exhaustion publishes the exact `NetWhnfState`
 and returns `Yielded`.
+
+If structural net reductions later use a distinct typed budget, translation
+reserves an explicit portion of the evaluator budget, constructs the child
+budget from that reservation, and returns only the representable unused
+portion. The initial implementation need not add that conversion machinery,
+but preserving both `remaining` and `spent` avoids a second budget-interface
+rewrite when profiling or measured conversion arrives.
 
 ### Dependency admission without a durable claim
 
@@ -452,6 +465,10 @@ later poll.
 ## Implementation Phases
 
 ### NC0 — Latch the seam, state, and size baseline
+
+Prerequisite: W6B.0 has replaced copied `usize` poll allowances with one
+borrowed budget token through the task and relevant nested-machine path. NC0
+must not begin by adding a callable-local compatibility budget.
 
 #### NC0A — Current-path characterization
 
@@ -560,11 +577,11 @@ frames, cursors, and retained values must match uninterrupted evaluation.
 
 #### NC1C — Net-machine semantic budget
 
-Pass the outer `step_budget` into `NetWhnfMachine::poll` and introduce shared
-semantic-budget accounting for call/operator dispatch and WHNF transitions.
-Preserve the existing structural normalization-batch policy. Add a
-deterministic zero/one/many matrix and prove one outer poll cannot grant a
-fresh full budget to every retry.
+Pass the outer mutable poll budget into `NetWhnfMachine::poll` and charge that
+same token for call/operator dispatch and WHNF transitions. Preserve the
+existing structural normalization-batch policy. Add a deterministic
+zero/one/many matrix, assert exact `spent` and `remaining` observations, and
+prove one outer poll cannot grant a fresh full budget to every retry.
 
 #### NC1D — Reachability inventory, not optimization
 

@@ -3663,6 +3663,85 @@ restarting earlier converted keys.
 
 #### W6B — Operators and runtime nets
 
+##### W6B.0 — Borrowed poll-budget foundation
+
+Complete this checkpoint before W6B.4b.2 begins. The current implementation
+has two incompatible layers:
+
+- regional WHNF already uses a mutable `WhnfStepBudget` and consumes one unit
+  per callback-free semantic transition; but
+- `EvaluationTaskMachine::poll` and most nested machine polls receive a copied
+  `usize`, `poll_computation` constructs a fresh WHNF budget, and
+  `NetWhnfMachine::poll` currently receives no production budget.
+
+That shape permits a nested owner to reuse or recreate the same nominal
+allowance and cannot report how much declared work one poll actually spent.
+Replace it with one simple mutable token created for a claimed task quantum
+and borrowed through every budget-aware nested poll:
+
+```rust
+struct PollBudget {
+    granted: usize,
+    remaining: usize,
+}
+
+impl PollBudget {
+    fn try_consume(&mut self) -> bool;
+    fn granted(&self) -> usize;
+    fn remaining(&self) -> usize;
+    fn spent(&self) -> usize;
+}
+```
+
+The exact name may reuse/generalize `WhnfStepBudget`. There is one
+authoritative `remaining` counter per outer poll, and a child receives
+`&mut PollBudget`, never another integer initialized from the parent's
+remaining value. Do not introduce synchronization or interior mutability: the
+budget is stack-owned orchestration state used by one polling thread.
+
+Partition the migration:
+
+1. **W6B.0a — Token and outer boundary.** Add `granted`, `remaining`, exact
+   `spent`, and focused zero/one/many tests. Change
+   `EvaluationTaskMachine::poll`, claimed-task forwarding, reflection and
+   deferred task adapters, and their fixture implementations to borrow one
+   token. The demand pump may continue discarding the unused part of a granted
+   quantum initially, preserving current fairness and termination behavior;
+   it records actual spend separately rather than pretending the whole grant
+   was consumed.
+2. **W6B.0b — Nested propagation.** Convert existing budget-aware reflection,
+   search, access, object, list, net-construction, and WHNF polls to receive the
+   same mutable borrow. Remove `step_budget.max(1)` and copied-budget
+   forwarding. A phase-only yield may leave budget unused, but a yield caused
+   by budget exhaustion must observe zero remaining units. Terminal or blocked
+   observation may legitimately spend zero.
+3. **W6B.0c — Semantic accounting latch.** Inventory every production
+   `step_budget: usize`, budget constructor, and nested poll forwarding site.
+   Any survivor must be an explicitly separate policy such as a host search
+   limit, not a disguised evaluator allowance. Force nested calls which would
+   previously each receive the full allowance and assert their combined spend
+   never exceeds the original grant.
+4. **W6B.0d — Translation-ready statistics.** Expose crate-private
+   observations sufficient for deterministic tests and optional profiling;
+   do not make work budgets part of Glam semantics or the public embedding
+   API. Record that future conversion to a distinct net-reduction budget must
+   reserve parent units and translate unused child units back explicitly.
+   Do not design ratios, rounding, or refunds until a real second budget type
+   exists.
+
+This checkpoint measures declared semantic work, not wall time or CPU
+instructions. It does not require every successful poll to spend a unit, and
+the scheduler must not infer progress solely from `spent()`. Its purpose is to
+make bounds compositional, prevent accidental budget renewal, and preserve a
+usable accounting seam for profiling and later budget translation.
+
+Verification: compile-exhaustive poll signature migration; exact spent/
+remaining fixtures across direct and nested WHNF, reflection, search, and
+lazy-task polls; one phase-only zero-spend yield; one exact exhausted yield;
+and the existing demand-pump fairness/termination schedules. Run routine and
+aggressive-GC suites because the signature reaches every task family, though
+the token itself owns no values and opens no access.
+
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6B.1 — Complete (2026-09-15): Operator descriptors** | 9 F | Build descriptors beneath matching access or narrow them to immediate keys/IDs; never create an unrooted durable descriptor. `-9`. |
