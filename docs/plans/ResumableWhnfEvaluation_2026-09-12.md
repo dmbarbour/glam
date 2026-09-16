@@ -3739,15 +3739,17 @@ as two independently verified checkpoints:
 2. **W6B.4b.2 — Callable WHNF spill (`-1`).** Execute NC0-NC6 in
    [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md).
    Evaluate a deferred callable as far as the current bounded quantum permits
-   and install `NormalizeCallable` topology only on budget yield or a real
-   dependency boundary. Suspended progress belongs to the managed net; no
-   call or operator claim becomes durable.
+   and replace its data with one
+   `CallableCheckpoint(NetWhnfState)` only on budget yield or a real dependency
+   boundary. Suspended progress and liveness belong to the managed net; no
+   call or checkpoint claim becomes durable.
 
 The separate plan is required because W6B.4b.2 adds core topology, semantic
-budget sharing, exact same-pair checkpoint mutation, production blocked
-operator resumption, and forced stale-admission/lost-wakeup verification. The
-parent plan remains authoritative for the raw-value inventory and records the
-combined W6B.4b closure only after both subcheckpoints pass.
+budget sharing, a net-owned isomorphism of regional WHNF work, exact
+same-pair checkpoint mutation, production blocked-checkpoint resumption, and
+forced stale-admission/lost-wakeup verification. The parent plan remains
+authoritative for the raw-value inventory and records the combined W6B.4b
+closure only after both subcheckpoints pass.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 

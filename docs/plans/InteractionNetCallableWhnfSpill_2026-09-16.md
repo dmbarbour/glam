@@ -1,12 +1,11 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: planned. This is the focused topology and suspension subplan for
-W6B.4b.2 of
+Status: planned; revised on 2026-09-16 to use one net-owned callable
+checkpoint rather than an `Operator >< Data` encoding. This is the focused
+topology and suspension subplan for W6B.4b.2 of
 [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md).
 The parent plan remains authoritative for the D.2c inventory and its `-1`
-callable-lowering delta. This plan owns the larger semantic, interaction-net,
-budget, race, and verification work needed to achieve that delta without a
-durable net claim.
+callable-lowering delta.
 
 ## Purpose
 
@@ -16,17 +15,22 @@ Replace synchronous callable forcing inside an interaction-net
 The common case must remain simple. When the callable reaches WHNF within the
 current evaluator quantum, the original call reduction lowers it directly to
 a copied raw net or a `CoreOperator`; it does not install intermediate graph
-state merely because the input began as a lazy or promise. Only a computation
-which exhausts its budget or reaches a real dependency publishes resumable
-state into the net.
+state merely because the input began as a lazy or promise. Only work which
+exhausts its budget or reaches a real dependency publishes resumable state
+into the net.
 
-The suspended representation is an internal `NormalizeCallable` operator. It
-retains the completed prefix of callable-WHNF work as ordinary managed net
-topology, not as a worker-local Rust continuation, a synthetic semantic
-`Value`, an active-pair side table, or a durable claim. A later worker may
-briefly claim that operator pair, project the checkpoint into ephemeral
-regional work, use another bounded quantum, and either remove the operator on
-completion or publish one replacement checkpoint before yielding again.
+Suspended work has this logical topology:
+
+```text
+Bind >< CallableCheckpoint(NetWhnfState)
+```
+
+`CallableCheckpoint` is one internal, data-like runtime node. The managed net
+is the liveness owner for every ordinary `Value` edge in `NetWhnfState`; the
+state must not contain runtime roots merely to survive suspension. A later
+worker may briefly claim the pair, project the checkpoint into ephemeral
+regional work, use another bounded quantum, and either lower the completed
+call directly or publish one replacement checkpoint before yielding again.
 
 This is a spill protocol:
 
@@ -37,10 +41,14 @@ Bind >< Data(callable)
               |
               +-- ready  -> direct existing callable lowering
               +-- failed -> structural stuck result
-              +-- yield  -> NormalizeCallable(checkpoint) >< Data(focus)
-              +-- wait   -> NormalizeCallable(checkpoint) >< Data(focus)
-                                then exact dependency suspension
+              +-- yield  -> Bind >< CallableCheckpoint(NetWhnfState)
+              +-- wait   -> Bind >< CallableCheckpoint(NetWhnfState)
+                                  then exact dependency suspension
 ```
+
+The checkpoint replaces the original `Data` node in place where practical.
+There is no additional normalization operator, operand node, or terminal
+reduction merely to reconstruct `Bind >< Data`.
 
 ## Why This Is a Separate Plan
 
@@ -49,10 +57,11 @@ runtime-net access resolution and callable lowering. Access resolution can
 reuse the existing `AccessMachine` ownership pattern. Callable lowering also
 requires:
 
-- a new core-net topology state;
+- a new specialization-owned runtime-node payload;
+- a net-owned isomorphism of regional WHNF work;
 - bounded evaluator-budget integration in `NetWhnfMachine`;
-- a same-pair payload checkpoint transition with managed-edge barriers;
-- production use of exact blocked operator pairs;
+- exact in-place checkpoint mutation with managed-edge barriers;
+- production blocked-checkpoint resumption;
 - stale-admission and lost-wakeup handling; and
 - a split-point, contention, profiling, and aggressive-GC matrix.
 
@@ -70,94 +79,116 @@ partial builtin, function, applicable dictionary, failure, or retryable wait.
 The retryable path can block the original call pair, but the exact incremental
 WHNF checkpoint is not represented in the net.
 
-The reusable WHNF evaluator already has the required semantic concepts:
+The reusable WHNF evaluator already has the required semantic state:
 
-- `RegionalWhnfWork` performs callback-free work beneath one matching access;
+- `RegionalWhnfWork` owns one callback-free focus, continuation frames,
+  followed identities, source-owner identity, and promise-cycle breadcrumb
+  while matching value access is active;
 - `WhnfStepBudget` bounds a regional quantum;
-- `DurableWhnfState` retains focus, followed deferred identities, cycle state,
-  and general continuation frames; and
+- `DurableWhnfState` is the rooted machine-owned isomorphism of that regional
+  work; and
 - `WhnfDeferredRequest` separates dependency admission from regional value
   access.
 
-Its durable form is intentionally machine-oriented. It owns runtime roots, is
-not cloneable, and must not simply be embedded in cloneable `CoreOperator`
-payloads. The call site initially needs only outer-shell normalization: the
-canonical lazy producer owns evaluation of an unfulfilled lazy source, while
-the call site follows fulfilled lazies and assigned promises and retains their
-cycle history.
+`DurableWhnfState` cannot be embedded in the managed net. Its runtime roots
+are correct for an outer Rust machine, but a root stored inside the traced heap
+would bypass the net's ordinary edge ownership and could keep the runtime
+alive independently. The initial net checkpoint instead mirrors
+`RegionalWhnfWork` using normal `Value` edges visited through the managed
+runtime net.
 
-The generic interaction-net runtime currently supports `OperatorYield::Data`
-and `OperatorYield::Operator`. The latter means that an operator application
-returned another callable operator; it consumes the current operand and
-installs a future `Bind`. It is not a same-pair continuation and must not be
-repurposed for callable normalization.
+## Selected Representation
 
-## Selected Semantics
+### Begin with the complete state
 
-### Inline first, spill only at a boundary
-
-Encountering `Value::Lazy` or `Value::Promised` does not by itself install a
-normalizer. The claimed call projects an ephemeral callable-WHNF work record
-and drives it with the remaining semantic budget for the current net-machine
-quantum.
-
-A chain such as:
-
-```text
-Lazy A -> Promise B -> Function F
-```
-
-which is already cached and assigned completes inline and follows the same
-direct lowering path as an immediate `Function F`. No additional node,
-managed root, task, or net reduction survives the operation.
-
-The work is reified only if:
-
-1. the available callable-WHNF budget is exhausted;
-2. the current lazy or promise is unresolved;
-3. dependency admission must occur outside managed access; or
-4. a future outer-shell rule reaches another explicit external boundary.
-
-### Net-owned checkpoint
-
-The initial checkpoint shape is deliberately narrower than a general
-`WhnfComputation`:
+The safe starting point is an isomorphism of `RegionalWhnfWork`, not a
+hand-selected subset:
 
 ```rust
-struct CallableWhnfCheckpoint {
-    generation: CallableCheckpointGeneration,
+struct NetWhnfState {
+    focus: Value,
+    frames: Vec<NetWhnfContinuation>,
     followed: BTreeSet<DeferredValueId>,
+    source_owner: Option<LazyId>,
+    cycle_promise: Option<PromisedValue>,
 }
-
-CoreOperator::NormalizeCallable(CallableWhnfCheckpoint)
 ```
 
-The exact field spelling may change after the NC1 inventory, but its ownership
-does not:
+`NetWhnfContinuation` initially mirrors every active
+`RegionalWhnfContinuation` variant with normal traced `Value` fields. The
+exact implementation may instead make the common WHNF state generic over a
+storage policy, but it must retain the same information and explicit
+ownership boundaries. Do not literally alias `RegionalWhnfWork` while that
+type's contract says it may exist only beneath regional access.
 
-- the associated `Data` node owns the current focus;
-- the operator owns only the remaining cycle/progress state;
-- semantic `Value` gains no callable-progress variant;
-- no `RuntimeValueRoot` is embedded merely to keep the checkpoint alive; and
-- every raw `Value` retained by the operator is a managed net edge covered by
-  the normal `CoreOperator` edge visitor and mutation barrier.
+Projection and publication are explicit:
 
-`generation` is an opaque runtime-local checkpoint identity, not semantic
-data. Together with the runtime-net identity and active-pair key, it prevents
-a delayed dependency admission from blocking a newer checkpoint which happens
-to occupy the same operator and data nodes. If existing runtime revisions can
-provide the same exactness without broad equality or retention, NC2 may reuse
-them; the invariant is required even if the field is not.
+```text
+NetWhnfState --project under access--> RegionalWhnfWork
+RegionalWhnfWork --publish via barrier--> NetWhnfState
+```
 
-### Meaning of `Data(focus)`
+Projection duplicates managed edges through the current access. Publication
+moves or duplicates the complete successor work into the checkpoint before
+the claim is released. Every field which can contain a `Value` participates in
+the runtime-net edge visitor and mutation transition.
 
-`focus` is the exact value which the next outer-shell WHNF step must inspect.
-It is not necessarily the callable originally attached to the `Bind`.
+Only after this complete representation passes forced split-point tests may
+NC5D remove fields which are proven unreachable for callable normalization.
+Expected candidates are `source_owner`, `cycle_promise`, and possibly
+`frames`, but none is omitted merely because current examples do not happen
+to use it.
 
-Regional shell transitions are atomic with respect to budget publication. The
-driver checks budget before a transition. Following a cached lazy or assigned
-promise updates both the current focus and `followed` before another budget
-check can yield. Consequently:
+### Runtime node boundary
+
+The generic runtime gains a specialization-owned, runtime-only checkpoint
+payload, conceptually:
+
+```rust
+trait NetSpecialization {
+    type CallableCheckpoint: Clone + Debug + Eq + 'static;
+    // existing associated types...
+}
+
+enum RuntimeNode<S: NetSpecialization> {
+    // existing variants...
+    CallableCheckpoint(S::CallableCheckpoint), // boxed if the size gate says so
+}
+```
+
+The exact name and boxing are implementation details. The node is not added to
+the public/template `Node` vocabulary unless copying mechanics prove that
+necessary. Users cannot construct it; only a running callable reduction may
+spill one.
+
+The payload is one-port and data-like:
+
+- `Bind >< CallableCheckpoint` is a resumable semantic call;
+- `Fan >< CallableCheckpoint` duplicates the checkpoint coherently;
+- `Erase >< CallableCheckpoint` drops it;
+- cursor/source copying clones it as one node; and
+- other principal interactions are stuck unless explicitly justified.
+
+Measure `size_of::<RuntimeNode<CoreSpecialization>>()`, its managed wrapper,
+and the applicable GC slot class before selecting storage. If an unboxed
+checkpoint increases a hot node or allocation size class materially, store
+the state behind `Box`. Checkpoints exist only after suspension, so one boxed
+allocation is preferable to increasing every ordinary net-node allocation.
+Revisit boxing after NC5D pares unreachable fields; do not retain it by habit
+if the final state fits without affecting node size.
+
+### Meaning of `focus`
+
+`focus` is the exact value which the next WHNF transition must inspect. It is
+not necessarily the callable originally attached to the `Bind`.
+
+Regional transitions are atomic with respect to checkpoint publication. The
+driver checks budget before a transition. A transition may inspect one cached
+lazy or assigned promise and update the complete regional state, including
+focus, frames, followed identities, and cycle metadata. Only then may another
+budget check yield.
+
+For example:
 
 ```text
 original focus: Lazy A
@@ -165,53 +196,71 @@ cached A:       Promise B
 assigned B:     Lazy C
 ```
 
-may spill as `Data(Lazy C)` with `A` and `B` already represented in the
-followed identities. Resumption begins at `C`; it does not return to `A` or
-re-read `B`. If budget expires before a transition starts, the prior focus is
-retained and only that not-yet-performed observation occurs after resumption.
+may spill with `focus = Lazy C`; resumption does not return to `A` or re-read
+`B`. If budget expires before a transition starts, no part of that transition
+has happened and the prior complete state remains authoritative.
 
-When the focus is an unfulfilled lazy, `Data(focus)` deliberately remains that
+No callback, task admission, reflection activation, or host operation occurs
+inside such a transition. Those are reported as boundaries only after the
+complete `NetWhnfState` has been published.
+
+### Producer work remains canonical
+
+When focus is an unfulfilled lazy, the checkpoint deliberately retains that
 same lazy identity. Its canonical `LazyTaskMachine` owns source evaluation,
-including function application, reflection tasks, host calls, or net work.
-The normalizer admits or joins that producer and blocks. After wakeup it reads
-the lazy's cache once and continues from the cached result. It never evaluates
-the lazy recipe itself and cannot construct a second reflection task.
+including application frames, reflection tasks, host calls, access work, or
+net work. The callable checkpoint admits or joins that producer and blocks.
+After wakeup it reads the lazy's cache and continues from the cached result; it
+never re-evaluates the lazy recipe or constructs a second reflection task.
 
 Promises follow the same division. An unassigned promise remains the focus;
 its producer or canonical follower owns eventual assignment. An assigned
-promise transition replaces focus with its assigned value before publication.
-The root-free `followed` set is sufficient for call-site cycle detection
-because the current repeated promise is itself available when a canonical
-promise-follow request is needed. The separate `cycle_promise` breadcrumb in
-general source-oriented `WhnfComputation` exists only for a producer which
-returns to its own source lazy; callable normalization has no `source_owner`
-and must not retain that field until such ownership is actually introduced.
+promise transition installs its assigned value as the new focus before
+publication.
 
-### Resume by projection
+NC1 and NC5 must nevertheless prove this ownership boundary. In particular,
+they must establish whether a callable checkpoint can ever inherit application
+or access frames rather than assuming all frames belong to a producer. If the
+proof fails, the full `frames` vector remains part of `NetWhnfState`.
 
-Claiming `NormalizeCallable(checkpoint) >< Data(focus)` projects those payloads
-into regional callable work beneath one matching value-access region. One
-claim may cover several callback-free outer-shell steps, but only within the
-bounded current quantum. The result is one of:
+### Inline first, spill only at a boundary
 
-- **Ready:** remove the normalizer and emit the final callable as `Data` at the
-  original `Bind` principal. Ordinary call lowering then proceeds. A later
-  measured optimization may fuse these two terminal reductions.
+Encountering `Value::Lazy` or `Value::Promised` does not by itself install a
+checkpoint. The claimed call projects ephemeral WHNF work and drives it with
+the remaining semantic budget for the current net-machine quantum.
+
+A cached/assigned chain which reaches an immediate callable within that budget
+takes the existing direct copy/operator path. No checkpoint node, managed
+root, producer, or additional net reduction survives the operation.
+
+The work is reified only if:
+
+1. the available callable-WHNF budget is exhausted;
+2. the current lazy or promise is unresolved;
+3. dependency admission must occur outside managed access; or
+4. a future WHNF rule reaches another explicit external boundary.
+
+### Resume and terminalize the same pair
+
+Claiming `Bind >< CallableCheckpoint(state)` projects the complete state into
+regional work and uses the remaining bounded quantum. Its result is:
+
+- **Ready:** classify the final focus and directly apply the existing raw-net
+  copy or callable-to-operator rewrite using the original `Bind` wiring. Do
+  not first reconstruct `Bind >< Data` merely to reduce it again.
 - **Failed:** retain the structured evaluation failure as the stuck reason.
-- **Yielded:** atomically replace the operator checkpoint and data focus once,
-  make the pair ready, and end the claim.
-- **Boundary:** publish the replacement checkpoint once, end the regional
-  access and claim, admit the dependency, then conditionally block only that
-  exact checkpoint.
+- **Yielded:** replace the checkpoint payload once, make the same pair ready,
+  and end the claim.
+- **Boundary:** publish the complete replacement state, end regional access
+  and the claim, admit the dependency, then conditionally block only that
+  exact checkpoint generation.
 
-The implementation must not mutate graph topology once per followed shell.
-The graph records quantum boundaries; the regional reducer records the cheap
-steps within a quantum.
+The graph records quantum boundaries, not individual cached-shell steps.
 
 ### Budget relationship
 
 `NetWhnfMachine::poll` must receive the outer task's `step_budget`. Initially,
-the net driver should use a semantic sub-budget:
+the net driver uses a semantic sub-budget:
 
 - each call or operator semantic dispatch consumes a unit;
 - each regional callable-WHNF transition consumes a unit from the same
@@ -220,302 +269,359 @@ the net driver should use a semantic sub-budget:
   separate bounded-batch policy rather than suddenly charging every wire or
   cursor operation as an evaluator semantic step.
 
-The precise accounting is latched in NC1 before topology changes. A callable
-must never receive a fresh full budget for every active-pair retry within one
-outer poll. Budget exhaustion returns `Yielded` after publishing the exact
-checkpoint.
+A callable must never receive a fresh full budget for every active-pair retry
+within one outer poll. Budget exhaustion publishes the exact `NetWhnfState`
+and returns `Yielded`.
 
 ### Dependency admission without a durable claim
 
-No call or operator claim may enter a machine field, scheduler record, or
-returned `Pending` result. A claim may span only the bounded callback-free
-regional computation and its immediate atomic topology publication.
+No call or checkpoint claim may enter a machine field, scheduler record, or
+returned `Pending` result. A claim may span only bounded callback-free work
+and its immediate atomic checkpoint publication.
 
-Dependency admission happens after managed value access closes. The selected
-protocol is logically two-stage:
+Dependency admission is logically two-stage:
 
-1. publish a ready normalization checkpoint and finish the current claim;
+1. publish a ready `CallableCheckpoint` and finish the current claim;
 2. admit or observe the lazy/promise dependency outside managed access;
-3. conditionally block the pair only if the runtime net, pair, and checkpoint
-   generation still match; and
+3. conditionally block the pair only if runtime net, pair, and checkpoint
+   generation/revision still match; and
 4. close the subscribe/observe race so completion immediately before or after
-   the conditional block cannot lose a wakeup.
+   blocking cannot lose a wakeup.
 
-Another worker may claim or even complete the normalizer between steps 1 and
-3. That is ordinary contention. The older boundary action becomes stale and
-must do nothing. It must not restore an older payload or block newer work.
-
-The implementation may use an existing persistent wait state or an explicit
-post-block completion recheck to close the lost-wakeup window. It must not
-solve the race by retaining the original claim across a callback, scheduler
-wait, or later poll.
+Another worker may claim, update, or terminalize the checkpoint between steps
+1 and 3. The older boundary action is then stale and must do nothing. It must
+not restore an older state or block newer work. The implementation must not
+solve this race by retaining a claim across a callback, scheduler wait, or
+later poll.
 
 ## Semantic and Ownership Invariants
 
-1. **Immediate and cheaply resolved callables leave no normalizer.** Deferred
-   syntax or representation alone is not a reason to add topology.
-2. **Suspension does not replay a completed prefix.** Focus, followed deferred
-   identities, promise-cycle state, and any later required continuation state
-   are published together.
-3. **Claims are quantum-local.** No claim survives budget yield, dependency
+1. **Immediate and cheaply resolved callables leave no checkpoint.** Deferred
+   representation alone is not a reason to add topology.
+2. **The initial checkpoint is complete.** It begins isomorphic to regional
+   WHNF work, including every continuation and ownership field.
+3. **Fields disappear only by proof.** Source ownership, promise breadcrumbs,
+   or frames may be removed only after constructors and transitions make them
+   structurally unreachable and forced tests cover the boundary.
+4. **Suspension does not replay a completed prefix.** The complete successor
+   state is published atomically at every yield and dependency boundary.
+5. **Claims are quantum-local.** No claim survives budget yield, dependency
    admission, scheduler return, callback, cancellation, or unwind.
-4. **The net owns suspended progress.** A ready or blocked normalizer is
-   complete authoritative state; no machine-side shadow checkpoint is needed
-   to resume it.
-5. **Lazy producers remain canonical.** An unfulfilled lazy is evaluated by
-   its normal producer owner. Callable normalization waits on and follows its
-   result; it does not create a second producer.
-6. **Producer work is not duplicated in topology.** The checkpoint retains
-   the current deferred identity, not its source recipe or producer machine.
-   Reflection, host, function-call, and net-source progress remain in the
-   canonical lazy task which the normalizer joins.
-7. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
-   boundary cannot change promise/lazy cycle recognition or the resulting
-   structured failure.
-8. **A checkpoint is copied as topology.** Copying or materializing a partially
-   normalized closed net retains its focus and checkpoint coherently; no
-   active-pair side table is required. Scheduler-local blocked status need not
-   copy: the target pair observes the retained focus and independently admits
-   the same semantic dependency.
-9. **No semantic value pollution.** Callable checkpoints are internal operator
-   state and cannot be observed through ordinary Glam patterns, equality, or
-   value-kind diagnostics.
-10. **Every checkpoint edit is a traced edge transition.** Replacing focus or
-   checkpoint-owned values reports exact leaving and entering edges through
-   the managed runtime-net mutation gateway.
-11. **Stale orchestration is harmless.** A delayed admission, wake, or retry
+6. **The net owns suspended progress and liveness.** Checkpoint values are
+   traced net edges, not independent roots or machine-side shadows.
+7. **Lazy producers remain canonical.** Callable normalization joins an
+   existing source owner and never reconstructs its recipe or reflection work.
+8. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
+   boundary cannot change cycle recognition or its structured failure.
+9. **Checkpoint copying is coherent.** Copying or materializing a partially
+   normalized closed net copies one complete checkpoint. Scheduler-local
+   blocked status need not copy; the target independently observes the same
+   semantic dependency.
+10. **No semantic value pollution.** Checkpoints are internal runtime nodes
+    and cannot be observed by ordinary Glam patterns, equality, or value-kind
+    diagnostics.
+11. **Every checkpoint edit is a traced edge transition.** Replacing a state
+    reports all leaving and entering `Value` edges through the managed-net
+    mutation gateway.
+12. **Stale orchestration is harmless.** Delayed admission, wake, or retry
     cannot block, restore, or fail a newer checkpoint.
-12. **Failure provenance is preserved.** Inline and spilled evaluation produce
-    equivalent evaluation failures and context frames.
-13. **Raw nets and applicable values retain existing meanings.** Reaching
-    `Value::Net`, builtin, partial builtin, function, or applicable dictionary
-    hands off to the established callable classification without inspecting
-    function stages or changing partial-application semantics.
-14. **Operator continuation is explicit.** `OperatorYield::Operator` retains
-    its current returned-callable meaning. Same-pair checkpoint replacement
-    receives a separately named mutation/result path.
-15. **No new global allocator is introduced.** Any checkpoint generation uses
+13. **Failure provenance is preserved.** Inline and spilled evaluation produce
+    equivalent failures and context frames.
+14. **Raw nets and applicable values retain existing meanings.** Final
+    classification preserves raw-net copying and ordinary builtin, function,
+    partial-function, and applicable-dictionary behavior.
+15. **No new global allocator is introduced.** Checkpoint generations use
     runtime-owned identity allocation or an existing exact runtime revision.
 
 ## Non-Goals
 
 - Do not move general pure evaluation into interaction-net topology.
-- Do not add a public WHNF, demand, or normalization agent.
+- Do not add a public WHNF, demand, or checkpoint agent.
 - Do not introduce durable active-pair claims.
 - Do not add an active-pair side table for callable progress.
 - Do not wrap every deferred callable in a synthetic managed lazy.
 - Do not add `Value::CallableProgress` or another semantic value variant.
-- Do not fuse final callable normalization with ordinary call lowering before
-  profiling demonstrates a worthwhile benefit.
+- Do not optimize fields out of `NetWhnfState` before the reachability proof.
 - Do not redesign cursor-WHNF normalization, generic task scheduling, or the
   entire interaction-net work budget in this subplan.
 - Do not migrate the separate W6B.4b access-path operation here.
 
 ## Implementation Phases
 
-### NC0 — Latch the current seam and target behavior
+### NC0 — Latch the seam, state, and size baseline
 
 #### NC0A — Current-path characterization
 
 Record focused tests and profiling observations for:
 
-- an immediate builtin, partial builtin, function, dictionary, and raw net;
-- a cached lazy resolving to each callable family;
-- an assigned promise resolving to a callable;
-- an unresolved lazy and promise;
-- a permanently non-callable result; and
-- the existing callable claim release, unwind, blocked retry, and fused
+- immediate builtin, partial builtin, function, dictionary, and raw-net calls;
+- cached lazies and assigned promises resolving to each callable family;
+- unresolved lazies and promises;
+- permanently non-callable results; and
+- existing claim release, unwind, blocked retry, and fused
   callable-to-operator topology.
 
-The tests should show that synchronous `lower_core_callable_in` is the only
-remaining W6B.4b callable declaration and identify where its claim currently
-crosses retryable evaluation. Do not change expected semantics in NC0A.
+Show that synchronous `lower_core_callable_in` is the only remaining W6B.4b
+callable declaration and identify where its claim currently crosses retryable
+evaluation. Do not change expected semantics in NC0A.
 
-#### NC0B — Failing spill or instrumentation oracle
+#### NC0B — State-shape and allocation baseline
+
+Record `size_of` and applicable GC slot/run-class observations for:
+
+- `RegionalWhnfWork` and each continuation family;
+- `RuntimeNode<CoreSpecialization>`;
+- the managed runtime-net node/container; and
+- boxed versus unboxed prototype checkpoint payloads.
+
+This baseline decides NC2A boxing. Prefer const assertions for architectural
+size assumptions and ordinary tests for policy thresholds which may change.
+
+#### NC0C — Failing spill oracle
 
 Add test-only observation sufficient to distinguish:
 
-- direct lowering with no normalizer ever installed;
-- one checkpoint installed because a budget was forced to expire;
-- one checkpoint installed because an exact dependency was reached; and
-- resumption from the published focus rather than the original callable.
+- direct lowering with no checkpoint installed;
+- one checkpoint installed because budget was forced to expire;
+- one checkpoint installed because a dependency was reached; and
+- resumption from the published state rather than the original callable.
 
-Prefer topology and counter observations over timing or thread repetition.
-The target tests may remain expected-failing only inside the NC0 commit and
-must become ordinary passing regressions as their owning phases land.
+Prefer topology and counters over timing or thread repetition. Target tests
+may remain expected-failing only inside the NC0 commit and become ordinary
+regressions as their owning phases land.
 
-Exit: the existing behavior and the desired no-spill fast path are executable
-contracts before production topology changes.
+Exit: existing behavior, target topology, state size, and the no-checkpoint
+fast path are executable baselines.
 
-### NC1 — Shared regional callable-WHNF work and budget
+### NC1 — Complete net-owned WHNF state and shared budget
 
-#### NC1A — Factor outer-shell semantics
+#### NC1A — Full regional/net isomorphism
 
-Extract the callback-free lazy/promise shell reducer and its deferred-identity
-rules so ordinary `WhnfComputation` and callable normalization use one
-implementation. Introduce a narrow regional callable work form only if the
-general `RegionalWhnfWork` cannot be safely reused without manufacturing
-irrelevant frames.
+Introduce `NetWhnfState` and `NetWhnfContinuation` with every field and variant
+of the current regional work. Add explicit projection/publication conversions
+under matching access. At this phase the state may be test-only or hosted by a
+temporary focused fixture; do not add runtime topology merely to exercise it.
 
-Prove that a call-site computation begins with no general continuation frames
-and that unfulfilled lazy-source evaluation remains owned by the canonical
-lazy task. If this proof fails, expand the net checkpoint deliberately rather
-than silently discarding general WHNF state.
+Force round trips with:
 
-#### NC1B — Reusable bounded driver
+- empty and nonempty frame stacks;
+- application and dictionary-application frames;
+- static-access and semantic-undefined frames;
+- followed lazy/promise identities;
+- source-owner identity and promise breadcrumb; and
+- values in every retained frame position.
 
-Drive callable work to `Ready`, `Failed`, `Yielded`, or `Boundary` beneath one
-matching access. Retain the exact regional work on yield and boundary. Add
-forced-budget tests which split a cached lazy/promise chain after every shell
-and compare it with uninterrupted WHNF. Add a reflection-backed lazy callable
-whose producer is paused before and after reflection admission; every split
-must retain one lazy identity and one reflection task rather than reconstruct
-either source.
+Collection between publication and projection must retain exactly the state
+reachable through the net-owned edge visitor, with no runtime roots inside the
+state.
+
+#### NC1B — Shared callback-free driver
+
+Factor the regional driver so general `WhnfComputation` and net checkpoint
+work use identical transition semantics. Drive net work to `Ready`, `Failed`,
+`Yielded`, or `Boundary` while retaining the entire regional successor on
+yield and boundary.
+
+Force budget splits before and after every transition in frame-free shell
+chains and representative frame-bearing work. Results, failures, remaining
+frames, cursors, and retained values must match uninterrupted evaluation.
 
 #### NC1C — Net-machine semantic budget
 
 Pass the outer `step_budget` into `NetWhnfMachine::poll` and introduce shared
-semantic-budget accounting for call/operator dispatch and callable shell
-steps. Preserve the existing structural normalization-batch policy. Add a
-deterministic zero/one/many-budget matrix and show that one outer poll cannot
-grant a fresh full callable budget to each retry.
+semantic-budget accounting for call/operator dispatch and WHNF transitions.
+Preserve the existing structural normalization-batch policy. Add a
+deterministic zero/one/many matrix and prove one outer poll cannot grant a
+fresh full budget to every retry.
 
-Exit: callable WHNF can be driven and split exactly without graph changes,
-and the net owner has an explicit bounded quantum to lend it.
+#### NC1D — Reachability inventory, not optimization
 
-### NC2 — Managed normalization checkpoint topology
+Inventory every constructor and transition by which callable normalization
+could receive or create:
 
-#### NC2A — Core operator state and edge coverage
+- a continuation frame;
+- `source_owner`; or
+- `cycle_promise`.
 
-Add `CoreOperator::NormalizeCallable` with the minimum checkpoint proven by
-NC1A. Extend every exhaustive operator match, debug rendering, equality used
-for exact internal matching, compatibility edge visitor, recursive identity
-inventory, and managed-drop/ownership inventory as appropriate.
+Record the apparent proof that ordinary call-site demand begins frame-free and
+that lazy-source application/reflection/access work belongs to the canonical
+producer. Do not remove fields in NC1; retain the proof obligations for NC5D
+after the full-state topology works end to end.
 
-Checkpoint-owned semantic values must appear in GC edge tests. Root-free IDs
-must not be turned into managed roots merely for uniformity.
+Exit: complete WHNF state can move losslessly between regional execution and
+net-owned storage under one bounded semantic quantum.
 
-#### NC2B — Same-pair checkpoint transition
+### NC2 — Runtime callable-checkpoint node
 
-Add a separately named generic runtime mutation which replaces the operator
-and data payloads of one claimed `Operator >< Data` pair while preserving its
-node identities and output connection. It must:
+#### NC2A — Specialization payload and boxing decision
 
-- validate the exact claimed pair;
-- report old and new operator/data edges through the mutation gateway;
-- publish the replacement before releasing the claim;
-- make the pair ready exactly once; and
-- remain distinct from `OperatorYield::Operator`.
+Add the specialization-owned callable-checkpoint associated type and the
+runtime-only node variant. Use NC0B measurements to select boxed or unboxed
+storage. Latch the resulting `RuntimeNode` and managed wrapper size classes.
 
-Test the generic runtime transition independently, including stale calls,
-unwind restoration before publication, and edge-set accounting.
+Extend debug rendering, exact internal equality, profiling classification,
+managed-drop/ownership inventories, and the core checkpoint edge visitor.
 
-#### NC2C — Conditional exact blocking
+#### NC2B — Generic interaction rules and copying
 
-Add the minimum exact-state operation needed to block a published
-normalization checkpoint after dependency admission. Match runtime net, pair,
-and generation/revision atomically. A stale request returns a non-error
-"disturbed" result and does not change pair state.
+Implement the data-like rules for fan duplication, erasure, port counts,
+cursor/source copying, and malformed/stuck interactions. Add no public
+template constructor. Verify a copied checkpoint contains an independent
+state value whose semantic edges still point to the intended shared managed
+values.
 
-Build deterministic barriers for both admission orderings:
+#### NC2C — Spill and update mutations
 
-1. the dependency remains pending through successful conditional blocking;
-2. the dependency completes before conditional blocking;
-3. another worker advances the checkpoint before conditional blocking; and
-4. another worker completes and removes the normalizer first.
+Add separately named generic runtime mutations which:
 
-Exit: the graph can durably publish and exactly suspend one callable
-checkpoint without storing a claim.
+1. replace one claimed call's `Data` node with a callable checkpoint while
+   retaining the original `Bind`, node identity, auxiliaries, and pair;
+2. replace one claimed checkpoint payload with its complete successor; and
+3. terminalize a claimed checkpoint directly through the existing raw-net copy
+   or callable-to-operator rewrites.
+
+Every mutation validates the exact claimed pair, publishes the complete
+replacement before release, and reports old/new payload edges through the
+managed mutation gateway. Test stale calls and unwind before publication.
+
+#### NC2D — Conditional exact blocking
+
+Add the minimum exact-state operation needed to block a published checkpoint
+after dependency admission. Match runtime net, pair, and checkpoint
+generation/revision atomically. A stale request returns a non-error disturbed
+result.
+
+Use deterministic barriers for:
+
+1. pending dependency through successful blocking;
+2. completion immediately before blocking;
+3. another worker updating the checkpoint first; and
+4. another worker terminalizing it first.
+
+Close the subscribe/observe race explicitly; no ordering may lose a wakeup.
+
+Exit: the runtime can own, copy, update, block, and terminalize a complete
+callable checkpoint without an additional graph node or durable claim.
 
 ### NC3 — Inline-first original call reduction
 
 #### NC3A — Regional fast path
 
-Replace `lower_core_callable_in`'s synchronous deferred forcing with bounded
-regional callable work. Immediate callables bypass the reducer. Deferred
-callables which become ready within the remaining budget take the existing
-direct copy/operator/failure paths.
+Replace synchronous deferred forcing in `lower_core_callable_in` with bounded
+regional WHNF work. Immediate callables bypass the driver. Deferred callables
+which become ready within the remaining budget take the existing direct
+copy/operator/failure paths.
 
 Prove through topology observation that cached or assigned chains within the
-budget never install `NormalizeCallable`.
+budget never install a checkpoint.
 
 #### NC3B — Spill on budget exhaustion
 
-When callable work yields, atomically replace the original call pair with the
-normalization topology containing the exact current focus and checkpoint.
-End the original claim and return ordinary runnable progress. Resume from that
-focus in NC4; never restart from the callable clone retained by the old claim.
+When regional work yields, use NC2C to replace the original `Data` node with a
+checkpoint containing the entire current `NetWhnfState`. End the original
+claim and return ordinary runnable progress. Never retain the original
+callable as a separate restart point.
 
 #### NC3C — Spill on dependency boundary
 
-Publish the same topology for an unresolved lazy/promise boundary, then use
-the NC2C protocol to admit and block outside access. Ensure an abandoned,
-cancelled, failed, or completed producer produces the same result as ordinary
-WHNF following.
+Publish the same complete checkpoint for an unresolved lazy/promise boundary,
+then use NC2D to admit and block outside access. Ensure abandoned, cancelled,
+failed, and completed producers match ordinary WHNF behavior.
 
-Exit: original calls either finish inline or leave one complete graph-owned
-checkpoint; they never retain a durable claim or machine-side continuation.
+Exit: original calls either finish inline or leave one complete net-owned
+state; they never retain a durable claim or machine-side continuation.
 
-### NC4 — Resume and retire normalization operators
+### NC4 — Resume and terminalize checkpoints
 
-#### NC4A — Operator projection and regional resume
+#### NC4A — Checkpoint claim and projection
 
-Teach core operator dispatch to recognize `NormalizeCallable`, project its
-checkpoint plus operand into regional callable work, and use the remaining
-shared semantic budget. This path is the first production user of blocked
-operator-pair resumption retained after W6B.2.
+Teach semantic active-pair dispatch to recognize
+`Bind >< CallableCheckpoint`, claim it briefly, project the entire state into
+regional work, and use the remaining shared semantic budget.
 
 #### NC4B — Yielded checkpoint replacement
 
-On budget yield, use NC2B to publish exactly one updated operator/data pair.
-Do not mutate topology once per followed shell. Add counters proving that a
-quantum with many cached transitions performs one checkpoint publication.
+On budget yield, publish one complete successor checkpoint through NC2C. Do
+not mutate topology once per WHNF transition. Add counters proving a quantum
+with many cached transitions performs one checkpoint publication.
 
-#### NC4C — Ready and failed retirement
+#### NC4C — Direct readiness and failure
 
-On readiness, remove the normalizer and emit the final callable `Data` at the
-original `Bind`, allowing the established call reduction to classify it. On
-failure, retain the structured stuck reason. Preserve raw-net copying,
-function partial application, and applicable dictionary/builtin behavior.
+On readiness, classify the final focus while the checkpoint remains claimed
+and terminalize directly using the original `Bind` wiring. Do not reconstruct
+a `Data` node and schedule another call reduction. On failure, retain the
+structured stuck reason.
 
-Exit: a spilled callable can cross arbitrarily many budget and dependency
-boundaries, then remove all checkpoint topology on terminal completion.
+Preserve raw-net copying, function partial application, and applicable
+dictionary/builtin behavior.
 
-### NC5 — Concurrency, copying, and failure closure
+#### NC4D — Frame-bearing resumption oracle
 
-#### NC5A — Cycle and dependency matrix
+Even if production callable entry is believed frame-free, force at least one
+checkpoint with nonempty continuation frames through yield, block, copy, and
+completion. This proves the initial full state is genuinely lossless before
+NC5D considers specialization.
+
+Exit: a checkpoint can cross arbitrary budget and dependency boundaries and
+terminalize without replay or temporary topology.
+
+### NC5 — Concurrency, ownership, and safe state specialization
+
+#### NC5A — Cycle, producer, and dependency matrix
 
 Force:
 
 - lazy-to-lazy, promise-to-promise, and mixed chains;
-- a repeated identity before and after one or more spills;
-- an unresolved dependency at the first and later focuses;
-- failure cached by a lazy or assigned to a promise; and
-- cancellation, abandonment, and task failure while blocked.
+- repeated identities before and after one or more spills;
+- unresolved dependencies at the first and later focuses;
+- cached or assigned failures;
+- cancellation, abandonment, and task failure while blocked; and
+- application-, reflection-, access-, host-, and net-backed lazy producers.
 
-Require identical result or structured failure for uninterrupted, every-step
-budget splitting, and dependency-split execution.
+Every producer-backed fixture records its canonical lazy/task identity. Budget
+splits and stale retries must retain one producer and, where applicable, one
+reflection task rather than reconstructing source work.
 
 #### NC5B — Contention and stale work
 
 Use barriers rather than repetition to force two workers toward the same
-normalization frontier. Verify one authoritative checkpoint, harmless stale
-admission, exact blocked retries, no restored older focus, and no claim after
-either worker returns. Cover panic/unwind before and after checkpoint
-publication.
+checkpoint. Verify one authoritative state, harmless stale admission, exact
+blocked retries, no restored predecessor, and no claim after either worker
+returns. Cover unwind before and after publication.
 
 #### NC5C — Copy and GC ownership
 
-Copy or materialize a closed runtime net while callable normalization is
-ready and while its source pair is blocked. Each copy must retain a coherent
-focus and checkpoint without an external side record, then independently
-observe and block on the still-pending semantic dependency. The source pair's
-scheduler-local blocked state is not copied. Run the cases with collection
-forced at projection, publication, dependency admission, wake, and terminal
-retirement boundaries.
+Copy or materialize a closed runtime net while a checkpoint is ready and while
+its source pair is blocked. Each copy retains one coherent state without roots
+or an external side record, then independently observes the pending semantic
+dependency. Force collection at projection, publication, dependency
+admission, wake, copy, and terminal retirement.
 
-Exit: topology, dependency, and ownership behavior remains correct under
-forced schedules and aggressive collection.
+#### NC5D — Prove and pare unreachable fields
+
+Revisit the NC1D inventory after the complete representation passes NC3-NC5C.
+For each candidate field:
+
+- identify the private constructors which establish its initial value;
+- identify every transition capable of changing it;
+- add a source-backed inventory or type boundary which fails if a new producer
+  appears; and
+- retain forced semantic fixtures spanning the removed state family.
+
+Remove `source_owner` only if callable work can never own lazy production.
+Remove `cycle_promise` only as a consequence of that proof and because a
+repeated current promise itself supplies the canonical follow target. Remove
+`frames` only if the callable checkpoint type can be constructed and advanced
+solely through an outer-shell state whose API cannot push frames. Otherwise
+keep the full vector; avoiding replay is more important than saving bytes in a
+rare suspended node.
+
+Rerun NC0B size measurements after paring and reconsider boxing. Record both
+the semantic proof and measured storage effect; do not optimize a field away
+for an unmeasured size assumption.
+
+Exit: the final state is either the complete correct representation or a
+structurally proven specialization of it.
 
 ### NC6 — W6 integration, profiling, and focused review
 
@@ -523,24 +629,24 @@ forced schedules and aggressive collection.
 
 Remove synchronous deferred callable forcing from `lower_core_callable_in` or
 retire the helper if classification now belongs directly to call progression.
-Relatch the D.2c manifest and record W6B.4b.2's `OperatorAndNet -1` delta.
-Keep the separate access-resolution declaration assigned to W6B.4b.1.
+Relatch the D.2c manifest and record W6B.4b.2's `OperatorAndNet -1` delta. Keep
+the separate access-resolution declaration assigned to W6B.4b.1.
 
 #### NC6B — Profiling and performance
 
 Extend static interaction-net profiling with, at minimum:
 
-- inline callable-WHNF steps;
-- normalization checkpoint installation;
-- normalization resumption;
-- checkpoint replacement;
-- exact dependency block/retry; and
-- stale boundary admission.
+- inline callable-WHNF transitions;
+- checkpoint installation;
+- checkpoint resumption and replacement;
+- exact dependency block/retry;
+- stale boundary admission; and
+- direct checkpoint terminalization.
 
-Update the focused profiling script with named tests. Verify that immediate and
-within-budget cached callables install zero normalizers. Compare direct-style
-assembly fixtures against the pre-NC baseline and feed any residual scheduling
-or managed-access cost into W6G rather than hiding it with an unbounded budget.
+Update the focused profiling script with named tests. Immediate and
+within-budget cached callables must install zero checkpoints. Compare
+direct-style assembly fixtures against the pre-NC baseline and feed residual
+cost into W6G rather than hiding it with an unbounded budget.
 
 #### NC6C — Routine verification and review
 
@@ -556,48 +662,49 @@ Also run the focused interaction-net profiling script, callable/function/net
 suites, forced-schedule tests, and relevant aggressive-GC partitions. Perform
 a focused post-NC review of:
 
-- inline-versus-spilled equivalence;
+- full-state versus specialized-state equivalence;
+- inline-versus-spilled results;
 - claims and dependency ownership;
-- exact mutation barriers;
-- runtime-net copy semantics;
+- mutation barriers and net-copy semantics;
+- boxing and node-size effects;
 - profiling determinism;
 - remaining synchronous evaluator compatibility; and
-- drift in W6C-W8 caused by the new budget/checkpoint vocabulary.
+- drift in W6C-W8 caused by the new checkpoint vocabulary.
 
-Exit: W6B.4b.2 is complete, reviewed, and ready for the parent W6B.4b closure.
+Exit: W6B.4b.2 is complete, reviewed, and ready for parent W6B.4b closure.
 
 ## Verification Matrix
 
-| Callable situation | Large budget | Forced budget yield | Dependency boundary | Required topology |
+| Callable situation | Large budget | Forced yield | Dependency boundary | Required topology |
 |---|---|---|---|---|
-| Immediate callable | direct result | direct result | n/a | no normalizer |
-| Cached lazy chain | direct result | same result after resume | n/a | normalizer only when forced split occurs |
-| Assigned promise chain | direct result | same result after resume | n/a | normalizer only when forced split occurs |
-| Unresolved lazy | eventual direct result | same result | exact lazy wait | one blocked normalizer |
-| Unassigned promise | eventual direct result | same result | exact promise wait/follower | one blocked normalizer |
-| Reflection-backed lazy | one producer and reflection task | same producer and task | exact lazy wait | one blocked normalizer, no source replay |
-| Mixed deferred cycle | same structured failure | same failure | same cycle dependency/failure | no replayed prefix |
-| Deferred non-callable | same stuck failure | same failure | optional earlier wait | normalizer retired or stuck exactly once |
-| Raw net result | copied source | same copied source | optional earlier wait | final normalizer removed |
-| Partial function result | ordinary one-argument application | same value | optional earlier wait | final normalizer removed |
+| Immediate callable | direct result | direct result | n/a | no checkpoint |
+| Cached lazy chain | direct result | same result | n/a | checkpoint only at forced split |
+| Assigned promise chain | direct result | same result | n/a | checkpoint only at forced split |
+| Unresolved lazy | eventual direct result | same result | exact lazy wait | one blocked checkpoint |
+| Unassigned promise | eventual direct result | same result | exact promise wait/follower | one blocked checkpoint |
+| Reflection-backed lazy | one reflection task | same task | exact lazy wait | no source replay |
+| Frame-bearing fixture | same state/result | same state/result | exact dependency | every frame retained |
+| Mixed deferred cycle | same failure | same failure | same cycle behavior | no replayed prefix |
+| Deferred non-callable | same stuck failure | same failure | optional earlier wait | stuck once |
+| Raw net result | copied source | same source | optional earlier wait | checkpoint removed directly |
+| Partial function | one ordinary application | same value | optional earlier wait | checkpoint removed directly |
 
-Every forced split must assert semantic result, checkpoint focus, followed-set
-continuity, claim absence after return, and expected profiling counts. Thread
-repetition alone is not evidence for any concurrency row.
+Every forced split asserts semantic result, complete state continuity, claim
+absence after return, producer identity, and expected profiling counts. Thread
+repetition alone is not evidence for a concurrency row.
 
 ## Deferred Optimization
 
 After correctness and profiling, consider:
 
-- fusing terminal `NormalizeCallable -> Data(callable) >< Bind` with the
-  established callable classification rewrite;
-- replacing the followed `BTreeSet` with a cheaper small-set representation
-  for short chains;
-- sharing normalized callable work across copied nets through a managed
-  resolver only if measurements justify the added allocation;
-- batching several pure semantic operator steps within one access region; and
+- a compact small-set representation for short followed-identity paths;
+- a specialized outer-shell state if NC5D cannot yet prove all frames
+  unreachable but can split a common no-frame representation safely;
+- batching several pure semantic active-pair steps within one access region;
+- sharing normalized callable work across copied nets only if measurements
+  justify another managed indirection; and
 - incorporating callable normalization into future annotated normalization or
   JIT policies.
 
-None of these optimizations may reintroduce durable claims or make suspended
-progress depend on a particular worker's Rust stack.
+None may reintroduce durable claims, unrooted machine state, or dependence on
+a particular worker's Rust stack.
