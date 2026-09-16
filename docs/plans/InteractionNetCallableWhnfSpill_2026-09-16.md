@@ -1253,14 +1253,28 @@ terminal matrix continues to prove the same exact failure publication.
 
 #### NC6A — Compatibility retirement and inventory closure
 
+##### NC6A.1 — Synchronous compatibility retirement
+
 Remove synchronous deferred callable forcing from `lower_core_callable_in` or
 retire the helper if classification now belongs directly to call progression.
+
+Completed. The test-only helper is now an immediate-WHNF classification seam
+named `classify_core_callable`; it cannot force a lazy or promised callable.
+All deferred callable progress therefore goes through the bounded regional
+driver and, when necessary, the runtime-net checkpoint. A source-backed latch
+rejects reintroduction of `lower_core_callable_in`, while the two immediate
+classification fixtures retain their original semantic coverage.
+
+##### NC6A.2 — D.2c and persistent-edge closure
+
 Relatch the D.2c manifest and record W6B.4b.2's `OperatorAndNet -1` delta. Keep
 the separate access-resolution declaration assigned to W6B.4b.1. Reconcile
 NC0D's runtime-node trait/copy occurrences with persistent-edge P3 and prove
 the checkpoint introduced no new P4 trait dependency.
 
 #### NC6B — Profiling and performance
+
+##### NC6B.1 — Profiling vocabulary
 
 Extend static interaction-net profiling with, at minimum:
 
@@ -1271,12 +1285,19 @@ Extend static interaction-net profiling with, at minimum:
 - stale boundary admission; and
 - direct checkpoint terminalization.
 
+##### NC6B.2 — Deterministic focused fixtures
+
 Update the focused profiling script with named tests. Immediate and
-within-budget cached callables must install zero checkpoints. Compare
-direct-style assembly fixtures against the pre-NC baseline and feed residual
+within-budget cached callables must install zero checkpoints.
+
+##### NC6B.3 — Assembly baseline and residual-cost handoff
+
+Compare direct-style assembly fixtures against the pre-NC baseline and feed residual
 cost into W6G rather than hiding it with an unbounded budget.
 
 #### NC6C — Routine verification and review
+
+##### NC6C.1 — Verification boundary
 
 Run:
 
@@ -1291,6 +1312,8 @@ suites, forced-schedule tests, and relevant aggressive-GC partitions. Re-run
 the forced-order retirement/publication latch which closed parent finding
 `W5C5-002`; an isolated or repeated pass remains insufficient evidence for
 concurrency regressions. Then perform a focused post-NC review of:
+
+##### NC6C.2 — Focused post-NC review
 
 - canonical-state identity across regional/net role changes;
 - inline-versus-spilled results;

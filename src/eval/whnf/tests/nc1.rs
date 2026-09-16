@@ -554,32 +554,15 @@ fn source_section<'source>(source: &'source str, start: &str, end: &str) -> &'so
 #[test]
 fn callable_checkpoint_reachability_inventory_starts_frame_free() {
     let net = include_str!("../../net.rs");
-    let lowering = source_section(
-        net,
-        "fn lower_core_callable_in(",
-        "#[cfg(test)]\npub(super) fn lower_core_callable(",
-    );
-    for producer_only_state in [
-        "from_application_checkpoint_in",
-        "from_static_access_checkpoint_in",
-        "with_source_owner",
-        "cycle_promise",
-        "frames.push",
-    ] {
-        assert!(
-            !lowering.contains(producer_only_state),
-            "ordinary Bind/Data callable demand must begin frame-free: {producer_only_state}"
-        );
-    }
     assert!(
-        lowering.contains("eval_value_in(context, &value)?"),
-        "NC3 must deliberately replace the one current frame-free synchronous demand seam"
+        !net.contains("fn lower_core_callable_in("),
+        "NC6 must not retain a synchronous deferred-callable forcing seam"
     );
 
     let production_driver = source_section(
         net,
         "fn drive_original_callable_whnf(",
-        "#[cfg(test)]\npub(super) fn lower_core_callable(",
+        "#[cfg(test)]\npub(super) fn classify_core_callable(",
     );
     assert_eq!(
         production_driver

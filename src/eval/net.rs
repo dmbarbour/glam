@@ -1431,19 +1431,6 @@ fn classify_core_callable_in(
     }
 }
 
-#[cfg(test)]
-fn lower_core_callable_in(
-    context: &EvaluatorStepContext<'_>,
-    value: Value,
-) -> Result<CoreCallable, EvaluationHalt> {
-    let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        eval_value_in(context, &value)?
-    } else {
-        value
-    };
-    context.with_value_access(|access| classify_core_callable_in(&access, value))
-}
-
 enum CallableWhnfOutcome {
     Ready(CoreCallable),
     Yielded,
@@ -1503,12 +1490,12 @@ fn drive_original_callable_whnf(
 }
 
 #[cfg(test)]
-pub(super) fn lower_core_callable(
+pub(super) fn classify_core_callable(
     context: &EvalContext,
     value: Value,
 ) -> Result<CoreCallable, EvaluationHalt> {
     super::with_direct_evaluator(context, |evaluator| {
-        lower_core_callable_in(evaluator, value)
+        evaluator.with_value_access(|access| classify_core_callable_in(&access, value))
     })
 }
 

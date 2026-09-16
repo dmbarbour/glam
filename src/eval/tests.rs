@@ -2657,7 +2657,7 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
 #[test]
 fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
     let function = closed_function_value(2, TestExpr::Local(0));
-    let callable = lower_core_callable(&test_context(), function.clone())
+    let callable = classify_core_callable(&test_context(), function.clone())
         .expect("an ordinary function should be callable from an interaction net");
 
     match callable {
@@ -2721,7 +2721,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         application_error.to_string(),
         "application requires a function value, received Sealed"
     );
-    let Err(net_call_error) = lower_core_callable(&test_context(), carrier.clone()) else {
+    let Err(net_call_error) = classify_core_callable(&test_context(), carrier.clone()) else {
         panic!("an interaction-net call must not unseal metadata");
     };
     assert_eq!(
