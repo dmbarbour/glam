@@ -3856,6 +3856,16 @@ test-only equality/formatting assumptions before the variant lands. NC2 owns
 their checkpoint-path repair, and NC6 must reconcile the result with both the
 D.2c raw-value manifest and persistent-edge P3/P4 cutover.
 
+NC0 completion record, 2026-09-16: the source-backed inventory assigns 24
+interlocks before the variant lands: twelve ordinary payload-compatibility
+operations remain parent D.2c/P3 work, ten runtime-node/checkpoint-path
+operations belong to focused NC2, and two topology observations belong to
+focused NC2 fixtures. The current D.2c count does not change merely for
+recording future topology. NC2 must update this assignment atomically with the
+new associated type and node variant; NC6 then owns the planned
+`OperatorAndNet -1` closure rather than treating any temporary carrier trait
+as progress.
+
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
 | Checkpoint | Live declarations and current shape | Target and delta |

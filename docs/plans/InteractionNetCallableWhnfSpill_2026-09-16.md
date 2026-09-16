@@ -1,8 +1,9 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: planned; revised on 2026-09-16 to use one net-owned callable
-checkpoint rather than an `Operator >< Data` encoding. This is the focused
-topology and suspension subplan for W6B.4b.2 of
+Status: in progress; NC0 completed on 2026-09-16. The plan was revised on
+2026-09-16 to use one net-owned callable checkpoint rather than an
+`Operator >< Data` encoding. This is the focused topology and suspension
+subplan for W6B.4b.2 of
 [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md).
 The parent plan remains authoritative for the D.2c inventory and its `-1`
 callable-lowering delta.
@@ -466,6 +467,16 @@ later poll.
 
 ### NC0 — Latch the seam, state, and size baseline
 
+Status: complete on 2026-09-16.
+
+NC0 exposed one staging error in the original checklist. A test cannot install
+or observe `CallableCheckpoint` before NC2 introduces the runtime-only variant.
+NC0 therefore latches the complete *pre-checkpoint* oracle. NC2B owns the
+cursor fixture over the real variant, NC3B-NC3C own the forced budget and
+dependency spill observations, and NC4 owns proof that resumption starts from
+published state. No ignored, disabled, or synthetic checkpoint fixture stands
+in for those later executable contracts.
+
 Prerequisite: W6B.0 has replaced copied `usize` poll allowances with one
 borrowed budget token through the task and relevant nested-machine path. NC0
 must not begin by adding a callable-local compatibility budget.
@@ -485,6 +496,18 @@ Show that synchronous `lower_core_callable_in` is the only remaining W6B.4b
 callable declaration and identify where its claim currently crosses retryable
 evaluation. Do not change expected semantics in NC0A.
 
+Completion record: the callable-disposition fixture now covers immediate
+builtin, partial builtin, function, dictionary, and raw-net values; cached
+lazy and assigned-promise shells resolving to every one of those families;
+unresolved promise and lazy dependencies; and permanent non-callability. The
+existing forced release, unwind, exact blocked retry, and direct operator
+splice fixtures remain in place. `callable_lowering_has_one_synchronous_claim_seam`
+source-latches one `lower_core_callable_in` declaration and the one call from
+`progress_core_call_claim` which currently crosses synchronous WHNF demand.
+Under `interaction-net-profiling`, direct operator and copy completion each
+commit one `call` reduction while dependency blockage commits none until the
+semantic rewrite terminalizes.
+
 #### NC0B — State-shape and allocation baseline
 
 Record `size_of` and applicable GC slot/run-class observations for:
@@ -501,6 +524,29 @@ or attempting to prove the absence of an incidental `Sync`
 auto-implementation. Separately latch that the active projected-state guard is
 not `Send` and cannot outlive its matching value access.
 
+Completion record on x86-64/64-bit targets:
+
+| Representation | Bytes |
+|---|---:|
+| `Value` | 64 |
+| `RegionalWhnfFrame` | 40 |
+| `RegionalUndefinedDictionary` | 32 |
+| `RegionalWhnfContinuation` | 160 |
+| `RegionalWhnfWork` | 128 |
+| `RuntimeNode<CoreSpecialization>` | 96 |
+| prototype node with unboxed `RegionalWhnfWork` | 128 |
+| prototype node with boxed `RegionalWhnfWork` | 96 |
+| `ManagedCoreNetCell` / requested GC slot extent | 248 / 248 |
+
+The test uses exact target-specific latches for the measurements and portable
+policy assertions that boxing preserves the existing runtime-node extent
+while the unboxed prototype currently enlarges it. `RegionalWhnfWork` and the
+boxed prototype satisfy `Send`. The existing compile-negative contracts in
+`evaluation/access.rs` prove `EvaluationValueAccess` and its underlying
+`RuntimeValueAccess` are neither `Send` nor `Sync`; their lifetimes remain the
+structural bound on projected work. This baseline selects boxed storage for
+NC2A unless NC1 or later paring changes the measured class before insertion.
+
 #### NC0C — Failing spill oracle
 
 Add test-only observation sufficient to distinguish:
@@ -513,6 +559,13 @@ Add test-only observation sufficient to distinguish:
 Prefer topology and counters over timing or thread repetition. Target tests
 may remain expected-failing only inside the NC0 commit and become ordinary
 regressions as their owning phases land.
+
+Completion record: `CurrentCallablePath` is the test-only topology oracle for
+the current four observable outcomes: direct copy, direct operator splice,
+exact dependency blockage, and permanent failure. It proves the NC0 fast path
+contains no progress node. Rather than retain expected-failing tests after the
+checkpoint, the four checkpoint-only observations have been assigned to
+NC3B, NC3C, and NC4 as described by the NC0 staging correction above.
 
 #### NC0D — Runtime-node trait and copy inventory
 
@@ -535,6 +588,28 @@ persistent-edge P3 manifests before introducing the variant. Demonstrate the
 topological premise with a fixture in which a cursor reaches a source
 `Bind >< CallableCheckpoint`: it must observe the active-pair dependency and
 must not request a checkpoint clone.
+
+Completion record: the exact source-backed inventory contains 24 interlocks
+and assigns each to one of three owners:
+
+- twelve existing-payload compatibility operations remain under parent D.2c/P3:
+  the specialization and associated-type trait bounds, template/claimed
+  payload clones, fan duplication, and ordinary data source materialization;
+- ten checkpoint-path operations belong to NC2: the blanket `RuntimeNode`
+  derives, whole-node source/cursor clones and their frontier carrier,
+  transition/full logical-payload vocabularies, materialization/erase match
+  coverage, managed trace dispatch, and opaque stuck-node formatting; and
+- two observation fixtures belong to NC2: the compile-exhaustive runtime
+  payload walk and the existing active-source-call cursor test.
+
+There are no tests comparing a complete runtime node as the semantic result;
+existing runtime tests use variant/topology observations. The current
+`active_source_call_is_a_dependency_and_is_never_copied` fixture already
+proves that a cursor stops at a claimed `Bind >< Data` source pair without
+copying the callable. NC2B will extend that same fixture to the real
+`Bind >< CallableCheckpoint` pair once the variant can be constructed. The
+source inventory fails on count drift before a new variant can silently
+inherit an old copy or observation path.
 
 Exit: existing behavior, target topology, state size, and the no-checkpoint
 fast path are executable baselines, and every trait/copy interlock has one
@@ -630,7 +705,10 @@ duplication operation.
 Verify that logical copying or cursor materialization at this source frontier
 blocks on the active pair, then copies only the semantic topology produced
 after the source pair terminalizes. The target must never contain a
-`CallableCheckpoint`, even transiently.
+`CallableCheckpoint`, even transiently. Extend NC0D's
+`active_source_call_is_a_dependency_and_is_never_copied` fixture with a real
+source `Bind >< CallableCheckpoint`; this is the deferred NC0 cursor oracle,
+not a new independent fixture.
 
 #### NC2C — Spill and update mutations
 
@@ -683,13 +761,16 @@ budget never install a checkpoint.
 When regional work yields, use NC2C to replace the original `Data` node with a
 checkpoint containing the entire current `NetWhnfState`. End the original
 claim and return ordinary runnable progress. Never retain the original
-callable as a separate restart point.
+callable as a separate restart point. Complete NC0C's budget-spill oracle with
+an exact one-checkpoint topology observation.
 
 #### NC3C — Spill on dependency boundary
 
 Publish the same complete checkpoint for an unresolved lazy/promise boundary,
 then use NC2D to admit and block outside access. Ensure abandoned, cancelled,
-failed, and completed producers match ordinary WHNF behavior.
+failed, and completed producers match ordinary WHNF behavior. Complete
+NC0C's dependency-spill oracle with an exact one-checkpoint topology
+observation.
 
 Exit: original calls either finish inline or leave one complete net-owned
 state; they never retain a durable claim or machine-side continuation.
@@ -701,6 +782,10 @@ state; they never retain a durable claim or machine-side continuation.
 Teach semantic active-pair dispatch to recognize
 `Bind >< CallableCheckpoint`, claim it briefly, project the entire state into
 regional work, and use the remaining shared semantic budget.
+
+Force a checkpoint whose focus has already advanced through at least two
+cached/assigned shells and prove resumption begins at that published focus,
+not at the original callable. This closes NC0C's deferred resumption oracle.
 
 #### NC4B — Yielded checkpoint replacement
 

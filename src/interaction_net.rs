@@ -28,4 +28,4 @@ pub(crate) use runtime::{
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};
 
 #[cfg(test)]
-pub(crate) use model::Node;
+pub(crate) use model::{Node, RuntimeNode};

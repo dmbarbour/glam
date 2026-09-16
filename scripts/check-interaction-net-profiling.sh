@@ -13,6 +13,7 @@ tests=(
   core_net::tests::profiling_semantic_signature_is_independent_of_ready_pair_order
   core_net::tests::profiling_counts_calls_only_when_the_claimed_rewrite_commits
   core_net::tests::profiling_counts_operator_calls_only_when_completion_commits
+  eval::net::driver_tests::current_callable_profile_counts_only_terminal_call_rewrites
   eval::tests::wrapper_returning_function_then_accepts_remaining_application
   eval::tests::wrapper_application_budget_probe_yields_without_publishing_a_cache
 )

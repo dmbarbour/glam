@@ -425,6 +425,219 @@ fn runtime_cycle_fixture_mapping_is_source_backed() {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CallableCheckpointMigrationOwner {
+    ExistingPayloadCompatibility,
+    Nc2CheckpointPath,
+    Nc2ObservationFixture,
+}
+
+struct CallableCheckpointInterlock {
+    name: &'static str,
+    source: &'static str,
+    needle: &'static str,
+    count: usize,
+    owner: CallableCheckpointMigrationOwner,
+}
+
+#[test]
+fn callable_checkpoint_trait_and_copy_inventory_is_source_backed() {
+    let model = include_str!("../model.rs");
+    let runtime = include_str!("../runtime.rs");
+    let cursor = include_str!("cursor.rs");
+    let rewrite = include_str!("rewrite.rs");
+    let eval_net = include_str!("../../eval/net.rs");
+    let managed = include_str!("../../core/managed/recursive_cells.rs");
+    let tests = include_str!("tests.rs");
+
+    let inventory = [
+        CallableCheckpointInterlock {
+            name: "specialization blanket traits",
+            source: model,
+            needle: "pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'static",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "data payload traits",
+            source: model,
+            needle: "type Data: Clone + fmt::Debug + PartialEq + Eq + 'static;",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "operator payload traits",
+            source: model,
+            needle: "type Operator: Clone + fmt::Debug + PartialEq + Eq + 'static;",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "runtime source traits",
+            source: model,
+            needle: "type RuntimeSource: Clone + fmt::Debug + PartialEq + Eq + 'static;",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "wait-token traits",
+            source: model,
+            needle: "type WaitToken: Clone + fmt::Debug + PartialEq + Eq + 'static;",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "stuck-reason traits",
+            source: model,
+            needle: "type StuckReason: Clone + fmt::Debug + 'static;",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "runtime-node blanket derives",
+            source: model,
+            needle: "#[derive(Debug, Clone, PartialEq, Eq)]\npub enum RuntimeNode",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "source-frontier whole node carrier",
+            source: runtime,
+            needle: "enum SourceFrontierShape<S: NetSpecialization> {\n    Principal {\n        port: Port,\n        node: RuntimeNode<S>,",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "logical payload vocabulary",
+            source: runtime,
+            needle: "pub(crate) enum RuntimeNetPayload",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "full logical payload traversal",
+            source: runtime,
+            needle: "pub(crate) fn visit_logical_payloads",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "transition payload traversal",
+            source: runtime,
+            needle: "fn visit<S: NetSpecialization>(",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "claimed data clone",
+            source: runtime,
+            needle: "Some(RuntimeNode::Data(data)) => data.clone(),",
+            count: 2,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "template data clone",
+            source: runtime,
+            needle: "Node::Data(data) => RuntimeNode::Data(data.clone()),",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "template operator clone",
+            source: runtime,
+            needle: "Node::Operator(operator) => RuntimeNode::Operator(operator.clone()),",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "cursor claim whole-node clone",
+            source: cursor,
+            needle: "self.node(cursor)?.clone()",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "source-frontier whole-node clone",
+            source: cursor,
+            needle: ".expect(\"remote cursor neighbor must exist\")\n                .clone();",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "source materialization data copy",
+            source: cursor,
+            needle: "RuntimeNode::Data(data) => RuntimeNode::Data(data.clone()),",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "fan data copy",
+            source: rewrite,
+            needle: "RuntimeNode::Data(payload.clone())",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "fan operator copy",
+            source: rewrite,
+            needle: "RuntimeNode::Operator(operator.clone())",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        },
+        CallableCheckpointInterlock {
+            name: "eraser evaluator-node exclusion",
+            source: rewrite,
+            needle: "evaluator-only nodes are not erased as ordinary agents",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "opaque stuck-node formatting",
+            source: eval_net,
+            needle: "interaction net reached a stuck active pair: {:?} >< {:?}",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "managed payload trace dispatch",
+            source: managed,
+            needle: "fn trace_core_runtime_payload(",
+            count: 1,
+            owner: CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        },
+        CallableCheckpointInterlock {
+            name: "compile-exhaustive runtime-node observation",
+            source: tests,
+            needle: "fn assert_runtime_payload_owner_inventory_is_compile_exhaustive",
+            count: 2,
+            owner: CallableCheckpointMigrationOwner::Nc2ObservationFixture,
+        },
+        CallableCheckpointInterlock {
+            name: "active source-call cursor fixture",
+            source: tests,
+            needle: "fn active_source_call_is_a_dependency_and_is_never_copied()",
+            count: 2,
+            owner: CallableCheckpointMigrationOwner::Nc2ObservationFixture,
+        },
+    ];
+
+    for entry in &inventory {
+        assert_eq!(
+            entry.source.matches(entry.needle).count(),
+            entry.count,
+            "callable-checkpoint interlock `{}` drifted",
+            entry.name
+        );
+    }
+    for owner in [
+        CallableCheckpointMigrationOwner::ExistingPayloadCompatibility,
+        CallableCheckpointMigrationOwner::Nc2CheckpointPath,
+        CallableCheckpointMigrationOwner::Nc2ObservationFixture,
+    ] {
+        assert!(inventory.iter().any(|entry| entry.owner == owner));
+    }
+}
+
 #[test]
 fn runtime_topology_retains_an_opaque_non_shared_source_identity() {
     let source = OpaqueRuntimeSource(42);

@@ -1522,26 +1522,117 @@ mod driver_tests {
         assert_eq!(retired.finalized_slots(), 1);
     }
 
-    fn claimed_core_call(callable: Value) -> (CoreRuntimeNet, Call) {
+    fn claimed_core_call_in(values: &CoreValueFactory, callable: Value) -> (CoreRuntimeNet, Call) {
         let mut net = NetBuilder::<CoreSpecialization>::new();
         let bind = net.push(crate::interaction_net::Node::Bind);
         let data = net.data(callable);
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
         net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
-        let pair = runtime.test_with(&crate::core::test_value_factory(), |net| {
-            net.active_pairs().next().unwrap()
-        });
+        let runtime = values.instantiate_core_net(&net.finish(Port::auxiliary(bind, 1)));
+        let pair = runtime.test_with(values, |net| net.active_pairs().next().unwrap());
         let reduction = runtime
-            .test_with_optional_mut(&crate::core::test_value_factory(), |net| {
-                net.reduce_pair(pair)
-            })
+            .test_with_optional_mut(values, |net| net.reduce_pair(pair))
             .expect("call fixture must be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data fixture must produce a call")
         };
         (runtime, Call { pair, bind, data })
+    }
+
+    fn claimed_core_call(callable: Value) -> (CoreRuntimeNet, Call) {
+        claimed_core_call_in(&crate::core::test_value_factory(), callable)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CurrentCallablePath {
+        DirectCopy,
+        DirectOperator,
+        BlockedDependency,
+        Failed,
+    }
+
+    fn observe_current_callable_path(runtime: &CoreRuntimeNet, call: Call) -> CurrentCallablePath {
+        runtime.test_with(&crate::core::test_value_factory(), |net| {
+            if net.blocked_call(call.pair).is_some() {
+                return CurrentCallablePath::BlockedDependency;
+            }
+            if net.stuck_reason(call.pair).is_some() {
+                return CurrentCallablePath::Failed;
+            }
+            match (net.node(call.bind), net.node(call.data)) {
+                (Some(_), None) => CurrentCallablePath::DirectCopy,
+                (None, None) => CurrentCallablePath::DirectOperator,
+                state => panic!("unrecognized callable-lowering topology: {state:?}"),
+            }
+        })
+    }
+
+    #[test]
+    fn callable_lowering_has_one_synchronous_claim_seam() {
+        let source = include_str!("net.rs");
+        let lowering_declaration = ["fn lower_core_", "callable_in("].concat();
+        assert_eq!(source.matches(&lowering_declaration).count(), 1);
+
+        let lowering = source
+            .split_once(&lowering_declaration)
+            .expect("callable lowering declaration must remain present")
+            .1
+            .split_once("#[cfg(test)]\npub(super) fn lower_core_callable(")
+            .expect("test adapter must remain after callable lowering")
+            .0;
+        assert!(lowering.contains("eval_value_in(context, &value)?"));
+
+        let claim = source
+            .split_once("fn progress_core_call_claim(")
+            .expect("claimed-call progress declaration must remain present")
+            .1
+            .split_once("#[cfg(test)]\nfn progress_exact_core_call(")
+            .expect("claimed-call test adapter must remain after progress")
+            .0;
+        let lowering_call = ["lower_core_", "callable_in(context, callable)"].concat();
+        assert_eq!(
+            claim.matches(&lowering_call).count(),
+            1,
+            "the claimed Bind >< Data path must have one synchronous callable-WHNF seam"
+        );
+    }
+
+    #[cfg(feature = "interaction-net-profiling")]
+    #[test]
+    fn current_callable_profile_counts_only_terminal_call_rewrites() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
+        let before = values.interaction_net_profile_snapshot();
+
+        let (runtime, call) = claimed_core_call_in(&values, Value::Builtin(Builtin::Add));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+        let after_builtin = values.interaction_net_profile_snapshot();
+        assert_eq!(after_builtin.reductions.call - before.reductions.call, 1);
+
+        let mut source = NetBuilder::<CoreSpecialization>::new();
+        let source_data = source.data(values.unit());
+        let source = values.instantiate_core_net(&source.finish(source_data));
+        let (runtime, call) = claimed_core_call_in(&values, Value::Net(NetValue::new(source)));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+        let after_net = values.interaction_net_profile_snapshot();
+        assert_eq!(after_net.reductions.call - after_builtin.reductions.call, 1);
+
+        let promise = PromisedValue::new(&values, "profiled unresolved callable");
+        let (runtime, call) = claimed_core_call_in(&values, Value::Promised(promise));
+        assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+
+        let after = values.interaction_net_profile_snapshot();
+        assert_eq!(
+            after.reductions.call - after_net.reductions.call,
+            0,
+            "a call blocked on retryable dependency has not committed its semantic rewrite"
+        );
+        assert_eq!(
+            after.reductions.operator_call - before.reductions.operator_call,
+            0,
+            "callable classification and fused operator installation are not separate reductions"
+        );
     }
 
     fn claimed_core_operator_call(
@@ -2569,55 +2660,107 @@ mod driver_tests {
     }
 
     #[test]
-    fn callable_claim_dispositions_cover_copy_operator_block_and_failure() {
+    fn callable_claim_dispositions_cover_direct_deferred_blocked_and_failed_paths() {
         let context = test_context();
 
+        let partial = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::Add,
+            arguments: Arc::from([Value::Number(1.into())]),
+        });
+        let function = closed_function_value_in(context.values(), 2, TestExpr::Local(0));
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let source_data = source.data(context.values().unit());
-        let source = instantiate(source.finish(source_data));
-        let source_copy = source.duplicate_for_test(context.values());
-        let (copy_runtime, copy_call) = claimed_core_call(Value::Net(NetValue::new(source_copy)));
-        assert!(progress_exact_core_call(&context, &copy_runtime, copy_call).unwrap());
-        assert!(
-            copy_runtime.test_with(&crate::core::test_value_factory(), |net| net
-                .call(copy_call.pair)
-                .is_none())
-        );
+        let source = context
+            .values()
+            .instantiate_core_net(&source.finish(source_data));
+        let callable_families = vec![
+            (
+                "builtin",
+                Value::Builtin(Builtin::Add),
+                CurrentCallablePath::DirectOperator,
+            ),
+            (
+                "partial builtin",
+                partial,
+                CurrentCallablePath::DirectOperator,
+            ),
+            ("function", function, CurrentCallablePath::DirectOperator),
+            (
+                "dictionary",
+                Value::Dict(crate::core::Dict::new_sync()),
+                CurrentCallablePath::DirectOperator,
+            ),
+            (
+                "raw net",
+                Value::Net(NetValue::new(source)),
+                CurrentCallablePath::DirectCopy,
+            ),
+        ];
 
-        let (operator_runtime, operator_call) = claimed_core_call(Value::Builtin(Builtin::Add));
-        assert!(progress_exact_core_call(&context, &operator_runtime, operator_call).unwrap());
-        assert!(
-            operator_runtime.test_with(&crate::core::test_value_factory(), |net| net
-                .call(operator_call.pair)
-                .is_none())
-        );
+        for (name, callable, expected) in callable_families {
+            let direct = callable.clone();
+            let lazy_result = callable.clone();
+            let promise_result = callable;
 
-        let function = closed_function_value(2, TestExpr::Local(0));
-        let (function_runtime, function_call) = claimed_core_call(function);
-        assert!(progress_exact_core_call(&context, &function_runtime, function_call).unwrap());
-        assert!(
-            function_runtime.test_with(&crate::core::test_value_factory(), |net| net
-                .call(function_call.pair)
-                .is_none())
-        );
+            let (runtime, call) = claimed_core_call(direct);
+            assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+            assert_eq!(
+                observe_current_callable_path(&runtime, call),
+                expected,
+                "{name}"
+            );
 
-        let (dict_runtime, dict_call) =
-            claimed_core_call(Value::Dict(crate::core::Dict::new_sync()));
-        assert!(progress_exact_core_call(&context, &dict_runtime, dict_call).unwrap());
-        assert!(
-            dict_runtime.test_with(&crate::core::test_value_factory(), |net| net
-                .call(dict_call.pair)
-                .is_none())
-        );
+            let lazy = LazyValue::from_access(
+                context.values(),
+                Arc::from([]),
+                Arc::from([context.values().unit()]),
+            );
+            crate::core::cache_test_lazy(
+                context.values(),
+                &lazy,
+                Ok(crate::core::EvaluatedValue::try_from(lazy_result)
+                    .expect("callable families are already in WHNF")),
+            )
+            .expect("fresh callable lazy must accept its cached result");
+            let (runtime, call) = claimed_core_call(Value::Lazy(lazy));
+            assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+            assert_eq!(
+                observe_current_callable_path(&runtime, call),
+                expected,
+                "cached lazy resolving to {name}"
+            );
+
+            let promise = PromisedValue::new(context.values(), format!("assigned {name} callable"));
+            crate::core::set_test_promise(context.values(), &promise, promise_result)
+                .expect("fresh callable promise must accept its assignment");
+            let (runtime, call) = claimed_core_call(Value::Promised(promise));
+            assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
+            assert_eq!(
+                observe_current_callable_path(&runtime, call),
+                expected,
+                "assigned promise resolving to {name}"
+            );
+        }
 
         let promise = PromisedValue::new(context.values(), "blocked disposition");
         let (blocked_runtime, blocked_call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &blocked_runtime, blocked_call).unwrap());
-        assert!(
-            blocked_runtime
-                .test_with(&crate::core::test_value_factory(), |net| net
-                    .blocked_call(blocked_call.pair))
-                .is_some()
+        assert_eq!(
+            observe_current_callable_path(&blocked_runtime, blocked_call),
+            CurrentCallablePath::BlockedDependency
+        );
+
+        let lazy_dependency = PromisedValue::new(context.values(), "blocked lazy dependency");
+        let lazy = LazyValue::from_access(
+            context.values(),
+            Arc::from([]),
+            Arc::from([Value::Promised(lazy_dependency)]),
+        );
+        let (blocked_runtime, blocked_call) = claimed_core_call(Value::Lazy(lazy));
+        assert!(progress_exact_core_call(&context, &blocked_runtime, blocked_call).unwrap());
+        assert_eq!(
+            observe_current_callable_path(&blocked_runtime, blocked_call),
+            CurrentCallablePath::BlockedDependency
         );
 
         let (failed_runtime, failed_call) = claimed_core_call(context.values().unit());
@@ -2632,6 +2775,10 @@ mod driver_tests {
             failed_runtime.test_with(&crate::core::test_value_factory(), |net| net.stuck_reason(failed_call.pair).cloned()),
             Some(StuckReason::Specialization(error)) if error == failure
         ));
+        assert_eq!(
+            observe_current_callable_path(&failed_runtime, failed_call),
+            CurrentCallablePath::Failed
+        );
     }
 
     #[test]

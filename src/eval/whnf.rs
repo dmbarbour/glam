@@ -1086,6 +1086,86 @@ mod tests {
 
     assert_does_not_implement!(whnf_computation_is_not_clone, WhnfComputation, Clone);
 
+    #[allow(dead_code)]
+    enum UnboxedCallableCheckpointPrototype {
+        Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
+        CallableCheckpoint(RegionalWhnfWork),
+    }
+
+    #[allow(dead_code)]
+    enum BoxedCallableCheckpointPrototype {
+        Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
+        CallableCheckpoint(Box<RegionalWhnfWork>),
+    }
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn regional_whnf_and_callable_checkpoint_layout_baseline() {
+        assert_send::<RegionalWhnfWork>();
+        assert_send::<BoxedCallableCheckpointPrototype>();
+
+        let continuation_families = [
+            RegionalWhnfContinuation::Generic(RegionalWhnfFrame {
+                kind: WhnfFrameKind::DemandThenInspect,
+                cursor: 0,
+                retained: Vec::new(),
+            }),
+            RegionalWhnfContinuation::Application {
+                arguments: Vec::new(),
+                next: 0,
+            },
+            RegionalWhnfContinuation::DictionaryApplication {
+                effect_payload: Value::Number(0.into()),
+                remaining_effect_values: Vec::new(),
+                next_effect_value: 0,
+                apply_member: None,
+            },
+            RegionalWhnfContinuation::SemanticUndefined {
+                purpose: UndefinedPurpose::EffectPayload,
+                ancestors: Vec::new(),
+                phase: UndefinedPhase::Inspect,
+            },
+            RegionalWhnfContinuation::StaticAccess {
+                keys: Arc::from([]),
+                next: 0,
+            },
+        ];
+        for continuation in &continuation_families {
+            assert_eq!(
+                std::mem::size_of_val(continuation),
+                std::mem::size_of::<RegionalWhnfContinuation>()
+            );
+        }
+
+        let runtime_node = std::mem::size_of::<
+            crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>,
+        >();
+        assert_eq!(
+            std::mem::size_of::<BoxedCallableCheckpointPrototype>(),
+            runtime_node,
+            "a boxed checkpoint must preserve the ordinary runtime-node extent"
+        );
+        assert!(
+            std::mem::size_of::<UnboxedCallableCheckpointPrototype>() > runtime_node,
+            "the baseline must keep detecting the current unboxed size-class increase"
+        );
+
+        #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+        {
+            assert_eq!(std::mem::size_of::<Value>(), 64);
+            assert_eq!(std::mem::size_of::<RegionalWhnfFrame>(), 40);
+            assert_eq!(std::mem::size_of::<RegionalUndefinedDictionary>(), 32);
+            assert_eq!(std::mem::size_of::<RegionalWhnfContinuation>(), 160);
+            assert_eq!(std::mem::size_of::<RegionalWhnfWork>(), 128);
+            assert_eq!(runtime_node, 96);
+            assert_eq!(
+                std::mem::size_of::<UnboxedCallableCheckpointPrototype>(),
+                128
+            );
+        }
+    }
+
     fn declaration<'source>(source: &'source str, start: &str, next: &str) -> &'source str {
         let start = source
             .find(start)

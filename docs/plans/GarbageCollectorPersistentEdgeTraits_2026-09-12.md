@@ -639,6 +639,15 @@ checkpoint-path occurrences, and NC6 reconciles their exact manifest here.
 P4 may not close if the new carrier has created a replacement compatibility
 trait, even if the older occurrence count still reaches zero.
 
+NC0D inventory record, 2026-09-16: the pre-variant source gate contains 24
+entries. Twelve are existing semantic-payload compatibility operations which
+remain assigned here or to parent D.2c; ten are runtime-node/checkpoint-path
+operations assigned to NC2; and two are explicit topology observations also
+assigned to NC2. In particular, the two whole-node cursor/frontier clones and
+the blanket `RuntimeNode` derives cannot be inherited by the checkpoint.
+NC2 must preserve the inventory's `Send`-only payload contract, and NC6 must
+relatch the exact set before P4 removes the remaining compatibility traits.
+
 ## Phase P4 — Trait Removal Cutover
 
 ### P4A — Remove implicit duplication
