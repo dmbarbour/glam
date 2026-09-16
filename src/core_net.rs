@@ -528,7 +528,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         expected: &CoreCursorDependency,
         disposition: CursorDependencyDisposition,
     ) -> CursorDependencyResolution {
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| {
                 runtime.resolve_cursor_dependency_edge_transition(
@@ -548,7 +548,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     RuntimeNetMutation::Unchanged(resolution)
                 }
             },
-        )
+        );
+        result
     }
 
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
@@ -664,7 +665,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> Result<crate::interaction_net::CallableCheckpointCall, Box<crate::eval::whnf::NetWhnfState>>
     {
         let mut state = Some(Box::new(state));
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| runtime.install_call_checkpoint_edge_transition(call),
             |runtime| match runtime.install_claimed_call_checkpoint(
@@ -676,21 +677,35 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(call) => RuntimeNetMutation::Changed(Ok(call)),
                 Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        if result.is_ok() {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointInstall,
+            );
+        }
+        result
     }
 
     pub(crate) fn take_claimed_callable_checkpoint(
         &self,
         call: crate::interaction_net::CallableCheckpointCall,
     ) -> Option<crate::eval::whnf::NetWhnfState> {
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| runtime.take_checkpoint_edge_transition(call),
             |runtime| match runtime.take_claimed_callable_checkpoint(call) {
                 Some(state) => RuntimeNetMutation::Changed(Some(*state)),
                 None => RuntimeNetMutation::Unchanged(None),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        if result.is_some() {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointResumption,
+            );
+        }
+        result
     }
 
     pub(crate) fn callable_checkpoint(
@@ -730,7 +745,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> Result<crate::interaction_net::CallableCheckpointCall, Box<crate::eval::whnf::NetWhnfState>>
     {
         let mut state = Some(Box::new(state));
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| runtime.publish_checkpoint_edge_transition(call),
             |runtime| match runtime.replace_claimed_callable_checkpoint(
@@ -742,7 +757,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(call) => RuntimeNetMutation::Changed(Ok(call)),
                 Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        if result.is_ok() {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointReplacement,
+            );
+        }
+        result
     }
 
     pub(crate) fn resume_claimed_checkpoint_with_copy(
@@ -761,6 +783,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values.values().record_net_driver(
+            crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
+        );
     }
 
     pub(crate) fn resume_claimed_checkpoint_with_operator(
@@ -778,6 +804,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values.values().record_net_driver(
+            crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
+        );
     }
 
     pub(crate) fn block_callable_checkpoint(
@@ -785,7 +815,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
         call: crate::interaction_net::CallableCheckpointCall,
         wait: CoreWaitToken,
     ) -> crate::interaction_net::CheckpointBlockResult {
-        self.runtime
+        let result = self
+            .runtime
             .cell()
             .with_conditional_mut_via(&self.runtime, |runtime| {
                 let result = runtime.block_callable_checkpoint(call, wait);
@@ -794,14 +825,25 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 } else {
                     RuntimeNetMutation::Unchanged(result)
                 }
-            })
+            });
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values.values().record_net_driver(match result {
+            crate::interaction_net::CheckpointBlockResult::Blocked => {
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointDependencyBlock
+            }
+            crate::interaction_net::CheckpointBlockResult::Disturbed => {
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointStaleAdmission
+            }
+        });
+        result
     }
 
     pub(crate) fn retry_blocked_callable_checkpoint(
         &self,
         blocked: &crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>,
     ) -> bool {
-        self.runtime
+        let result = self
+            .runtime
             .cell()
             .with_conditional_mut_via(&self.runtime, |runtime| {
                 if runtime.retry_blocked_callable_checkpoint(blocked) {
@@ -809,7 +851,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
-            })
+            });
+        #[cfg(feature = "interaction-net-profiling")]
+        if result {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointDependencyRetry,
+            );
+        }
+        result
     }
 
     pub(crate) fn fail_blocked_callable_checkpoint(
@@ -818,7 +867,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         error: EvaluationHalt,
     ) -> Result<crate::eval::whnf::NetWhnfState, EvaluationHalt> {
         let mut error = Some(error);
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| runtime.fail_published_checkpoint_edge_transition(blocked.call),
             |runtime| match runtime.fail_blocked_callable_checkpoint(
@@ -830,7 +879,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(state) => RuntimeNetMutation::Changed(Ok(*state)),
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        if result.is_ok() {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
+            );
+        }
+        result
     }
 
     pub(crate) fn release_claimed_callable_checkpoint(&self, pair: ActivePairKey) -> bool {
@@ -851,7 +907,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         error: EvaluationHalt,
     ) -> Result<(), EvaluationHalt> {
         let mut error = Some(error);
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| {
                 runtime.fail_call_edge_transition(crate::interaction_net::Call {
@@ -869,7 +925,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(()) => RuntimeNetMutation::Changed(Ok(())),
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        if result.is_ok() {
+            self.values.values().record_net_driver(
+                crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
+            );
+        }
+        result
     }
 
     pub(crate) fn fail_published_callable_checkpoint(
@@ -878,7 +941,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         error: EvaluationHalt,
     ) -> Result<(), EvaluationHalt> {
         let mut error = Some(error);
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let result = self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| runtime.fail_published_checkpoint_edge_transition(call),
             |runtime| match runtime.fail_published_callable_checkpoint(
@@ -890,7 +953,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(()) => RuntimeNetMutation::Changed(Ok(())),
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
-        )
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values.values().record_net_driver(if result.is_ok() {
+            crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization
+        } else {
+            crate::interaction_net::profiling::DriverEvent::CallableCheckpointStaleAdmission
+        });
+        result
     }
 
     pub(crate) fn reclaim_blocked_call(

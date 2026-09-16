@@ -1296,6 +1296,14 @@ Extend static interaction-net profiling with, at minimum:
 - stale boundary admission; and
 - direct checkpoint terminalization.
 
+Completed. Profiling builds now expose eight callable-specific driver counts.
+Inline transitions use the exact shared-budget delta; checkpoint install,
+claim/resumption, replacement, dependency block/retry, disturbed or stale
+admission, and successful terminalization are recorded at the authoritative
+`CoreRuntimeNetAccess` mutation boundary. This avoids counting an evaluator's
+intent when its exact generation loses a race. Ordinary builds retain no
+observer lookup, branch, or atomic update.
+
 ##### NC6B.2 — Deterministic focused fixtures
 
 Update the focused profiling script with named tests. Immediate and

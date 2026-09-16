@@ -51,6 +51,14 @@ pub struct NetDriverCounts {
     pub contentions: u64,
     pub disturbances: u64,
     pub request_root_restarts: u64,
+    pub callable_whnf_inline_transitions: u64,
+    pub callable_checkpoint_installs: u64,
+    pub callable_checkpoint_resumptions: u64,
+    pub callable_checkpoint_replacements: u64,
+    pub callable_checkpoint_dependency_blocks: u64,
+    pub callable_checkpoint_dependency_retries: u64,
+    pub callable_checkpoint_stale_admissions: u64,
+    pub callable_checkpoint_terminalizations: u64,
 }
 
 impl NetDriverCounts {
@@ -112,6 +120,14 @@ atomic_counts!(AtomicNetDriverCounts => NetDriverCounts {
     contentions,
     disturbances,
     request_root_restarts,
+    callable_whnf_inline_transitions,
+    callable_checkpoint_installs,
+    callable_checkpoint_resumptions,
+    callable_checkpoint_replacements,
+    callable_checkpoint_dependency_blocks,
+    callable_checkpoint_dependency_retries,
+    callable_checkpoint_stale_admissions,
+    callable_checkpoint_terminalizations,
 });
 
 /// Runtime-owned counter sink. All updates are intentionally relaxed: the
@@ -152,6 +168,14 @@ pub(crate) enum DriverEvent {
     Contention,
     Disturbance,
     RequestRootRestart,
+    CallableWhnfInlineTransition,
+    CallableCheckpointInstall,
+    CallableCheckpointResumption,
+    CallableCheckpointReplacement,
+    CallableCheckpointDependencyBlock,
+    CallableCheckpointDependencyRetry,
+    CallableCheckpointStaleAdmission,
+    CallableCheckpointTerminalization,
 }
 
 impl InteractionNetProfile {
@@ -180,6 +204,10 @@ impl InteractionNetProfile {
     }
 
     pub(crate) fn record_driver(&self, event: DriverEvent) {
+        self.record_driver_by(event, 1);
+    }
+
+    pub(crate) fn record_driver_by(&self, event: DriverEvent, count: u64) {
         let counter = match event {
             DriverEvent::MachinePoll => &self.driver.machine_polls,
             DriverEvent::WorkItem => &self.driver.work_items,
@@ -191,8 +219,30 @@ impl InteractionNetProfile {
             DriverEvent::Contention => &self.driver.contentions,
             DriverEvent::Disturbance => &self.driver.disturbances,
             DriverEvent::RequestRootRestart => &self.driver.request_root_restarts,
+            DriverEvent::CallableWhnfInlineTransition => {
+                &self.driver.callable_whnf_inline_transitions
+            }
+            DriverEvent::CallableCheckpointInstall => &self.driver.callable_checkpoint_installs,
+            DriverEvent::CallableCheckpointResumption => {
+                &self.driver.callable_checkpoint_resumptions
+            }
+            DriverEvent::CallableCheckpointReplacement => {
+                &self.driver.callable_checkpoint_replacements
+            }
+            DriverEvent::CallableCheckpointDependencyBlock => {
+                &self.driver.callable_checkpoint_dependency_blocks
+            }
+            DriverEvent::CallableCheckpointDependencyRetry => {
+                &self.driver.callable_checkpoint_dependency_retries
+            }
+            DriverEvent::CallableCheckpointStaleAdmission => {
+                &self.driver.callable_checkpoint_stale_admissions
+            }
+            DriverEvent::CallableCheckpointTerminalization => {
+                &self.driver.callable_checkpoint_terminalizations
+            }
         };
-        counter.fetch_add(1, Ordering::Relaxed);
+        counter.fetch_add(count, Ordering::Relaxed);
     }
 
     #[cfg(test)]

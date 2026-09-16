@@ -425,6 +425,17 @@ impl CoreValueFactory {
         self.domain.interaction_net_profile.record_driver(event);
     }
 
+    #[cfg(feature = "interaction-net-profiling")]
+    pub(crate) fn record_net_driver_by(
+        &self,
+        event: crate::interaction_net::profiling::DriverEvent,
+        count: u64,
+    ) {
+        self.domain
+            .interaction_net_profile
+            .record_driver_by(event, count);
+    }
+
     #[cfg(all(test, feature = "interaction-net-profiling"))]
     pub(crate) fn interaction_net_profile_snapshot(
         &self,

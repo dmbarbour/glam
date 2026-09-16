@@ -1456,12 +1456,20 @@ fn drive_original_callable_whnf(
         }
 
         let work = crate::eval::whnf::RegionalWhnfWork::from_focus(&access, callable);
-        match crate::eval::whnf::drive_regional(
+        #[cfg(feature = "interaction-net-profiling")]
+        let spent_before = step_budget.spent();
+        let outcome = crate::eval::whnf::drive_regional(
             &access,
             work,
             step_budget,
             crate::eval::whnf::reduce_semantic_shell,
-        ) {
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        access.values().values().record_net_driver_by(
+            crate::interaction_net::profiling::DriverEvent::CallableWhnfInlineTransition,
+            (step_budget.spent() - spent_before) as u64,
+        );
+        match outcome {
             crate::eval::whnf::RegionalWhnfDrive::Ready(value) => {
                 match classify_core_callable_in(&access, value) {
                     Ok(callable) => CallableWhnfOutcome::Ready(callable),

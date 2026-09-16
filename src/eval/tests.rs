@@ -231,6 +231,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 contentions: 0,
                 disturbances: 0,
                 request_root_restarts: 0,
+                ..NetDriverCounts::default()
             }
         );
     }
