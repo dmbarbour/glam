@@ -127,7 +127,6 @@ The initial checkpoint shape is deliberately narrower than a general
 struct CallableWhnfCheckpoint {
     generation: CallableCheckpointGeneration,
     followed: BTreeSet<DeferredValueId>,
-    cycle_promise: Option<PromisedValue>,
 }
 
 CoreOperator::NormalizeCallable(CallableWhnfCheckpoint)
@@ -149,6 +148,44 @@ a delayed dependency admission from blocking a newer checkpoint which happens
 to occupy the same operator and data nodes. If existing runtime revisions can
 provide the same exactness without broad equality or retention, NC2 may reuse
 them; the invariant is required even if the field is not.
+
+### Meaning of `Data(focus)`
+
+`focus` is the exact value which the next outer-shell WHNF step must inspect.
+It is not necessarily the callable originally attached to the `Bind`.
+
+Regional shell transitions are atomic with respect to budget publication. The
+driver checks budget before a transition. Following a cached lazy or assigned
+promise updates both the current focus and `followed` before another budget
+check can yield. Consequently:
+
+```text
+original focus: Lazy A
+cached A:       Promise B
+assigned B:     Lazy C
+```
+
+may spill as `Data(Lazy C)` with `A` and `B` already represented in the
+followed identities. Resumption begins at `C`; it does not return to `A` or
+re-read `B`. If budget expires before a transition starts, the prior focus is
+retained and only that not-yet-performed observation occurs after resumption.
+
+When the focus is an unfulfilled lazy, `Data(focus)` deliberately remains that
+same lazy identity. Its canonical `LazyTaskMachine` owns source evaluation,
+including function application, reflection tasks, host calls, or net work.
+The normalizer admits or joins that producer and blocks. After wakeup it reads
+the lazy's cache once and continues from the cached result. It never evaluates
+the lazy recipe itself and cannot construct a second reflection task.
+
+Promises follow the same division. An unassigned promise remains the focus;
+its producer or canonical follower owns eventual assignment. An assigned
+promise transition replaces focus with its assigned value before publication.
+The root-free `followed` set is sufficient for call-site cycle detection
+because the current repeated promise is itself available when a canonical
+promise-follow request is needed. The separate `cycle_promise` breadcrumb in
+general source-oriented `WhnfComputation` exists only for a producer which
+returns to its own source lazy; callable normalization has no `source_owner`
+and must not retain that field until such ownership is actually introduced.
 
 ### Resume by projection
 
@@ -228,32 +265,36 @@ wait, or later poll.
 5. **Lazy producers remain canonical.** An unfulfilled lazy is evaluated by
    its normal producer owner. Callable normalization waits on and follows its
    result; it does not create a second producer.
-6. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
+6. **Producer work is not duplicated in topology.** The checkpoint retains
+   the current deferred identity, not its source recipe or producer machine.
+   Reflection, host, function-call, and net-source progress remain in the
+   canonical lazy task which the normalizer joins.
+7. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
    boundary cannot change promise/lazy cycle recognition or the resulting
    structured failure.
-7. **A checkpoint is copied as topology.** Copying or materializing a partially
+8. **A checkpoint is copied as topology.** Copying or materializing a partially
    normalized closed net retains its focus and checkpoint coherently; no
    active-pair side table is required. Scheduler-local blocked status need not
    copy: the target pair observes the retained focus and independently admits
    the same semantic dependency.
-8. **No semantic value pollution.** Callable checkpoints are internal operator
+9. **No semantic value pollution.** Callable checkpoints are internal operator
    state and cannot be observed through ordinary Glam patterns, equality, or
    value-kind diagnostics.
-9. **Every checkpoint edit is a traced edge transition.** Replacing focus or
+10. **Every checkpoint edit is a traced edge transition.** Replacing focus or
    checkpoint-owned values reports exact leaving and entering edges through
    the managed runtime-net mutation gateway.
-10. **Stale orchestration is harmless.** A delayed admission, wake, or retry
+11. **Stale orchestration is harmless.** A delayed admission, wake, or retry
     cannot block, restore, or fail a newer checkpoint.
-11. **Failure provenance is preserved.** Inline and spilled evaluation produce
+12. **Failure provenance is preserved.** Inline and spilled evaluation produce
     equivalent evaluation failures and context frames.
-12. **Raw nets and applicable values retain existing meanings.** Reaching
+13. **Raw nets and applicable values retain existing meanings.** Reaching
     `Value::Net`, builtin, partial builtin, function, or applicable dictionary
     hands off to the established callable classification without inspecting
     function stages or changing partial-application semantics.
-13. **Operator continuation is explicit.** `OperatorYield::Operator` retains
+14. **Operator continuation is explicit.** `OperatorYield::Operator` retains
     its current returned-callable meaning. Same-pair checkpoint replacement
     receives a separately named mutation/result path.
-14. **No new global allocator is introduced.** Any checkpoint generation uses
+15. **No new global allocator is introduced.** Any checkpoint generation uses
     runtime-owned identity allocation or an existing exact runtime revision.
 
 ## Non-Goals
@@ -326,7 +367,10 @@ than silently discarding general WHNF state.
 Drive callable work to `Ready`, `Failed`, `Yielded`, or `Boundary` beneath one
 matching access. Retain the exact regional work on yield and boundary. Add
 forced-budget tests which split a cached lazy/promise chain after every shell
-and compare it with uninterrupted WHNF.
+and compare it with uninterrupted WHNF. Add a reflection-backed lazy callable
+whose producer is paused before and after reflection admission; every split
+must retain one lazy identity and one reflection task rather than reconstruct
+either source.
 
 #### NC1C — Net-machine semantic budget
 
@@ -531,6 +575,7 @@ Exit: W6B.4b.2 is complete, reviewed, and ready for the parent W6B.4b closure.
 | Assigned promise chain | direct result | same result after resume | n/a | normalizer only when forced split occurs |
 | Unresolved lazy | eventual direct result | same result | exact lazy wait | one blocked normalizer |
 | Unassigned promise | eventual direct result | same result | exact promise wait/follower | one blocked normalizer |
+| Reflection-backed lazy | one producer and reflection task | same producer and task | exact lazy wait | one blocked normalizer, no source replay |
 | Mixed deferred cycle | same structured failure | same failure | same cycle dependency/failure | no replayed prefix |
 | Deferred non-callable | same stuck failure | same failure | optional earlier wait | normalizer retired or stuck exactly once |
 | Raw net result | copied source | same copied source | optional earlier wait | final normalizer removed |
