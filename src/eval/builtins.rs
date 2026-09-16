@@ -120,7 +120,7 @@ pub(super) fn apply_builtin_in(
     }
 }
 
-fn exact<const N: usize>(arguments: Vec<Value>, name: &str) -> Result<[Value; N], EvaluationHalt> {
+fn exact<const N: usize, T>(arguments: Vec<T>, name: &str) -> Result<[T; N], EvaluationHalt> {
     arguments.try_into().map_err(|_| {
         EvaluationHalt::new(format!(
             "{name} builtin received the wrong number of arguments"

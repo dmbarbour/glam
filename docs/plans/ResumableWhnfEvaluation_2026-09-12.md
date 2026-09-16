@@ -4014,7 +4014,8 @@ until W6G.3 aggregates it.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6C.1 — Dispatch and arity** | 1 S, 1 F | Thread the caller's regional leaf through callback-free dispatch and make exact-arity extraction access-qualified. `-2`. |
+| **W6C.1a — Complete (2026-09-16): Generic arity extraction** | 1 F | Remove raw-value ownership from exact-arity extraction by making it a generic container operation. `-1`. |
+| **W6C.1b — Final builtin dispatcher closure (after W6F.7)** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
 | **W6C.2 — Assertions and conditionals** | 3 S | Separate operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-3`. |
 | **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; reuse W6A.0c tagged-payload work and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
@@ -4028,6 +4029,21 @@ strategy scheduling. Run builtin dispatch, assertion, conditional, numeric,
 comparison, provenance, `seq`, and `spark` suites in both GC modes. W6C.5 and
 W6C.6 must retain the source-backed no-callback/no-scheduler-under-access
 checks.
+
+W6C.1 is deliberately split around the family migration. Passing regional
+access through `apply_builtin_in` before W6C.2-W6F.7 would place the existing
+synchronous operand demands and scheduler handoffs beneath that access and
+would only make the signature inventory look complete. W6C.1a is independent:
+`exact` inspects only `Vec` length/ownership, so it becomes generic rather than
+accepting raw `Value`. W6C.1b closes the dispatcher only after its final
+family branch is callback-free.
+
+W6C.1a completion record, 2026-09-16: exact-arity extraction is generic over
+the owned element type and therefore neither observes nor owns a semantic
+value. Existing callers retain identical arity diagnostics and array
+conversion behavior. The D.2c manifest falls from 148 to 147 declarations;
+`DispatchScalarAndStrategy` falls from 25 to 24 and W6C.1 retains only the
+final dispatcher declaration.
 
 #### W6D — Dictionaries, lists, and patterns
 
