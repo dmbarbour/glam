@@ -162,9 +162,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        3,
-        "computed-access and object-fixpoint source arguments published before entering poll-spanning owners",
-        "W3B.2b and W3C.2 source handoff"
+        4,
+        "computed-access, object-fixpoint, and resumable builtin source arguments published before entering poll-spanning owners",
+        "W3B.2b, W3C.2, and W6C source handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -712,6 +712,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#4|surface=access-publication|scope=production",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",

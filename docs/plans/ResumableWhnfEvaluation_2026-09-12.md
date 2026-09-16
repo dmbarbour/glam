@@ -4016,7 +4016,8 @@ until W6G.3 aggregates it.
 |---|---:|---|
 | **W6C.1a — Complete (2026-09-16): Generic arity extraction** | 1 F | Remove raw-value ownership from exact-arity extraction by making it a generic container operation. `-1`. |
 | **W6C.1b — Final builtin dispatcher closure (after W6F.7)** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
-| **W6C.2 — Assertions and conditionals** | 3 S | Separate operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-3`. |
+| **W6C.2a — Complete (2026-09-16): Builtin assertions and conditionals** | 2 S | Separate builtin operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-2`. |
+| **W6C.2b — Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
 | **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; reuse W6A.0c tagged-payload work and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
 | **W6C.5 — Provenance** | 1 D | Replace the durable evaluator facade with an explicit reflection/provenance handoff. `-1`. |
@@ -4044,6 +4045,24 @@ value. Existing callers retain identical arity diagnostics and array
 conversion behavior. The D.2c manifest falls from 148 to 147 declarations;
 `DispatchScalarAndStrategy` falls from 25 to 24 and W6C.1 retains only the
 final dispatcher declaration.
+
+W6C.2 is split at the annotation boundary. Saturated builtin assertion and
+conditional sources can own their demand immediately, while annotation
+assertion still calls the shared synchronous helper from the W6E.1 dispatcher.
+Deleting that helper before W6E.1 would either duplicate assertion semantics
+or conceal its demand beneath the compatibility evaluator.
+
+W6C.2a completion record, 2026-09-16: builtin `assert_unit`, `if_result`, and
+`match_result` sources now install durable builtin machines. Assertion demand
+retains the asserted value and target once; a failing assertion yields before
+demanding its structured diagnostic context and resumes without replaying the
+value. Conditional demand validates the result list and traverses its first
+logical item through the shared list-front machine, preserving the existing
+empty-result diagnostics. A selected target/result remains lazy and is handed
+back to ordinary WHNF demand rather than being mistaken for a completed WHNF.
+The old conditional implementation and builtin assertion entry point are
+removed. The D.2c manifest falls from 142 to 140 declarations; W6C.2 retains
+only the annotation compatibility helper assigned to W6C.2b/W6E.1.
 
 W6C.4 completion record, 2026-09-16: saturated numeric sources now install one
 durable builtin machine. It roots each operand once, polls them in source order

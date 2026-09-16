@@ -642,10 +642,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // existing resumable static-access and application lazy owners.
 // W6C.4 replaces recursive numeric operand demand with one durable builtin
 // owner which polls each operand through the ordinary WHNF machine.
-const EXPECTED_OCCURRENCES: usize = 274;
-const EXPECTED_FINGERPRINT: u64 = 15_876_577_758_968_907_385;
+const EXPECTED_OCCURRENCES: usize = 275;
+const EXPECTED_FINGERPRINT: u64 = 7_314_571_321_480_371_399;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 94),
+    (Signal::EvalValue, 93),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
@@ -658,12 +658,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 37),
+    (Signal::StructuralRecursion, 39),
     (Signal::UserSizedLoop, 57),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 125),
+    (WorkShape::DemandThenInspect, 126),
     (WorkShape::OrderedOperands, 5),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),

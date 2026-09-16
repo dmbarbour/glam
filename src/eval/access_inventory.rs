@@ -156,8 +156,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/assertion.rs",
-        [2, 0],
-        "I3B.1 scoped assertions"
+        [1, 0],
+        "I3B.1 scoped annotation assertion compatibility pending W6E.1"
     ),
     context_entry!(
         "src/eval/builtins/comparison.rs",
@@ -168,11 +168,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/builtins/comparison/implementation.rs",
         [7, 0],
         "I3B.1 scoped recursive comparisons"
-    ),
-    context_entry!(
-        "src/eval/builtins/conditional.rs",
-        [1, 0],
-        "I3B.1 scoped conditionals"
     ),
     context_entry!(
         "src/eval/builtins/dict.rs",
@@ -231,8 +226,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [2, 2],
-        "W6C.4 durable numeric operand owner and callback-free regional result projection"
+        [5, 5],
+        "W6C.2/W6C.4 durable conditional, assertion, and numeric owners with callback-free regional result projection"
     ),
     context_entry!(
         "src/eval/builtins/object.rs",

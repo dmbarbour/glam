@@ -3,7 +3,6 @@
 mod annotation;
 mod assertion;
 mod comparison;
-mod conditional;
 mod dict;
 mod effect;
 mod list;
@@ -97,7 +96,17 @@ pub(super) fn apply_builtin_in(
         | Builtin::ListEffectAlt
         | Builtin::ListEffectCut
         | Builtin::ListEffectFix => list_effect::apply(context, builtin, arguments),
-        Builtin::IfResult | Builtin::MatchResult => conditional::apply(context, builtin, arguments),
+        Builtin::IfResult | Builtin::MatchResult => {
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                )
+            })))
+        }
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
@@ -122,7 +131,15 @@ pub(super) fn apply_builtin_in(
         Builtin::Seq | Builtin::Spark => strategy::apply(context.context(), builtin, arguments),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
         Builtin::InspectOrigin => provenance::apply(context.context(), arguments),
-        Builtin::AssertUnit => assertion::apply(context, arguments),
+        Builtin::AssertUnit => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::Anno => annotation::apply(context, arguments),
     }
 }

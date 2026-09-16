@@ -14,6 +14,7 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
+use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
 
@@ -25,6 +26,8 @@ pub(crate) enum BuiltinTaskPoll {
 }
 
 pub(crate) enum BuiltinTaskMachine {
+    Assertion(AssertionBuiltinMachine),
+    Conditional(ConditionalBuiltinMachine),
     Numeric(NumericBuiltinMachine),
 }
 
@@ -32,7 +35,10 @@ impl BuiltinTaskMachine {
     pub(crate) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
-            Builtin::Add
+            Builtin::AssertUnit
+                | Builtin::IfResult
+                | Builtin::MatchResult
+                | Builtin::Add
                 | Builtin::Subtract
                 | Builtin::Multiply
                 | Builtin::Divide
@@ -48,7 +54,13 @@ impl BuiltinTaskMachine {
             builtin.arity(),
             "a builtin source must contain one saturated call"
         );
-        Self::Numeric(NumericBuiltinMachine::new(builtin, arguments))
+        match builtin {
+            Builtin::AssertUnit => Self::Assertion(AssertionBuiltinMachine::new(arguments)),
+            Builtin::IfResult | Builtin::MatchResult => {
+                Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
+            }
+            _ => Self::Numeric(NumericBuiltinMachine::new(builtin, arguments)),
+        }
     }
 
     pub(crate) fn poll(
@@ -59,10 +71,220 @@ impl BuiltinTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> BuiltinTaskPoll {
         match self {
+            Self::Assertion(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::Conditional(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
             Self::Numeric(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
         }
+    }
+}
+
+enum AssertionPhase {
+    Value,
+    DiagnosticContext { received: &'static str },
+}
+
+pub(crate) struct AssertionBuiltinMachine {
+    arguments: Vec<RuntimeValueRoot>,
+    phase: AssertionPhase,
+    demand: Option<WhnfComputation>,
+}
+
+impl AssertionBuiltinMachine {
+    fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
+        Self {
+            arguments,
+            phase: AssertionPhase::Value,
+            demand: None,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        let argument = match self.phase {
+            AssertionPhase::Value => &self.arguments[1],
+            AssertionPhase::DiagnosticContext { .. } => &self.arguments[0],
+        };
+        let demand = self
+            .demand
+            .get_or_insert_with(|| WhnfComputation::from_root(argument.clone()));
+        let value = match poll_demand(demand, poll_context, durable_context, step_budget) {
+            DemandPoll::Ready(value) => value,
+            other => return other.into_builtin_poll(),
+        };
+        self.demand = None;
+        let value = EvaluatedValue::try_from(context.project_root(&value))
+            .expect("assertion operand demand must reach WHNF")
+            .into_value();
+
+        match self.phase {
+            AssertionPhase::Value => {
+                let is_unit = context.with_value_access(|access| {
+                    access
+                        .values()
+                        .same_representation(&value, &durable_context.values().unit())
+                });
+                if is_unit {
+                    return BuiltinTaskPoll::Ready(self.arguments[2].clone());
+                }
+                self.phase = AssertionPhase::DiagnosticContext {
+                    received: value.diagnostic_kind_name(),
+                };
+                BuiltinTaskPoll::Yielded
+            }
+            AssertionPhase::DiagnosticContext { received } => {
+                let Value::Binary(diagnostic_context) = value else {
+                    return permanent_failure(
+                        context,
+                        "unit assertion diagnostic context must be text",
+                    );
+                };
+                permanent_failure(
+                    context,
+                    format!(
+                        "{}: unit expected, received {received}",
+                        String::from_utf8_lossy(&diagnostic_context)
+                    ),
+                )
+            }
+        }
+    }
+}
+
+pub(crate) struct ConditionalBuiltinMachine {
+    builtin: Builtin,
+    results: RuntimeValueRoot,
+    demand: Option<WhnfComputation>,
+    front: Option<ListFrontMachine>,
+}
+
+impl ConditionalBuiltinMachine {
+    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [results]: [RuntimeValueRoot; 1] = arguments
+            .try_into()
+            .expect("a conditional source retains one result list");
+        Self {
+            builtin,
+            results,
+            demand: None,
+            front: None,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        if self.front.is_none() {
+            let demand = self
+                .demand
+                .get_or_insert_with(|| WhnfComputation::from_root(self.results.clone()));
+            let results = match poll_demand(demand, poll_context, durable_context, step_budget) {
+                DemandPoll::Ready(value) => value,
+                other => return other.into_builtin_poll(),
+            };
+            let value = EvaluatedValue::try_from(context.project_root(&results))
+                .expect("conditional result-list demand must reach WHNF")
+                .into_value();
+            if !matches!(value, Value::List(_)) {
+                return permanent_failure(
+                    context,
+                    format!(
+                        "{} search did not produce a result list",
+                        conditional_name(self.builtin)
+                    ),
+                );
+            }
+            self.demand = None;
+            self.front = Some(ListFrontMachine::unowned(results));
+        }
+
+        match self
+            .front
+            .as_mut()
+            .expect("conditional list-front owner must be installed")
+            .poll(poll_context, context, durable_context, step_budget)
+        {
+            ListFrontPoll::Ready(Some((result, _tail))) => BuiltinTaskPoll::Ready(result),
+            ListFrontPoll::Ready(None) => permanent_failure(
+                context,
+                match self.builtin {
+                    Builtin::IfResult => "if search exhausted despite its required `else` branch",
+                    Builtin::MatchResult => {
+                        "match search exhausted despite its compiler-provided fallback"
+                    }
+                    _ => unreachable!(),
+                },
+            ),
+            ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+            ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
+            ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+        }
+    }
+}
+
+enum DemandPoll {
+    Ready(RuntimeValueRoot),
+    Pending(WorkDependency),
+    Yielded,
+    Failed(RuntimeFailureRoot),
+}
+
+impl DemandPoll {
+    fn into_builtin_poll(self) -> BuiltinTaskPoll {
+        match self {
+            Self::Ready(_) => unreachable!("ready demand must be consumed by its family owner"),
+            Self::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+            Self::Yielded => BuiltinTaskPoll::Yielded,
+            Self::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+        }
+    }
+}
+
+fn poll_demand(
+    demand: &mut WhnfComputation,
+    poll_context: &EvaluationPollContext,
+    durable_context: &EvalContext,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> DemandPoll {
+    match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
+        WhnfOwnerPoll::Ready(value) => DemandPoll::Ready(value),
+        WhnfOwnerPoll::Pending(dependency) => DemandPoll::Pending(dependency),
+        WhnfOwnerPoll::Yielded => DemandPoll::Yielded,
+        WhnfOwnerPoll::Failed(failure) => DemandPoll::Failed(failure),
+        WhnfOwnerPoll::External(boundary) => {
+            unreachable!("builtin operand demand produced an external {boundary:?} boundary")
+        }
+    }
+}
+
+fn permanent_failure(
+    context: &EvaluatorStepContext<'_>,
+    message: impl Into<String>,
+) -> BuiltinTaskPoll {
+    BuiltinTaskPoll::Failed(
+        context.root_failure(Arc::new(EvaluationFailure::message(message.into()))),
+    )
+}
+
+fn conditional_name(builtin: Builtin) -> &'static str {
+    match builtin {
+        Builtin::IfResult => "if",
+        Builtin::MatchResult => "match",
+        _ => unreachable!("conditional name requested for another builtin"),
     }
 }
 
@@ -232,6 +454,91 @@ mod tests {
                 .expect_err("numeric kind validation must remain a permanent failure")
                 .to_string(),
             "floor builtin requires number values"
+        );
+    }
+
+    #[test]
+    fn assertion_machine_resumes_diagnostic_context_without_replaying_the_value() {
+        let context = context();
+        let value_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&value_demands);
+        let value = Value::semantic_thunk(context.values(), "asserted value", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Number(7.into()))
+        });
+        let diagnostic_context =
+            PromisedValue::new(context.values(), "unit assertion diagnostic context");
+        let assertion = Value::builtin_call(
+            context.values(),
+            Builtin::AssertUnit,
+            vec![
+                Value::Promised(diagnostic_context.clone()),
+                value,
+                Value::Number(99.into()),
+            ],
+        );
+
+        let blocked = crate::eval::eval_value(&context, &assertion)
+            .expect_err("assertion failure should suspend on its diagnostic context");
+        assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        assert_eq!(value_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &diagnostic_context,
+            Value::binary_from_text("definition foo"),
+        )
+        .expect("the diagnostic context should accept its assignment");
+        assert_eq!(
+            crate::eval::eval_value(&context, &assertion)
+                .expect_err("the resumed assertion must report its failure")
+                .to_string(),
+            "definition foo: unit expected, received Number"
+        );
+        assert_eq!(value_demands.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn conditional_machine_selects_first_result_and_retains_exhaustion_diagnostics() {
+        let context = context();
+        for builtin in [Builtin::IfResult, Builtin::MatchResult] {
+            let selection = Value::builtin_call(
+                context.values(),
+                builtin,
+                vec![Value::List(crate::core::List::from_values(vec![
+                    Value::Number(1.into()),
+                    Value::Number(2.into()),
+                ]))],
+            );
+            assert_eq!(
+                crate::eval::eval_value(&context, &selection)
+                    .expect("a non-empty search should select its first result"),
+                Value::Number(1.into())
+            );
+        }
+
+        let empty_if = Value::builtin_call(
+            context.values(),
+            Builtin::IfResult,
+            vec![Value::List(crate::core::List::empty())],
+        );
+        assert_eq!(
+            crate::eval::eval_value(&context, &empty_if)
+                .expect_err("an if search should never exhaust its else branch")
+                .to_string(),
+            "if search exhausted despite its required `else` branch"
+        );
+
+        let empty_match = Value::builtin_call(
+            context.values(),
+            Builtin::MatchResult,
+            vec![Value::List(crate::core::List::empty())],
+        );
+        assert_eq!(
+            crate::eval::eval_value(&context, &empty_match)
+                .expect_err("an empty match should be diagnosed")
+                .to_string(),
+            "match search exhausted despite its compiler-provided fallback"
         );
     }
 }

@@ -2,14 +2,6 @@
 
 use super::super::*;
 
-pub(super) fn apply(
-    context: &EvaluatorStepContext<'_>,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
-    let [diagnostic_context, value, target] = super::exact(arguments, "assert_unit")?;
-    assert_unit_in(context, Some(&diagnostic_context), &value, &target)
-}
-
 pub(in crate::eval) fn assert_unit_in(
     context: &EvaluatorStepContext<'_>,
     diagnostic_context: Option<&Value>,
