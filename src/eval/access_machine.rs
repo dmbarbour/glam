@@ -115,7 +115,7 @@ impl AccessMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> AccessMachinePoll {
         if let Some(conversion) = &mut self.conversion {
             let result = match conversion {
@@ -250,7 +250,7 @@ impl KeyConversionMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Key> {
         match &mut self.state {
             KeyConversionState::Demand(computation) => {
@@ -371,7 +371,7 @@ impl KeyListMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Vec<Key>> {
         if let Some(child) = &mut self.child {
             return match child.poll(poll_context, context, durable_context, step_budget) {

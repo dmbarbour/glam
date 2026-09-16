@@ -377,7 +377,7 @@ impl EvaluationTaskMachine for TestTaskMachine {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         panic!("coordinator lifecycle tests drive deferred polls explicitly")
     }
@@ -389,7 +389,7 @@ impl EvaluationTaskMachine for CountTaskPolls {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.0.fetch_add(1, Ordering::AcqRel);
         EvaluationMachinePoll::Yielded
@@ -412,7 +412,7 @@ impl EvaluationTaskMachine for CheckDeferredDropLocks {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         panic!("the coordinator test drives this machine's terminal poll")
     }
@@ -440,7 +440,7 @@ impl EvaluationTaskMachine for CountDeferredDropLocks {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         panic!("the coordinator test drives this machine explicitly")
     }

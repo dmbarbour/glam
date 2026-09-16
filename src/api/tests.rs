@@ -119,7 +119,7 @@ impl EvaluationTaskMachine for FailedReasoningTask {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(Arc::new(
             crate::core::EvaluationFailure::message("public reasoning failure"),

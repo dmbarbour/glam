@@ -1508,7 +1508,13 @@ fn drive_request_decode(
 ) -> Result<Request<TestRequest>, TaskHalt> {
     let poll_context = EvaluationPollContext::for_context(context);
     for _ in 0..64 {
-        match decoder.poll(&poll_context, context, tags, &[], 1) {
+        match decoder.poll(
+            &poll_context,
+            context,
+            tags,
+            &[],
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        ) {
             RequestDecodePoll::Ready(request) => return Ok(request),
             RequestDecodePoll::Continue => {}
             RequestDecodePoll::Yielded => {}
@@ -1912,7 +1918,11 @@ fn drive_reset_stack_decoder(
 ) -> Result<DecodedResetStack, TaskHalt> {
     let poll_context = EvaluationPollContext::for_context(context);
     for _ in 0..512 {
-        match decoder.poll(&poll_context, context, 1) {
+        match decoder.poll(
+            &poll_context,
+            context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        ) {
             ResetStackPoll::Ready(stack) => return Ok(stack),
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Wait(wait)) => {
@@ -2222,7 +2232,11 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
     let mut decoder = ResetStackMachine::new(serialized);
     let poll_context = EvaluationPollContext::for_context(&context);
     let dependency = loop {
-        match decoder.poll(&poll_context, &context, 1) {
+        match decoder.poll(
+            &poll_context,
+            &context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        ) {
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Promise(dependency)) => break dependency,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
@@ -2344,7 +2358,11 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
     let mut decoder = ResetStackMachine::new(serialized);
     let poll_context = EvaluationPollContext::for_context(&context);
     loop {
-        match decoder.poll(&poll_context, &context, 1) {
+        match decoder.poll(
+            &poll_context,
+            &context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        ) {
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Promise(_)) => break,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
@@ -4627,6 +4645,31 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
 }
 
 #[test]
+fn nested_effect_work_cannot_renew_one_shared_poll_budget() {
+    let (assembler, effect) = compile_effect(
+        ".r \"A\" >>= (\\a -> .r \"B\" >>= (\\b -> .r \"C\" >>= (\\c -> .r (a ++ b ++ c))))",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let mut task = EffectTask::new(
+        &assembler.core_values(),
+        effect.clone_core_for_test(),
+        TestEffects,
+        host,
+    )
+    .unwrap();
+    let poll_context = EvaluationPollContext::for_context(&task.eval_context);
+    let mut budget = crate::evaluation::EvaluationStepBudget::new(3);
+
+    assert!(matches!(
+        task.poll_with_context(&poll_context, &mut budget),
+        EffectTaskPoll::Yielded
+    ));
+    assert_eq!(budget.granted(), 3);
+    assert_eq!(budget.remaining(), 0);
+    assert_eq!(budget.spent(), 3);
+}
+
+#[test]
 #[should_panic(expected = "poll context and evaluator context must share one demand session")]
 fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let (assembler, effect) = compile_effect(".r ()");
@@ -4643,7 +4686,10 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     .expect("effect task should build");
     let mut machine = ValueEffectTask(task);
 
-    let _ = machine.poll(&poll_context, 1);
+    let _ = machine.poll(
+        &poll_context,
+        &mut crate::evaluation::EvaluationStepBudget::new(1),
+    );
 }
 
 #[test]
@@ -4673,7 +4719,10 @@ fn poll_machine_exit(
     context: &EvalContext,
 ) -> EvaluationExitBlock {
     loop {
-        match machine.poll(poll_context, 256) {
+        match machine.poll(
+            poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(256),
+        ) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Exit(exit) => return exit,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -4724,7 +4773,10 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
         assert!(matches!(
-            machine.poll(&poll_context, 1),
+            machine.poll(
+                &poll_context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1)
+            ),
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,
                 observed_epoch: None,
@@ -4906,7 +4958,10 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     assert!(host.stderr().is_empty());
     assert!(host.diagnostics().is_empty());
     assert!(matches!(
-        machine.poll(&poll_context, 256),
+        machine.poll(
+            &poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(256)
+        ),
         EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: ExitIntent::Success,
             observed_epoch: Some(_),
@@ -4921,7 +4976,10 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     ));
 
     let value = loop {
-        match machine.poll(&poll_context, 256) {
+        match machine.poll(
+            &poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(256),
+        ) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {

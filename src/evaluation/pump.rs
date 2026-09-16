@@ -23,7 +23,7 @@ impl ClientDemandOperation {
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut super::EvaluationStepBudget,
     ) -> coordinator::ClientDemandPoll {
         match super::whnf::poll_computation(&mut self.0, poll_context, context, step_budget) {
             super::whnf::WhnfOwnerPoll::Ready(value) => {
@@ -153,7 +153,7 @@ impl ClaimedTask {
         Self { coordinator, kind }
     }
 
-    fn poll(&mut self, step_budget: usize) -> EvaluationMachinePoll {
+    fn poll(&mut self, step_budget: &mut super::EvaluationStepBudget) -> EvaluationMachinePoll {
         let context = EvaluationPollContext::for_claim(self.kind.demand());
         match &mut self.kind {
             ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
@@ -209,7 +209,8 @@ impl EvaluationDemandState {
                 return self.session_run_report(&coordinator);
             };
 
-            let poll = claimed.poll(TASK_POLL_QUANTUM);
+            let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+            let poll = claimed.poll(&mut budget);
             let (_, _, released) = claimed.release(poll);
             if let Some(machine) = released {
                 machine.finish();
@@ -392,7 +393,9 @@ pub(super) fn pump_demand(
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
         let quantum = step_budget.min(TASK_POLL_QUANTUM);
         step_budget -= quantum;
-        let poll = claimed.poll(quantum);
+        let mut budget = super::EvaluationStepBudget::new(quantum);
+        let poll = claimed.poll(&mut budget);
+        debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
         let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
@@ -645,7 +648,8 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) -> bool {
         let mut claimed = ClaimedTask::new(self.clone(), work);
-        let poll = claimed.poll(TASK_POLL_QUANTUM);
+        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+        let poll = claimed.poll(&mut budget);
         let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
@@ -661,7 +665,8 @@ impl EvaluationWorkCoordinator {
         probe: impl FnOnce(&EvaluationMachinePoll),
     ) {
         let mut claimed = ClaimedTask::new(self.clone(), work);
-        let poll = claimed.poll(TASK_POLL_QUANTUM);
+        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+        let poll = claimed.poll(&mut budget);
         probe(&poll);
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
@@ -674,7 +679,8 @@ impl EvaluationWorkCoordinator {
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
         let context = EvaluationPollContext::for_claim(&claimed.demand);
-        let poll = claimed.poll(&context, TASK_POLL_QUANTUM);
+        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+        let poll = claimed.poll(&context, &mut budget);
         self.release_client_demand(claimed, poll);
     }
 

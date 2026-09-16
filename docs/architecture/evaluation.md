@@ -160,6 +160,17 @@ it also inherits no managed-access region. Claim release, terminal publication,
 cancellation, destruction, coordinator waits, and worker sleeps therefore run
 without inherited mutator authority.
 
+Each claimed evaluator quantum also owns one stack-local
+`EvaluationStepBudget`. Budget-aware nested machines borrow that same mutable
+token; they never reconstruct an allowance from its remaining count. The
+token records its original grant, remaining units, and exact declared spend.
+Delegating reflection phases charge an administrative unit only when their
+child consumed none, so a one-unit quantum can still advance nested WHNF work
+without hiding a renewed sub-budget. The current demand pump deliberately
+reserves its whole task quantum before polling and does not refund unused
+units; the finer accounting is observational until scheduler policy is
+revisited.
+
 Successful type-erased machine polls cross that release boundary as a
 `RuntimeValueRoot`, never a bare `core::Value`. Evaluator results are published
 through the checked poll domain, while an effect result keeps the public root

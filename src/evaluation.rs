@@ -51,6 +51,62 @@ pub(crate) use session::{
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
 pub(crate) use whnf::{WhnfOwnerPoll, poll_computation as poll_whnf_computation};
 
+/// Stack-owned allowance for one bounded evaluation poll.
+///
+/// Every nested evaluator machine borrows the same token. Constructing a new
+/// token is reserved for an outer orchestration boundary, so nested work
+/// cannot accidentally renew its caller's allowance.
+#[derive(Debug)]
+pub(crate) struct EvaluationStepBudget {
+    granted: usize,
+    remaining: usize,
+}
+
+impl EvaluationStepBudget {
+    pub(crate) const fn new(granted: usize) -> Self {
+        Self {
+            granted,
+            remaining: granted,
+        }
+    }
+
+    pub(crate) fn try_consume(&mut self) -> bool {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
+
+    pub(crate) const fn granted(&self) -> usize {
+        self.granted
+    }
+
+    pub(crate) const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    pub(crate) const fn spent(&self) -> usize {
+        self.granted - self.remaining
+    }
+
+    /// Charges one administrative transition only when delegated work did
+    /// not already consume from this same budget.
+    pub(crate) fn charge_if_unchanged(&mut self, previous_remaining: usize) {
+        debug_assert!(self.remaining <= previous_remaining);
+        if self.remaining == previous_remaining {
+            assert!(
+                self.try_consume(),
+                "an admitted evaluation transition must retain one budget unit"
+            );
+        }
+    }
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<EvaluationStepBudget>() == 2 * std::mem::size_of::<usize>());
+};
+
 #[cfg(test)]
 pub(crate) fn test_execution_resources(
     worker_count: usize,
@@ -102,7 +158,7 @@ impl EvaluationTaskMachine for PendingTestPromiseTask {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,

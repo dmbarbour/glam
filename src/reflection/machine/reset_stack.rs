@@ -96,13 +96,12 @@ impl ResetStackMachine {
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ResetStackPoll {
         let state = std::mem::replace(&mut self.state, ResetStackState::Poisoned);
         match state {
             ResetStackState::StackWhnf(mut demand) => {
-                match poll_whnf_computation(&mut demand, poll_context, context, step_budget.max(1))
-                {
+                match poll_whnf_computation(&mut demand, poll_context, context, step_budget) {
                     WhnfOwnerPoll::Ready(stack) => {
                         let is_list = poll_context.evaluate(context, |evaluator| {
                             matches!(evaluator.project_root(&stack), Value::List(_))
@@ -214,13 +213,12 @@ impl ResetFrameMachine {
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ResetFramePoll {
         let state = std::mem::replace(&mut self.state, ResetFrameState::Poisoned);
         match state {
             ResetFrameState::FrameWhnf(mut demand) => {
-                match poll_whnf_computation(&mut demand, poll_context, context, step_budget.max(1))
-                {
+                match poll_whnf_computation(&mut demand, poll_context, context, step_budget) {
                     WhnfOwnerPoll::Ready(frame) => {
                         let is_list = poll_context.evaluate(context, |evaluator| {
                             matches!(evaluator.project_root(&frame), Value::List(_))
@@ -313,7 +311,7 @@ impl ResetFrameMachine {
                 order,
             } => {
                 let poll = poll_context.evaluate(context, |evaluator| {
-                    conversion.poll(poll_context, evaluator, context, step_budget.max(1))
+                    conversion.poll(poll_context, evaluator, context, step_budget)
                 });
                 match poll {
                     ConversionPoll::Ready(key) => {
@@ -462,10 +460,10 @@ fn poll_usize(
     demand: &mut WhnfComputation,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
-    step_budget: usize,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
     field: &str,
 ) -> UsizePoll {
-    let value = match poll_whnf_computation(demand, poll_context, context, step_budget.max(1)) {
+    let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {
         WhnfOwnerPoll::Ready(value) => value,
         WhnfOwnerPoll::Pending(dependency) => return UsizePoll::Pending(dependency),
         WhnfOwnerPoll::Yielded => return UsizePoll::Yielded,
@@ -499,10 +497,10 @@ fn poll_list_front(
     front: &mut ListFrontMachine,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
-    step_budget: usize,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> ListFrontPoll {
     poll_context.evaluate(context, |evaluator| {
-        front.poll(poll_context, evaluator, context, step_budget.max(1))
+        front.poll(poll_context, evaluator, context, step_budget)
     })
 }
 

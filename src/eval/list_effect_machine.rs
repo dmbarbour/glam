@@ -128,7 +128,7 @@ impl ListEffectSourceMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ListEffectSourcePoll {
         match &mut self.state {
             ListEffectState::Run { phase, demand } => {

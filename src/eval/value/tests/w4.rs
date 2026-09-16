@@ -38,7 +38,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -46,7 +46,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     collect_between_handoffs(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -57,17 +57,21 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     collect_between_handoffs(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     collect_between_handoffs(&context);
-    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Complete(value) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("the rooted callback result must complete on a later poll")
     };
     assert_eq!(value.clone_core_for_test(), number(42));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Complete(value) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("a repeated poll must use the lazy cache")
     };
     assert_eq!(value.clone_core_for_test(), number(42));
@@ -87,22 +91,26 @@ fn failed_host_call_is_not_replayed_after_publication() {
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     collect_between_handoffs(&context);
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     collect_between_handoffs(&context);
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("the callback failure must become the lazy failure")
     };
     assert_eq!(failure.to_string(), "host callback failed");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("a repeated poll must use the cached callback failure")
     };
     assert_eq!(failure.to_string(), "host callback failed");
@@ -141,7 +149,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let mut machine = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
     let value = loop {
-        match machine.poll(&poll, 1) {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
             EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(_) => {
@@ -155,7 +163,9 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     };
     assert_eq!(value.clone_core_for_test(), number(44));
 
-    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Complete(value) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("a repeated poll must use the lazy cache")
     };
     assert_eq!(value.clone_core_for_test(), number(44));
@@ -174,14 +184,14 @@ fn reflection_source_reserves_then_waits_from_one_typed_owner() {
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     assert!(matches!(machine.work, LazyTaskWork::Reflection(_)));
     collect_between_handoffs(&context);
 
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     let wait = {
@@ -201,7 +211,7 @@ fn reflection_source_reserves_then_waits_from_one_typed_owner() {
     let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
         dependency: Some(WorkDependency::Wait(blocked)),
         ..
-    }) = machine.poll(&poll, 1)
+    }) = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
     else {
         panic!("the reserved reflection source must expose its stable wait")
     };
@@ -211,11 +221,13 @@ fn reflection_source_reserves_then_waits_from_one_typed_owner() {
     context.complete_wait_with_value(&wait, number(43));
     collect_between_handoffs(&context);
     assert!(matches!(
-        machine.poll(&poll, 1),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     collect_between_handoffs(&context);
-    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Complete(value) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("the completed reflection result must resume ordinary WHNF work")
     };
     assert_eq!(value.clone_core_for_test(), number(43));

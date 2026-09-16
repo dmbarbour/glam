@@ -3663,7 +3663,7 @@ restarting earlier converted keys.
 
 #### W6B — Operators and runtime nets
 
-##### W6B.0 — Borrowed poll-budget foundation
+##### W6B.0 — Complete (2026-09-16): Borrowed poll-budget foundation
 
 Complete this checkpoint before W6B.4b.2 begins. The current implementation
 has two incompatible layers:
@@ -3699,7 +3699,7 @@ authoritative `remaining` counter per outer poll, and a child receives
 remaining value. Do not introduce synchronization or interior mutability: the
 budget is stack-owned orchestration state used by one polling thread.
 
-Partition the migration:
+Completed migration:
 
 1. **W6B.0a — Token and outer boundary.** Add `granted`, `remaining`, exact
    `spent`, and focused zero/one/many tests. Change
@@ -3728,6 +3728,18 @@ Partition the migration:
    reserve parent units and translate unused child units back explicitly.
    Do not design ratios, rounding, or refunds until a real second budget type
    exists.
+
+Implementation result: `EvaluationStepBudget` is a two-word stack token with
+exact grant, remaining, and spent observations. The claimed-task boundary,
+client demand, resumable WHNF, reflection phases, isolated net construction,
+and nested access/list/object machines all borrow that one token. Direct
+session pumping and the public isolated-search convenience remain explicit
+outer integer policies which construct the token; no internal `max(1)` or
+copied nested allowance remains. Reflection delegates let child work consume
+first, then charge an administrative transition only if the child consumed
+nothing. This preserves one-unit progress without renewing fuel. The demand
+pump still reserves and discards one whole task quantum, preserving scheduler
+fairness while actual per-poll spend is independently observable.
 
 This checkpoint measures declared semantic work, not wall time or CPU
 instructions. It does not require every successful poll to spend a unit, and

@@ -488,7 +488,7 @@ impl ClaimedClientDemand {
     pub(super) fn poll(
         &mut self,
         poll_context: &super::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut super::EvaluationStepBudget,
     ) -> ClientDemandPoll {
         assert_eq!(
             self.operation

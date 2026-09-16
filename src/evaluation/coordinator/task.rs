@@ -143,7 +143,7 @@ pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(
         &mut self,
         context: &super::super::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut super::super::EvaluationStepBudget,
     ) -> EvaluationMachinePoll;
 
     fn cancel(&mut self) {}

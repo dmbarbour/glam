@@ -52,7 +52,7 @@ impl ListFrontMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ListFrontPoll {
         if let Some(chunk) = &mut self.chunk {
             let value =

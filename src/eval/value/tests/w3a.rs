@@ -35,7 +35,7 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: Some(WorkDependency::Wait(_)),
             ..
-        }) = machine.poll(&poll, 1)
+        }) = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         else {
             panic!("the retained source result must wait on its canonical promise follower")
         };
@@ -44,7 +44,9 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
 
     crate::core::set_test_promise(context.values(), &promise, Value::Number(79.into()))
         .expect("the source-result promise should accept one assignment");
-    let EvaluationMachinePoll::Complete(value) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Complete(value) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("the assigned promise must complete the owning lazy")
     };
     assert_eq!(value.clone_core_for_test(), Value::Number(79.into()));
@@ -77,13 +79,17 @@ fn lazy_source_failure_is_cached_without_replaying_the_source() {
     let (_root, mut machine) = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("a permanent source failure must fail its lazy task")
     };
     assert!(failure.to_string().contains("source failed permanently"));
     assert_eq!(evaluations.load(Ordering::SeqCst), 1);
 
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(&poll, 1) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
         panic!("a repeated poll must observe the cached source failure")
     };
     assert!(failure.to_string().contains("source failed permanently"));

@@ -405,9 +405,9 @@ impl NetConstructionMachine {
     pub(in crate::eval) fn poll(
         &mut self,
         context: &EvaluatorStepContext<'_>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> Result<Option<Value>, EvaluationHalt> {
-        match self.search.poll(step_budget.max(1)) {
+        match self.search.poll_with_budget(step_budget) {
             IsolatedSearchPoll::Yielded => Ok(None),
             IsolatedSearchPoll::Blocked(blocked) => {
                 if let Some(dependency) = blocked.dependency().cloned() {

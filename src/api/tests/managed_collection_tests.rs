@@ -80,7 +80,7 @@ impl EvaluationTaskMachine for PausedHostWorker {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.entered
             .take()
@@ -98,7 +98,7 @@ impl EvaluationTaskMachine for PausedManagedWorker {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |_| {
             self.entered

@@ -408,7 +408,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
         if let LazyTaskWork::HostCall(machine) = &mut self.work
@@ -815,7 +815,7 @@ impl EvaluationTaskMachine for PromiseFollower {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
         match poll_whnf_computation(
@@ -1380,7 +1380,10 @@ mod ownership_tests {
         };
         let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
 
-        let pending = follower.poll(&poll_context, 1);
+        let pending = follower.poll(
+            &poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        );
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: Some(WorkDependency::Promise(dependency)),
             ..
@@ -1394,10 +1397,16 @@ mod ownership_tests {
         crate::core::set_test_promise(context.values(), &promise, Value::Number(73.into()))
             .expect("the follower promise should accept one assignment");
         assert!(matches!(
-            follower.poll(&poll_context, 1),
+            follower.poll(
+                &poll_context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1)
+            ),
             EvaluationMachinePoll::Yielded
         ));
-        let EvaluationMachinePoll::Complete(value) = follower.poll(&poll_context, 1) else {
+        let EvaluationMachinePoll::Complete(value) = follower.poll(
+            &poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        ) else {
             panic!("the yielded follower must resume from the assigned value")
         };
         assert_eq!(value.clone_core_for_test(), Value::Number(73.into()));

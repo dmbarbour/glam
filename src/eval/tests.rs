@@ -443,7 +443,7 @@ impl EvaluationTaskMachine for GateFailureMachine {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
     }
@@ -505,7 +505,7 @@ impl EvaluationTaskMachine for RootedBlockingReflectionMachine {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
@@ -576,7 +576,7 @@ impl EvaluationTaskMachine for FixtureTaskMachine {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self
             .terminal

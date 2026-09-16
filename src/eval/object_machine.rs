@@ -116,7 +116,7 @@ impl ObjectFixpointMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ObjectFixpointPoll {
         match &mut self.state {
             ObjectState::Linearize(machine) => {
@@ -178,7 +178,7 @@ impl ObjectLinearizationMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> LinearizationPoll {
         let state = std::mem::replace(
             &mut self
@@ -472,7 +472,7 @@ impl ObjectMixMachine {
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
         source_owner: LazyId,
         self_marker: &RuntimeValueRoot,
     ) -> ObjectFixpointPoll {

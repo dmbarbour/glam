@@ -556,7 +556,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let context = EvaluationPollContext::for_context(&self.eval_context);
         for _ in 0..steps.max(1) {
-            let poll = self.poll_with_context(&context, steps);
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
+            let poll = self.poll_with_context(&context, &mut budget);
             let EffectTaskPoll::Blocked(blocked) = &poll else {
                 return poll;
             };
@@ -575,7 +576,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     pub(super) fn poll_with_context(
         &mut self,
         context: &EvaluationPollContext,
-        steps: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EffectTaskPoll {
         context.assert_context(&self.eval_context);
         if let Some(terminal) = &self.terminal {
@@ -588,9 +589,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return blocked;
         }
 
-        for _ in 0..steps {
+        while step_budget.remaining() != 0 {
             if let Some(controlling) = self.execution.controlling.take() {
-                match self.control_step(context, controlling, steps) {
+                let previous_remaining = step_budget.remaining();
+                match self.control_step(context, controlling, step_budget) {
                     ControlStep::Continue(controlling) => {
                         self.execution.controlling = Some(controlling);
                     }
@@ -611,10 +613,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.handle_step_error(error);
                     }
                 }
+                step_budget.charge_if_unchanged(previous_remaining);
                 continue;
             }
             if let Some(specializing) = self.execution.specializing.take() {
-                match self.specialization_step(context, specializing, steps) {
+                let previous_remaining = step_budget.remaining();
+                match self.specialization_step(context, specializing, step_budget) {
                     SpecializationStep::Continue(specializing) => {
                         self.execution.specializing = Some(specializing);
                     }
@@ -635,10 +639,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.handle_step_error(error);
                     }
                 }
+                step_budget.charge_if_unchanged(previous_remaining);
                 continue;
             }
             if let Some(demanding) = self.execution.demanding.take() {
-                match self.scalar_demand_step(context, demanding, steps) {
+                let previous_remaining = step_budget.remaining();
+                match self.scalar_demand_step(context, demanding, step_budget) {
                     ScalarDemandStep::Complete(step) => match step {
                         MachineStep::Continue(work) => self.execution.work = work,
                         MachineStep::Decode(decoding) => {
@@ -692,10 +698,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.handle_step_error(error);
                     }
                 }
+                step_budget.charge_if_unchanged(previous_remaining);
                 continue;
             }
             if let Some(pathing) = self.execution.pathing.take() {
-                match self.state_path_step(context, pathing, steps) {
+                let previous_remaining = step_budget.remaining();
+                match self.state_path_step(context, pathing, step_budget) {
                     StatePathStep::Continue(pathing) => self.execution.pathing = Some(pathing),
                     StatePathStep::Complete(work) => self.execution.work = work,
                     StatePathStep::Blocked(pathing, dependency) => {
@@ -714,10 +722,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.handle_step_error(error);
                     }
                 }
+                step_budget.charge_if_unchanged(previous_remaining);
                 continue;
             }
             if let Some(decoding) = self.execution.decoding.take() {
-                match self.decode_step(context, decoding, steps) {
+                let previous_remaining = step_budget.remaining();
+                match self.decode_step(context, decoding, step_budget) {
                     EffectDecodeStep::Continue(decoding) => {
                         self.execution.decoding = Some(decoding);
                     }
@@ -738,8 +748,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         return self.handle_step_error(error);
                     }
                 }
+                step_budget.charge_if_unchanged(previous_remaining);
                 continue;
             }
+            assert!(step_budget.try_consume());
             let work = self.execution.work.clone();
             match self.step(context, work) {
                 Ok(MachineStep::Continue(work)) => self.execution.work = work,
@@ -821,7 +833,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         mut decoding: EffectDecodeWork<S>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EffectDecodeStep<S> {
         if let EffectDecodeOperation::Request(request) = &mut decoding.operation {
             return match request.poll(
@@ -829,7 +841,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 &self.eval_context,
                 &self.tags,
                 &self.specialized_requests,
-                step_budget.max(1),
+                step_budget,
             ) {
                 RequestDecodePoll::Ready(request) => {
                     #[cfg(test)]
@@ -860,7 +872,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             unreachable!("request decoding returned above")
         };
         let purpose = *purpose;
-        match poll_whnf_computation(computation, context, &self.eval_context, step_budget.max(1)) {
+        match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
             WhnfOwnerPoll::Pending(dependency) => {
                 #[cfg(test)]
                 if matches!(purpose, EffectDecodePurpose::ApplicationResult)
@@ -891,14 +903,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         mut specializing: Box<SpecializationWork<S>>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> SpecializationStep<S> {
         if let Some(computation) = specializing.demand.as_mut() {
             let input = match poll_whnf_computation(
                 computation,
                 context,
                 &self.eval_context,
-                step_budget.max(1),
+                step_budget,
             ) {
                 WhnfOwnerPoll::Ready(value) => {
                     let values = Values::from_core_factory(self.eval_context.values().clone());
@@ -982,13 +994,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         mut demanding: ScalarDemandWork<S>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ScalarDemandStep<S> {
         let value = match poll_whnf_computation(
             &mut demanding.computation,
             context,
             &self.eval_context,
-            step_budget.max(1),
+            step_budget,
         ) {
             WhnfOwnerPoll::Ready(value) => value,
             WhnfOwnerPoll::Pending(dependency) => {
@@ -1123,7 +1135,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         mut controlling: ControlWork<S>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ControlStep<S> {
         let operation = std::mem::replace(&mut controlling.operation, ControlOperation::Poisoned);
         match operation {
@@ -1133,7 +1145,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 disposition,
             } => {
                 let poll = context.evaluate(&self.eval_context, |evaluator| {
-                    key.poll(context, evaluator, &self.eval_context, step_budget.max(1))
+                    key.poll(context, evaluator, &self.eval_context, step_budget)
                 });
                 match poll {
                     eval::ConversionPoll::Ready(key) => {
@@ -1174,7 +1186,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 key,
                 mut stack,
                 disposition,
-            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+            } => match stack.poll(context, &self.eval_context, step_budget) {
                 ResetStackPoll::Ready(decoded) => {
                     let reset_stack::DecodedResetStack {
                         serialized,
@@ -1322,7 +1334,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 mut stack,
                 captured,
                 value,
-            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+            } => match stack.poll(context, &self.eval_context, step_budget) {
                 ResetStackPoll::Ready(decoded) => {
                     let mut layers = captured
                         .reset_frames
@@ -1435,7 +1447,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 mut stack,
                 root,
                 choices,
-            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+            } => match stack.poll(context, &self.eval_context, step_budget) {
                 ResetStackPoll::Ready(decoded) => {
                     let reset_stack::DecodedResetStack {
                         serialized: reset_stack,
@@ -1534,7 +1546,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             },
             ControlOperation::Delivery { mut stack, value } => {
-                match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+                match stack.poll(context, &self.eval_context, step_budget) {
                     ResetStackPoll::Ready(decoded) => {
                         let mut resets = decoded.frames;
                         let mut branch = controlling.branch;
@@ -1621,7 +1633,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 mut stack,
                 outer,
                 value,
-            } => match stack.poll(context, &self.eval_context, step_budget.max(1)) {
+            } => match stack.poll(context, &self.eval_context, step_budget) {
                 ResetStackPoll::Ready(decoded) => {
                     let mut branch = controlling.branch;
                     let state = context.evaluate(&self.eval_context, |evaluator| {
@@ -1696,12 +1708,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &mut self,
         context: &EvaluationPollContext,
         mut pathing: StatePathWork<S>,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> StatePathStep<S> {
         match &mut pathing.operation {
             StatePathOperation::Keys { machine, after } => {
                 let poll = context.evaluate(&self.eval_context, |evaluator| {
-                    machine.poll(context, evaluator, &self.eval_context, step_budget.max(1))
+                    machine.poll(context, evaluator, &self.eval_context, step_budget)
                 });
                 match poll {
                     eval::ConversionPoll::Ready(keys) => {
@@ -1749,7 +1761,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             StatePathOperation::Get(machine) => {
-                match machine.poll(context, &self.eval_context, step_budget.max(1)) {
+                match machine.poll(context, &self.eval_context, step_budget) {
                     ValuePathPoll::Ready(value) => StatePathStep::Complete(
                         MachineWork::deliver_root(value, pathing.branch, pathing.scope_depth),
                     ),
@@ -1764,12 +1776,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 computation,
                 path,
                 value,
-            } => match poll_whnf_computation(
-                computation,
-                context,
-                &self.eval_context,
-                step_budget.max(1),
-            ) {
+            } => match poll_whnf_computation(computation, context, &self.eval_context, step_budget)
+            {
                 WhnfOwnerPoll::Ready(base) => {
                     let is_dict = context.evaluate(&self.eval_context, |evaluator| {
                         matches!(evaluator.project_root(&base), Value::Dict(_))
@@ -1822,33 +1830,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     )),
                 ),
             },
-            StatePathOperation::SetUpdate(computation) => match poll_whnf_computation(
-                computation,
-                context,
-                &self.eval_context,
-                step_budget.max(1),
-            ) {
-                WhnfOwnerPoll::Ready(state) => {
-                    pathing.branch.state = state;
-                    StatePathStep::Complete(MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        pathing.branch,
-                        pathing.scope_depth,
-                    ))
+            StatePathOperation::SetUpdate(computation) => {
+                match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
+                    WhnfOwnerPoll::Ready(state) => {
+                        pathing.branch.state = state;
+                        StatePathStep::Complete(MachineWork::deliver(
+                            self.eval_context.values(),
+                            self.eval_context.values().unit(),
+                            pathing.branch,
+                            pathing.scope_depth,
+                        ))
+                    }
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        StatePathStep::Blocked(pathing, dependency)
+                    }
+                    WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
+                    WhnfOwnerPoll::Failed(failure) => {
+                        StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
+                    }
+                    WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
+                        pathing,
+                        TaskHalt::new(format!(
+                            "reflection state update reached an unsupported {boundary:?} boundary"
+                        )),
+                    ),
                 }
-                WhnfOwnerPoll::Pending(dependency) => StatePathStep::Blocked(pathing, dependency),
-                WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
-                WhnfOwnerPoll::Failed(failure) => {
-                    StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
-                }
-                WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
-                    pathing,
-                    TaskHalt::new(format!(
-                        "reflection state update reached an unsupported {boundary:?} boundary"
-                    )),
-                ),
-            },
+            }
             StatePathOperation::Poisoned => {
                 unreachable!("failed state-path work cannot be resumed before error handling")
             }
@@ -3461,7 +3468,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_value_effect_task(&mut self.0, context, step_budget)
     }
@@ -3475,7 +3482,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, context, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
@@ -3498,7 +3505,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
 fn poll_value_effect_task<S: TaskSpecialization>(
     task: &mut EffectTask<S>,
     context: &crate::evaluation::EvaluationPollContext,
-    step_budget: usize,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
     match task.poll_with_context(context, step_budget) {
@@ -3526,7 +3533,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll_with_context(context, step_budget) {
@@ -4224,7 +4231,7 @@ impl ValuePathMachine {
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvalContext,
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ValuePathPoll {
         if self.next == self.path.len() {
             return ValuePathPoll::Ready(self.current.clone());
@@ -4907,7 +4914,7 @@ impl<R: Clone> RequestDecodeWork<R> {
         context: &EvalContext,
         tags: &Tags,
         specialized: &[SpecializedRequest<R>],
-        step_budget: usize,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RequestDecodePoll<R> {
         match &mut self.state {
             RequestDecodeState::Select(request) => {
@@ -5078,7 +5085,7 @@ fn poll_request_id(
     demand: &mut WhnfComputation,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
-    step_budget: usize,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
     kind: &str,
 ) -> RequestIdPoll {
     let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {

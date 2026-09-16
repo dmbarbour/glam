@@ -442,7 +442,7 @@ impl ClaimedDeferredWork {
     pub(in crate::evaluation) fn poll(
         &mut self,
         context: &super::super::EvaluationPollContext,
-        step_budget: usize,
+        step_budget: &mut super::super::EvaluationStepBudget,
     ) -> super::EvaluationMachinePoll {
         self.machine
             .as_mut()

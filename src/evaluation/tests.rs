@@ -41,6 +41,30 @@ fn isolated_standalone_context() -> OwnedEvalContext {
     ))
 }
 
+#[test]
+fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
+    let mut empty = EvaluationStepBudget::new(0);
+    assert_eq!(
+        (empty.granted(), empty.remaining(), empty.spent()),
+        (0, 0, 0)
+    );
+    assert!(!empty.try_consume());
+
+    let mut one = EvaluationStepBudget::new(1);
+    assert!(one.try_consume());
+    assert_eq!((one.granted(), one.remaining(), one.spent()), (1, 0, 1));
+    assert!(!one.try_consume());
+
+    let mut many = EvaluationStepBudget::new(4);
+    assert!(many.try_consume());
+    let after_child = many.remaining();
+    assert!(many.try_consume());
+    many.charge_if_unchanged(after_child);
+    assert_eq!((many.granted(), many.remaining(), many.spent()), (4, 2, 2));
+    many.charge_if_unchanged(many.remaining());
+    assert_eq!((many.remaining(), many.spent()), (1, 3));
+}
+
 /// Compile-exhaustive ownership inventory for every value-bearing machine
 /// poll boundary established by I3A.4.
 ///
@@ -447,7 +471,10 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
         .claim_client_demand(handle.work())
         .expect("assigned promise demand should be ready");
     let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
-    let poll = claimed.poll(&poll_context, 1);
+    let poll = claimed.poll(
+        &poll_context,
+        &mut crate::evaluation::EvaluationStepBudget::new(1),
+    );
     assert!(matches!(poll, ClientDemandPoll::Yielded));
     coordinator.release_client_demand(claimed, poll);
     assert!(matches!(
@@ -480,7 +507,10 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
         .claim_client_demand(handle.work())
         .expect("client demand should be ready");
     let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
-    let poll = claimed.poll(&poll_context, 64);
+    let poll = claimed.poll(
+        &poll_context,
+        &mut crate::evaluation::EvaluationStepBudget::new(64),
+    );
     let ClientDemandPoll::Blocked(WorkDependency::Wait(wait)) = &poll else {
         panic!("uncached lazy demand should expose its canonical producer wait")
     };
@@ -1542,7 +1572,7 @@ impl EvaluationTaskMachine for Complete {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
@@ -1554,7 +1584,7 @@ impl EvaluationTaskMachine for CompleteWithValue {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(
             context.root_value(
@@ -1582,7 +1612,7 @@ impl EvaluationTaskMachine for ProbePollOutcomeMachine {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.0 {
             ProbePollOutcome::Yielded => EvaluationMachinePoll::Yielded,
@@ -1614,7 +1644,7 @@ impl EvaluationTaskMachine for ExitVote {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Exit(self.0.clone())
     }
@@ -1629,7 +1659,7 @@ impl EvaluationTaskMachine for ExitUntilObservation {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if self.context.current_observation_epoch() == self.observed {
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
@@ -1819,7 +1849,7 @@ impl EvaluationTaskMachine for Await {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.context.poll_wait(&self.dependency) {
             EvaluationWaitPoll::Pending(wait) => {
@@ -1857,7 +1887,7 @@ impl EvaluationTaskMachine for AwaitPromise {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.evaluate(&self.context, |context| {
             match context
@@ -1884,7 +1914,7 @@ impl EvaluationTaskMachine for AwaitCell {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let dependency = self
             .dependency
@@ -1980,7 +2010,7 @@ impl EvaluationTaskMachine for AlwaysBlocked {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
@@ -1998,7 +2028,7 @@ impl EvaluationTaskMachine for BlockedWithFailure {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: None,
@@ -2017,7 +2047,7 @@ impl EvaluationTaskMachine for ScopedThenBlocked {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |access| {
             assert!(access.values().belongs_to(self.context.values()));
@@ -2048,7 +2078,7 @@ impl EvaluationTaskMachine for ScopedCompleteWithDropCheck {
     fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |_| {
             assert!(matches!(
@@ -2077,7 +2107,7 @@ impl EvaluationTaskMachine for CountedBlocked {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         *self
             .polls
@@ -2097,7 +2127,7 @@ impl EvaluationTaskMachine for AlwaysYields {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
     }
@@ -2113,7 +2143,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.polls
             .lock()
@@ -2133,7 +2163,7 @@ impl EvaluationTaskMachine for Fail {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure("reasoning failed")))
     }
@@ -2145,7 +2175,7 @@ impl EvaluationTaskMachine for FailWith {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
     }
@@ -2157,7 +2187,7 @@ impl EvaluationTaskMachine for Signal {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(signal) = self.0.take() {
             signal.send(()).expect("test receiver should remain open");
@@ -2175,7 +2205,7 @@ impl EvaluationTaskMachine for SpawnSignal {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let signal = self
             .signal
@@ -2197,7 +2227,7 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
@@ -2223,7 +2253,7 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
@@ -2251,7 +2281,7 @@ impl EvaluationTaskMachine for FailAfterRelease {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
@@ -2277,7 +2307,7 @@ impl EvaluationTaskMachine for CancellableAfterRelease {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
             started
@@ -2307,7 +2337,7 @@ impl EvaluationTaskMachine for AssignPromiseThenYield {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let promise = self
             .promise
@@ -2335,7 +2365,7 @@ impl EvaluationTaskMachine for CompleteAndSignalDrop {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
@@ -2362,7 +2392,7 @@ impl EvaluationTaskMachine for CompleteAndCheckTerminalPublication {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
@@ -2382,7 +2412,7 @@ impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
     }
@@ -2409,7 +2439,7 @@ impl EvaluationTaskMachine for CacheLazyFailure {
     fn poll(
         &mut self,
         context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let result = self.values.with_runtime_value_access(|access| {
             self.lazy.cache(&access, Err(self.failure.clone()))
@@ -2430,7 +2460,7 @@ impl EvaluationTaskMachine for SpawnOnce {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if !self.spawned {
             self.spawned = true;
@@ -2450,7 +2480,7 @@ impl EvaluationTaskMachine for Cancellable {
     fn poll(
         &mut self,
         _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: usize,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
     }
@@ -3192,7 +3222,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
         fn poll(
             &mut self,
             context: &EvaluationPollContext,
-            _step_budget: usize,
+            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             if self.context.current_observation_epoch() == self.observed {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -5986,7 +6016,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
         fn poll(
             &mut self,
             _context: &crate::evaluation::EvaluationPollContext,
-            _step_budget: usize,
+            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: None,
@@ -6104,7 +6134,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
         fn poll(
             &mut self,
             _context: &crate::evaluation::EvaluationPollContext,
-            _step_budget: usize,
+            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,

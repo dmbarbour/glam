@@ -631,13 +631,15 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // Filled from W0B's deliberately failing initial AST scan. The per-signal
 // summary explains count drift; the full record fingerprint detects moves or
 // classification substitutions which leave those counts unchanged.
-const EXPECTED_OCCURRENCES: usize = 282;
-const EXPECTED_FINGERPRINT: u64 = 4_056_815_297_817_542_125;
+// W6B.0 removed two copied-budget adapter occurrences while preserving their
+// resumable owners; nested WHNF now borrows the outer poll budget directly.
+const EXPECTED_OCCURRENCES: usize = 280;
+const EXPECTED_FINGERPRINT: u64 = 2_489_930_610_344_343_526;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 105),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
-    (Signal::ApplyValue, 15),
+    (Signal::ApplyValue, 14),
     (Signal::ApplyValues, 5),
     (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 10),
@@ -647,12 +649,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 36),
+    (Signal::StructuralRecursion, 35),
     (Signal::UserSizedLoop, 54),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 128),
+    (WorkShape::DemandThenInspect, 126),
     (WorkShape::OrderedOperands, 11),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),

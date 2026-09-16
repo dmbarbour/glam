@@ -9,7 +9,6 @@ use crate::core::EvaluationFailure;
 use crate::core::thread_has_runtime_value_access_for_test;
 use crate::eval::whnf::{
     WhnfComputation, WhnfDeferredRequest, WhnfDependency, WhnfExternalBoundary, WhnfPoll,
-    WhnfStepBudget,
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -34,11 +33,10 @@ pub(crate) fn poll_computation(
     computation: &mut WhnfComputation,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
-    step_budget: usize,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> WhnfOwnerPoll {
-    let mut budget = WhnfStepBudget::new(step_budget);
     let poll = poll_context.with_value_access(context, |access| {
-        computation.poll_semantic_in(&access, &mut budget)
+        computation.poll_semantic_in(&access, step_budget)
     });
     #[cfg(test)]
     assert!(
@@ -133,7 +131,12 @@ mod tests {
         let poll_context = EvaluationPollContext::for_context(&context);
 
         assert_eq!(context.deferred_task_count(), 0);
-        let result = poll_computation(&mut computation, &poll_context, &context, 1);
+        let result = poll_computation(
+            &mut computation,
+            &poll_context,
+            &context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        );
         let WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)) = result else {
             panic!("uncached lazy must admit its canonical producer after inspection")
         };
@@ -159,7 +162,12 @@ mod tests {
         let mut computation = WhnfComputation::from_root(focus);
         let poll_context = EvaluationPollContext::for_context(&context);
 
-        let result = poll_computation(&mut computation, &poll_context, &context, 1);
+        let result = poll_computation(
+            &mut computation,
+            &poll_context,
+            &context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        );
         let WhnfOwnerPoll::Pending(WorkDependency::Promise(promise)) = result else {
             panic!("resolver promise must remain the exact completion dependency")
         };
@@ -183,7 +191,12 @@ mod tests {
         let mut computation = WhnfComputation::from_root(focus);
         let poll_context = EvaluationPollContext::for_context(&owner);
 
-        let result = poll_computation(&mut computation, &poll_context, &owner, 1);
+        let result = poll_computation(
+            &mut computation,
+            &poll_context,
+            &owner,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        );
         let WhnfOwnerPoll::Failed(failure) = result else {
             panic!("a producer task cannot wait on its own promise")
         };

@@ -13,7 +13,7 @@ use crate::core::{
     ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
-use crate::evaluation::EvaluationValueAccess;
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
@@ -200,29 +200,8 @@ pub(crate) enum RegionalWhnfDrive {
     Failed(Arc<EvaluationFailure>),
 }
 
-/// Deterministic budget for one regional WHNF quantum.
-pub(crate) struct WhnfStepBudget {
-    remaining: usize,
-}
-
-impl WhnfStepBudget {
-    pub(crate) fn new(steps: usize) -> Self {
-        Self { remaining: steps }
-    }
-
-    fn consume(&mut self) -> bool {
-        let Some(remaining) = self.remaining.checked_sub(1) else {
-            return false;
-        };
-        self.remaining = remaining;
-        true
-    }
-
-    #[cfg(test)]
-    fn remaining(&self) -> usize {
-        self.remaining
-    }
-}
+/// WHNF's semantic name for the shared outer evaluation budget.
+pub(crate) type WhnfStepBudget = EvaluationStepBudget;
 
 /// Drives bounded callback-free transitions without recursive Rust calls.
 ///
@@ -238,7 +217,7 @@ pub(crate) fn drive_regional<'scope>(
     mut reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
 ) -> RegionalWhnfDrive {
     loop {
-        if !budget.consume() {
+        if !budget.try_consume() {
             return RegionalWhnfDrive::Yielded(work);
         }
         match reduce(access, &mut work) {
