@@ -4020,7 +4020,7 @@ until W6G.3 aggregates it.
 | **W6C.2b — Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
 | **W6C.3 — Comparison** | 6 S, 3 F | Convert ordered/equality operand work; reuse W6A.0c tagged-payload work and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
-| **W6C.5 — Provenance** | 1 D | Replace the durable evaluator facade with an explicit reflection/provenance handoff. `-1`. |
+| **W6C.5 — Complete (2026-09-16): Provenance** | 1 D | Replace the durable evaluator facade with an explicit provenance owner and bounded opaque-origin inspection. `-1`. |
 | **W6C.6 — Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
 
 Operations which require only immediate data become immediate-data helpers,
@@ -4074,6 +4074,17 @@ resumes without replay. Division-by-zero and wrong-kind diagnostics remain
 unchanged, and the fixtures pass with aggressive collection. The old numeric
 dispatcher and synchronous implementation are removed. The D.2c manifest
 falls from 147 to 142 declarations and the W6C.4 group reaches zero.
+
+W6C.5 completion record, 2026-09-16: origin inspection now installs a durable
+builtin machine rather than downgrading the dispatcher to `EvalContext`. The
+machine owns and resumes ordinary WHNF demand, adds the established
+`compilation_origin` frame to permanent demand failures, and performs the
+edge-free opaque provenance downcast only after demand reaches WHNF. The
+forced fixture suspends on an unassigned origin operand, then propagates a
+deferred failure with its context intact; public round-trip and wrong-family
+fixtures pass in both GC modes. The old provenance module is removed, the
+dispatcher retains only strategy's deliberate durable-context downgrade, and
+the D.2c manifest falls from 140 to 139 declarations with W6C.5 at zero.
 
 #### W6D — Dictionaries, lists, and patterns
 

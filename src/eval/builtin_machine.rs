@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::core::{Builtin, EvaluatedValue, EvaluationFailure, Value};
+use crate::core::{Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, Value};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
     poll_whnf_computation,
@@ -29,6 +29,7 @@ pub(crate) enum BuiltinTaskMachine {
     Assertion(AssertionBuiltinMachine),
     Conditional(ConditionalBuiltinMachine),
     Numeric(NumericBuiltinMachine),
+    Provenance(ProvenanceBuiltinMachine),
 }
 
 impl BuiltinTaskMachine {
@@ -44,6 +45,7 @@ impl BuiltinTaskMachine {
                 | Builtin::Divide
                 | Builtin::Floor
                 | Builtin::Mod
+                | Builtin::InspectOrigin
         )
     }
 
@@ -59,6 +61,7 @@ impl BuiltinTaskMachine {
             Builtin::IfResult | Builtin::MatchResult => {
                 Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
             }
+            Builtin::InspectOrigin => Self::Provenance(ProvenanceBuiltinMachine::new(arguments)),
             _ => Self::Numeric(NumericBuiltinMachine::new(builtin, arguments)),
         }
     }
@@ -80,6 +83,68 @@ impl BuiltinTaskMachine {
             Self::Numeric(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
+            Self::Provenance(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+        }
+    }
+}
+
+pub(crate) struct ProvenanceBuiltinMachine {
+    demand: WhnfComputation,
+}
+
+impl ProvenanceBuiltinMachine {
+    fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [origin]: [RuntimeValueRoot; 1] = arguments
+            .try_into()
+            .expect("origin inspection retains one operand");
+        Self {
+            demand: WhnfComputation::from_root(origin),
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        let origin = match poll_demand(&mut self.demand, poll_context, durable_context, step_budget)
+        {
+            DemandPoll::Ready(value) => value,
+            DemandPoll::Failed(failure) => {
+                let failure = context.with_value_access(|access| {
+                    EvaluationHalt::failure(failure.into_failure()).with_context(
+                        access.values(),
+                        super::value::evaluation_context_frame_in(
+                            access.values(),
+                            "compilation_origin",
+                        ),
+                    )
+                });
+                return BuiltinTaskPoll::Failed(
+                    context.root_failure(failure.into_permanent_failure()),
+                );
+            }
+            other => return other.into_builtin_poll(),
+        };
+        let origin = EvaluatedValue::try_from(context.project_root(&origin))
+            .expect("origin demand must reach WHNF")
+            .into_value();
+        let Value::Opaque(origin) = origin else {
+            return permanent_failure(
+                context,
+                "origin inspection requires an opaque compilation origin",
+            );
+        };
+        match crate::diagnostic::inspect_compilation_origin(durable_context.values(), &origin) {
+            Some(origin) => BuiltinTaskPoll::Ready(context.root_value(origin)),
+            None => permanent_failure(
+                context,
+                "origin inspection requires an opaque compilation origin",
+            ),
         }
     }
 }
@@ -539,6 +604,37 @@ mod tests {
                 .expect_err("an empty match should be diagnosed")
                 .to_string(),
             "match search exhausted despite its compiler-provided fallback"
+        );
+    }
+
+    #[test]
+    fn provenance_machine_suspends_then_preserves_its_demand_context() {
+        let context = context();
+        let origin = PromisedValue::new(context.values(), "origin operand");
+        let inspection = Value::builtin_call(
+            context.values(),
+            Builtin::InspectOrigin,
+            vec![Value::Promised(origin.clone())],
+        );
+
+        let blocked = crate::eval::eval_value(&context, &inspection)
+            .expect_err("unassigned origin demand must remain resumable");
+        assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+
+        let failed = Value::semantic_thunk(context.values(), "failed origin", |_| {
+            Err(EvaluationHalt::new("origin production failed"))
+        });
+        crate::core::set_test_promise(context.values(), &origin, failed)
+            .expect("the origin operand should accept its assignment");
+        let failure = crate::eval::eval_value(&context, &inspection)
+            .expect_err("origin demand failure must propagate")
+            .into_permanent_failure();
+        assert_eq!(failure.to_string(), "origin production failed");
+        assert_eq!(
+            failure.contexts(),
+            [super::super::value::evaluation_context_frame(
+                "compilation_origin"
+            )]
         );
     }
 }

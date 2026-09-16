@@ -10,7 +10,6 @@ mod list_effect;
 mod net;
 mod object;
 mod pattern;
-mod provenance;
 mod strategy;
 
 use super::*;
@@ -130,7 +129,15 @@ pub(super) fn apply_builtin_in(
         | Builtin::EffectMapContinue => effect::apply(context, builtin, arguments),
         Builtin::Seq | Builtin::Spark => strategy::apply(context.context(), builtin, arguments),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
-        Builtin::InspectOrigin => provenance::apply(context.context(), arguments),
+        Builtin::InspectOrigin => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::AssertUnit => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,

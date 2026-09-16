@@ -170,6 +170,10 @@ fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationF
     ))
 }
 
+#[allow(
+    dead_code,
+    reason = "W8 retains the direct compatibility evaluator for tests until the family migration closes"
+)]
 pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
     super::with_direct_evaluator(context, |evaluator| eval_value_in(evaluator, value))
 }

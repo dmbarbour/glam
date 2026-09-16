@@ -226,8 +226,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [5, 5],
-        "W6C.2/W6C.4 durable conditional, assertion, and numeric owners with callback-free regional result projection"
+        [6, 6],
+        "W6C.2/W6C.4/W6C.5 durable conditional, assertion, numeric, and provenance owners with callback-free regional result projection"
     ),
     context_entry!(
         "src/eval/builtins/object.rs",
@@ -253,11 +253,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/builtins/pattern.rs",
         [17, 0],
         "I3B.1 scoped pattern inspection"
-    ),
-    context_entry!(
-        "src/eval/builtins/provenance.rs",
-        [0, 1],
-        "I3E.3/I10 opaque origin inspection"
     ),
     context_entry!(
         "src/eval/builtins/strategy.rs",
@@ -551,13 +546,10 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
 
     assert_eq!(
         dispatcher.matches("context.context()").count(),
-        2,
-        "only strategies and provenance may downgrade in the dispatcher"
+        1,
+        "only strategies may downgrade in the dispatcher"
     );
-    for durable_call in [
-        "strategy::apply(context.context(), builtin, arguments)",
-        "provenance::apply(context.context(), arguments)",
-    ] {
+    for durable_call in ["strategy::apply(context.context(), builtin, arguments)"] {
         assert!(
             dispatcher.contains(durable_call),
             "missing durable builtin boundary `{durable_call}`"

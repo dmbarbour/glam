@@ -56,6 +56,10 @@ pub(crate) use operator::{
 pub(crate) use sequence::list_output_bytes;
 #[cfg(test)]
 pub(crate) use sequence::list_to_value_items;
+#[allow(
+    unused_imports,
+    reason = "W8 retains the direct compatibility evaluator for tests until the family migration closes"
+)]
 pub use value::eval_value;
 pub(crate) use value::failure_diagnostic_value_in;
 pub(crate) use value::{eval_value_in, lazy_root_wait};

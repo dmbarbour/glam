@@ -592,7 +592,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/eval/builtins/provenance.rs::apply#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_dependency_completion_before_exact_block_is_not_lost#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -812,7 +811,6 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
         // D.2b.2 gives provenance-generated halt context an explicit bounded
         // value region.
-        ("src/eval/builtins/provenance.rs", GatewayCounts::new(1, 0)),
         // P2B compares registered net roots under the same explicit access
         // authority used by production normalization batches. P2C adds
         // explicit test-only duplicate/root handoffs for cursor-driver and
@@ -1034,7 +1032,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        22
+        21
     );
 }
 
