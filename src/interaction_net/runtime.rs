@@ -192,6 +192,7 @@ pub enum ActivePairStep<S: NetSpecialization> {
     Reduction(Reduction),
     Cursor(NodeId),
     BlockedCall(BlockedCall<S::WaitToken>),
+    BlockedCallableCheckpoint(BlockedCallableCheckpoint<S::WaitToken>),
     BlockedOperatorCall(BlockedOperatorCall<S::WaitToken>),
     Stuck(StuckPair<S::StuckReason>),
     Contended(NetContention),
@@ -377,6 +378,14 @@ pub struct Call {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallableCheckpointCall {
+    pub pair: ActivePairKey,
+    pub bind: NodeId,
+    pub checkpoint: NodeId,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperatorCall {
     pub pair: ActivePairKey,
     pub operator: NodeId,
@@ -402,6 +411,18 @@ pub struct BlockedCall<W> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedCallableCheckpoint<W> {
+    pub call: CallableCheckpointCall,
+    pub wait: W,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointBlockResult {
+    Blocked,
+    Disturbed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedOperatorCall<W> {
     pub pair: ActivePairKey,
     pub wait: W,
@@ -419,6 +440,10 @@ pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
     BlockedCall {
+        wait: S::WaitToken,
+    },
+    BlockedCallableCheckpoint {
+        generation: u64,
         wait: S::WaitToken,
     },
     BlockedOperatorCall {
@@ -629,7 +654,9 @@ impl RuntimeNetEdgeSet {
                     visit(RuntimeNetPayload::Operator(operator));
                 }
                 Some(RuntimeNode::CallableCheckpoint(checkpoint)) => {
-                    visit(RuntimeNetPayload::CallableCheckpoint(checkpoint));
+                    if let Some(payload) = &checkpoint.payload {
+                        visit(RuntimeNetPayload::CallableCheckpoint(payload));
+                    }
                 }
                 Some(
                     RuntimeNode::Bind
@@ -681,6 +708,7 @@ fn visit_active_pair_payload<'payload, S: NetSpecialization>(
         ActivePairState::Ready
         | ActivePairState::Claimed
         | ActivePairState::BlockedCall { .. }
+        | ActivePairState::BlockedCallableCheckpoint { .. }
         | ActivePairState::BlockedOperatorCall { .. }
         | ActivePairState::BlockedCursor {
             blockage: CursorBlockage::Stable,
@@ -1222,74 +1250,87 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         Gateway: RuntimeNetMutationGateway<S>,
     {
-        let (mut outcome, cursor_claim) = {
-            let mut state = self
-                .runtime
-                .lock()
-                .expect("shared runtime net was poisoned");
-            let revisions = self.revisions();
-            if expected_topology_revision
-                .is_some_and(|expected| expected != revisions.topology_revision())
+        let (mut outcome, cursor_claim) =
             {
-                return match state.runtime.active.get(&pair) {
-                    Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
-                        pair,
-                        reason: reason.clone(),
-                    }),
-                    _ => ActivePairStep::Disturbed,
-                };
-            }
-            let pair_state = state.runtime.active.get(&pair).cloned();
-            let mut cursor_claim = None;
-            let (outcome, changed) = match pair_state {
-                Some(ActivePairState::Ready) => {
-                    let edges = state.runtime.reduce_pair_edge_transition(pair);
-                    let reduction = gateway
-                        .transition_edges(&mut state.runtime, edges, |runtime| {
-                            runtime.reduce_pair(pair)
-                        })
-                        .expect("ready pair must produce one reduction");
-                    if let ReductionKind::RemoteCursor {
-                        cursor,
-                        progress: CursorProgress::Claimed,
-                    } = &reduction.kind
-                    {
-                        cursor_claim = Some(
-                            state
+                let mut state = self
+                    .runtime
+                    .lock()
+                    .expect("shared runtime net was poisoned");
+                let revisions = self.revisions();
+                if expected_topology_revision
+                    .is_some_and(|expected| expected != revisions.topology_revision())
+                {
+                    return match state.runtime.active.get(&pair) {
+                        Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
+                            pair,
+                            reason: reason.clone(),
+                        }),
+                        _ => ActivePairStep::Disturbed,
+                    };
+                }
+                let pair_state = state.runtime.active.get(&pair).cloned();
+                let mut cursor_claim = None;
+                let (outcome, changed) =
+                    match pair_state {
+                        Some(ActivePairState::Ready) => {
+                            let edges = state.runtime.reduce_pair_edge_transition(pair);
+                            let reduction = gateway
+                                .transition_edges(&mut state.runtime, edges, |runtime| {
+                                    runtime.reduce_pair(pair)
+                                })
+                                .expect("ready pair must produce one reduction");
+                            if let ReductionKind::RemoteCursor {
+                                cursor,
+                                progress: CursorProgress::Claimed,
+                            } = &reduction.kind
+                            {
+                                cursor_claim =
+                                    Some(state.runtime.cursor_claim(*cursor, gateway).expect(
+                                        "cursor reduction must retain its claimed transition",
+                                    ));
+                            }
+                            (ActivePairStep::Reduction(reduction), true)
+                        }
+                        Some(ActivePairState::Claimed) => {
+                            (ActivePairStep::Contended(self.contention(revisions)), false)
+                        }
+                        Some(ActivePairState::BlockedCursor { cursor, .. }) => {
+                            (ActivePairStep::Cursor(cursor), false)
+                        }
+                        Some(ActivePairState::BlockedCall { wait }) => (
+                            ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
+                            false,
+                        ),
+                        Some(ActivePairState::BlockedCallableCheckpoint { generation, wait }) => {
+                            let call = state
                                 .runtime
-                                .cursor_claim(*cursor, gateway)
-                                .expect("cursor reduction must retain its claimed transition"),
-                        );
-                    }
-                    (ActivePairStep::Reduction(reduction), true)
+                                .callable_checkpoint(pair)
+                                .expect("blocked checkpoint state must retain its structural pair");
+                            debug_assert_eq!(call.generation, generation);
+                            (
+                                ActivePairStep::BlockedCallableCheckpoint(
+                                    BlockedCallableCheckpoint { call, wait },
+                                ),
+                                false,
+                            )
+                        }
+                        Some(ActivePairState::BlockedOperatorCall { wait }) => (
+                            ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
+                            false,
+                        ),
+                        Some(ActivePairState::Stuck(reason)) => {
+                            (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
+                        }
+                        None => (ActivePairStep::Gone, false),
+                    };
+                if changed {
+                    self.publish_mutation(&mut state.batches);
                 }
-                Some(ActivePairState::Claimed) => {
-                    (ActivePairStep::Contended(self.contention(revisions)), false)
-                }
-                Some(ActivePairState::BlockedCursor { cursor, .. }) => {
-                    (ActivePairStep::Cursor(cursor), false)
-                }
-                Some(ActivePairState::BlockedCall { wait }) => (
-                    ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
-                    false,
-                ),
-                Some(ActivePairState::BlockedOperatorCall { wait }) => (
-                    ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
-                    false,
-                ),
-                Some(ActivePairState::Stuck(reason)) => {
-                    (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
-                }
-                None => (ActivePairStep::Gone, false),
+                (
+                    outcome,
+                    cursor_claim.map(|claim| CursorClaimGuard::new(self, claim, gateway)),
+                )
             };
-            if changed {
-                self.publish_mutation(&mut state.batches);
-            }
-            (
-                outcome,
-                cursor_claim.map(|claim| CursorClaimGuard::new(self, claim, gateway)),
-            )
-        };
 
         if let Some(claim) = cursor_claim {
             let progress = claim.advance_with(inspect_source);
@@ -1925,7 +1966,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     visit(RuntimeNetPayload::Operator(operator));
                 }
                 RuntimeNode::CallableCheckpoint(checkpoint) => {
-                    visit(RuntimeNetPayload::CallableCheckpoint(checkpoint));
+                    if let Some(payload) = &checkpoint.payload {
+                        visit(RuntimeNetPayload::CallableCheckpoint(payload));
+                    }
                 }
                 RuntimeNode::Bind
                 | RuntimeNode::Fan { .. }
@@ -1963,6 +2006,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 ActivePairState::Ready
                 | ActivePairState::Claimed
                 | ActivePairState::BlockedCall { .. }
+                | ActivePairState::BlockedCallableCheckpoint { .. }
                 | ActivePairState::BlockedOperatorCall { .. }
                 | ActivePairState::BlockedCursor {
                     blockage: CursorBlockage::Stable,
@@ -2063,6 +2107,66 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         )
     }
 
+    pub(crate) fn fail_published_checkpoint_edge_transition(
+        &self,
+        call: CallableCheckpointCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::node(call.checkpoint),
+            RuntimeNetEdgeSet::active(call.pair),
+        )
+    }
+
+    pub(crate) fn install_call_checkpoint_edge_transition(
+        &self,
+        call: Call,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::node(call.data),
+            RuntimeNetEdgeSet::node(call.data),
+        )
+    }
+
+    pub(crate) fn take_checkpoint_edge_transition(
+        &self,
+        call: CallableCheckpointCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::node(call.checkpoint),
+            RuntimeNetEdgeSet::default(),
+        )
+    }
+
+    pub(crate) fn publish_checkpoint_edge_transition(
+        &self,
+        call: CallableCheckpointCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::default(),
+            RuntimeNetEdgeSet::node(call.checkpoint),
+        )
+    }
+
+    pub(crate) fn resume_checkpoint_with_copy_edge_transition(
+        &self,
+        _call: CallableCheckpointCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::default(),
+            RuntimeNetEdgeSet::copy(CopyId(self.next_copy_id)),
+        )
+    }
+
+    pub(crate) fn resume_checkpoint_with_operator_edge_transition(
+        &self,
+        _call: CallableCheckpointCall,
+    ) -> RuntimeNetEdgeTransition {
+        RuntimeNetEdgeTransition::new(
+            RuntimeNetEdgeSet::default(),
+            RuntimeNetEdgeSet::node(self.next_node(0)),
+        )
+    }
+
     pub(crate) fn complete_operator_edge_transition(
         &self,
         call: OperatorCall,
@@ -2136,6 +2240,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     #[cfg(test)]
     pub fn active_pairs(&self) -> impl ExactSizeIterator<Item = ActivePairKey> + '_ {
         self.active.keys().copied()
+    }
+
+    #[cfg(test)]
+    pub fn callable_checkpoint_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|entry| matches!(entry.node, RuntimeNode::CallableCheckpoint(_)))
+            .count()
     }
 
     #[cfg(test)]
@@ -2369,6 +2481,25 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     #[cfg(test)]
+    pub fn blocked_callable_checkpoint(
+        &self,
+        pair: ActivePairKey,
+    ) -> Option<BlockedCallableCheckpoint<S::WaitToken>> {
+        let call = self.callable_checkpoint(pair)?;
+        match self.active.get(&pair) {
+            Some(ActivePairState::BlockedCallableCheckpoint { generation, wait })
+                if *generation == call.generation =>
+            {
+                Some(BlockedCallableCheckpoint {
+                    call,
+                    wait: wait.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub fn blocked_operator_call(
         &self,
         pair: ActivePairKey,
@@ -2400,6 +2531,259 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             }),
             _ => None,
         }
+    }
+
+    pub fn callable_checkpoint(&self, pair: ActivePairKey) -> Option<CallableCheckpointCall> {
+        let (left, right) = self.active_pair_nodes(pair)?;
+        match (self.node(left), self.node(right)) {
+            (Some(RuntimeNode::Bind), Some(RuntimeNode::CallableCheckpoint(checkpoint))) => {
+                Some(CallableCheckpointCall {
+                    pair,
+                    bind: left,
+                    checkpoint: right,
+                    generation: checkpoint.generation,
+                })
+            }
+            (Some(RuntimeNode::CallableCheckpoint(checkpoint)), Some(RuntimeNode::Bind)) => {
+                Some(CallableCheckpointCall {
+                    pair,
+                    bind: right,
+                    checkpoint: left,
+                    generation: checkpoint.generation,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn install_claimed_call_checkpoint(
+        &mut self,
+        call: Call,
+        payload: S::CallableCheckpoint,
+    ) -> Result<CallableCheckpointCall, S::CallableCheckpoint> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+            || !matches!(self.node(call.data), Some(RuntimeNode::Data(_)))
+        {
+            return Err(payload);
+        }
+        let generation = 0;
+        let entry = self
+            .nodes
+            .get_mut(&call.data)
+            .expect("claimed call data node must exist");
+        entry.node = RuntimeNode::CallableCheckpoint(RuntimeCallableCheckpoint {
+            generation,
+            payload: Some(payload),
+        });
+        self.active.insert(call.pair, ActivePairState::Ready);
+        Ok(CallableCheckpointCall {
+            pair: call.pair,
+            bind: call.bind,
+            checkpoint: call.data,
+            generation,
+        })
+    }
+
+    pub(crate) fn take_claimed_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+    ) -> Option<S::CallableCheckpoint> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+        {
+            return None;
+        }
+        let RuntimeNode::CallableCheckpoint(checkpoint) = &mut self
+            .nodes
+            .get_mut(&call.checkpoint)
+            .expect("claimed callable checkpoint node must exist")
+            .node
+        else {
+            return None;
+        };
+        if checkpoint.generation != call.generation {
+            return None;
+        }
+        checkpoint.payload.take()
+    }
+
+    pub(crate) fn restore_claimed_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+        payload: S::CallableCheckpoint,
+    ) -> Result<(), S::CallableCheckpoint> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+        {
+            return Err(payload);
+        }
+        let Some(RuntimeNode::CallableCheckpoint(checkpoint)) = self
+            .nodes
+            .get_mut(&call.checkpoint)
+            .map(|entry| &mut entry.node)
+        else {
+            return Err(payload);
+        };
+        if checkpoint.generation != call.generation || checkpoint.payload.is_some() {
+            return Err(payload);
+        }
+        checkpoint.payload = Some(payload);
+        self.active.insert(call.pair, ActivePairState::Ready);
+        Ok(())
+    }
+
+    pub(crate) fn replace_claimed_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+        payload: S::CallableCheckpoint,
+    ) -> Result<CallableCheckpointCall, S::CallableCheckpoint> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+        {
+            return Err(payload);
+        }
+        let Some(RuntimeNode::CallableCheckpoint(checkpoint)) = self
+            .nodes
+            .get_mut(&call.checkpoint)
+            .map(|entry| &mut entry.node)
+        else {
+            return Err(payload);
+        };
+        if checkpoint.generation != call.generation || checkpoint.payload.is_some() {
+            return Err(payload);
+        }
+        let generation = checkpoint
+            .generation
+            .checked_add(1)
+            .expect("interaction-net callable checkpoint generation space exhausted");
+        checkpoint.generation = generation;
+        checkpoint.payload = Some(payload);
+        self.active.insert(call.pair, ActivePairState::Ready);
+        Ok(CallableCheckpointCall { generation, ..call })
+    }
+
+    pub(crate) fn block_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+        wait: S::WaitToken,
+    ) -> CheckpointBlockResult {
+        if !matches!(self.active.get(&call.pair), Some(ActivePairState::Ready))
+            || self.callable_checkpoint(call.pair) != Some(call)
+        {
+            return CheckpointBlockResult::Disturbed;
+        }
+        self.active.insert(
+            call.pair,
+            ActivePairState::BlockedCallableCheckpoint {
+                generation: call.generation,
+                wait,
+            },
+        );
+        CheckpointBlockResult::Blocked
+    }
+
+    pub(crate) fn retry_blocked_callable_checkpoint(
+        &mut self,
+        blocked: &BlockedCallableCheckpoint<S::WaitToken>,
+    ) -> bool {
+        if self.callable_checkpoint(blocked.call.pair) != Some(blocked.call)
+            || !matches!(
+                self.active.get(&blocked.call.pair),
+                Some(ActivePairState::BlockedCallableCheckpoint { generation, wait })
+                    if *generation == blocked.call.generation && wait == &blocked.wait
+            )
+        {
+            return false;
+        }
+        self.active
+            .insert(blocked.call.pair, ActivePairState::Ready);
+        true
+    }
+
+    pub(crate) fn release_claimed_callable_checkpoint(&mut self, pair: ActivePairKey) -> bool {
+        let Some(call) = self.callable_checkpoint(pair) else {
+            return false;
+        };
+        if !self
+            .active
+            .get(&pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(
+                self.node(call.checkpoint),
+                Some(RuntimeNode::CallableCheckpoint(checkpoint))
+                    if checkpoint.generation == call.generation && checkpoint.payload.is_some()
+            )
+        {
+            return false;
+        }
+        self.active.insert(pair, ActivePairState::Ready);
+        true
+    }
+
+    pub(crate) fn fail_claimed_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+        reason: S::StuckReason,
+    ) -> Result<(), S::StuckReason> {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+            || !matches!(
+                self.node(call.checkpoint),
+                Some(RuntimeNode::CallableCheckpoint(checkpoint))
+                    if checkpoint.generation == call.generation && checkpoint.payload.is_none()
+            )
+        {
+            return Err(reason);
+        }
+        self.active.insert(
+            call.pair,
+            ActivePairState::Stuck(StuckReason::Specialization(reason)),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn fail_published_callable_checkpoint(
+        &mut self,
+        call: CallableCheckpointCall,
+        reason: S::StuckReason,
+    ) -> Result<(), S::StuckReason> {
+        if !matches!(self.active.get(&call.pair), Some(ActivePairState::Ready))
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+        {
+            return Err(reason);
+        }
+        let Some(RuntimeNode::CallableCheckpoint(checkpoint)) = self
+            .nodes
+            .get_mut(&call.checkpoint)
+            .map(|entry| &mut entry.node)
+        else {
+            return Err(reason);
+        };
+        if checkpoint.generation != call.generation || checkpoint.payload.is_none() {
+            return Err(reason);
+        }
+        drop(checkpoint.payload.take());
+        self.active.insert(
+            call.pair,
+            ActivePairState::Stuck(StuckReason::Specialization(reason)),
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2491,6 +2875,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Suspends an exact claimed call on specialization-owned external work.
+    #[allow(
+        dead_code,
+        reason = "generic blocked-call compatibility remains covered by direct runtime fixtures while core callable waits use checkpoints"
+    )]
     pub fn block_claimed_call(&mut self, call: Call, wait: S::WaitToken) {
         let previous = self
             .active

@@ -17,12 +17,12 @@ pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };
 pub(crate) use runtime::{
-    ActivePairStep, BlockedCall, BlockedOperatorCall, Call, CursorDependency,
-    CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
-    DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
-    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell,
-    RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway, RuntimeNetPayload,
-    SourceFrontier, StuckReason,
+    ActivePairStep, BlockedCall, BlockedCallableCheckpoint, BlockedOperatorCall, Call,
+    CallableCheckpointCall, CheckpointBlockResult, CursorDependency, CursorDependencyDisposition,
+    CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
+    InterfaceDemand, NetContention, OperatorCall, PreparedCopySource, Reduction, ReductionKind,
+    RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutation,
+    RuntimeNetMutationGateway, RuntimeNetPayload, SourceFrontier, StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

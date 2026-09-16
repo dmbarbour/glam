@@ -110,10 +110,6 @@ pub(crate) struct RegionalWhnfWork(WhnfState);
 /// enclosing managed net traces every semantic edge below. Claiming and
 /// publishing this state consume one role wrapper and install the other; they
 /// never project a copy or rebuild a continuation.
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical net-owned state before NC2A installs its runtime node"
-)]
 /// Opaque runtime-net ownership wrapper for one complete WHNF checkpoint.
 ///
 /// The type is public only because the public generic interaction-net trait
@@ -177,6 +173,10 @@ impl From<WhnfFrame> for WhnfContinuation {
 }
 
 impl RegionalWhnfWork {
+    pub(crate) fn from_focus(access: &EvaluationValueAccess<'_>, focus: Value) -> Self {
+        Self::from_parts(access, focus, Vec::new(), BTreeSet::new(), None, None)
+    }
+
     fn from_parts(
         _access: &EvaluationValueAccess<'_>,
         focus: Value,
@@ -192,6 +192,11 @@ impl RegionalWhnfWork {
             source_owner,
             cycle_promise,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
+        self.0.container_identities_for_test()
     }
 }
 
@@ -258,6 +263,13 @@ pub(crate) enum RegionalWhnfDrive {
     Failed(Arc<EvaluationFailure>),
 }
 
+pub(crate) enum RegionalWhnfStatus {
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
 /// Net-owned counterpart of [`RegionalWhnfDrive`].
 ///
 /// Yield and boundary outcomes contain the complete replacement state. Ready
@@ -265,7 +277,7 @@ pub(crate) enum RegionalWhnfDrive {
 /// still active and therefore need no intermediate roots.
 #[allow(
     dead_code,
-    reason = "NC1 defines the complete net-owned state before NC2 installs its runtime node"
+    reason = "the NC1 split oracle retains the consuming driver; production NC4 claims in place so unwind can restore the same payload"
 )]
 pub(crate) enum NetWhnfDrive {
     Ready(Value),
@@ -289,22 +301,45 @@ pub(crate) type WhnfStepBudget = EvaluationStepBudget;
 /// loop.
 pub(crate) fn drive_regional<'scope>(
     access: &EvaluationValueAccess<'scope>,
-    mut work: RegionalWhnfWork,
+    work: RegionalWhnfWork,
+    budget: &mut WhnfStepBudget,
+    reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+) -> RegionalWhnfDrive {
+    let mut work = Some(work);
+    match drive_regional_in_place(access, &mut work, budget, reduce) {
+        RegionalWhnfStatus::Ready(value) => RegionalWhnfDrive::Ready(value),
+        RegionalWhnfStatus::Boundary(request) => RegionalWhnfDrive::Boundary {
+            work: work.expect("boundary retains regional WHNF state"),
+            request,
+        },
+        RegionalWhnfStatus::Yielded => {
+            RegionalWhnfDrive::Yielded(work.expect("yield retains regional WHNF state"))
+        }
+        RegionalWhnfStatus::Failed(failure) => RegionalWhnfDrive::Failed(failure),
+    }
+}
+
+pub(crate) fn drive_regional_in_place<'scope>(
+    access: &EvaluationValueAccess<'scope>,
+    work: &mut Option<RegionalWhnfWork>,
     budget: &mut WhnfStepBudget,
     mut reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
-) -> RegionalWhnfDrive {
+) -> RegionalWhnfStatus {
     loop {
         if !budget.try_consume() {
-            return RegionalWhnfDrive::Yielded(work);
+            return RegionalWhnfStatus::Yielded;
         }
-        match reduce(access, &mut work) {
-            RegionalWhnfStep::Delegate(focus) => work.focus = focus,
-            RegionalWhnfStep::Continue(next) => work = next,
-            RegionalWhnfStep::Ready(value) => return RegionalWhnfDrive::Ready(value),
+        let active = work
+            .as_mut()
+            .expect("regional WHNF state remains installed while driving");
+        match reduce(access, active) {
+            RegionalWhnfStep::Delegate(focus) => active.focus = focus,
+            RegionalWhnfStep::Continue(next) => *active = next,
+            RegionalWhnfStep::Ready(value) => return RegionalWhnfStatus::Ready(value),
             RegionalWhnfStep::Boundary(request) => {
-                return RegionalWhnfDrive::Boundary { work, request };
+                return RegionalWhnfStatus::Boundary(request);
             }
-            RegionalWhnfStep::Failed(failure) => return RegionalWhnfDrive::Failed(failure),
+            RegionalWhnfStep::Failed(failure) => return RegionalWhnfStatus::Failed(failure),
         }
     }
 }
@@ -531,10 +566,6 @@ impl DurableWhnfContinuation {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical net-owned state before NC2A installs its runtime node"
-)]
 impl NetWhnfState {
     /// Publishes one complete regional successor into net-owned storage.
     ///
@@ -554,8 +585,36 @@ impl NetWhnfState {
         RegionalWhnfWork(self.0)
     }
 
+    #[cfg(test)]
+    pub(crate) fn application_checkpoint_for_test(
+        access: &EvaluationValueAccess<'_>,
+        focus: Value,
+        arguments: Vec<Value>,
+    ) -> Self {
+        Self::from_regional(
+            access,
+            RegionalWhnfWork::from_parts(
+                access,
+                focus,
+                vec![WhnfContinuation::Application { arguments, next: 0 }],
+                BTreeSet::new(),
+                None,
+                None,
+            ),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
+        self.0.container_identities_for_test()
+    }
+
     /// Drives one bounded callback-free quantum using the same regional
     /// transition loop as ordinary WHNF computation.
+    #[allow(
+        dead_code,
+        reason = "the NC1 split oracle retains this consuming adapter; production NC4 drives an in-place claim so unwind can restore it"
+    )]
     pub(crate) fn drive_in(
         self,
         access: &EvaluationValueAccess<'_>,
@@ -576,11 +635,56 @@ impl NetWhnfState {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
-)]
 impl WhnfState {
+    #[cfg(test)]
+    fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
+        let mut identities = vec![(
+            self.frames.as_ptr() as usize,
+            self.frames.len(),
+            self.frames.capacity(),
+        )];
+        for frame in &self.frames {
+            match frame {
+                WhnfContinuation::Generic(frame) => identities.push((
+                    frame.retained.as_ptr() as usize,
+                    frame.retained.len(),
+                    frame.retained.capacity(),
+                )),
+                WhnfContinuation::Application { arguments, .. } => identities.push((
+                    arguments.as_ptr() as usize,
+                    arguments.len(),
+                    arguments.capacity(),
+                )),
+                WhnfContinuation::DictionaryApplication {
+                    remaining_effect_values,
+                    ..
+                } => identities.push((
+                    remaining_effect_values.as_ptr() as usize,
+                    remaining_effect_values.len(),
+                    remaining_effect_values.capacity(),
+                )),
+                WhnfContinuation::SemanticUndefined { ancestors, .. } => {
+                    identities.push((
+                        ancestors.as_ptr() as usize,
+                        ancestors.len(),
+                        ancestors.capacity(),
+                    ));
+                    identities.extend(ancestors.iter().map(|ancestor| {
+                        (
+                            ancestor.members.as_ptr() as usize,
+                            ancestor.members.len(),
+                            ancestor.members.capacity(),
+                        )
+                    }));
+                }
+                WhnfContinuation::StaticAccess { keys, .. } => {
+                    identities.push((keys.as_ptr() as usize, keys.len(), keys.len()));
+                }
+            }
+        }
+        identities
+    }
+
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         trace_whnf_value(&self.focus, visitor);
         for frame in &self.frames {
@@ -592,10 +696,6 @@ impl WhnfState {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
-)]
 impl WhnfContinuation {
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
@@ -623,18 +723,10 @@ impl WhnfContinuation {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
-)]
 fn trace_whnf_value(value: &Value, visitor: &mut glam_gc::Visitor<'_>) {
     crate::core::trace_compatibility_value_managed_edges(value, visitor);
 }
 
-#[allow(
-    dead_code,
-    reason = "NC2.0 defines the canonical edge walk before NC2A installs its runtime node"
-)]
 fn trace_whnf_values(values: &[Value], visitor: &mut glam_gc::Visitor<'_>) {
     for value in values {
         trace_whnf_value(value, visitor);
@@ -856,7 +948,7 @@ impl WhnfComputation {
     }
 }
 
-fn reduce_semantic_shell(
+pub(crate) fn reduce_semantic_shell(
     access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfWork,
 ) -> RegionalWhnfStep {

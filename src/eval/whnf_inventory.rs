@@ -636,35 +636,35 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // NC2.0 removes NC1's borrowed net/regional projection walks. The remaining
 // bounded state walks are durable root conversion and the canonical managed
 // edge visitor, not recursive Rust evaluation.
-const EXPECTED_OCCURRENCES: usize = 283;
-const EXPECTED_FINGERPRINT: u64 = 1_518_247_022_251_014_407;
+const EXPECTED_OCCURRENCES: usize = 286;
+const EXPECTED_FINGERPRINT: u64 = 17_885_897_020_878_647_130;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 105),
+    (Signal::EvalValue, 104),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
     (Signal::ApplyValues, 5),
     (Signal::ProduceLazySource, 1),
-    (Signal::RetryableWait, 10),
+    (Signal::RetryableWait, 11),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 20),
+    (Signal::CoordinatorBoundary, 21),
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 35),
-    (Signal::UserSizedLoop, 57),
+    (Signal::StructuralRecursion, 36),
+    (Signal::UserSizedLoop, 58),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 129),
+    (WorkShape::DemandThenInspect, 131),
     (WorkShape::OrderedOperands, 11),
     (WorkShape::CollectionWalk, 46),
     (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 22),
     (WorkShape::AccessPath, 10),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 51),
+    (WorkShape::OrchestrationHandoff, 52),
 ];
 
 #[test]

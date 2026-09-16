@@ -593,10 +593,13 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/builtins/provenance.rs::apply#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::callable_dependency_completion_before_exact_block_is_not_lost#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_driver_releases_each_runtime_before_crossing_to_the_next#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::frame_bearing_callable_checkpoint_survives_every_ownership_handoff#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::fresh_operator_claim_release_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::fresh_operator_claim_unwind_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -811,8 +814,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // explicit test-only duplicate/root handoffs for cursor-driver and
         // concurrent normalization fixtures.
         // W4C.1's persistent-driver fixtures compare retained request roots
-        // under two additional bounded test accesses.
-        ("src/eval/net.rs", GatewayCounts::new(20, 0)),
+        // under two additional bounded test accesses. NC3-NC4 add three
+        // forced-order checkpoint fixtures which duplicate managed promise
+        // edges only inside matching test access.
+        ("src/eval/net.rs", GatewayCounts::new(23, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         ("src/eval/test_support.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under

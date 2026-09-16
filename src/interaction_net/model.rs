@@ -206,6 +206,21 @@ impl<S: NetSpecialization> Node<S> {
     }
 }
 
+pub struct RuntimeCallableCheckpoint<Checkpoint> {
+    pub(crate) generation: u64,
+    pub(crate) payload: Option<Checkpoint>,
+}
+
+impl<Checkpoint> fmt::Debug for RuntimeCallableCheckpoint<Checkpoint> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeCallableCheckpoint")
+            .field("generation", &self.generation)
+            .field("payload", &self.payload.as_ref().map(|_| ".."))
+            .finish()
+    }
+}
+
 pub enum RuntimeNode<S: NetSpecialization> {
     Bind,
     Fan {
@@ -215,11 +230,7 @@ pub enum RuntimeNode<S: NetSpecialization> {
     Data(S::Data),
     Operator(S::Operator),
     /// Opaque incremental WHNF state installed only by callable evaluation.
-    #[allow(
-        dead_code,
-        reason = "NC2C installs the runtime-only checkpoint after NC2A establishes its linear type seam"
-    )]
-    CallableCheckpoint(S::CallableCheckpoint),
+    CallableCheckpoint(RuntimeCallableCheckpoint<S::CallableCheckpoint>),
     /// Stable, evaluator-only anchor for a runtime net's exposed port.
     Interface,
     /// Evaluator-only one-way wire into a logical copy of another runtime net.

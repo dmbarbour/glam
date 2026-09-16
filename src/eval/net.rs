@@ -387,7 +387,7 @@ fn drive_net_driver_work_with_budget_in(
                 }
                 let retained_root = root.clone();
                 if let Err(error) =
-                    drive_active_pair_semantic_step(context, driver, root, pair, step)
+                    drive_active_pair_semantic_step(context, driver, root, pair, step, step_budget)
                 {
                     if error.blocked_on().is_some() || error.unassigned_promise_root().is_some() {
                         driver.worklist.push(NetDriverWork::ActivePair {
@@ -437,6 +437,15 @@ fn release_unstarted_semantic_step(
                     runtime.release_claimed_call(Call { pair, bind, data })
                 });
                 assert!(restored, "budget denial must restore the exact call claim");
+            }
+            ReductionKind::CallableCheckpoint { .. } => {
+                let restored = with_core_net_access(context, &runtime, |runtime| {
+                    runtime.release_claimed_callable_checkpoint(pair)
+                });
+                assert!(
+                    restored,
+                    "budget denial must restore the exact checkpoint claim"
+                );
             }
             ReductionKind::OperatorCall { operator, data } => {
                 let restored = with_core_net_access(context, &runtime, |runtime| {
@@ -708,7 +717,9 @@ fn prepare_active_pair_step(
         ActivePairStep::Cursor(cursor) => {
             driver.worklist.push(NetDriverWork::Cursor { root, cursor });
         }
-        step @ (ActivePairStep::BlockedCall(_) | ActivePairStep::BlockedOperatorCall(_)) => {
+        step @ (ActivePairStep::BlockedCall(_)
+        | ActivePairStep::BlockedCallableCheckpoint(_)
+        | ActivePairStep::BlockedOperatorCall(_)) => {
             return Ok(Some(NetBatchOutcome::Semantic { root, pair, step }));
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
@@ -741,6 +752,7 @@ fn drive_active_pair_semantic_step(
     root: crate::core::ManagedCoreNetRoot,
     pair: ActivePairKey,
     step: ActivePairStep,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<(), EvaluationHalt> {
     let runtime =
         context.with_value_access(|access| CoreRuntimeNet::from_root(&root, access.values()));
@@ -749,9 +761,15 @@ fn drive_active_pair_semantic_step(
         ActivePairStep::Reduction(reduction) => match reduction.kind {
             ReductionKind::Call { bind, data } => {
                 let call = Call { pair, bind, data };
-                if !progress_exact_core_call_in(context, &runtime, call)? {
+                if !progress_exact_core_call_in(context, &runtime, call, step_budget)? {
                     return Err(EvaluationHalt::new("interaction-net call lost its claim"));
                 }
+                driver
+                    .worklist
+                    .push(NetDriverWork::ActivePair { root, pair });
+            }
+            ReductionKind::CallableCheckpoint { .. } => {
+                progress_callable_checkpoint(context, &runtime, pair, step_budget)?;
                 driver
                     .worklist
                     .push(NetDriverWork::ActivePair { root, pair });
@@ -795,9 +813,39 @@ fn drive_active_pair_semantic_step(
                     "interaction-net call lost its exact blocked claim",
                 ));
             };
-            if !progress_core_call_claim(context, claim)? {
+            if !progress_core_call_claim(context, claim, step_budget)? {
                 return Err(EvaluationHalt::new(
                     "interaction-net call released its retry",
+                ));
+            }
+            driver.progressed = true;
+            driver
+                .worklist
+                .push(NetDriverWork::ActivePair { root, pair });
+        }
+        ActivePairStep::BlockedCallableCheckpoint(blocked) => {
+            #[cfg(feature = "interaction-net-profiling")]
+            context
+                .context()
+                .values()
+                .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
+            match context.context().poll_wait(&blocked.wait.0) {
+                crate::evaluation::EvaluationWaitPoll::Pending(_) => {
+                    return Err(EvaluationHalt::blocked(blocked.wait));
+                }
+                crate::evaluation::EvaluationWaitPoll::Complete(_)
+                | crate::evaluation::EvaluationWaitPoll::Failed(_)
+                | crate::evaluation::EvaluationWaitPoll::Cancelled
+                | crate::evaluation::EvaluationWaitPoll::Abandoned
+                | crate::evaluation::EvaluationWaitPoll::Exited
+                | crate::evaluation::EvaluationWaitPoll::Killed(_) => {}
+            }
+            let retried = with_core_net_access(context, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            });
+            if !retried {
+                return Err(EvaluationHalt::new(
+                    "interaction-net checkpoint lost its exact blocked generation",
                 ));
             }
             driver.progressed = true;
@@ -963,7 +1011,6 @@ pub(super) enum CoreCallable {
 enum CallDisposition {
     Copy(CorePreparedCopySource),
     Operator(CoreOperator),
-    Blocked(crate::core_net::CoreWaitToken),
     Failed(EvaluationHalt),
     #[allow(
         dead_code,
@@ -1031,6 +1078,23 @@ impl<'claim, 'step> CoreCallClaim<'claim, 'step> {
         access.clone_root(&self.callable)
     }
 
+    fn install_checkpoint_in(
+        &mut self,
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
+        state: crate::eval::whnf::NetWhnfState,
+    ) -> Result<crate::interaction_net::CallableCheckpointCall, EvaluationHalt> {
+        let runtime = access.net(self.runtime);
+        match runtime.install_claimed_call_checkpoint(self.call, state) {
+            Ok(call) => {
+                self.fallback = None;
+                Ok(call)
+            }
+            Err(_state) => Err(EvaluationHalt::new(
+                "interaction-net call lost its claim while publishing WHNF state",
+            )),
+        }
+    }
+
     fn finish(mut self, disposition: CallDisposition) -> Result<bool, EvaluationHalt> {
         let result = match disposition {
             CallDisposition::Copy(source) => {
@@ -1042,12 +1106,6 @@ impl<'claim, 'step> CoreCallClaim<'claim, 'step> {
             CallDisposition::Operator(operator) => {
                 with_core_net_access(self.context, self.runtime, |runtime| {
                     runtime.resume_claimed_call_with_operator(self.call, operator)
-                });
-                Ok(true)
-            }
-            CallDisposition::Blocked(wait) => {
-                with_core_net_access(self.context, self.runtime, |runtime| {
-                    runtime.block_claimed_call(self.call, wait)
                 });
                 Ok(true)
             }
@@ -1082,6 +1140,94 @@ impl Drop for CoreCallClaim<'_, '_> {
     fn drop(&mut self) {
         if self.fallback.is_some() {
             let _ = self.restore_fallback();
+        }
+    }
+}
+
+#[must_use = "a callable checkpoint claim must be published, terminalized, or restored"]
+struct CoreCheckpointClaim<'claim, 'scope> {
+    access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
+    runtime: CoreRuntimeNetAccess<'claim, 'scope>,
+    call: crate::interaction_net::CallableCheckpointCall,
+    work: Option<crate::eval::whnf::RegionalWhnfWork>,
+}
+
+impl<'claim, 'scope> CoreCheckpointClaim<'claim, 'scope> {
+    fn take(
+        access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
+        runtime: &'claim CoreRuntimeNet,
+        pair: ActivePairKey,
+    ) -> Option<Self> {
+        let runtime = access.net(runtime);
+        let call = runtime.callable_checkpoint(pair)?;
+        let state = runtime.take_claimed_callable_checkpoint(call)?;
+        Some(Self {
+            access,
+            runtime,
+            call,
+            work: Some(state.into_regional(access)),
+        })
+    }
+
+    fn drive(
+        &mut self,
+        budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> crate::eval::whnf::RegionalWhnfStatus {
+        crate::eval::whnf::drive_regional_in_place(
+            self.access,
+            &mut self.work,
+            budget,
+            crate::eval::whnf::reduce_semantic_shell,
+        )
+    }
+
+    fn publish(mut self) -> Result<crate::interaction_net::CallableCheckpointCall, EvaluationHalt> {
+        let work = self
+            .work
+            .take()
+            .expect("claimed checkpoint retains its complete regional state");
+        let state = crate::eval::whnf::NetWhnfState::from_regional(self.access, work);
+        self.runtime
+            .replace_claimed_callable_checkpoint(self.call, state)
+            .map_err(|state| {
+                drop(state);
+                EvaluationHalt::new("interaction-net checkpoint lost its claimed generation")
+            })
+    }
+
+    fn finish(mut self, callable: CoreCallable) -> Result<(), EvaluationHalt> {
+        drop(self.work.take());
+        match callable {
+            CoreCallable::Net(source) => {
+                let source = self.access.net(&source).prepare_copy_source();
+                self.runtime
+                    .resume_claimed_checkpoint_with_copy(self.call, source);
+            }
+            CoreCallable::Operator(operator) => self
+                .runtime
+                .resume_claimed_checkpoint_with_operator(self.call, operator),
+        }
+        Ok(())
+    }
+
+    fn fail(mut self, error: EvaluationHalt) -> Result<(), EvaluationHalt> {
+        drop(self.work.take());
+        self.runtime
+            .fail_claimed_callable_checkpoint(self.call, error)
+    }
+}
+
+impl Drop for CoreCheckpointClaim<'_, '_> {
+    fn drop(&mut self) {
+        let Some(work) = self.work.take() else {
+            return;
+        };
+        let state = crate::eval::whnf::NetWhnfState::from_regional(self.access, work);
+        if let Err(state) = self
+            .runtime
+            .restore_claimed_callable_checkpoint(self.call, state)
+        {
+            drop(state);
         }
     }
 }
@@ -1226,16 +1372,11 @@ impl Drop for CoreOperatorClaim<'_, '_> {
     }
 }
 
-fn lower_core_callable_in(
-    context: &EvaluatorStepContext<'_>,
+fn classify_core_callable_in(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
     value: Value,
 ) -> Result<CoreCallable, EvaluationHalt> {
-    let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        eval_value_in(context, &value)?
-    } else {
-        value
-    };
-    context.with_value_access(|access| match value {
+    match value {
         Value::Net(net) => Ok(CoreCallable::Net(net.into_runtime())),
         Value::Builtin(builtin) => Ok(CoreCallable::Operator(builtin_operator(
             access.values(),
@@ -1255,7 +1396,78 @@ fn lower_core_callable_in(
         | Value::Metadata(_)
         | Value::Opaque(_)) => Err(non_callable_error(access.values(), &value)),
         Value::Lazy(_) | Value::Promised(_) => {
-            unreachable!("callable value shell must be fully forced")
+            unreachable!("callable classification requires WHNF")
+        }
+    }
+}
+
+#[cfg(test)]
+fn lower_core_callable_in(
+    context: &EvaluatorStepContext<'_>,
+    value: Value,
+) -> Result<CoreCallable, EvaluationHalt> {
+    let value = if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
+        eval_value_in(context, &value)?
+    } else {
+        value
+    };
+    context.with_value_access(|access| classify_core_callable_in(&access, value))
+}
+
+enum CallableWhnfOutcome {
+    Ready(CoreCallable),
+    Yielded,
+    Boundary {
+        call: crate::interaction_net::CallableCheckpointCall,
+        request: crate::eval::whnf::RegionalBoundaryRequest,
+    },
+    Failed(EvaluationHalt),
+}
+
+fn drive_original_callable_whnf(
+    context: &EvaluatorStepContext<'_>,
+    claim: &mut CoreCallClaim<'_, '_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> CallableWhnfOutcome {
+    context.with_value_access(|access| {
+        let callable = claim.callable(&access);
+        if !matches!(callable, Value::Lazy(_) | Value::Promised(_)) {
+            return match classify_core_callable_in(&access, callable) {
+                Ok(callable) => CallableWhnfOutcome::Ready(callable),
+                Err(error) => CallableWhnfOutcome::Failed(error),
+            };
+        }
+
+        let work = crate::eval::whnf::RegionalWhnfWork::from_focus(&access, callable);
+        match crate::eval::whnf::drive_regional(
+            &access,
+            work,
+            step_budget,
+            crate::eval::whnf::reduce_semantic_shell,
+        ) {
+            crate::eval::whnf::RegionalWhnfDrive::Ready(value) => {
+                match classify_core_callable_in(&access, value) {
+                    Ok(callable) => CallableWhnfOutcome::Ready(callable),
+                    Err(error) => CallableWhnfOutcome::Failed(error),
+                }
+            }
+            crate::eval::whnf::RegionalWhnfDrive::Boundary { work, request } => {
+                let state = crate::eval::whnf::NetWhnfState::from_regional(&access, work);
+                match claim.install_checkpoint_in(&access, state) {
+                    Ok(call) => CallableWhnfOutcome::Boundary { call, request },
+                    Err(error) => CallableWhnfOutcome::Failed(error),
+                }
+            }
+            crate::eval::whnf::RegionalWhnfDrive::Yielded(work) => {
+                let state = crate::eval::whnf::NetWhnfState::from_regional(&access, work);
+                match claim.install_checkpoint_in(&access, state) {
+                    Ok(_) => CallableWhnfOutcome::Yielded,
+                    Err(error) => CallableWhnfOutcome::Failed(error),
+                }
+            }
+            crate::eval::whnf::RegionalWhnfDrive::Failed(failure) => {
+                CallableWhnfOutcome::Failed(EvaluationHalt::failure(failure))
+            }
         }
     })
 }
@@ -1274,35 +1486,177 @@ fn progress_exact_core_call_in(
     context: &EvaluatorStepContext<'_>,
     runtime: &CoreRuntimeNet,
     call: Call,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<bool, EvaluationHalt> {
     let Some(claim) = CoreCallClaim::fresh(context, runtime, call) else {
         return Ok(false);
     };
-    progress_core_call_claim(context, claim)
+    progress_core_call_claim(context, claim, step_budget)
 }
 
 fn progress_core_call_claim(
     context: &EvaluatorStepContext<'_>,
     claim: CoreCallClaim<'_, '_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<bool, EvaluationHalt> {
-    let callable = context.with_value_access(|access| claim.callable(&access));
-    let disposition = match lower_core_callable_in(context, callable) {
-        Ok(CoreCallable::Net(source)) => {
+    progress_core_call_claim_with_boundary_handoff(context, claim, step_budget, || {})
+}
+
+fn progress_core_call_claim_with_boundary_handoff(
+    context: &EvaluatorStepContext<'_>,
+    mut claim: CoreCallClaim<'_, '_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    before_block: impl FnOnce(),
+) -> Result<bool, EvaluationHalt> {
+    let outcome = drive_original_callable_whnf(context, &mut claim, step_budget);
+    let disposition = match outcome {
+        CallableWhnfOutcome::Ready(CoreCallable::Net(source)) => {
             let source =
                 with_core_net_access(context, &source, |source| source.prepare_copy_source());
             CallDisposition::Copy(source)
         }
-        Ok(CoreCallable::Operator(operator)) => CallDisposition::Operator(operator),
-        Err(error) => {
-            let error = match retryable_evaluation_wait(context.context(), &error) {
-                Ok(Some(wait)) => return claim.finish(CallDisposition::Blocked(wait)),
-                Ok(None) => error,
-                Err(error) => error,
-            };
-            CallDisposition::Failed(error)
+        CallableWhnfOutcome::Ready(CoreCallable::Operator(operator)) => {
+            CallDisposition::Operator(operator)
         }
+        CallableWhnfOutcome::Yielded => return Ok(true),
+        CallableWhnfOutcome::Boundary { call, request } => {
+            settle_callable_checkpoint_boundary(
+                context,
+                claim.runtime,
+                call,
+                request,
+                before_block,
+            )?;
+            return Ok(true);
+        }
+        CallableWhnfOutcome::Failed(error) => CallDisposition::Failed(error),
     };
     claim.finish(disposition)
+}
+
+fn settle_callable_checkpoint_boundary(
+    context: &EvaluatorStepContext<'_>,
+    runtime: &CoreRuntimeNet,
+    call: crate::interaction_net::CallableCheckpointCall,
+    request: crate::eval::whnf::RegionalBoundaryRequest,
+    before_block: impl FnOnce(),
+) -> Result<(), EvaluationHalt> {
+    let wait = match callable_boundary_wait(context.context(), request) {
+        Ok(wait) => wait,
+        Err(error) => {
+            let failure = with_core_net_access(context, runtime, |runtime| {
+                runtime.fail_published_callable_checkpoint(call, error.clone())
+            });
+            return if failure.is_ok() {
+                Err(error)
+            } else {
+                // A newer generation or terminal result won the exact-state
+                // race. That worker remains authoritative; this stale
+                // admission must not publish a competing failure.
+                Ok(())
+            };
+        }
+    };
+    before_block();
+    let result = with_core_net_access(context, runtime, |runtime| {
+        runtime.block_callable_checkpoint(call, wait)
+    });
+    debug_assert!(matches!(
+        result,
+        crate::interaction_net::CheckpointBlockResult::Blocked
+            | crate::interaction_net::CheckpointBlockResult::Disturbed
+    ));
+    Ok(())
+}
+
+fn callable_boundary_wait(
+    context: &EvalContext,
+    request: crate::eval::whnf::RegionalBoundaryRequest,
+) -> Result<crate::core_net::CoreWaitToken, EvaluationHalt> {
+    use crate::eval::whnf::{RegionalBoundaryRequest, WhnfDeferredRequest, WhnfDependency};
+
+    let wait = match request {
+        RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(wait)) => return Ok(wait),
+        RegionalBoundaryRequest::Dependency(WhnfDependency::Promise(promise))
+        | RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::PromiseFollow(promise)) => {
+            promise_root_wait(context, &promise)
+        }
+        RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
+            lazy_root_wait(context, &lazy)
+        }
+        RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Promise(promise)) => {
+            if let Some(producer) = promise.producer()
+                && context.observes_as_task(producer.owner())
+            {
+                return Err(EvaluationHalt::new(format!(
+                    "reflection promise {} recursively observed itself in task {}",
+                    promise.id().get(),
+                    producer.owner().get()
+                )));
+            }
+            promise_root_wait(context, &promise)
+        }
+        RegionalBoundaryRequest::External(_) => {
+            return Err(EvaluationHalt::new(
+                "callable WHNF reached an unsupported external boundary",
+            ));
+        }
+    };
+    wait.map(crate::core_net::CoreWaitToken)
+        .map_err(|error| EvaluationHalt::new(error.as_ref()))
+}
+
+enum CheckpointWhnfOutcome {
+    Progressed,
+    Boundary {
+        call: crate::interaction_net::CallableCheckpointCall,
+        request: crate::eval::whnf::RegionalBoundaryRequest,
+    },
+}
+
+fn progress_callable_checkpoint(
+    context: &EvaluatorStepContext<'_>,
+    runtime: &CoreRuntimeNet,
+    pair: ActivePairKey,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> Result<(), EvaluationHalt> {
+    let outcome = context.with_value_access(|access| {
+        let Some(mut claim) = CoreCheckpointClaim::take(&access, runtime, pair) else {
+            return Err(EvaluationHalt::new(
+                "interaction-net checkpoint lost its exact claimed state",
+            ));
+        };
+        match claim.drive(step_budget) {
+            crate::eval::whnf::RegionalWhnfStatus::Ready(value) => {
+                match classify_core_callable_in(&access, value) {
+                    Ok(callable) => claim.finish(callable)?,
+                    Err(error) => {
+                        claim.fail(error.clone())?;
+                        return Err(error);
+                    }
+                }
+                Ok(CheckpointWhnfOutcome::Progressed)
+            }
+            crate::eval::whnf::RegionalWhnfStatus::Boundary(request) => {
+                let call = claim.publish()?;
+                Ok(CheckpointWhnfOutcome::Boundary { call, request })
+            }
+            crate::eval::whnf::RegionalWhnfStatus::Yielded => {
+                claim.publish()?;
+                Ok(CheckpointWhnfOutcome::Progressed)
+            }
+            crate::eval::whnf::RegionalWhnfStatus::Failed(failure) => {
+                let error = EvaluationHalt::failure(failure);
+                claim.fail(error.clone())?;
+                Err(error)
+            }
+        }
+    })?;
+
+    let CheckpointWhnfOutcome::Boundary { call, request } = outcome else {
+        return Ok(());
+    };
+    settle_callable_checkpoint_boundary(context, runtime, call, request, || {})
 }
 
 #[cfg(test)]
@@ -1312,7 +1666,12 @@ fn progress_exact_core_call(
     call: Call,
 ) -> Result<bool, EvaluationHalt> {
     super::with_direct_evaluator(context, |evaluator| {
-        progress_exact_core_call_in(evaluator, runtime, call)
+        progress_exact_core_call_in(
+            evaluator,
+            runtime,
+            call,
+            &mut crate::evaluation::EvaluationStepBudget::new(usize::MAX),
+        )
     })
 }
 
@@ -1375,22 +1734,6 @@ fn progress_core_operator_claim(
         };
         claim.finish_in(&access, disposition)
     })
-}
-
-fn retryable_evaluation_wait(
-    context: &EvalContext,
-    error: &EvaluationHalt,
-) -> Result<Option<crate::core_net::CoreWaitToken>, EvaluationHalt> {
-    if let Some(wait) = error.blocked_on() {
-        return Ok(Some(wait));
-    }
-    let Some(promise) = error.unassigned_promise_root() else {
-        return Ok(None);
-    };
-    promise_root_wait(context, promise)
-        .map(crate::core_net::CoreWaitToken)
-        .map(Some)
-        .map_err(|error| EvaluationHalt::new(error.as_ref()))
 }
 
 pub(super) fn resolve_core_access_in(
@@ -1629,6 +1972,9 @@ mod driver_tests {
             if net.blocked_call(call.pair).is_some() {
                 return CurrentCallablePath::BlockedDependency;
             }
+            if net.blocked_callable_checkpoint(call.pair).is_some() {
+                return CurrentCallablePath::BlockedDependency;
+            }
             if net.stuck_reason(call.pair).is_some() {
                 return CurrentCallablePath::Failed;
             }
@@ -1640,21 +1986,34 @@ mod driver_tests {
         })
     }
 
+    fn checkpoint_observation(
+        runtime: &CoreRuntimeNet,
+        values: &CoreValueFactory,
+        pair: ActivePairKey,
+    ) -> (
+        crate::interaction_net::CallableCheckpointCall,
+        Vec<(usize, usize, usize)>,
+    ) {
+        runtime.test_with(values, |net| {
+            let call = net
+                .callable_checkpoint(pair)
+                .expect("fixture must retain one callable checkpoint");
+            let Some(crate::interaction_net::RuntimeNode::CallableCheckpoint(checkpoint)) =
+                net.node(call.checkpoint)
+            else {
+                panic!("checkpoint token must identify its payload node")
+            };
+            let state = checkpoint
+                .payload
+                .as_ref()
+                .expect("published checkpoint must retain its dormant state");
+            (call, state.container_identities_for_test())
+        })
+    }
+
     #[test]
-    fn callable_lowering_has_one_synchronous_claim_seam() {
+    fn callable_lowering_uses_one_bounded_checkpoint_driver() {
         let source = include_str!("net.rs");
-        let lowering_declaration = ["fn lower_core_", "callable_in("].concat();
-        assert_eq!(source.matches(&lowering_declaration).count(), 1);
-
-        let lowering = source
-            .split_once(&lowering_declaration)
-            .expect("callable lowering declaration must remain present")
-            .1
-            .split_once("#[cfg(test)]\npub(super) fn lower_core_callable(")
-            .expect("test adapter must remain after callable lowering")
-            .0;
-        assert!(lowering.contains("eval_value_in(context, &value)?"));
-
         let claim = source
             .split_once("fn progress_core_call_claim(")
             .expect("claimed-call progress declaration must remain present")
@@ -1662,12 +2021,14 @@ mod driver_tests {
             .split_once("#[cfg(test)]\nfn progress_exact_core_call(")
             .expect("claimed-call test adapter must remain after progress")
             .0;
-        let lowering_call = ["lower_core_", "callable_in(context, callable)"].concat();
         assert_eq!(
-            claim.matches(&lowering_call).count(),
+            claim
+                .matches("drive_original_callable_whnf(context, &mut claim, step_budget)")
+                .count(),
             1,
-            "the claimed Bind >< Data path must have one synchronous callable-WHNF seam"
+            "the claimed Bind >< Data path must have one bounded callable-WHNF driver"
         );
+        assert!(!claim.contains("eval_value_in"));
     }
 
     #[cfg(feature = "interaction-net-profiling")]
@@ -2312,9 +2673,10 @@ mod driver_tests {
             .expect("the parked driver must retain its semantic wait");
         let blocked = runtime
             .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_calls().next()
+                net.active_pairs()
+                    .find_map(|pair| net.blocked_callable_checkpoint(pair))
             })
-            .expect("the callable claim must publish Blocked before parking");
+            .expect("the callable checkpoint must publish Blocked before parking");
 
         assert_eq!(blocked.wait.0, wait.0);
         assert!(matches!(
@@ -2704,79 +3066,93 @@ mod driver_tests {
     }
 
     #[test]
-    fn retried_call_claim_release_restores_the_exact_wait() {
+    fn retried_checkpoint_claim_release_restores_the_exact_generation() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "call-claim wait");
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
             .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_call(call.pair)
+                net.blocked_callable_checkpoint(call.pair)
             })
-            .expect("unassigned callable promise must block the call");
-        let before = runtime
-            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
-            .1;
+            .expect("unassigned callable promise must block the checkpoint");
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
-            let claim = CoreCallClaim::retry(evaluator, &runtime, blocked.clone())
-                .expect("the exact blocked wait must be reclaimable");
-            assert!(!claim.finish(CallDisposition::Release).unwrap());
+            assert!(with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            }));
         });
-
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("ready checkpoint must be claimable");
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("exact checkpoint must issue its scoped claim");
+                drop(claim);
+            });
+        });
         let restored = runtime
-            .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_call(call.pair)
-            })
-            .expect("release must restore the prior blocked call");
-        assert_eq!(restored.wait, blocked.wait);
-        let after = runtime
-            .test_with_revisions(&crate::core::test_value_factory(), |_| ())
-            .1;
-        assert_eq!(after.topology_revision(), before.topology_revision() + 2);
-        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 2);
+            .test_with(context.values(), |net| net.callable_checkpoint(call.pair))
+            .expect("release restores the exact ready checkpoint");
+        assert_eq!(restored, blocked.call);
+        assert!(
+            runtime
+                .test_with(context.values(), |net| net
+                    .blocked_callable_checkpoint(call.pair))
+                .is_none()
+        );
     }
 
     #[test]
-    fn retried_call_claim_unwind_restores_the_exact_wait() {
+    fn retried_checkpoint_claim_unwind_restores_the_exact_generation() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "unwound call-claim wait");
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
             .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_call(call.pair)
+                net.blocked_callable_checkpoint(call.pair)
             })
-            .expect("unassigned callable promise must block the call");
+            .expect("unassigned callable promise must block the checkpoint");
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            assert!(with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            }));
+        });
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("ready checkpoint must be claimable");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::eval::with_direct_evaluator(&context, |evaluator| {
-                let _claim = CoreCallClaim::retry(evaluator, &runtime, blocked.clone())
-                    .expect("the exact blocked wait must be reclaimable");
-                panic!("forced retried-call unwind");
+                evaluator.with_value_access(|access| {
+                    let _claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                        .expect("exact checkpoint must issue its scoped claim");
+                    panic!("forced checkpoint-claim unwind");
+                });
             });
         }));
 
         assert!(unwind.is_err());
         let restored = runtime
-            .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_call(call.pair)
-            })
-            .expect("unwind must restore the prior blocked call");
-        assert_eq!(restored.wait, blocked.wait);
+            .test_with(context.values(), |net| net.callable_checkpoint(call.pair))
+            .expect("unwind restores the exact ready checkpoint");
+        assert_eq!(restored, blocked.call);
     }
 
     #[test]
-    fn mismatched_blocked_call_retry_fails_quietly_before_guard_issuance() {
+    fn mismatched_blocked_checkpoint_retry_fails_without_disturbance() {
         let context = test_context();
         let promise = PromisedValue::new(context.values(), "current call wait");
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
             .test_with(&crate::core::test_value_factory(), |net| {
-                net.blocked_call(call.pair)
+                net.blocked_callable_checkpoint(call.pair)
             })
-            .expect("unassigned callable promise must block the call");
+            .expect("unassigned callable promise must block the checkpoint");
         let other = PromisedValue::new(context.values(), "unrelated call wait");
         let wrong_wait = crate::core_net::CoreWaitToken(
             promise_wait(&context, &other).expect("unrelated wait must allocate"),
@@ -2787,11 +3163,13 @@ mod driver_tests {
             .1;
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
-            let mismatch = BlockedCall {
-                pair: blocked.pair,
+            let mismatch = crate::interaction_net::BlockedCallableCheckpoint {
+                call: blocked.call,
                 wait: wrong_wait,
             };
-            assert!(CoreCallClaim::retry(evaluator, &runtime, mismatch).is_none());
+            assert!(!with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&mismatch)
+            }));
         });
 
         assert_eq!(
@@ -2803,7 +3181,7 @@ mod driver_tests {
         assert_eq!(
             runtime
                 .test_with(&crate::core::test_value_factory(), |net| net
-                    .blocked_call(call.pair))
+                    .blocked_callable_checkpoint(call.pair))
                 .expect("mismatched retry must preserve the current wait")
                 .wait,
             blocked.wait
@@ -2929,6 +3307,296 @@ mod driver_tests {
         assert_eq!(
             observe_current_callable_path(&failed_runtime, failed_call),
             CurrentCallablePath::Failed
+        );
+    }
+
+    #[test]
+    fn callable_checkpoint_resumes_published_focus_without_replay() {
+        let context = test_context();
+        let terminal = PromisedValue::new(context.values(), "terminal callable focus");
+        crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
+            .expect("terminal promise accepts its callable result");
+        let mut focus = terminal;
+        for label in ["third", "second", "first"] {
+            let prior = context
+                .values()
+                .with_runtime_value_access(|access| Value::Promised(focus.duplicate_in(&access)));
+            let next = PromisedValue::new(context.values(), format!("{label} callable focus"));
+            crate::core::set_test_promise(context.values(), &next, prior)
+                .expect("promise accepts its delegated focus");
+            focus = next;
+        }
+        let (runtime, call) = claimed_core_call(Value::Promised(focus));
+
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(2);
+            assert!(progress_exact_core_call_in(evaluator, &runtime, call, &mut budget).unwrap());
+        });
+        assert_eq!(
+            checkpoint_observation(&runtime, context.values(), call.pair)
+                .0
+                .generation,
+            0
+        );
+        assert_eq!(
+            runtime.test_with(context.values(), RuntimeNet::callable_checkpoint_count),
+            1
+        );
+
+        for (budget, expected_generation) in [(2, Some(1)), (1, None)] {
+            let reduction = runtime
+                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .expect("published checkpoint must remain runnable");
+            assert!(matches!(
+                reduction.kind,
+                ReductionKind::CallableCheckpoint { .. }
+            ));
+            super::with_direct_evaluator(&context, |evaluator| {
+                let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
+                progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+            })
+            .unwrap();
+            match expected_generation {
+                Some(generation) => {
+                    assert_eq!(
+                        checkpoint_observation(&runtime, context.values(), call.pair)
+                            .0
+                            .generation,
+                        generation,
+                        "one quantum with multiple WHNF transitions publishes one successor"
+                    );
+                }
+                None => assert_eq!(
+                    runtime.test_with(context.values(), RuntimeNet::callable_checkpoint_count),
+                    0
+                ),
+            }
+        }
+        assert_eq!(
+            observe_current_callable_path(&runtime, call),
+            CurrentCallablePath::DirectOperator
+        );
+    }
+
+    #[test]
+    fn callable_dependency_completion_before_exact_block_is_not_lost() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "checkpoint block race");
+        let call_promise = context
+            .values()
+            .with_runtime_value_access(|access| promise.duplicate_in(&access));
+        let (runtime, call) = claimed_core_call(Value::Promised(call_promise));
+
+        super::with_direct_evaluator(&context, |evaluator| {
+            let claim = CoreCallClaim::fresh(evaluator, &runtime, call).unwrap();
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
+            progress_core_call_claim_with_boundary_handoff(evaluator, claim, &mut budget, || {
+                crate::core::set_test_promise(
+                    context.values(),
+                    &promise,
+                    Value::Builtin(Builtin::Add),
+                )
+                .expect("completion barrier assigns the observed promise");
+            })
+        })
+        .unwrap();
+
+        let blocked = runtime
+            .test_with(context.values(), |net| {
+                net.blocked_callable_checkpoint(call.pair)
+            })
+            .expect("completion-before-block still publishes an exact blocked checkpoint");
+        assert!(matches!(
+            context.pump_wait(&blocked.wait.0, 256),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        ));
+        assert!(!matches!(
+            context.poll_wait(&blocked.wait.0),
+            crate::evaluation::EvaluationWaitPoll::Pending(_)
+        ));
+
+        super::with_direct_evaluator(&context, |evaluator| {
+            assert!(with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            }));
+            runtime
+                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .expect("completed dependency makes the checkpoint runnable");
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
+            progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+        })
+        .unwrap();
+        assert_eq!(
+            observe_current_callable_path(&runtime, call),
+            CurrentCallablePath::DirectOperator
+        );
+    }
+
+    #[test]
+    fn unsupported_checkpoint_boundary_terminalizes_the_exact_generation() {
+        let context = test_context();
+        let (runtime, call) = claimed_core_call(context.values().unit());
+        let checkpoint = super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let state = crate::eval::whnf::NetWhnfState::from_regional(
+                    &access,
+                    crate::eval::whnf::RegionalWhnfWork::from_focus(
+                        &access,
+                        Value::Builtin(Builtin::Add),
+                    ),
+                );
+                let Ok(checkpoint) = access
+                    .net(&runtime)
+                    .install_claimed_call_checkpoint(call, state)
+                else {
+                    panic!("claimed call accepts one checkpoint")
+                };
+                checkpoint
+            })
+        });
+
+        let failure = super::with_direct_evaluator(&context, |evaluator| {
+            settle_callable_checkpoint_boundary(
+                evaluator,
+                &runtime,
+                checkpoint,
+                crate::eval::whnf::RegionalBoundaryRequest::External(
+                    crate::eval::whnf::WhnfExternalBoundary::Reflection,
+                ),
+                || {},
+            )
+        })
+        .expect_err("unsupported external boundary must fail the exact checkpoint");
+        assert!(
+            failure
+                .to_string()
+                .contains("unsupported external boundary")
+        );
+        assert_eq!(
+            observe_current_callable_path(&runtime, call),
+            CurrentCallablePath::Failed
+        );
+    }
+
+    #[test]
+    fn frame_bearing_callable_checkpoint_survives_every_ownership_handoff() {
+        let context = test_context();
+        let inner = PromisedValue::new(context.values(), "framed checkpoint dependency");
+        let inner_value = context
+            .values()
+            .with_runtime_value_access(|access| Value::Promised(inner.duplicate_in(&access)));
+        let outer = PromisedValue::new(context.values(), "framed checkpoint delegate");
+        crate::core::set_test_promise(context.values(), &outer, inner_value)
+            .expect("outer promise delegates to the unresolved inner promise");
+        let (runtime, call) = claimed_core_call(context.values().unit());
+
+        let expected = super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let state = crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
+                    &access,
+                    Value::Promised(outer),
+                    vec![Value::Number(1.into())],
+                );
+                let expected = state.container_identities_for_test();
+                let Ok(installed) = access
+                    .net(&runtime)
+                    .install_claimed_call_checkpoint(call, state)
+                else {
+                    panic!("claimed call accepts the framed checkpoint")
+                };
+                assert_eq!(installed.generation, 0);
+                expected
+            })
+        });
+        assert_eq!(
+            checkpoint_observation(&runtime, context.values(), call.pair),
+            (
+                crate::interaction_net::CallableCheckpointCall {
+                    pair: call.pair,
+                    bind: call.bind,
+                    checkpoint: call.data,
+                    generation: 0,
+                },
+                expected.clone(),
+            )
+        );
+
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("initial checkpoint is runnable");
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
+            progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+        })
+        .unwrap();
+        let (yielded, yielded_identity) =
+            checkpoint_observation(&runtime, context.values(), call.pair);
+        assert_eq!(yielded.generation, 1);
+        assert_eq!(yielded_identity, expected);
+
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("yielded checkpoint is runnable");
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
+            progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+        })
+        .unwrap();
+        let blocked = runtime
+            .test_with(context.values(), |net| {
+                net.blocked_callable_checkpoint(call.pair)
+            })
+            .expect("unresolved inner promise blocks the framed checkpoint");
+        assert_eq!(blocked.call.generation, 2);
+        let (_, blocked_identity) = checkpoint_observation(&runtime, context.values(), call.pair);
+        assert_eq!(blocked_identity, expected);
+
+        crate::core::set_test_promise(context.values(), &inner, Value::Builtin(Builtin::Add))
+            .expect("inner promise accepts the eventual callable");
+        assert!(matches!(
+            context.pump_wait(&blocked.wait.0, 256),
+            crate::evaluation::EvaluationPumpOutcome::TargetReady
+        ));
+        super::with_direct_evaluator(&context, |evaluator| {
+            assert!(with_core_net_access(evaluator, &runtime, |runtime| {
+                runtime.retry_blocked_callable_checkpoint(&blocked)
+            }));
+        });
+
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("completed dependency makes the checkpoint runnable");
+        super::with_direct_evaluator(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
+                    .expect("exact checkpoint claim moves state into regional ownership");
+                assert_eq!(
+                    claim
+                        .work
+                        .as_ref()
+                        .expect("claim retains regional work")
+                        .container_identities_for_test(),
+                    expected
+                );
+                drop(claim);
+            });
+        });
+        let (restored, restored_identity) =
+            checkpoint_observation(&runtime, context.values(), call.pair);
+        assert_eq!(restored.generation, blocked.call.generation);
+        assert_eq!(restored_identity, expected);
+
+        runtime
+            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .expect("restored checkpoint is runnable");
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
+            progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+        })
+        .unwrap();
+        assert_eq!(
+            observe_current_callable_path(&runtime, call),
+            CurrentCallablePath::DirectOperator
         );
     }
 

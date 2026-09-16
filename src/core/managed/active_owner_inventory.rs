@@ -244,6 +244,13 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
     },
     ActiveRaiiEntry {
         path: "src/eval/net.rs",
+        owner: "CoreCheckpointClaim",
+        disposition: ActiveRaiiDisposition::BoundedClaimGuard,
+        retirement: "restore one complete callable WHNF checkpoint before scoped net access ends",
+        verification: "retried_checkpoint_claim_unwind_restores_the_exact_generation",
+    },
+    ActiveRaiiEntry {
+        path: "src/eval/net.rs",
         owner: "CoreOperatorClaim",
         disposition: ActiveRaiiDisposition::BoundedClaimGuard,
         retirement: "restore one bracketed operator claim before scoped net access ends",

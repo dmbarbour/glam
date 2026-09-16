@@ -189,6 +189,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.attach_call_to_copy(call, source)
     }
 
+    pub fn resume_claimed_checkpoint_with_copy(
+        &mut self,
+        call: CallableCheckpointCall,
+        source: PreparedCopySource<S>,
+    ) -> NodeId {
+        assert!(self.take_empty_claimed_checkpoint(call));
+        let cursor = self.begin_copy(source);
+        self.connect(Port::principal(call.bind), Port::principal(cursor));
+        cursor
+    }
+
     pub(in crate::interaction_net::runtime) fn attach_call_to_copy(
         &mut self,
         call: Call,
@@ -237,6 +248,48 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.connect(Port::principal(operator), argument);
         self.connect(Port::auxiliary(operator, 1), result);
         operator
+    }
+
+    pub fn resume_claimed_checkpoint_with_operator(
+        &mut self,
+        call: CallableCheckpointCall,
+        operator: S::Operator,
+    ) -> NodeId {
+        assert!(self.take_empty_claimed_checkpoint(call));
+        let [argument, result] =
+            <[Port; 2]>::try_from(self.take_auxiliaries(call.bind, 2)).unwrap();
+        assert!(matches!(self.remove_node(call.bind), RuntimeNode::Bind));
+
+        let operator = self.add_node(RuntimeNode::Operator(operator));
+        self.connect(Port::principal(operator), argument);
+        self.connect(Port::auxiliary(operator, 1), result);
+        operator
+    }
+
+    fn take_empty_claimed_checkpoint(&mut self, call: CallableCheckpointCall) -> bool {
+        if !self
+            .active
+            .get(&call.pair)
+            .is_some_and(ActivePairState::is_claimed)
+            || !matches!(self.node(call.bind), Some(RuntimeNode::Bind))
+            || !matches!(
+                self.node(call.checkpoint),
+                Some(RuntimeNode::CallableCheckpoint(checkpoint))
+                    if checkpoint.generation == call.generation && checkpoint.payload.is_none()
+            )
+        {
+            return false;
+        }
+        self.active.remove(&call.pair);
+        assert_eq!(
+            self.disconnect(Port::principal(call.bind)),
+            Some(Port::principal(call.checkpoint))
+        );
+        assert!(matches!(
+            self.remove_node(call.checkpoint),
+            RuntimeNode::CallableCheckpoint(_)
+        ));
+        true
     }
 
     pub(in crate::interaction_net::runtime) fn take_operator_call(

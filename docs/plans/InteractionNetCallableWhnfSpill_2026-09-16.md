@@ -1,6 +1,6 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: in progress; NC0-NC2.0 completed on 2026-09-16. The plan was revised on
+Status: in progress; NC0-NC4 completed on 2026-09-16. The plan was revised on
 2026-09-16 first to use one net-owned callable checkpoint rather than an
 `Operator >< Data` encoding, then to make regional and net-owned roles
 zero-walk wrappers around one canonical `WhnfState`. This is the focused
@@ -899,6 +899,8 @@ pair dependency without ever materializing the checkpoint payload.
 
 #### NC2C — Spill and update mutations
 
+Status: complete on 2026-09-16.
+
 Execution checkpoints:
 
 - **NC2C.1 — Install and restore.** Move a claimed `Data` payload out through
@@ -924,7 +926,20 @@ Every mutation validates the exact claimed pair, publishes the complete
 replacement before release, and reports old/new payload edges through the
 managed mutation gateway. Test stale calls and unwind before publication.
 
+Completion record: one generic checkpoint envelope holds a monotonically
+incremented per-node generation and an optional linear payload. `None` is
+legal only while the exact pair is claimed. The managed core gateway installs
+the boxed state at the former data node, moves it into regional ownership,
+restores it on claim-guard drop, or publishes one successor generation.
+Stale calls return the still-owned payload without mutation. Copy and operator
+completion consume the empty claimed checkpoint and rewrite the original bind
+wiring directly; neither path reconstructs `Data` or schedules another call.
+Generic runtime fixtures cover install, stale restore, successor publication,
+unwind restoration, and both direct terminal shapes.
+
 #### NC2D — Conditional exact blocking
+
+Status: complete on 2026-09-16.
 
 Partition this into the exact topology operation first and the four
 forced-order subscription/admission fixtures second. The latter is not
@@ -944,11 +959,22 @@ Use deterministic barriers for:
 
 Close the subscribe/observe race explicitly; no ordering may lose a wakeup.
 
+Completion record: blocking atomically requires the exact ready pair and
+checkpoint generation; retry additionally requires the exact wait token.
+Generation publication and terminalization make prior admission tokens
+harmlessly disturbed. A forced-order evaluator fixture admits the promise
+follower, completes its source before exact blocking, explicitly pumps that
+follower, and resumes the same checkpoint. Generic fixtures force ordinary
+pending blockage, a newer generation winning first, and terminalization
+winning first. None relies on repetition or scheduler timing.
+
 Exit: the runtime can own, move, update, block, and terminalize a complete
 callable checkpoint without an additional graph node, durable claim, payload
 observation trait, checkpoint-copy path, or regional/net representation walk.
 
 ### NC3 — Inline-first original call reduction
+
+Status: complete on 2026-09-16.
 
 #### NC3A — Regional fast path
 
@@ -982,7 +1008,19 @@ observation.
 Exit: original calls either finish inline or leave one complete net-owned
 state; they never retain a durable claim or machine-side continuation.
 
+Completion record: immediate values bypass WHNF work, while assigned promises
+and cached lazies use the shared regional driver and remaining outer semantic
+budget. Ready values take the existing direct net/operator/failure paths.
+Budget exhaustion installs exactly one generation-zero checkpoint by moving
+the advanced state into the former data node. Dependency boundaries publish
+that same state before translating or subscribing outside access, then block
+the exact generation. Existing direct-family fixtures prove no intermediate
+checkpoint survives an inline result; budget and dependency fixtures prove
+the two spill outcomes.
+
 ### NC4 — Resume and terminalize checkpoints
+
+Status: complete on 2026-09-16.
 
 #### NC4A — Checkpoint claim and regional handoff
 
@@ -1021,6 +1059,21 @@ zero-walk before NC5D records actual production usage.
 
 Exit: a checkpoint can cross arbitrary budget and dependency boundaries and
 terminalize without replay or temporary topology.
+
+Completion record: semantic dispatch moves a claimed checkpoint through one
+`CoreCheckpointClaim` into regional work under a single value-access region.
+Its drop guard republishes the same state and generation after release or
+unwind. Yield publishes one incremented generation regardless of how many
+WHNF transitions the quantum performed; a four-promise fixture proves
+resumption begins at the published focus and reaches generation one after a
+two-transition quantum rather than replaying the original callable. Ready
+copy/operator results and structured failures terminalize directly. Failure
+while translating a boundary also fails the exact published generation;
+disturbance leaves the newer worker authoritative. A nonempty application
+frame crosses yield, dependency block, claim unwind, wake, and completion
+while retaining the outer frame and argument-buffer identities across every
+regional/net role handoff. The former blocked-data call fixtures now assert
+the corresponding exact checkpoint-generation contract.
 
 ### NC5 — Concurrency, ownership, and state-usage audit
 

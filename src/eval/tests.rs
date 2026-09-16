@@ -6069,7 +6069,8 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
         .expect("call should report a task wait");
     assert_eq!(
         runtime.test_with(&crate::core::test_value_factory(), |net| net
-            .blocked_calls()
+            .active_pairs()
+            .filter(|pair| net.blocked_callable_checkpoint(*pair).is_some())
             .count()),
         1
     );
@@ -6111,7 +6112,8 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
         .expect("function call should report the gate's exact task wait");
     assert_eq!(
         runtime.test_with(&crate::core::test_value_factory(), |net| net
-            .blocked_calls()
+            .active_pairs()
+            .filter(|pair| net.blocked_callable_checkpoint(*pair).is_some())
             .count()),
         1
     );

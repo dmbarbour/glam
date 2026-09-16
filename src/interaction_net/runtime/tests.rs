@@ -247,7 +247,8 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
             let _: &S::Operator = operator;
         }
         RuntimeNode::CallableCheckpoint(checkpoint) => {
-            let _: &S::CallableCheckpoint = checkpoint;
+            let _: (&u64, &Option<S::CallableCheckpoint>) =
+                (&checkpoint.generation, &checkpoint.payload);
         }
         RuntimeNode::RemoteCursor { copy, remote } => {
             let _: (&CopyId, &Port) = (copy, remote);
@@ -322,7 +323,9 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
 
     match active_state {
         ActivePairState::Ready | ActivePairState::Claimed => {}
-        ActivePairState::BlockedCall { wait } | ActivePairState::BlockedOperatorCall { wait } => {
+        ActivePairState::BlockedCall { wait }
+        | ActivePairState::BlockedCallableCheckpoint { wait, .. }
+        | ActivePairState::BlockedOperatorCall { wait } => {
             let _: &S::WaitToken = wait;
         }
         ActivePairState::BlockedCursor { cursor, blockage } => {
@@ -346,6 +349,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         ActivePairState::Ready
         | ActivePairState::Claimed
         | ActivePairState::BlockedCall { .. }
+        | ActivePairState::BlockedCallableCheckpoint { .. }
         | ActivePairState::BlockedOperatorCall { .. }
         | ActivePairState::BlockedCursor {
             blockage: CursorBlockage::Stable,
@@ -2818,7 +2822,11 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
 
     let mut checkpoint_source: RuntimeNet<&'static str> = RuntimeNet::empty();
     let bind = checkpoint_source.add_node(RuntimeNode::Bind);
-    let checkpoint = checkpoint_source.add_node(RuntimeNode::CallableCheckpoint(()));
+    let checkpoint =
+        checkpoint_source.add_node(RuntimeNode::CallableCheckpoint(RuntimeCallableCheckpoint {
+            generation: 0,
+            payload: Some(()),
+        }));
     let result = checkpoint_source.add_node(RuntimeNode::Data("result"));
     checkpoint_source.connect(Port::principal(bind), Port::principal(checkpoint));
     checkpoint_source.connect(Port::auxiliary(bind, 2), Port::principal(result));
@@ -2856,7 +2864,11 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
 fn callable_checkpoint_has_one_linear_interaction() {
     let mut callable: RuntimeNet<()> = RuntimeNet::empty();
     let bind = callable.add_node(RuntimeNode::Bind);
-    let checkpoint = callable.add_node(RuntimeNode::CallableCheckpoint(()));
+    let checkpoint =
+        callable.add_node(RuntimeNode::CallableCheckpoint(RuntimeCallableCheckpoint {
+            generation: 0,
+            payload: Some(()),
+        }));
     callable.connect(Port::principal(bind), Port::principal(checkpoint));
     let pair = ActivePairKey::new(bind, checkpoint);
     assert_eq!(
@@ -2875,10 +2887,17 @@ fn callable_checkpoint_has_one_linear_interaction() {
         RuntimeNode::Erase,
         RuntimeNode::Data(()),
         RuntimeNode::Operator(TestOperator::new("never", |_| unreachable!())),
-        RuntimeNode::CallableCheckpoint(()),
+        RuntimeNode::CallableCheckpoint(RuntimeCallableCheckpoint {
+            generation: 0,
+            payload: Some(()),
+        }),
     ] {
         let mut stuck: RuntimeNet<()> = RuntimeNet::empty();
-        let checkpoint = stuck.add_node(RuntimeNode::CallableCheckpoint(()));
+        let checkpoint =
+            stuck.add_node(RuntimeNode::CallableCheckpoint(RuntimeCallableCheckpoint {
+                generation: 0,
+                payload: Some(()),
+            }));
         let partner = stuck.add_node(partner);
         stuck.connect(Port::principal(checkpoint), Port::principal(partner));
         let pair = ActivePairKey::new(checkpoint, partner);
@@ -2894,6 +2913,190 @@ fn callable_checkpoint_has_one_linear_interaction() {
             Some(ActivePairState::Stuck(StuckReason::NoRule))
         ));
     }
+}
+
+fn claimed_test_call(runtime: &mut RuntimeNet<()>) -> Call {
+    let bind = runtime.add_node(RuntimeNode::Bind);
+    let data = runtime.add_node(RuntimeNode::Data(()));
+    let argument = runtime.add_node(RuntimeNode::Data(()));
+    let result = runtime.add_node(RuntimeNode::Data(()));
+    runtime.connect(Port::principal(bind), Port::principal(data));
+    runtime.connect(Port::auxiliary(bind, 1), Port::principal(argument));
+    runtime.connect(Port::auxiliary(bind, 2), Port::principal(result));
+    let Some(Reduction {
+        pair,
+        kind: ReductionKind::Call { bind, data },
+    }) = runtime.reduce_next()
+    else {
+        panic!("test call must reduce to one claimed semantic operation");
+    };
+    Call { pair, bind, data }
+}
+
+#[test]
+fn callable_checkpoint_mutations_are_exact_and_move_payloads() {
+    let mut runtime = RuntimeNet::empty();
+    let call = claimed_test_call(&mut runtime);
+    let argument = runtime.neighbor(Port::auxiliary(call.bind, 1));
+    let result = runtime.neighbor(Port::auxiliary(call.bind, 2));
+
+    let checkpoint = runtime
+        .install_claimed_call_checkpoint(call, ())
+        .expect("the exact claimed call accepts one checkpoint");
+    assert_eq!(checkpoint.checkpoint, call.data);
+    assert_eq!(
+        runtime.active.get(&call.pair),
+        Some(&ActivePairState::Ready)
+    );
+    assert_eq!(runtime.neighbor(Port::auxiliary(call.bind, 1)), argument);
+    assert_eq!(runtime.neighbor(Port::auxiliary(call.bind, 2)), result);
+    assert!(runtime.install_claimed_call_checkpoint(call, ()).is_err());
+
+    let Some(Reduction {
+        kind: ReductionKind::CallableCheckpoint { .. },
+        ..
+    }) = runtime.reduce_pair(call.pair)
+    else {
+        panic!("published checkpoint must become exact semantic work");
+    };
+    assert_eq!(runtime.callable_checkpoint(call.pair), Some(checkpoint));
+    runtime
+        .take_claimed_callable_checkpoint(checkpoint)
+        .expect("claimed checkpoint payload moves into regional ownership");
+    let stale = CallableCheckpointCall {
+        generation: checkpoint.generation + 1,
+        ..checkpoint
+    };
+    runtime
+        .restore_claimed_callable_checkpoint(stale, ())
+        .expect_err("a stale generation cannot restore checkpoint state");
+    runtime
+        .restore_claimed_callable_checkpoint(checkpoint, ())
+        .expect("unwind restores the exact payload and ready state");
+    assert_eq!(
+        runtime.active.get(&call.pair),
+        Some(&ActivePairState::Ready)
+    );
+
+    runtime.reduce_pair(call.pair).unwrap();
+    runtime
+        .take_claimed_callable_checkpoint(checkpoint)
+        .unwrap();
+    let successor = runtime
+        .replace_claimed_callable_checkpoint(checkpoint, ())
+        .expect("yield publishes one successor generation");
+    assert_eq!(successor.generation, checkpoint.generation + 1);
+    assert_eq!(
+        runtime.block_callable_checkpoint(checkpoint, 17),
+        CheckpointBlockResult::Disturbed,
+        "a successor publication makes the prior generation stale"
+    );
+    assert_eq!(
+        runtime.active.get(&call.pair),
+        Some(&ActivePairState::Ready)
+    );
+
+    assert_eq!(
+        runtime.block_callable_checkpoint(successor, 17),
+        CheckpointBlockResult::Blocked
+    );
+    assert_eq!(
+        runtime.block_callable_checkpoint(successor, 17),
+        CheckpointBlockResult::Disturbed,
+        "only the exact published ready generation can be blocked"
+    );
+    let blocked = BlockedCallableCheckpoint {
+        call: successor,
+        wait: 17,
+    };
+    assert!(runtime.retry_blocked_callable_checkpoint(&blocked));
+    assert_eq!(
+        runtime.active.get(&call.pair),
+        Some(&ActivePairState::Ready)
+    );
+    assert!(!runtime.retry_blocked_callable_checkpoint(&blocked));
+
+    runtime.reduce_pair(call.pair).unwrap();
+    runtime.take_claimed_callable_checkpoint(successor).unwrap();
+    let operator = TestOperator::new("terminal", |_| unreachable!());
+    let operator_node = runtime.resume_claimed_checkpoint_with_operator(successor, operator);
+    assert!(matches!(
+        runtime.node(operator_node),
+        Some(RuntimeNode::Operator(_))
+    ));
+    assert!(!runtime.active.contains_key(&call.pair));
+    assert!(!runtime.nodes.contains_key(&checkpoint.checkpoint));
+    assert_eq!(runtime.neighbor(Port::principal(operator_node)), argument);
+    assert_eq!(runtime.neighbor(Port::auxiliary(operator_node, 1)), result);
+    assert_eq!(
+        runtime.block_callable_checkpoint(successor, 17),
+        CheckpointBlockResult::Disturbed,
+        "terminalization makes an old checkpoint token stale"
+    );
+}
+
+#[test]
+fn callable_checkpoint_terminalizes_directly_to_a_copy() {
+    let mut source_builder = NetBuilder::new();
+    let source_data = source_builder.data(());
+    let source = source_builder.finish(source_data).instantiate_shared();
+
+    let mut runtime = RuntimeNet::empty();
+    let call = claimed_test_call(&mut runtime);
+    let checkpoint = runtime.install_claimed_call_checkpoint(call, ()).unwrap();
+    runtime.reduce_pair(call.pair).unwrap();
+    runtime
+        .take_claimed_callable_checkpoint(checkpoint)
+        .unwrap();
+    let cursor =
+        runtime.resume_claimed_checkpoint_with_copy(checkpoint, source.prepare_copy_source());
+    assert!(matches!(
+        runtime.node(cursor),
+        Some(RuntimeNode::RemoteCursor { .. })
+    ));
+    assert_eq!(
+        runtime.neighbor(Port::principal(call.bind)),
+        Some(Port::principal(cursor))
+    );
+    assert_eq!(
+        runtime.active.get(&call.pair),
+        Some(&ActivePairState::Ready)
+    );
+}
+
+#[test]
+fn published_callable_checkpoint_failure_is_exact() {
+    let mut runtime = RuntimeNet::empty();
+    let call = claimed_test_call(&mut runtime);
+    let checkpoint = runtime
+        .install_claimed_call_checkpoint(call, ())
+        .expect("the exact call publishes one checkpoint");
+    let stale = CallableCheckpointCall {
+        generation: checkpoint.generation + 1,
+        ..checkpoint
+    };
+
+    let stale_error: Arc<str> = Arc::from("stale");
+    assert_eq!(
+        runtime.fail_published_callable_checkpoint(stale, stale_error.clone()),
+        Err(stale_error)
+    );
+    assert_eq!(runtime.callable_checkpoint(call.pair), Some(checkpoint));
+    assert_eq!(
+        runtime.fail_published_callable_checkpoint(checkpoint, Arc::from("failed")),
+        Ok(())
+    );
+    assert!(matches!(
+        runtime.active.get(&call.pair),
+        Some(ActivePairState::Stuck(StuckReason::Specialization(error)))
+            if error.as_ref() == "failed"
+    ));
+    assert!(runtime.callable_checkpoint(call.pair).is_some());
+    let again: Arc<str> = Arc::from("again");
+    assert_eq!(
+        runtime.fail_published_callable_checkpoint(checkpoint, again.clone()),
+        Err(again)
+    );
 }
 
 #[test]

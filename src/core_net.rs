@@ -657,6 +657,221 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .map(|value| self.values.root_runtime_value(value))
     }
 
+    pub(crate) fn install_claimed_call_checkpoint(
+        &self,
+        call: crate::interaction_net::Call,
+        state: crate::eval::whnf::NetWhnfState,
+    ) -> Result<crate::interaction_net::CallableCheckpointCall, Box<crate::eval::whnf::NetWhnfState>>
+    {
+        let mut state = Some(Box::new(state));
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.install_call_checkpoint_edge_transition(call),
+            |runtime| match runtime.install_claimed_call_checkpoint(
+                call,
+                state
+                    .take()
+                    .expect("checkpoint input is consumed exactly once"),
+            ) {
+                Ok(call) => RuntimeNetMutation::Changed(Ok(call)),
+                Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
+            },
+        )
+    }
+
+    pub(crate) fn take_claimed_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+    ) -> Option<crate::eval::whnf::NetWhnfState> {
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.take_checkpoint_edge_transition(call),
+            |runtime| match runtime.take_claimed_callable_checkpoint(call) {
+                Some(state) => RuntimeNetMutation::Changed(Some(*state)),
+                None => RuntimeNetMutation::Unchanged(None),
+            },
+        )
+    }
+
+    pub(crate) fn callable_checkpoint(
+        &self,
+        pair: ActivePairKey,
+    ) -> Option<crate::interaction_net::CallableCheckpointCall> {
+        self.runtime
+            .cell()
+            .with(|runtime| runtime.callable_checkpoint(pair))
+    }
+
+    pub(crate) fn restore_claimed_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        state: crate::eval::whnf::NetWhnfState,
+    ) -> Result<(), Box<crate::eval::whnf::NetWhnfState>> {
+        let mut state = Some(Box::new(state));
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.publish_checkpoint_edge_transition(call),
+            |runtime| match runtime.restore_claimed_callable_checkpoint(
+                call,
+                state
+                    .take()
+                    .expect("checkpoint input is consumed exactly once"),
+            ) {
+                Ok(()) => RuntimeNetMutation::Changed(Ok(())),
+                Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
+            },
+        )
+    }
+
+    pub(crate) fn replace_claimed_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        state: crate::eval::whnf::NetWhnfState,
+    ) -> Result<crate::interaction_net::CallableCheckpointCall, Box<crate::eval::whnf::NetWhnfState>>
+    {
+        let mut state = Some(Box::new(state));
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.publish_checkpoint_edge_transition(call),
+            |runtime| match runtime.replace_claimed_callable_checkpoint(
+                call,
+                state
+                    .take()
+                    .expect("checkpoint input is consumed exactly once"),
+            ) {
+                Ok(call) => RuntimeNetMutation::Changed(Ok(call)),
+                Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
+            },
+        )
+    }
+
+    pub(crate) fn resume_claimed_checkpoint_with_copy(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        source: CorePreparedCopySource,
+    ) {
+        let (source, _source_root) = source.into_inner_for(self.values);
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.resume_checkpoint_with_copy_edge_transition(call),
+            |runtime| runtime.resume_claimed_checkpoint_with_copy(call, source),
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
+    }
+
+    pub(crate) fn resume_claimed_checkpoint_with_operator(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        operator: CoreOperator,
+    ) {
+        self.runtime.cell().with_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.resume_checkpoint_with_operator_edge_transition(call),
+            |runtime| runtime.resume_claimed_checkpoint_with_operator(call, operator),
+        );
+        #[cfg(feature = "interaction-net-profiling")]
+        self.values
+            .values()
+            .interaction_net_profile()
+            .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
+    }
+
+    pub(crate) fn block_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        wait: CoreWaitToken,
+    ) -> crate::interaction_net::CheckpointBlockResult {
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                let result = runtime.block_callable_checkpoint(call, wait);
+                if result == crate::interaction_net::CheckpointBlockResult::Blocked {
+                    RuntimeNetMutation::Changed(result)
+                } else {
+                    RuntimeNetMutation::Unchanged(result)
+                }
+            })
+    }
+
+    pub(crate) fn retry_blocked_callable_checkpoint(
+        &self,
+        blocked: &crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>,
+    ) -> bool {
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.retry_blocked_callable_checkpoint(blocked) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
+    }
+
+    pub(crate) fn release_claimed_callable_checkpoint(&self, pair: ActivePairKey) -> bool {
+        self.runtime
+            .cell()
+            .with_conditional_mut_via(&self.runtime, |runtime| {
+                if runtime.release_claimed_callable_checkpoint(pair) {
+                    RuntimeNetMutation::Changed(true)
+                } else {
+                    RuntimeNetMutation::Unchanged(false)
+                }
+            })
+    }
+
+    pub(crate) fn fail_claimed_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        error: EvaluationHalt,
+    ) -> Result<(), EvaluationHalt> {
+        let mut error = Some(error);
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| {
+                runtime.fail_call_edge_transition(crate::interaction_net::Call {
+                    pair: call.pair,
+                    bind: call.bind,
+                    data: call.checkpoint,
+                })
+            },
+            |runtime| match runtime.fail_claimed_callable_checkpoint(
+                call,
+                error
+                    .take()
+                    .expect("checkpoint error is consumed exactly once"),
+            ) {
+                Ok(()) => RuntimeNetMutation::Changed(Ok(())),
+                Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
+            },
+        )
+    }
+
+    pub(crate) fn fail_published_callable_checkpoint(
+        &self,
+        call: crate::interaction_net::CallableCheckpointCall,
+        error: EvaluationHalt,
+    ) -> Result<(), EvaluationHalt> {
+        let mut error = Some(error);
+        self.runtime.cell().with_conditional_edge_mut_via(
+            &self.runtime,
+            |runtime| runtime.fail_published_checkpoint_edge_transition(call),
+            |runtime| match runtime.fail_published_callable_checkpoint(
+                call,
+                error
+                    .take()
+                    .expect("checkpoint error is consumed exactly once"),
+            ) {
+                Ok(()) => RuntimeNetMutation::Changed(Ok(())),
+                Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
+            },
+        )
+    }
+
     pub(crate) fn reclaim_blocked_call(
         &self,
         blocked: &BlockedCall<CoreWaitToken>,
@@ -692,16 +907,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
-    }
-
-    pub(crate) fn block_claimed_call(
-        &self,
-        call: crate::interaction_net::Call,
-        wait: CoreWaitToken,
-    ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.block_claimed_call(call, wait)
-        });
     }
 
     pub(crate) fn fail_claimed_call(
@@ -1062,6 +1267,7 @@ pub(crate) enum CoreActivePairStep {
     Reduction(Reduction),
     Cursor(NodeId),
     BlockedCall(BlockedCall<CoreWaitToken>),
+    BlockedCallableCheckpoint(crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>),
     BlockedOperatorCall(BlockedOperatorCall<CoreWaitToken>),
     Stuck,
     Contended(CoreNetContention),
@@ -1083,6 +1289,9 @@ impl CoreActivePairStep {
             ActivePairStep::Reduction(reduction) => Self::Reduction(reduction),
             ActivePairStep::Cursor(cursor) => Self::Cursor(cursor),
             ActivePairStep::BlockedCall(blocked) => Self::BlockedCall(blocked),
+            ActivePairStep::BlockedCallableCheckpoint(blocked) => {
+                Self::BlockedCallableCheckpoint(blocked)
+            }
             ActivePairStep::BlockedOperatorCall(blocked) => Self::BlockedOperatorCall(blocked),
             ActivePairStep::Stuck(_) => Self::Stuck,
             ActivePairStep::Contended(contention) => {
