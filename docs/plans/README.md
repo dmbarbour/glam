@@ -24,6 +24,12 @@ when their historical value no longer justifies keeping them.
 - [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
   is the nested GCI11R-002D transition from implicit `Gc<T>` traits to
   mutator-qualified persistent-edge duplication and identity.
+- [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md)
+  replaces recursive and replaying WHNF demand with bounded regional work and
+  durable owner checkpoints.
+- [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md)
+  is the W6B.4b.2 subplan for inline-first callable evaluation and managed-net
+  checkpoint topology only when a quantum must suspend.
 
 ## Recent Completed Plans
 

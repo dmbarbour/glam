@@ -1,8 +1,9 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
 Status: W0-W5 and their mandatory reviews plus W6.0 are complete by
-2026-09-15; W6A is in progress and W6B-W8 remain planned. This is the focused implementation plan
-selected by
+2026-09-15; W6A's independent leaves and W6B.1-W6B.4a are complete, while
+the cross-family closures, W6B.4b, and W6C-W8 remain planned. This is the
+focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -3668,7 +3669,7 @@ restarting earlier converted keys.
 | **W6B.2 — Complete (2026-09-15): Operator execution** | 2 S | Convert one active-pair reduction and constant-effect construction without holding access across driver coordination; move operator application/function instantiation to the W6A.2 owner. `-2`. |
 | **W6B.3 — Complete (2026-09-15): Net claim projection** | 2 F | Require the active claim/access capability when projecting callable or operator payloads. `-2`. |
 | **W6B.4a — Complete (2026-09-15): Net attachment** | 3 S | Access-qualify function-stage attachment, argument attachment, and function-call machine construction without changing demand semantics. `-3`. |
-| **W6B.4b — Suspendable net application** | 2 S | Convert callable lowering and access resolution, including the W6A.0c/W6A.4 key/path-conversion consumers, into state retained by their actual machine owners. `-2`. |
+| **W6B.4b — Suspendable net application** | 2 S | Convert access resolution through its existing machine owner, then implement inline-first, spill-on-suspension callable WHNF through the focused callable-spill plan. `-2`. |
 
 Keep topology and claim state in their existing net owners. Force suspension
 after callable lowering and after the first attached argument, and retain the
@@ -3725,6 +3726,28 @@ reopening nested access. The D.2c manifest falls from 153 to 150 declarations
 and `OperatorAndNet` from 5 to 2. The remaining two declarations are genuinely
 suspendable callable/path operations assigned to W6B.4b, not attachment
 leaves.
+
+##### W6B.4b — Partition and callable-spill subplan
+
+W6B.4b retains one inventory umbrella and its planned `-2` delta, but executes
+as two independently verified checkpoints:
+
+1. **W6B.4b.1 — Runtime-net access resolution (`-1`).** Replace
+   `resolve_core_access_in` with state retained by the existing resumable
+   access owner. Preserve the W6A.0c/W6A.4 key/path conversion assignments and
+   force suspension after at least one completed path element.
+2. **W6B.4b.2 — Callable WHNF spill (`-1`).** Execute NC0-NC6 in
+   [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md).
+   Evaluate a deferred callable as far as the current bounded quantum permits
+   and install `NormalizeCallable` topology only on budget yield or a real
+   dependency boundary. Suspended progress belongs to the managed net; no
+   call or operator claim becomes durable.
+
+The separate plan is required because W6B.4b.2 adds core topology, semantic
+budget sharing, exact same-pair checkpoint mutation, production blocked
+operator resumption, and forced stale-admission/lost-wakeup verification. The
+parent plan remains authoritative for the raw-value inventory and records the
+combined W6B.4b closure only after both subcheckpoints pass.
 
 #### W6C — Dispatch, scalars, comparisons, and strategies
 
