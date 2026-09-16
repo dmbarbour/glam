@@ -116,6 +116,11 @@ pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'stat
     /// Structured explanation retained when specialization policy cannot
     /// reduce an otherwise valid active pair.
     type StuckReason: Clone + fmt::Debug + 'static;
+    /// Linear evaluator state retained by a runtime-only callable checkpoint.
+    ///
+    /// Generic topology may move and visit this payload, but never clones,
+    /// compares, or formats it. Only specialization policy may construct one.
+    type CallableCheckpoint: Send + 'static;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +206,6 @@ impl<S: NetSpecialization> Node<S> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeNode<S: NetSpecialization> {
     Bind,
     Fan {
@@ -210,6 +214,12 @@ pub enum RuntimeNode<S: NetSpecialization> {
     Erase,
     Data(S::Data),
     Operator(S::Operator),
+    /// Opaque incremental WHNF state installed only by callable evaluation.
+    #[allow(
+        dead_code,
+        reason = "NC2C installs the runtime-only checkpoint after NC2A establishes its linear type seam"
+    )]
+    CallableCheckpoint(S::CallableCheckpoint),
     /// Stable, evaluator-only anchor for a runtime net's exposed port.
     Interface,
     /// Evaluator-only one-way wire into a logical copy of another runtime net.
@@ -224,7 +234,52 @@ impl<S: NetSpecialization> RuntimeNode<S> {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
             Self::Operator(_) | Self::Interface => 2,
-            Self::Erase | Self::Data(_) | Self::RemoteCursor { .. } => 1,
+            Self::Erase
+            | Self::Data(_)
+            | Self::CallableCheckpoint(_)
+            | Self::RemoteCursor { .. } => 1,
+        }
+    }
+
+    /// Clones only the ordinary topology/data vocabulary. Runtime evaluator
+    /// checkpoints are deliberately linear and have no generic copy path.
+    pub(super) fn clone_copyable(&self) -> Option<Self> {
+        Some(match self {
+            Self::Bind => Self::Bind,
+            Self::Fan { identity } => Self::Fan {
+                identity: identity.clone(),
+            },
+            Self::Erase => Self::Erase,
+            Self::Data(data) => Self::Data(data.clone()),
+            Self::Operator(operator) => Self::Operator(operator.clone()),
+            Self::Interface => Self::Interface,
+            Self::RemoteCursor { copy, remote } => Self::RemoteCursor {
+                copy: *copy,
+                remote: *remote,
+            },
+            Self::CallableCheckpoint(_) => return None,
+        })
+    }
+}
+
+impl<S: NetSpecialization> fmt::Debug for RuntimeNode<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bind => formatter.write_str("Bind"),
+            Self::Fan { identity } => formatter
+                .debug_struct("Fan")
+                .field("identity", identity)
+                .finish(),
+            Self::Erase => formatter.write_str("Erase"),
+            Self::Data(data) => formatter.debug_tuple("Data").field(data).finish(),
+            Self::Operator(operator) => formatter.debug_tuple("Operator").field(operator).finish(),
+            Self::CallableCheckpoint(_) => formatter.write_str("CallableCheckpoint(..)"),
+            Self::Interface => formatter.write_str("Interface"),
+            Self::RemoteCursor { copy, remote } => formatter
+                .debug_struct("RemoteCursor")
+                .field("copy", copy)
+                .field("remote", remote)
+                .finish(),
         }
     }
 }

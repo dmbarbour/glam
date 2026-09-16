@@ -114,7 +114,11 @@ pub(crate) struct RegionalWhnfWork(WhnfState);
     dead_code,
     reason = "NC2.0 defines the canonical net-owned state before NC2A installs its runtime node"
 )]
-pub(crate) struct NetWhnfState(WhnfState);
+/// Opaque runtime-net ownership wrapper for one complete WHNF checkpoint.
+///
+/// The type is public only because the public generic interaction-net trait
+/// names specialization payloads. Its state and constructors remain internal.
+pub struct NetWhnfState(WhnfState);
 
 /// Regional counterpart of [`DurableWhnfFrame`].
 ///

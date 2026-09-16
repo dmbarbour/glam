@@ -153,7 +153,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
             RuntimeNode::Operator(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
-            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
+            RuntimeNode::Interface
+            | RuntimeNode::CallableCheckpoint(_)
+            | RuntimeNode::RemoteCursor { .. } => {
                 unreachable!("evaluator-only nodes are not erased as ordinary agents")
             }
         };

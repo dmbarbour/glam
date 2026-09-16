@@ -1070,6 +1070,7 @@ fn trace_core_runtime_payload(
             visit_compatibility_payload_managed_edges(operator, visitor);
             trace_core_operator_managed_net_edges(operator, visitor);
         }
+        RuntimeNetPayload::CallableCheckpoint(checkpoint) => checkpoint.trace(visitor),
         RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
         RuntimeNetPayload::StuckReason(reason) => {
             visit_halt_value_edges(reason, &mut |value| {

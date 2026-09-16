@@ -5,7 +5,7 @@ impl<S: NetSpecialization> SourceFrontierShape<S> {
         match self {
             Self::Principal {
                 port,
-                node: RuntimeNode::RemoteCursor { .. },
+                node: SourcePrincipalNode::Copyable(RuntimeNode::RemoteCursor { .. }),
             } => Some(DemandEndpoint::Cursor(port.node())),
             Self::Principal { .. } => None,
             Self::StableAuxiliary { terminal_pair, .. } => {
@@ -119,15 +119,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let mut adding = match &frontier.shape {
             SourceFrontierShape::Principal {
                 node:
-                    RuntimeNode::Bind
-                    | RuntimeNode::Fan { .. }
-                    | RuntimeNode::Erase
-                    | RuntimeNode::Data(_)
-                    | RuntimeNode::Operator(_),
+                    SourcePrincipalNode::Copyable(
+                        RuntimeNode::Bind
+                        | RuntimeNode::Fan { .. }
+                        | RuntimeNode::Erase
+                        | RuntimeNode::Data(_)
+                        | RuntimeNode::Operator(_),
+                    ),
                 ..
             } if converging_cursor.is_none() => RuntimeNetEdgeSet::node(self.next_node(0)),
             SourceFrontierShape::Principal {
-                node: RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. },
+                node:
+                    SourcePrincipalNode::Copyable(
+                        RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. },
+                    )
+                    | SourcePrincipalNode::CallableCheckpoint,
                 ..
             }
             | SourceFrontierShape::StableAuxiliary { .. }
@@ -305,15 +311,15 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         if !self.cursor_claim_is_in_flight(cursor) {
             return None;
         }
-        let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)?.clone() else {
+        let RuntimeNode::RemoteCursor { copy, remote } = self.node(cursor)? else {
             return None;
         };
-        let source = gateway.duplicate_runtime_source(&self.copies.get(&copy)?.source);
+        let source = gateway.duplicate_runtime_source(&self.copies.get(copy)?.source);
         Some(CursorClaim {
             cursor,
             owner,
-            copy,
-            remote,
+            copy: *copy,
+            remote: *remote,
             source,
         })
     }
@@ -363,8 +369,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         if port.is_principal() {
             let node = self
                 .node(port.node())
-                .expect("remote cursor neighbor must exist")
-                .clone();
+                .expect("remote cursor neighbor must exist");
+            let node = match node.clone_copyable() {
+                Some(node) => SourcePrincipalNode::Copyable(node),
+                None => SourcePrincipalNode::CallableCheckpoint,
+            };
             return SourceFrontierShape::Principal { port, node };
         }
 
@@ -454,7 +463,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             match shape {
                 SourceFrontierShape::Principal {
                     port,
-                    node: RuntimeNode::RemoteCursor { .. },
+                    node: SourcePrincipalNode::Copyable(RuntimeNode::RemoteCursor { .. }),
                 } => {
                     let observation = observation
                         .expect("a source cursor endpoint must carry its frontier observation");
@@ -466,7 +475,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         ))),
                     )
                 }
-                SourceFrontierShape::Principal { port, node } => {
+                SourceFrontierShape::Principal {
+                    port,
+                    node: SourcePrincipalNode::Copyable(node),
+                } => {
                     assert!(observation.is_none());
                     (
                         self.materialize_remote_node(
@@ -478,6 +490,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         ),
                         None,
                     )
+                }
+                SourceFrontierShape::Principal {
+                    node: SourcePrincipalNode::CallableCheckpoint,
+                    ..
+                } => {
+                    assert!(observation.is_none());
+                    (CursorProgress::Blocked, Some(CursorBlockage::Stable))
                 }
                 SourceFrontierShape::StableAuxiliary {
                     principal_anchors,
@@ -584,6 +603,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             RuntimeNode::Erase => RuntimeNode::Erase,
             RuntimeNode::Data(data) => RuntimeNode::Data(data.clone()),
             RuntimeNode::Operator(operator) => RuntimeNode::Operator(operator),
+            RuntimeNode::CallableCheckpoint(_) => {
+                self.copies.insert(copy, state);
+                return CursorProgress::Blocked;
+            }
             RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => {
                 self.copies.insert(copy, state);
                 return CursorProgress::Blocked;
@@ -593,7 +616,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             RuntimeNode::Bind | RuntimeNode::Fan { .. } => 2,
             RuntimeNode::Operator(_) => 1,
             RuntimeNode::Erase | RuntimeNode::Data(_) => 0,
-            RuntimeNode::Interface | RuntimeNode::RemoteCursor { .. } => unreachable!(),
+            RuntimeNode::Interface
+            | RuntimeNode::CallableCheckpoint(_)
+            | RuntimeNode::RemoteCursor { .. } => unreachable!(),
         };
 
         let local = self

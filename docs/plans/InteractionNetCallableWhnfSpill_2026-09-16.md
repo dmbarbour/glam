@@ -826,6 +826,19 @@ isomorphism and stays assigned to parent W6G.3.
 
 #### NC2A — Specialization payload and boxing decision
 
+Status: complete on 2026-09-16.
+
+Execution checkpoints:
+
+- **NC2A.1 — Generic linear payload seam.** Add the associated type and
+  runtime-only node variant, remove the blanket runtime-node trait derives,
+  and replace whole-node cloning in reduction and cursor-frontier discovery
+  with explicit structural classifications. The checkpoint remains opaque in
+  generic diagnostics and cannot enter a template or copy path.
+- **NC2A.2 — Core managed payload.** Select and latch boxed `NetWhnfState`
+  storage, extend logical-payload visitation and managed tracing, and update
+  the ownership/drop/cycle inventories and size gates.
+
 Add the specialization-owned callable-checkpoint associated type and the
 runtime-only node variant. Use NC0B measurements to select boxed or unboxed
 storage. Latch the resulting `RuntimeNode` and managed wrapper size classes.
@@ -843,7 +856,23 @@ equality. Extend `RuntimeNetPayload` and the outer `ManagedCoreNetCell` trace
 adapter so the checkpoint's complete internal edge walk participates in every
 logical payload snapshot; do not add roots to compensate for a missing edge.
 
+Completion record: `NetSpecialization::CallableCheckpoint` requires only
+`Send + 'static`; core selects `Box<NetWhnfState>`, preserving the 96-byte
+`RuntimeNode<CoreSpecialization>` size class. `RuntimeNode` no longer derives
+clone, formatting, or equality from every payload. Its manual structural
+formatter hides checkpoint internals, and the only generic clone helper
+returns `None` for the linear variant. Reduction and cursor-frontier discovery
+now clone only explicitly copyable ordinary nodes. Both transition and full
+logical-payload walks report the checkpoint, and the managed core trace
+adapter delegates to the canonical state's exhaustive edge visitor. The
+source-backed interlock inventory now retains only intentional ordinary
+payload clones and NC2's pending observation fixture.
+
 #### NC2B — Linear interaction and cursor rules
+
+Execute the interaction table and the active-source cursor oracle as a
+separate checkpoint after NC2A. A source frontier may classify a checkpoint
+only as non-materializable active work; it never owns or clones its payload.
 
 Implement the sole reducing rule for `Bind >< CallableCheckpoint`, the stuck
 rules for fan, erase, and all other principal partners, and the checkpoint's
@@ -860,6 +889,18 @@ not a new independent fixture.
 
 #### NC2C — Spill and update mutations
 
+Execution checkpoints:
+
+- **NC2C.1 — Install and restore.** Move a claimed `Data` payload out through
+  the existing claim, install one boxed checkpoint at the same node, and give
+  unwind an exact restoration path.
+- **NC2C.2 — Successor publication.** Claim/move a checkpoint payload into
+  regional ownership and either restore it or publish one complete successor
+  through the managed edge gateway.
+- **NC2C.3 — Direct terminalization.** Generalize copy/operator completion to
+  terminalize either a claimed `Data` call or claimed checkpoint without
+  reconstructing an intermediate data node.
+
 Add separately named generic runtime mutations which:
 
 1. replace one claimed call's `Data` node with a callable checkpoint while
@@ -874,6 +915,10 @@ replacement before release, and reports old/new payload edges through the
 managed mutation gateway. Test stale calls and unwind before publication.
 
 #### NC2D — Conditional exact blocking
+
+Partition this into the exact topology operation first and the four
+forced-order subscription/admission fixtures second. The latter is not
+accepted on repetition evidence.
 
 Add the minimum exact-state operation needed to block a published checkpoint
 after dependency admission. Match runtime net, pair, and checkpoint
@@ -896,6 +941,9 @@ observation trait, checkpoint-copy path, or regional/net representation walk.
 ### NC3 — Inline-first original call reduction
 
 #### NC3A — Regional fast path
+
+Implement and verify immediate bypass plus bounded cached/assigned progress
+before enabling either spill outcome.
 
 Replace synchronous deferred forcing in `lower_core_callable_in` with bounded
 regional WHNF work. Immediate callables bypass the driver. Deferred callables

@@ -950,6 +950,7 @@ impl NetSpecialization for CoreSpecialization {
     type RuntimeSource = CoreRuntimeNet;
     type WaitToken = crate::core_net::CoreWaitToken;
     type StuckReason = EvaluationHalt;
+    type CallableCheckpoint = Box<crate::eval::whnf::NetWhnfState>;
 }
 
 pub(super) enum CoreCallable {

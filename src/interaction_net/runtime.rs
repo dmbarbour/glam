@@ -624,6 +624,9 @@ impl RuntimeNetEdgeSet {
                 Some(RuntimeNode::Operator(operator)) => {
                     visit(RuntimeNetPayload::Operator(operator));
                 }
+                Some(RuntimeNode::CallableCheckpoint(checkpoint)) => {
+                    visit(RuntimeNetPayload::CallableCheckpoint(checkpoint));
+                }
                 Some(
                     RuntimeNode::Bind
                     | RuntimeNode::Fan { .. }
@@ -1785,7 +1788,7 @@ pub(crate) struct SourceFrontier<S: NetSpecialization> {
 enum SourceFrontierShape<S: NetSpecialization> {
     Principal {
         port: Port,
-        node: RuntimeNode<S>,
+        node: SourcePrincipalNode<S>,
     },
     StableAuxiliary {
         port: Port,
@@ -1796,6 +1799,12 @@ enum SourceFrontierShape<S: NetSpecialization> {
         entered: Port,
         partner: Port,
     },
+}
+
+/// A source principal classified without copying a linear evaluator payload.
+enum SourcePrincipalNode<S: NetSpecialization> {
+    Copyable(RuntimeNode<S>),
+    CallableCheckpoint,
 }
 
 struct RuntimeEntry<S: NetSpecialization> {
@@ -1811,6 +1820,7 @@ struct RuntimeEntry<S: NetSpecialization> {
 pub(crate) enum RuntimeNetPayload<'payload, S: NetSpecialization> {
     Data(&'payload S::Data),
     Operator(&'payload S::Operator),
+    CallableCheckpoint(&'payload S::CallableCheckpoint),
     Source(&'payload S::RuntimeSource),
     StuckReason(&'payload S::StuckReason),
 }
@@ -1909,6 +1919,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 }
                 RuntimeNode::Operator(operator) => {
                     visit(RuntimeNetPayload::Operator(operator));
+                }
+                RuntimeNode::CallableCheckpoint(checkpoint) => {
+                    visit(RuntimeNetPayload::CallableCheckpoint(checkpoint));
                 }
                 RuntimeNode::Bind
                 | RuntimeNode::Fan { .. }
@@ -2713,6 +2726,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     RuntimeNode::Fan { .. }
                     | RuntimeNode::Erase
                     | RuntimeNode::Operator(_)
+                    | RuntimeNode::CallableCheckpoint(_)
                     | RuntimeNode::Interface,
                 )
                 | None => InterfaceDemand::NormalForm,
@@ -2867,14 +2881,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let (left_id, right_id) = self
             .pair_nodes(pair)
             .expect("ready pair key must identify a principal-principal wire");
-        let left = self
-            .node(left_id)
-            .expect("ready pair left node must exist")
-            .clone();
+        let left = self.node(left_id).expect("ready pair left node must exist");
         let right = self
             .node(right_id)
-            .expect("ready pair right node must exist")
-            .clone();
+            .expect("ready pair right node must exist");
         let cursor = match (&left, &right) {
             (RuntimeNode::RemoteCursor { .. }, _) => Some(left_id),
             (_, RuntimeNode::RemoteCursor { .. }) => Some(right_id),
@@ -2889,6 +2899,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 kind: ReductionKind::RemoteCursor { cursor, progress },
             });
         }
+        if matches!(left, RuntimeNode::CallableCheckpoint(_))
+            || matches!(right, RuntimeNode::CallableCheckpoint(_))
+        {
+            *self.active.get_mut(&pair).unwrap() = ActivePairState::Stuck(StuckReason::NoRule);
+            return Some(Reduction {
+                pair,
+                kind: ReductionKind::Stuck,
+            });
+        }
+        let left = left
+            .clone_copyable()
+            .expect("non-checkpoint node must remain generically copyable");
+        let right = right
+            .clone_copyable()
+            .expect("non-checkpoint node must remain generically copyable");
         let kind = match (&left, &right) {
             (RuntimeNode::Bind, RuntimeNode::Bind) => {
                 self.join(left_id, right_id, 2);
@@ -2981,6 +3006,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             | (RuntimeNode::RemoteCursor { .. }, _)
             | (_, RuntimeNode::RemoteCursor { .. }) => {
                 unreachable!("evaluator-only nodes do not use ordinary interaction rules")
+            }
+            (RuntimeNode::CallableCheckpoint(_), _) | (_, RuntimeNode::CallableCheckpoint(_)) => {
+                unreachable!("linear checkpoints were excluded before ordinary dispatch")
             }
         };
         if !matches!(

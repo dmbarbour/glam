@@ -296,6 +296,7 @@ mod tests {
         type RuntimeSource = crate::interaction_net::SharedRuntimeNet<Self>;
         type WaitToken = ();
         type StuckReason = ();
+        type CallableCheckpoint = ();
     }
 
     struct ManagedNetFixtureNode {
@@ -324,6 +325,7 @@ mod tests {
             runtime.visit_logical_payloads(&mut |payload| match payload {
                 RuntimeNetPayload::Data(edge) => visitor.visit(edge),
                 RuntimeNetPayload::Operator(()) => {}
+                RuntimeNetPayload::CallableCheckpoint(()) => {}
                 RuntimeNetPayload::Source(_) => {
                     unreachable!("the closed fixture creates no logical copies")
                 }
