@@ -1526,16 +1526,18 @@ coordination without turning into a general mutator-spanning wait. Preserve
 batched disturbance publication and shared-net normalization.
 
 The W6B.4b.2 callable-spill subcheckpoint may add the private runtime-only
-`CallableCheckpoint`, but it must not add an ordinary trait dependency to the
-raw-value carrier closure. Its focused NC0D checkpoint inventories
+`CallableCheckpoint`, but it must not add an ordinary duplication,
+formatting, or equality trait dependency to the raw-value carrier closure.
+Its focused NC0D checkpoint inventories
 `NetSpecialization` bounds, `RuntimeNode` derives, whole-node clones, and
 node equality/formatting assumptions before adding the variant. The
-checkpoint is linear: only `Bind >< CallableCheckpoint` reduces; fan, erase,
-and other principal partners are stuck, and cursor copying waits for the
-source active pair rather than duplicating its state. D.2c.3c owns the raw
-operation/count update, while the nested persistent-edge plan's P3/P4
-interlock owns the final proof that no `Clone`, `Debug`, `PartialEq`, or `Eq`
-dependency was introduced.
+checkpoint requires `Send + 'static`, but not `Sync`: it moves between
+mutex-protected net storage and one exact thread-bound claim. It is linear:
+only `Bind >< CallableCheckpoint` reduces; fan, erase, and other principal
+partners are stuck, and cursor copying waits for the source active pair rather
+than duplicating its state. D.2c.3c owns the raw operation/count update, while
+the nested persistent-edge plan's P3/P4 interlock owns the final proof that no
+`Clone`, `Debug`, `PartialEq`, or `Eq` dependency was introduced.
 
 Verification: operator/function-call fixtures, net data extraction, cursor
 handoff and contention barrier tests, and cursor WHNF tests in both modes.

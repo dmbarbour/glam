@@ -150,7 +150,7 @@ payload, conceptually:
 
 ```rust
 trait NetSpecialization {
-    type CallableCheckpoint: 'static;
+    type CallableCheckpoint: Send + 'static;
     // existing associated types...
 }
 
@@ -185,6 +185,30 @@ The parent GC remediation is deliberately removing those unqualified traits
 from raw `Value`, managed edges, and eventually the generic runtime carriers
 which contain them. Adding the bounds here would create a new transitive
 interlock immediately before that cutover.
+
+It does require `Send`. The checkpoint is stored under the runtime-net mutex
+or moved into one winning, thread-bound claim. Different workers may own that
+state at different times, so the mutex-protected runtime state must be
+sendable. It does not require `Sync`: no shared checkpoint reference escapes
+the runtime lock or claim, and pair claiming excludes simultaneous regional
+access. The concrete state may happen to auto-implement `Sync`, but the
+specialization contract must not rely on it.
+
+`Send` describes the dormant payload stored in the runtime net. Once a claim
+moves that payload into regional work, the claim/state guard is lifetime-bound
+to the non-`Send` value-access region. It must publish or restore the complete
+state before that access closes and cannot be handed to another worker.
+
+Boxing does not change this contract: `Box<NetWhnfState>` is `Send` whenever
+the state is `Send`, and it keeps the state uniquely owned and movable. Do not
+replace it with `Gc<NetWhnfState>` merely for cross-thread use. `Gc<T>`
+requires `T: Trace`, whose current contract includes both `Send` and `Sync`,
+and a managed allocation cannot simply be moved out when a claim projects the
+checkpoint into regional work. That representation would therefore add a
+stronger bound, collector tracing/mutation machinery, indirection, and likely
+one managed allocation per successor checkpoint. Reconsider managed
+indirection only if later profiling identifies a separate sharing or layout
+need which outweighs those costs.
 
 The current generic `RuntimeNode` derives and `NetSpecialization` bounds are
 transition scaffolding, not the checkpoint contract. NC0D inventories every
@@ -370,9 +394,13 @@ later poll.
     partial-function, and applicable-dictionary behavior.
 15. **No new global allocator is introduced.** Checkpoint generations use
     runtime-owned identity allocation or an existing exact runtime revision.
-16. **No standard value traits are reintroduced.** Checkpoint storage,
-    orchestration, tests, and diagnostics do not require `Clone`, `Debug`,
-    `PartialEq`, or `Eq` from checkpoint state or its retained values.
+16. **No standard value observation traits are reintroduced.** Checkpoint
+    storage, orchestration, tests, and diagnostics do not require `Clone`,
+    `Debug`, `PartialEq`, or `Eq` from checkpoint state or its retained values.
+17. **Thread mobility is ownership mobility.** Checkpoint state is `Send` so
+    the mutex-protected net may move work between workers; `Sync` is not a
+    checkpoint requirement because the lock and exact claim prevent shared
+    regional access.
 
 ## Non-Goals
 
@@ -417,6 +445,10 @@ Record `size_of` and applicable GC slot/run-class observations for:
 
 This baseline decides NC2A boxing. Prefer const assertions for architectural
 size assumptions and ordinary tests for policy thresholds which may change.
+Add a compile-time positive contract for checkpoint `Send`, without imposing
+or attempting to prove the absence of an incidental `Sync`
+auto-implementation. Separately latch that the active projected-state guard is
+not `Send` and cannot outlive its matching value access.
 
 #### NC0C — Failing spill oracle
 
@@ -434,7 +466,8 @@ regressions as their owning phases land.
 #### NC0D — Runtime-node trait and copy inventory
 
 Inventory the exact generic declarations which would make a new runtime-node
-payload inherit `Clone`, `Debug`, `PartialEq`, or `Eq`, including:
+payload inherit `Clone`, `Debug`, `PartialEq`, or `Eq`, and separately confirm
+where `Send` is required for runtime sharing, including:
 
 - `NetSpecialization` bounds and associated-type bounds;
 - `RuntimeNode` derives and whole-node clones;
@@ -521,8 +554,9 @@ Add the specialization-owned callable-checkpoint associated type and the
 runtime-only node variant. Use NC0B measurements to select boxed or unboxed
 storage. Latch the resulting `RuntimeNode` and managed wrapper size classes.
 Give the associated type no ordinary duplication, formatting, or equality
-bounds. Remove or narrow any blanket `RuntimeNode` derive which would impose
-them, using the NC0D assignment rather than introducing a compatibility shim.
+bounds beyond `Send + 'static`. Remove or narrow any blanket `RuntimeNode`
+derive which would impose them, using the NC0D assignment rather than
+introducing a compatibility shim.
 
 Extend structural variant rendering, profiling classification,
 managed-drop/ownership inventories, and the core checkpoint edge visitor.
@@ -574,7 +608,7 @@ Close the subscribe/observe race explicitly; no ordering may lose a wakeup.
 
 Exit: the runtime can own, move, update, block, and terminalize a complete
 callable checkpoint without an additional graph node, durable claim, payload
-trait, or checkpoint-copy path.
+observation trait, or checkpoint-copy path.
 
 ### NC3 — Inline-first original call reduction
 
