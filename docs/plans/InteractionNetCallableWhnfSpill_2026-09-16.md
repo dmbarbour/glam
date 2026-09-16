@@ -1157,6 +1157,8 @@ the new atomic blocked-failure transition.
 
 #### NC5C — Cursor deferral and GC ownership
 
+Status: complete on 2026-09-16.
+
 Attempt to copy or materialize a closed runtime net while a checkpoint pair is
 ready and while it is blocked. The target cursor must depend on source active
 pair progress; after the source terminalizes, it copies only the semantic
@@ -1164,6 +1166,17 @@ result. Assert that no checkpoint payload is cloned and no target checkpoint
 exists. Force collection at claim, publication, dependency admission,
 wake, cursor deferral, source terminalization, result materialization, and
 checkpoint retirement.
+
+Completion record: two independently rooted logical copies meet the source
+checkpoint in ready and blocked states. Each target cursor records the source
+active pair and contains zero checkpoint nodes. After the exact promise wake,
+the source terminalizes through the ordinary callable path and both targets
+materialize only its unit semantic result. Explicit full collections succeed
+at original claim, ready publication, ready cursor deferral, dependency
+admission, blocked cursor deferral, wake, source terminalization, result
+materialization, and final owner retirement. The non-cloneable payload and the
+zero-target-checkpoint assertions jointly latch that no logical copy copied
+checkpoint state.
 
 #### NC5D — Record actual callable-state usage
 

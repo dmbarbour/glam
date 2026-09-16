@@ -494,6 +494,29 @@ fn install_ready_checkpoint(
     (runtime, call, checkpoint)
 }
 
+fn claimed_applied_core_call_in(
+    values: &CoreValueFactory,
+    callable: Value,
+) -> (CoreRuntimeNet, Call) {
+    let mut net = NetBuilder::<CoreSpecialization>::new();
+    let [application, argument, result] = net.bind();
+    let callable = net.data(callable);
+    let argument_value = net.data(values.unit());
+    net.wire(application, callable);
+    net.wire(argument, argument_value);
+    let runtime = values.instantiate_core_net(&net.finish(result));
+    let pair = runtime.test_with(values, |net| {
+        net.active_pairs().next().expect("call pair must be active")
+    });
+    let reduction = runtime
+        .test_with_optional_mut(values, |net| net.reduce_pair(pair))
+        .expect("call pair must be claimable");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("bind-data fixture must produce a call")
+    };
+    (runtime, Call { pair, bind, data })
+}
+
 #[test]
 fn two_workers_contend_for_one_linear_checkpoint_payload() {
     let fixture = SameRuntimeFixture::new();
@@ -613,4 +636,155 @@ fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
         });
     });
     assert!(!runtime.test_with(context.values(), |net| net.pair_is_claimed(call.pair)));
+}
+
+fn assert_cursor_defers_to_checkpoint(
+    values: &CoreValueFactory,
+    target: &CoreRuntimeNet,
+    interface: Port,
+    source_pair: ActivePairKey,
+) {
+    let cursor = match target.test_poll_interface_demand(values, interface) {
+        InterfaceDemand::Cursor(cursor) => cursor,
+        demand => panic!("checkpoint copy must expose a cursor, got {demand:?}"),
+    };
+    let dependency = match target.test_step_cursor(values, cursor) {
+        CursorStep::Dependency(dependency) => dependency,
+        step => panic!("checkpoint cursor must defer to source progress, got {step:?}"),
+    };
+    assert!(matches!(
+        dependency,
+        CursorDependency::SourceFrontier(observation)
+            if observation.endpoint() == DemandEndpoint::ActivePair(source_pair)
+    ));
+    assert_eq!(
+        target.test_with(values, RuntimeNet::callable_checkpoint_count),
+        0,
+        "logical copies must never materialize a checkpoint payload"
+    );
+}
+
+#[test]
+fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
+    let values = CoreValueFactory::new(
+        allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let context = EvalContext::isolated(values.clone());
+    let promise = PromisedValue::new(&values, "NC5 cursor dependency");
+    let (source, call) = claimed_applied_core_call_in(&values, Value::Promised(promise.clone()));
+    let source_root = values.root_core_net(&source);
+
+    values
+        .collect_managed_for_test()
+        .expect("collection at the original claimed call must succeed");
+    super::super::with_direct_evaluator(&context, |evaluator| {
+        let mut budget = crate::evaluation::EvaluationStepBudget::new(0);
+        assert!(progress_exact_core_call_in(
+            evaluator,
+            &source,
+            call,
+            &mut budget,
+        )?);
+        Ok::<_, EvaluationHalt>(())
+    })
+    .unwrap();
+    let published = checkpoint_observation(&source, &values, call.pair).0;
+    assert_eq!(published.generation, 0);
+    values
+        .collect_managed_for_test()
+        .expect("collection at ready checkpoint publication must succeed");
+
+    let (ready_target, ready_interface) =
+        CoreRuntimeNet::test_copy_layer(&values, source.clone());
+    let ready_root = values.root_core_net(&ready_target);
+    assert_cursor_defers_to_checkpoint(
+        &values,
+        &ready_target,
+        ready_interface,
+        call.pair,
+    );
+    values
+        .collect_managed_for_test()
+        .expect("collection while a ready checkpoint cursor is deferred must succeed");
+
+    reduce_checkpoint(&values, &source, call.pair);
+    progress_checkpoint(&context, &source, call.pair, usize::MAX).unwrap();
+    let blocked = blocked_checkpoint(&values, &source, call.pair);
+    values
+        .collect_managed_for_test()
+        .expect("collection after dependency admission must succeed");
+
+    let (blocked_target, blocked_interface) =
+        CoreRuntimeNet::test_copy_layer(&values, source.clone());
+    let blocked_root = values.root_core_net(&blocked_target);
+    assert_cursor_defers_to_checkpoint(
+        &values,
+        &blocked_target,
+        blocked_interface,
+        call.pair,
+    );
+    values
+        .collect_managed_for_test()
+        .expect("collection while a blocked checkpoint cursor is deferred must succeed");
+
+    let result = crate::eval::test_support::closed_function_value_in(
+        &values,
+        1,
+        crate::eval::test_support::TestExpr::Value(values.unit()),
+    );
+    crate::core::set_test_promise(
+        &values,
+        &promise,
+        result,
+    )
+    .expect("cursor dependency accepts its semantic net result");
+    assert!(matches!(
+        context.pump_wait(&blocked.wait.0, 256),
+        EvaluationPumpOutcome::TargetReady
+    ));
+    values
+        .collect_managed_for_test()
+        .expect("collection after the exact wake must succeed");
+
+    resume_blocked_checkpoint(&context, &source, &blocked).unwrap();
+    assert_eq!(
+        source.test_with(&values, RuntimeNet::callable_checkpoint_count),
+        0,
+        "source terminalization retires the checkpoint payload"
+    );
+    values
+        .collect_managed_for_test()
+        .expect("collection after source terminalization must succeed");
+
+    let source_interface = source.test_with(&values, RuntimeNet::exposed);
+    assert_eq!(
+        normalization_request_in(&context, &source, source_interface)
+            .drive(&context)
+            .expect("source semantic result must materialize"),
+        NetInterfaceOutcome::Data
+    );
+    for (target, interface) in [
+        (&ready_target, ready_interface),
+        (&blocked_target, blocked_interface),
+    ] {
+        assert_eq!(
+            normalization_request_in(&context, target, interface)
+                .drive(&context)
+                .expect("deferred cursor must copy only the semantic result"),
+            NetInterfaceOutcome::Data
+        );
+        assert_eq!(
+            target.test_with(&values, RuntimeNet::callable_checkpoint_count),
+            0
+        );
+    }
+    values
+        .collect_managed_for_test()
+        .expect("collection after result materialization must succeed");
+
+    drop((ready_root, blocked_root, source_root));
+    values
+        .collect_managed_for_test()
+        .expect("collection after checkpoint-owner retirement must succeed");
 }
