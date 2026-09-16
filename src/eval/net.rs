@@ -2171,9 +2171,7 @@ mod driver_tests {
             .expect("terminal promise accepts its callable result");
         let mut focus = terminal;
         for label in ["third", "second", "first"] {
-            let prior = context
-                .values()
-                .with_runtime_value_access(|access| Value::Promised(focus.duplicate_in(&access)));
+            let prior = Value::Promised(focus);
             let next = PromisedValue::new(context.values(), format!("{label} profiled callable"));
             crate::core::set_test_promise(context.values(), &next, prior)
                 .expect("promise accepts its delegated focus");
@@ -2230,14 +2228,14 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("retried checkpoint is claimable");
-        let successor = super::with_direct_evaluator(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                CoreCheckpointClaim::take(&access, &runtime, call.pair)
-                    .expect("exact checkpoint state is claimable")
-                    .publish()
-                    .expect("claimed checkpoint accepts one successor generation")
-            })
-        });
+        super::with_direct_evaluator(&context, |evaluator| {
+            let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
+            progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
+        })
+        .expect("unresolved focus publishes and blocks one successor generation");
+        let successor = runtime
+            .test_with(context.values(), |net| net.callable_checkpoint(call.pair))
+            .expect("successor checkpoint remains published while blocked");
         assert_ne!(successor.generation, blocked.call.generation);
         super::with_direct_evaluator(&context, |evaluator| {
             assert_eq!(
@@ -2250,7 +2248,7 @@ mod driver_tests {
 
         let profile = context.values().interaction_net_profile_snapshot().driver;
         assert_eq!(profile.callable_checkpoint_installs, 1);
-        assert_eq!(profile.callable_checkpoint_dependency_blocks, 1);
+        assert_eq!(profile.callable_checkpoint_dependency_blocks, 2);
         assert_eq!(profile.callable_checkpoint_dependency_retries, 1);
         assert_eq!(profile.callable_checkpoint_resumptions, 1);
         assert_eq!(profile.callable_checkpoint_replacements, 1);

@@ -614,6 +614,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net.rs::driver_tests::retried_operator_claim_release_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::retried_operator_claim_unwind_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::stale_fresh_operator_claim_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net/tests/nc5.rs::block_task_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_usage_distinguishes_production_from_frame_fixture#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -823,7 +824,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/eval/net.rs", GatewayCounts::new(23, 0)),
         // NC5's promise-chain and usage fixtures duplicate managed promise
         // edges only beneath three explicit matching-runtime access regions.
-        ("src/eval/net/tests/nc5.rs", GatewayCounts::new(3, 0)),
+        // NC6C roots the task-terminal net in one additional bounded region;
+        // aggressive collection may otherwise reclaim the test fixture
+        // between construction and its terminal-state observation.
+        ("src/eval/net/tests/nc5.rs", GatewayCounts::new(4, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         ("src/eval/test_support.rs", GatewayCounts::new(1, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under

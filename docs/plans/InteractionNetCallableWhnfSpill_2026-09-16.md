@@ -1,6 +1,6 @@
 # Interaction-Net Callable WHNF Spill Plan — 2026-09-16
 
-Status: in progress; NC0-NC5 completed on 2026-09-16. The plan was revised on
+Status: complete; NC0-NC6 completed on 2026-09-16. The plan was revised on
 2026-09-16 first to use one net-owned callable checkpoint rather than an
 `Operator >< Data` encoding, then to make regional and net-owned roles
 zero-walk wrappers around one canonical `WhnfState`. This is the focused
@@ -1349,6 +1349,16 @@ suites, forced-schedule tests, and relevant aggressive-GC partitions. Re-run
 the forced-order retirement/publication latch which closed parent finding
 `W5C5-002`; an isolated or repeated pass remains insufficient evidence for
 concurrency regressions. Then perform a focused post-NC review of:
+
+Completed on 2026-09-16. Routine formatting, all-target/all-feature Clippy,
+the full ordinary suite, the focused profiling script, both forced-order
+retirement/publication schedules, and the callable plus regional-role
+aggressive-GC partitions pass. Aggressive collection exposed one test-only
+ownership defect: the task-terminal fixture carried an unrooted managed net
+across separate access regions. The fixture now constructs, claims, and roots
+that net within one bounded region and retains the root for the complete
+terminal-state scenario. Exact access and regional-constructor inventories
+record that deliberate test boundary; production ownership did not change.
 
 ##### NC6C.2 — Focused post-NC review
 

@@ -528,7 +528,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         expected: &CoreCursorDependency,
         disposition: CursorDependencyDisposition,
     ) -> CursorDependencyResolution {
-        let result = self.runtime.cell().with_conditional_edge_mut_via(
+        self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| {
                 runtime.resolve_cursor_dependency_edge_transition(
@@ -548,8 +548,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     RuntimeNetMutation::Unchanged(resolution)
                 }
             },
-        );
-        result
+        )
     }
 
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {

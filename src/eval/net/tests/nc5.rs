@@ -296,14 +296,36 @@ fn block_task_promise(
     observer: &EvalContext,
     promise: PromisedValue,
 ) -> (
+    crate::core::ManagedCoreNetRoot,
     CoreRuntimeNet,
     Call,
     crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>,
 ) {
-    let (runtime, call) = claimed_core_call_in(observer.values(), Value::Promised(promise));
+    let mut net = NetBuilder::<CoreSpecialization>::new();
+    let bind = net.push(crate::interaction_net::Node::Bind);
+    let data = net.data(Value::Promised(promise));
+    let erase = net.push(crate::interaction_net::Node::Erase);
+    net.wire(Port::principal(bind), data);
+    net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
+    let template = net.finish(Port::auxiliary(bind, 1));
+    let (root, runtime, call) = observer.values().with_runtime_value_access(|access| {
+        let runtime = access
+            .construct_managed_core_net(template.instantiate())
+            .expect("managed task-promise net must fit one collector run");
+        let root = runtime.root_in(&access);
+        let runtime_access = runtime.access(&access);
+        let pair = runtime_access.with(|net| net.active_pairs().next().unwrap());
+        let reduction = runtime_access
+            .with_optional_mut(|net| net.reduce_pair(pair))
+            .expect("task-promise call fixture must be claimable");
+        let ReductionKind::Call { bind, data } = reduction.kind else {
+            panic!("bind-data fixture must produce a call")
+        };
+        (root, runtime, Call { pair, bind, data })
+    });
     assert!(progress_exact_core_call(observer, &runtime, call).unwrap());
     let blocked = blocked_checkpoint(observer.values(), &runtime, call.pair);
-    (runtime, call, blocked)
+    (root, runtime, call, blocked)
 }
 
 fn assert_task_terminal_fails_checkpoint(
@@ -337,12 +359,12 @@ fn callable_checkpoint_propagates_task_cancellation_abandonment_and_failure() {
     let (promise, task, owner_context) = owner
         .task_owned_promise("NC5 cancelled task promise")
         .expect("task promise should register");
-    let (runtime, call, blocked) = block_task_promise(&observer, promise);
+    let (_root, runtime, call, blocked) = block_task_promise(&observer, promise);
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     assert_task_terminal_fails_checkpoint(&observer, &runtime, call, &blocked, "was cancelled");
     drop((owner_context, owner));
 
-    let (runtime, call, blocked) = {
+    let (_root, runtime, call, blocked) = {
         let owner = fixture.context();
         let (promise, _task, owner_context) = owner
             .task_owned_promise("NC5 abandoned task promise")
@@ -357,7 +379,7 @@ fn callable_checkpoint_propagates_task_cancellation_abandonment_and_failure() {
     let (promise, task, owner_context) = owner
         .task_owned_promise("NC5 failed task promise")
         .expect("task promise should register");
-    let (runtime, call, blocked) = block_task_promise(&observer, promise);
+    let (_root, runtime, call, blocked) = block_task_promise(&observer, promise);
     owner.fail_wait(task.wait(), "NC5 producer task failure");
     assert_task_terminal_fails_checkpoint(
         &observer,

@@ -1468,6 +1468,7 @@ mod tests {
         ContainingRoot,
         EvaluatorNursery,
         ExplicitFamilyRoot,
+        ExactFixtureRoot,
     }
 
     struct ReviewedConstructorSite {
@@ -1675,6 +1676,11 @@ mod tests {
                     "src/core.rs::PromisedValue::fixpoint",
                 ],
             ),
+            (
+                RegionalConstructionDisposition::ExactFixtureRoot,
+                "roots the managed net inside the same test access region before carrying it across later observations",
+                &["src/eval/net/tests/nc5.rs::block_task_promise"],
+            ),
         ];
 
         groups
@@ -1712,6 +1718,11 @@ mod tests {
             }
             RegionalConstructionDisposition::ExplicitFamilyRoot => {
                 !site.calls.rooted.is_empty() && site.calls.nursery.is_empty()
+            }
+            RegionalConstructionDisposition::ExactFixtureRoot => {
+                !site.calls.access_entries.is_empty()
+                    && !site.calls.publications.is_empty()
+                    && site.calls.nursery.is_empty()
             }
         }
     }
