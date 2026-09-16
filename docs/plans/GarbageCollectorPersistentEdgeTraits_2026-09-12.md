@@ -626,7 +626,10 @@ Planned W6B.4b.2 interlock, 2026-09-16: the private runtime-only
 value shell. Its associated type has no `Clone`, `Debug`, `PartialEq`, or `Eq`
 bound. It requires `Send + 'static` because ownership may move between
 workers, but the runtime-net mutex and exact claim mean it does not require
-`Sync`. Only `Bind >< CallableCheckpoint` reduces; fan, erase, and other
+`Sync`. The enclosing `ManagedCoreNetCell::trace` still walks every nested
+checkpoint edge through the logical-payload visitor; avoiding a direct
+`NetWhnfState: Trace` implementation does not make the state untraced. Only
+`Bind >< CallableCheckpoint` reduces; fan, erase, and other
 principal interactions are stuck, and cursor/source materialization waits for
 the source active pair rather than copying checkpoint state. Before adding the
 variant, focused checkpoint NC0D inventories every `NetSpecialization` bound,

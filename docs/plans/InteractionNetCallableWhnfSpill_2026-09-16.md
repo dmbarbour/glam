@@ -210,6 +210,38 @@ one managed allocation per successor checkpoint. Reconsider managed
 indirection only if later profiling identifies a separate sharing or layout
 need which outweighs those costs.
 
+### Nested tracing boundary
+
+The checkpoint must nevertheless be traced. Boxing changes storage layout; it
+does not make the retained values roots and does not make tracing optional.
+The intended boundary extends the existing outer managed-net traversal:
+
+```text
+ManagedCoreNetCell::trace
+  -> RuntimeNetCell::try_visit_logical_payloads
+  -> RuntimeNetPayload::CallableCheckpoint(&NetWhnfState)
+  -> visit every managed edge retained by the state and its frames
+```
+
+`NetWhnfState` therefore provides an exhaustive internal edge walk covering
+at least `focus`, every value-bearing continuation field, and the managed
+promise breadcrumb when present. ID-only fields contribute no edge. Adding a
+state field without updating this walk must fail a source-backed exhaustive
+inventory or compile-exhaustive dispatch test.
+
+This nested walk need not be an implementation of glam-gc's unsafe `Trace`
+trait on `NetWhnfState`. `ManagedCoreNetCell` is the managed allocation and
+already owns the unsafe tracing contract. It locks the runtime cell while
+visiting a stable logical payload snapshot. Because `Mutex<T>` can make the
+outer cell shareable when its protected state is `Send`, the nested payload
+does not independently need `Sync` merely to be visited by the collector.
+
+There is no untraced gap when a claim projects the state. The move into
+regional work occurs only after matching mutator admission; collection cannot
+start while that access remains active. The access-branded claim must publish
+or restore the complete state into the traced net before the mutator exits.
+Dormant and blocked checkpoints are always resident in the outer trace walk.
+
 The current generic `RuntimeNode` derives and `NetSpecialization` bounds are
 transition scaffolding, not the checkpoint contract. NC0D inventories every
 derive, bound, formatting path, equality use, and whole-node clone which the
@@ -370,8 +402,10 @@ later poll.
    state is published atomically at every yield and dependency boundary.
 5. **Claims are quantum-local.** No claim survives budget yield, dependency
    admission, scheduler return, callback, cancellation, or unwind.
-6. **The net owns suspended progress and liveness.** Checkpoint values are
-   traced net edges, not independent roots or machine-side shadows.
+6. **The net owns suspended progress and liveness.** The outer managed-net
+   trace visits every checkpoint edge; they are not independent roots or
+   machine-side shadows. A projected state exists only beneath active mutator
+   admission and returns to the trace before that admission closes.
 7. **Lazy producers remain canonical.** Callable normalization joins an
    existing source owner and never reconstructs its recipe or reflection work.
 8. **Cycle semantics match ordinary WHNF.** Splitting at any quantum or wait
@@ -473,6 +507,7 @@ where `Send` is required for runtime sharing, including:
 - `RuntimeNode` derives and whole-node clones;
 - generic fan/erase rewrites;
 - cursor/source materialization;
+- logical-payload tracing and managed-edge inventories;
 - stuck-state and diagnostic formatting; and
 - tests which compare complete nodes rather than semantic observations.
 
@@ -508,7 +543,9 @@ Force round trips with:
 
 Collection between publication and projection must retain exactly the state
 reachable through the net-owned edge visitor, with no runtime roots inside the
-state.
+state. Give each value-bearing frame position and the optional promise
+breadcrumb an independently collectible sentinel so omitting any one edge
+fails deterministically.
 
 #### NC1B — Shared callback-free driver
 
@@ -562,7 +599,9 @@ Extend structural variant rendering, profiling classification,
 managed-drop/ownership inventories, and the core checkpoint edge visitor.
 Structural rendering identifies the opaque checkpoint variant only. Exact
 orchestration uses its generation/revision and pair identity, not payload
-equality.
+equality. Extend `RuntimeNetPayload` and the outer `ManagedCoreNetCell` trace
+adapter so the checkpoint's complete internal edge walk participates in every
+logical payload snapshot; do not add roots to compensate for a missing edge.
 
 #### NC2B — Linear interaction and cursor rules
 

@@ -3757,7 +3757,9 @@ requires only `Send + 'static`: workers may own it at different times, but the
 runtime-net mutex and exact pair claim make `Sync` unnecessary. It has only
 the `Bind >< CallableCheckpoint` reducing rule; fan, erase, and every other
 principal partner are stuck, while cursor copying waits for the source active
-pair to produce semantic topology. Focused NC0D inventories the current
+pair to produce semantic topology. The outer `ManagedCoreNetCell` trace must
+visit every nested checkpoint edge; a box is traced storage, not a root.
+Focused NC0D inventories the current
 `NetSpecialization` bounds, `RuntimeNode` derives, whole-node clones, and
 test-only equality/formatting assumptions before the variant lands. NC2 owns
 their checkpoint-path repair, and NC6 must reconcile the result with both the

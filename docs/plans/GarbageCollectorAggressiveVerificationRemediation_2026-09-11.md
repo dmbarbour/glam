@@ -1539,11 +1539,20 @@ than duplicating its state. D.2c.3c owns the raw operation/count update, while
 the nested persistent-edge plan's P3/P4 interlock owns the final proof that no
 `Clone`, `Debug`, `PartialEq`, or `Eq` dependency was introduced.
 
+The state remains part of the managed graph. Extend
+`ManagedCoreNetCell::trace` through the runtime's logical-payload visitor to
+walk every value-bearing checkpoint field and direct managed breadcrumb. A
+boxed state is nested traced storage, not a root and not an excuse to omit its
+edges. When a claim moves it out of the net, matching mutator admission must
+remain active until the complete state is restored or published, preventing a
+collector-visible gap without requiring `NetWhnfState: Trace + Sync`.
+
 Verification: operator/function-call fixtures, net data extraction, cursor
 handoff and contention barrier tests, and cursor WHNF tests in both modes.
 Root and access ledgers must show no new net facade root and no nested
 admission. The raw-value and persistent-edge inventories must reject a
-trait-bearing checkpoint payload or a checkpoint-copy path.
+trait-bearing checkpoint payload, a missing checkpoint edge, or a
+checkpoint-copy path.
 
 ###### GCI11R-002D.2c.4 — Dispatch, Scalars, and Strategies
 
