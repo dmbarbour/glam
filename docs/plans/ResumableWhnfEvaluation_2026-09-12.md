@@ -4082,6 +4082,13 @@ improvement. Close W6G.1 by restoring comparable fixture cost or by recording a
 measured, justified residual with ownership assigned to a later performance
 phase.
 
+NC6 measurement, 2026-09-16: callable-WHNF spill did not enlarge this debt.
+Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
+13.11s before and 13.16s after; the successful repeated-split ELF fixture was
+53.01s before and 52.12s after. The minimized semantic/driver signature also
+remains unchanged. Treat the timings only as corroboration, but do not assign
+the preexisting `7fed99e` gap to callable checkpoints.
+
 ##### W6G.2 — Regional standard-effect fusion investigation
 
 Investigate extending the regional-WHNF principle to consecutive standard

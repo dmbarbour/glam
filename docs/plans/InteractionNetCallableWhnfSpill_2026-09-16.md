@@ -1319,8 +1319,18 @@ renamed or dropped regression fails the script's discovery gate.
 
 ##### NC6B.3 — Assembly baseline and residual-cost handoff
 
-Compare direct-style assembly fixtures against the pre-NC baseline and feed residual
-cost into W6G rather than hiding it with an unbounded budget.
+Compare direct-style assembly fixtures against the pre-NC baseline and feed
+residual cost into W6G rather than hiding it with an unbounded budget.
+
+Completed against the NC0 revision `08f7c09` using the same debug-test build
+and exact executable fixtures. The duplicate-symbol fixture took 13.11s at
+NC0 and 13.16s after NC6; the successful repeated-split ELF fixture took
+53.01s at NC0 and 52.12s after NC6. Both retained their exact result and
+diagnostic contracts. These single-run timings are corroborating evidence,
+not a scheduling proof; the unchanged 71-work-item minimized signature and
+the fresh-runtime callable counters are the deterministic gates. NC adds no
+measurable residual of its own. W6G.1 continues to own the older bounded gap
+against `7fed99e` rather than obscuring it with an unbounded callable budget.
 
 #### NC6C — Routine verification and review
 
