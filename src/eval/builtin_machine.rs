@@ -16,11 +16,13 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
+use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
 
 pub(crate) enum BuiltinTaskPoll {
     Ready(RuntimeValueRoot),
+    ScheduleSpark(RuntimeValueRoot),
     Pending(WorkDependency),
     Yielded,
     Failed(RuntimeFailureRoot),
@@ -32,6 +34,7 @@ pub(crate) enum BuiltinTaskMachine {
     Comparison(ComparisonBuiltinMachine),
     Numeric(NumericBuiltinMachine),
     Provenance(ProvenanceBuiltinMachine),
+    Strategy(StrategyBuiltinMachine),
 }
 
 impl BuiltinTaskMachine {
@@ -54,6 +57,8 @@ impl BuiltinTaskMachine {
                 | Builtin::Floor
                 | Builtin::Mod
                 | Builtin::InspectOrigin
+                | Builtin::Seq
+                | Builtin::Spark
         )
     }
 
@@ -76,6 +81,9 @@ impl BuiltinTaskMachine {
             | Builtin::LessEqual
             | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
             Builtin::InspectOrigin => Self::Provenance(ProvenanceBuiltinMachine::new(arguments)),
+            Builtin::Seq | Builtin::Spark => {
+                Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
+            }
             _ => Self::Numeric(NumericBuiltinMachine::new(builtin, arguments)),
         }
     }
@@ -110,6 +118,68 @@ impl BuiltinTaskMachine {
             Self::Provenance(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
+            Self::Strategy(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+        }
+    }
+}
+
+enum StrategyPhase {
+    First,
+    SparkRequested,
+}
+
+pub(crate) struct StrategyBuiltinMachine {
+    builtin: Builtin,
+    demand: StrategyDemandMachine,
+    target: RuntimeValueRoot,
+    phase: StrategyPhase,
+}
+
+impl StrategyBuiltinMachine {
+    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [first, target]: [RuntimeValueRoot; 2] = arguments
+            .try_into()
+            .expect("a strategy source retains two operands");
+        Self {
+            builtin,
+            demand: StrategyDemandMachine::new(first),
+            target,
+            phase: StrategyPhase::First,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        if self.builtin == Builtin::Spark {
+            return match self.phase {
+                StrategyPhase::First => {
+                    let useful = self.demand.is_useful_spark(context);
+                    if useful {
+                        self.phase = StrategyPhase::SparkRequested;
+                        BuiltinTaskPoll::ScheduleSpark(self.demand.source().clone())
+                    } else {
+                        BuiltinTaskPoll::Ready(self.target.clone())
+                    }
+                }
+                StrategyPhase::SparkRequested => BuiltinTaskPoll::Ready(self.target.clone()),
+            };
+        }
+
+        match self
+            .demand
+            .poll(poll_context, context, durable_context, step_budget)
+        {
+            StrategyDemandPoll::Ready => BuiltinTaskPoll::Ready(self.target.clone()),
+            StrategyDemandPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+            StrategyDemandPoll::Yielded => BuiltinTaskPoll::Yielded,
+            StrategyDemandPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
         }
     }
 }

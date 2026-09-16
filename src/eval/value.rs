@@ -698,6 +698,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             if let LazyTaskWork::Builtin(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     BuiltinTaskPoll::Ready(value) => self.follow_value(value),
+                    BuiltinTaskPoll::ScheduleSpark(value) => {
+                        EvaluationMachinePoll::ScheduleSpark(value)
+                    }
                     BuiltinTaskPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),

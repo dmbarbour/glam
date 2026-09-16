@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Weak};
 
+#[cfg(test)]
 use crate::core::Value;
+use crate::eval::strategy_machine::StrategyDemandMachine;
 use crate::runtime::RuntimeValueRoot;
 
 use super::super::EvaluationDemandState;
@@ -14,7 +16,7 @@ use super::{
 
 pub(super) struct SparkDemand {
     session: Weak<EvaluationDemandState>,
-    value: RuntimeValueRoot,
+    operation: StrategyDemandMachine,
 }
 
 pub(crate) struct SparkWork {
@@ -38,14 +40,27 @@ impl ClaimedSparkWork {
         self.session.demand()
     }
 
+    #[cfg(test)]
     pub(crate) fn value(&self) -> &RuntimeValueRoot {
-        &self.demand.value
+        self.demand.operation.source()
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        context: &crate::evaluation::EvaluatorStepContext<'_>,
+        durable_context: &crate::evaluation::EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> crate::eval::strategy_machine::StrategyDemandPoll {
+        self.demand
+            .operation
+            .poll(poll_context, context, durable_context, step_budget)
     }
 
     pub(crate) fn assert_runtime(&self, runtime: crate::runtime::EvaluationRuntimeId) {
         self.session.assert_runtime(runtime);
         assert_eq!(
-            self.value().runtime_id(),
+            self.demand.operation.runtime_id(),
             runtime,
             "spark value must match its claimed demand session runtime"
         );
@@ -54,6 +69,7 @@ impl ClaimedSparkWork {
 
 pub(crate) enum SparkWorkPoll {
     Complete,
+    Yielded,
     Blocked(WorkDependency),
 }
 
@@ -73,16 +89,27 @@ impl SparkRetirement {
 }
 
 impl EvaluationWorkCoordinator {
+    #[cfg(test)]
     pub(in crate::evaluation) fn submit_spark(
         &self,
         session: Arc<EvaluationDemandState>,
         value: Value,
     ) {
+        let value = session.values.construct_runtime_value_root(|_| value);
+        self.submit_spark_root(session, value);
+    }
+
+    pub(in crate::evaluation) fn submit_spark_root(
+        &self,
+        session: Arc<EvaluationDemandState>,
+        value: RuntimeValueRoot,
+    ) {
         debug_assert_eq!(session.values.runtime_id(), self.runtime);
+        debug_assert_eq!(value.runtime_id(), self.runtime);
         let id = EvaluationWorkId(self.ids.evaluation_work());
         let demand = SparkDemand {
             session: Arc::downgrade(&session),
-            value: session.values.construct_runtime_value_root(|_| value),
+            operation: StrategyDemandMachine::new(value),
         };
         let mutation = self.admission.mutation_guard();
         let admitted = {
@@ -187,8 +214,10 @@ impl EvaluationWorkCoordinator {
 
             let mut obsolete_dependency = None;
             let mut exact_subscription = None;
+            let yielded = matches!(poll, SparkWorkPoll::Yielded);
             let dependency = match poll {
                 SparkWorkPoll::Complete => None,
+                SparkWorkPoll::Yielded => None,
                 SparkWorkPoll::Blocked(dependency) => Some(dependency),
             };
             let retired = if close_requested {
@@ -212,6 +241,18 @@ impl EvaluationWorkCoordinator {
                 spark.dependency = dependency;
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
+            } else if yielded {
+                obsolete_dependency = claimed.prior_dependency;
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("running spark work must remain registered");
+                let spark = spark_work_mut(record);
+                spark.demand = Some(claimed.demand);
+                spark.dependency = None;
+                record.state = WorkState::Queued;
+                queue_spark(&mut state, claimed.id);
+                None
             } else if let Some(dependency) = dependency {
                 if dependency.runtime_id() != self.runtime {
                     obsolete_dependency = claimed.prior_dependency;

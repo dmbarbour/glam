@@ -4724,6 +4724,9 @@ fn poll_machine_exit(
             &mut crate::evaluation::EvaluationStepBudget::new(256),
         ) {
             EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::ScheduleSpark(_) => {
+                panic!("exit fixture unexpectedly scheduled a spark")
+            }
             EvaluationMachinePoll::Exit(exit) => return exit,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait)),
@@ -4981,6 +4984,9 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
             &mut crate::evaluation::EvaluationStepBudget::new(256),
         ) {
             EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::ScheduleSpark(_) => {
+                panic!("disturbed exit retry unexpectedly scheduled a spark")
+            }
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait)),

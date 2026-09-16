@@ -167,6 +167,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W3B.2b explicit object-fixpoint source owner"
     ),
     entry!(
+        "src/eval/strategy_machine.rs",
+        0,
+        0,
+        1,
+        "hidden metadata retained across resumable seq and spark demand",
+        "W6C.6 shared durable strategy-demand owner"
+    ),
+    entry!(
         "src/eval/tagged_machine.rs",
         0,
         0,
@@ -459,6 +467,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
                 | "src/eval/object_machine.rs::spec_member_root"
+                | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
                 | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
@@ -734,6 +743,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::spec_member_root#1|surface=access-publication|scope=production",
+    "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#2|surface=access-publication|scope=production",
@@ -765,7 +775,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf/tests/w2b.rs::promise_computation#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
-    "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=production",
+    "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=test",
     "src/evaluation/coordinator/task.rs::promise_assignment_terminal#1|surface=scoped-factory|scope=production",
     "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#2|surface=compatibility-new|scope=test",
@@ -810,6 +820,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::ready_settlement_publishes_exited_once_and_retains_exit_errors#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::root_promise_value#1|surface=access-publication|scope=test",
+    "src/evaluation/tests.rs::rooted_promise_value#1|surface=access-publication|scope=test",
+    "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::runtime_deadlock_retains_typed_task_and_client_dependencies#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",

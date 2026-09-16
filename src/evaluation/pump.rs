@@ -162,12 +162,26 @@ impl ClaimedTask {
     }
 
     fn release(self, poll: EvaluationMachinePoll) -> (bool, bool, Option<ReleasedTaskMachine>) {
-        match self.kind {
+        let (poll, spark) = match poll {
+            EvaluationMachinePoll::ScheduleSpark(value) => {
+                (EvaluationMachinePoll::Yielded, Some(value))
+            }
+            poll => (poll, None),
+        };
+        let demand = spark.as_ref().map(|_| self.kind.demand().demand());
+        let released = match self.kind {
             ClaimedTaskKind::Reflection(task) => {
                 release_reflection_task(&self.coordinator, task, poll)
             }
             ClaimedTaskKind::Deferred(task) => release_deferred_task(&self.coordinator, task, poll),
+        };
+        if let Some(value) = spark {
+            self.coordinator.submit_spark_root(
+                demand.expect("a spark request must retain its demand session"),
+                value,
+            );
         }
+        released
     }
 }
 
@@ -396,7 +410,10 @@ pub(super) fn pump_demand(
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let poll = claimed.poll(&mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
-        let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
+        let yielded = matches!(
+            poll,
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+        );
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
@@ -420,6 +437,9 @@ fn release_reflection_task(
     let work = claimed.id();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
+        EvaluationMachinePoll::ScheduleSpark(_) => {
+            unreachable!("claimed-task release must externalize spark requests")
+        }
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
         EvaluationMachinePoll::Complete(value) => (
@@ -497,6 +517,9 @@ fn release_deferred_task(
     let work = claimed.id();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
+        EvaluationMachinePoll::ScheduleSpark(_) => {
+            unreachable!("claimed-task release must externalize spark requests")
+        }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => {
             drop(exit);
@@ -650,7 +673,10 @@ impl EvaluationWorkCoordinator {
         let mut claimed = ClaimedTask::new(self.clone(), work);
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let poll = claimed.poll(&mut budget);
-        let yielded = matches!(poll, EvaluationMachinePoll::Yielded);
+        let yielded = matches!(
+            poll,
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+        );
         let (_, _, released) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
@@ -685,23 +711,24 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn poll_claimed_spark(self: &Arc<Self>, claimed: coordinator::ClaimedSparkWork) {
+        let mut claimed = claimed;
         claimed.assert_runtime(self.runtime_id());
         let poll_context = EvaluationPollContext::for_claim(claimed.demand());
         let context = EvalContext::for_spark(claimed.demand_session());
+        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let result = poll_context.evaluate(&context, |evaluator| {
-            let value = evaluator.project_root(claimed.value());
-            crate::eval::demand_strategy_value_in(evaluator, &value)
+            claimed.poll(&poll_context, evaluator, &context, &mut budget)
         });
         let poll = match result {
-            Ok(()) => coordinator::SparkWorkPoll::Complete,
-            Err(halt) => {
-                if let Some(wait) = halt.blocked_on() {
-                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Wait(wait.0))
-                } else if let Some(promise) = halt.unassigned_promise_root() {
-                    coordinator::SparkWorkPoll::Blocked(WorkDependency::Promise(promise.clone()))
-                } else {
-                    coordinator::SparkWorkPoll::Complete
-                }
+            crate::eval::strategy_machine::StrategyDemandPoll::Ready
+            | crate::eval::strategy_machine::StrategyDemandPoll::Failed(_) => {
+                coordinator::SparkWorkPoll::Complete
+            }
+            crate::eval::strategy_machine::StrategyDemandPoll::Pending(dependency) => {
+                coordinator::SparkWorkPoll::Blocked(dependency)
+            }
+            crate::eval::strategy_machine::StrategyDemandPoll::Yielded => {
+                coordinator::SparkWorkPoll::Yielded
             }
         };
         drop(context);

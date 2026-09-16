@@ -830,6 +830,7 @@ impl EvalContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn spark(&self, value: Value) {
         // A promise names data whose producer or completed assignment may
         // expose useful work. Nets and the remaining variants are already in
@@ -841,6 +842,15 @@ impl EvalContext {
             && let Some(coordinator) = self.coordinator()
         {
             coordinator.submit_spark(self.session.clone(), value);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spark_root(&self, value: RuntimeValueRoot) {
+        if !self.session.is_closed()
+            && let Some(coordinator) = self.coordinator()
+        {
+            coordinator.submit_spark_root(self.session.clone(), value);
         }
     }
 

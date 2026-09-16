@@ -1646,9 +1646,11 @@ mod tests {
                 "the evaluator step acquires an exact family root before the small access region ends",
                 &[
                     "src/eval/application.rs::apply_function_values_in",
+                    "src/eval/builtins.rs::apply_builtin_in",
                     "src/eval/builtins/annotation/implementation.rs::annotation_error_value",
                     "src/eval/builtins/annotation/implementation.rs::defer_metadata_reflection",
                     "src/eval/builtins/annotation/implementation.rs::defer_reflection_annotation",
+                    "src/eval/builtins/annotation/implementation.rs::eval_anno_builtin",
                     "src/eval/builtins/annotation/implementation.rs::eval_metadata_pure_annotation",
                     "src/eval/builtins/annotation/implementation.rs::eval_metadata_reflection_annotation",
                     "src/eval/builtins/annotation/implementation.rs::metadata_update_outputs",

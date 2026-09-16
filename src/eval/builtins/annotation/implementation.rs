@@ -52,13 +52,29 @@ pub(super) fn eval_anno_builtin(
             Ok(defer_reflection_annotation(context, effect, target))
         }
         RecognizedAnnotation::Seq { value } => {
-            super::super::strategy::seq(context.context(), &value, target)
+            let target = target.clone();
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin: Builtin::Seq,
+                        arguments: Arc::from([value, target]),
+                    },
+                )
+            })))
         }
-        RecognizedAnnotation::Spark { value } => Ok(super::super::strategy::spark(
-            context.context(),
-            value,
-            target,
-        )),
+        RecognizedAnnotation::Spark { value } => {
+            let target = target.clone();
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin: Builtin::Spark,
+                        arguments: Arc::from([value, target]),
+                    },
+                )
+            })))
+        }
         RecognizedAnnotation::Error => {
             let message = eval_value_in(context, target).map_err(|error| {
                 context.with_value_access(|access| {

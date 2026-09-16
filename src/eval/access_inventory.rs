@@ -216,8 +216,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [6, 6],
-        "W6C.2/W6C.4/W6C.5 durable conditional, assertion, numeric, and provenance owners with callback-free regional result projection"
+        [7, 7],
+        "W6C.2-W6C.6 durable conditional, assertion, numeric, provenance, and strategy owners with callback-free regional result projection"
     ),
     context_entry!(
         "src/eval/comparison_machine.rs",
@@ -250,11 +250,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3B.1 scoped pattern inspection"
     ),
     context_entry!(
-        "src/eval/builtins/strategy.rs",
-        [1, 4],
-        "I3C scoped strategy demand and durable scheduling boundary"
-    ),
-    context_entry!(
         "src/eval/net.rs",
         [21, 7],
         "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner; NC1 shared net-WHNF budget driver; NC3-NC5 regional callable spill, resumption, and cold exact terminalization; NC6 retired the synchronous deferred-callable context; W6B.4b.1 retired synchronous access resolution"
@@ -268,6 +263,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/sequence.rs",
         [4, 3],
         "I3B.2 and I3D/I3E direct sequence callers"
+    ),
+    context_entry!(
+        "src/eval/strategy_machine.rs",
+        [2, 1],
+        "W6C.6 shared resumable seq and best-effort spark demand"
     ),
     context_entry!(
         "src/eval/tagged_machine.rs",
@@ -546,13 +546,12 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
 
     assert_eq!(
         dispatcher.matches("context.context()").count(),
-        1,
-        "only strategies may downgrade in the dispatcher"
+        0,
+        "builtin dispatch must not downgrade evaluator-step authority"
     );
-    let durable_call = "strategy::apply(context.context(), builtin, arguments)";
     assert!(
-        dispatcher.contains(durable_call),
-        "missing durable builtin boundary `{durable_call}`"
+        dispatcher.contains("| Builtin::Seq\n        | Builtin::Spark => Ok(Value::Lazy("),
+        "strategy builtins must install durable lazy owners"
     );
     assert!(
         dispatcher.contains("Builtin::Anno => annotation::apply(context, arguments)"),
@@ -571,8 +570,8 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
     for annotation_boundary in [
         "fn defer_reflection_annotation(\n    context: &EvaluatorStepContext<'_>,\n    effect: Value,\n    target: &Value,",
         "fn defer_metadata_reflection(context: &EvaluatorStepContext<'_>, effect: Value)",
-        "strategy::seq(context.context(), &value, target)",
-        "strategy::spark(\n            context.context(),",
+        "builtin: Builtin::Seq",
+        "builtin: Builtin::Spark",
     ] {
         assert!(
             annotation.contains(annotation_boundary),

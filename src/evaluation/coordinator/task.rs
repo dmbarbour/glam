@@ -132,6 +132,7 @@ pub(crate) struct EvaluationExitBlock {
 
 pub(crate) enum EvaluationMachinePoll {
     Yielded,
+    ScheduleSpark(RuntimeValueRoot),
     Blocked(EvaluationTaskBlock),
     Exit(EvaluationExitBlock),
     Complete(RuntimeValueRoot),

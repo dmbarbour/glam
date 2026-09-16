@@ -837,10 +837,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 186;
+const DECLARATION_BASELINE_COUNT: usize = 201;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([144, 140, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 783_206_054_878_265_169;
+    DeclarationSignals::new([144, 167, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_058_911_520_175_969_561;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -973,6 +973,12 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
         "list-effect recipe progress"
+    } else if declaration.starts_with("src/eval/builtin_machine.rs::")
+        || declaration.starts_with("src/eval/comparison_machine.rs::")
+        || declaration.starts_with("src/eval/tagged_machine.rs::")
+        || declaration.starts_with("src/eval/strategy_machine.rs::")
+    {
+        "task, wait, exit, terminal, and failure-ledger records"
     } else if matches!(
         declaration,
         "src/eval/value.rs::LazyTaskWork" | "src/eval/value.rs::HostCallSourceState"

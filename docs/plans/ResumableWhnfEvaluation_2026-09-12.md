@@ -4024,7 +4024,7 @@ until W6G.3 aggregates it.
 | **W6C.3b — Complete (2026-09-16): Comparison** | 6 S, 3 F | Convert ordered/equality operand work, reuse W6C.3a tagged-payload work, and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
 | **W6C.5 — Complete (2026-09-16): Provenance** | 1 D | Replace the durable evaluator facade with an explicit provenance owner and bounded opaque-origin inspection. `-1`. |
-| **W6C.6 — Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
+| **W6C.6 — Complete (2026-09-16): Strategy** | 1 S, 4 D | Convert `seq` demand and `spark` admission so scheduler work begins only after regional access closes. `-5`. |
 
 Operations which require only immediate data become immediate-data helpers,
 not artificial WHNF frames. Force suspension on the second comparison/numeric
@@ -4104,6 +4104,17 @@ and obsolete list-like compatibility leaf are removed. The D.2c manifest
 falls from 139 to 129 declarations: W6C.3 reaches zero and W6D.4 falls from
 five declarations to four. Focused comparison, tagged-payload, inventory, and
 aggressive-collection fixtures pass.
+
+W6C.6 completion record, 2026-09-16: saturated `seq` and `spark` sources now
+install one durable strategy owner. `seq` retains resumable progress through
+ordinary demand and the value's hidden metadata demand before handing its
+target back to ordinary WHNF evaluation. `spark` publishes a rooted scheduling
+request from the builtin poll, and the task pump admits that best-effort work
+only after evaluator access has closed. Spark workers retain the same strategy
+machine across yields and dependency wakes instead of restarting demand. The
+old synchronous strategy implementation is removed, the source/access and
+poll-boundary inventories latch the post-access handoff, and the W6C.6 raw
+declaration group reaches zero.
 
 #### W6D — Dictionaries, lists, and patterns
 

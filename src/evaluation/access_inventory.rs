@@ -652,6 +652,9 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::impl CacheLazyFailure::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::root_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::rooted_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::synchronous_client_demand_waits_for_worker_owned_runtime_progress#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::project_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -870,7 +873,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // explicit matching-domain access rather than facade mutation.
         // D.2b.2's production-shaped promise publishers install assignments
         // under matching access before detached wakes.
-        ("src/evaluation/tests.rs", GatewayCounts::new(8, 0)),
+        // W6C.6's aggressive-collection spark fixtures construct and publish
+        // their recursive values under three additional bounded regions.
+        ("src/evaluation/tests.rs", GatewayCounts::new(11, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),

@@ -111,7 +111,6 @@ enum D2cCheckpoint {
     W6C3Comparison,
     W6C4Numeric,
     W6C5Provenance,
-    W6C6Strategy,
     W6D1DictBasic,
     W6D2DictMerge,
     W6D3ListObservation,
@@ -433,7 +432,6 @@ impl ApiOccurrence {
                 _,
             ) => W6C4Numeric,
             (DispatchScalarAndStrategy, "src/eval/builtins/provenance.rs", _) => W6C5Provenance,
-            (DispatchScalarAndStrategy, "src/eval/builtins/strategy.rs", _) => W6C6Strategy,
 
             (
                 CollectionsAndPatterns,
@@ -1409,13 +1407,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        548,
+        541,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        18_153_118_362_668_637_025,
+        4_077_440_464_697_442_774,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1428,7 +1426,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let expected = BTreeMap::from([
         ((ApiKind::Function, ApiDisposition::RegionalAccess), 123),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        ((ApiKind::Function, ApiDisposition::Violation), 387),
+        ((ApiKind::Function, ApiDisposition::Violation), 380),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1502,14 +1500,14 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            129,
+            124,
         ),
         (
             (
                 RemediationOwner::D2dOrchestration,
                 ReplacementShape::RootedOrchestration,
             ),
-            14,
+            12,
         ),
         (
             (
@@ -1644,7 +1642,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         BTreeMap::from([
             (D2cFamily::ValueDemand, 12),
             (D2cFamily::ApplicationAndSequence, 7),
-            (D2cFamily::DispatchScalarAndStrategy, 7),
+            (D2cFamily::DispatchScalarAndStrategy, 2),
             (D2cFamily::CollectionsAndPatterns, 42),
             (D2cFamily::AnnotationsAndEffects, 36),
             (D2cFamily::Objects, 17),
@@ -1668,8 +1666,8 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 105),
-            (D2cCurrentContext::DurableEval, 6),
+            (D2cCurrentContext::EvaluatorStep, 104),
+            (D2cCurrentContext::DurableEval, 2),
             (D2cCurrentContext::ContextFree, 18),
         ]),
         "the D.2c signature baseline drifted"
@@ -1691,7 +1689,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [18, 111, 0],
+        [18, 106, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1723,7 +1721,7 @@ fn d2c_family_fingerprints_are_exact() {
         ),
         (
             D2cFamily::DispatchScalarAndStrategy,
-            13_819_104_458_029_276_580,
+            5_656_025_884_590_611_233,
         ),
         (
             D2cFamily::CollectionsAndPatterns,
@@ -1771,7 +1769,6 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 2),
         (W6C1DispatchAndArity, 1),
         (W6C2AssertionAndConditional, 1),
-        (W6C6Strategy, 5),
         (W6D1DictBasic, 4),
         (W6D2DictMerge, 8),
         (W6D3ListObservation, 7),
@@ -1814,7 +1811,6 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
         (W6C2AssertionAndConditional, 11_178_720_452_358_268_189),
-        (W6C6Strategy, 7_226_560_668_498_362_880),
         (W6D1DictBasic, 3_953_826_480_194_787_850),
         (W6D2DictMerge, 17_524_228_289_460_621_433),
         (W6D3ListObservation, 1_141_124_844_497_395_933),

@@ -644,10 +644,12 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // owner which polls each operand through the ordinary WHNF machine.
 // W6C.3 replaces recursive comparison, tuple-tag, and semantic-undefined
 // demand with explicit durable machine stacks and bounded collection walks.
+// W6C.6 gives seq and best-effort sparks one shared resumable demand owner;
+// scheduler admission is a rooted post-access poll disposition.
 const EXPECTED_OCCURRENCES: usize = 273;
-const EXPECTED_FINGERPRINT: u64 = 6_504_142_152_118_169_106;
+const EXPECTED_FINGERPRINT: u64 = 7_358_313_886_148_540_378;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 88),
+    (Signal::EvalValue, 86),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
@@ -660,7 +662,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 44),
+    (Signal::StructuralRecursion, 46),
     (Signal::UserSizedLoop, 55),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[

@@ -151,6 +151,9 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let value = loop {
         match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
             EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
+            EvaluationMachinePoll::ScheduleSpark(_) => {
+                panic!("the host-call fixture must not schedule a spark")
+            }
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(_) => {
                 panic!("the local semantic thunk must not block")

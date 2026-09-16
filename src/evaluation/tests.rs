@@ -5,7 +5,7 @@ use glam_gc::CollectionError;
 use std::sync::{Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::core::{LazyCycle, LazyValue, ManagedPromiseRoot, PromisedValue};
+use crate::core::{EvaluationHalt, LazyCycle, LazyValue, ManagedPromiseRoot, PromisedValue};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
@@ -74,6 +74,9 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
     match poll {
         EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Cancelled => {}
+        EvaluationMachinePoll::ScheduleSpark(value) => {
+            let _: &RuntimeValueRoot = value;
+        }
         EvaluationMachinePoll::Blocked(block) => {
             let EvaluationTaskBlock {
                 dependency,
@@ -127,6 +130,7 @@ fn evaluation_machine_poll_boundary_inventory_is_complete() {
             "I4F.1c.2 / I6C interior",
         ),
         ("Failed(RuntimeFailureRoot)", "I4F.1c.2 / I6C interior"),
+        ("ScheduleSpark(RuntimeValueRoot)", "W6C.6"),
         (
             "Yielded/Cancelled/epoch/test dependency",
             "no managed payload",
@@ -134,7 +138,7 @@ fn evaluation_machine_poll_boundary_inventory_is_complete() {
     ];
 
     let _: fn(&EvaluationMachinePoll) = assert_evaluation_machine_poll_boundary_inventory;
-    assert_eq!(CHECKPOINTS.len(), 8);
+    assert_eq!(CHECKPOINTS.len(), 9);
     assert!(
         CHECKPOINTS
             .iter()
@@ -2030,6 +2034,48 @@ fn inert_lazy(label: &'static str) -> LazyValue {
 fn inert_lazy_for(values: &CoreValueFactory, label: &'static str) -> LazyValue {
     LazyValue::semantic_thunk(values, label, |_| {
         panic!("scheduler cycle fixtures must use their installed test machine")
+    })
+}
+
+fn rooted_inert_lazy_value(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (LazyValue, RuntimeValueRoot) {
+    rooted_semantic_lazy_value(values, label, |_| {
+        panic!("scheduler cycle fixtures must use their installed test machine")
+    })
+}
+
+fn rooted_semantic_lazy_value(
+    values: &CoreValueFactory,
+    label: &'static str,
+    thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
+) -> (LazyValue, RuntimeValueRoot) {
+    values.with_runtime_value_access(|access| {
+        let lazy = LazyValue::semantic_thunk_in(&access, label, thunk);
+        let _lazy_root = lazy.root_in(&access);
+        let value = access.root_runtime_value(Value::Lazy(lazy.clone()));
+        (lazy, value)
+    })
+}
+
+fn rooted_promise_value(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (PromisedValue, ManagedPromiseRoot, RuntimeValueRoot) {
+    values.with_runtime_value_access(|access| {
+        let promise_root = access
+            .construct_rooted_managed_promise(label)
+            .expect("the rooted promise fixture should fit one managed run");
+        let promise = PromisedValue::from_root(&promise_root, &access);
+        let value = access.root_runtime_value(Value::Promised(promise.duplicate_in(&access)));
+        (promise, promise_root, value)
+    })
+}
+
+fn root_promise_value(values: &CoreValueFactory, promise: &ManagedPromiseRoot) -> RuntimeValueRoot {
+    values.with_runtime_value_access(|access| {
+        access.root_runtime_value(Value::Promised(PromisedValue::from_root(promise, &access)))
     })
 }
 
@@ -6523,16 +6569,15 @@ fn runtime_pump_abandons_queued_and_blocked_sparks() {
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
 
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "queued runtime-pump spark",
-    )));
+    let (_queued, queued) = rooted_inert_lazy_value(context.values(), "queued runtime-pump spark");
+    context.spark_root(queued);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
     fixture.runtime.pump_until_stable();
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
 
-    let promise = PromisedValue::new(context.values(), "blocked runtime-pump spark");
-    context.spark(Value::Promised(promise.clone()));
+    let (promise, _promise_root, promise_value) =
+        rooted_promise_value(context.values(), "blocked runtime-pump spark");
+    context.spark_root(promise_value);
     park_next_spark(&coordinator);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
     fixture.runtime.pump_until_stable();
@@ -6693,11 +6738,13 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
-    let promise = PromisedValue::new(context.values(), "spark-owned deferred wait");
+    let (promise, _promise_owner, _promise_value) =
+        rooted_promise_value(context.values(), "spark-owned deferred wait");
     let followed = promise.clone();
-    let lazy = LazyValue::semantic_thunk(context.values(), "spark-owned lazy claim", move |_| {
-        Ok(Value::Promised(followed.clone()))
-    });
+    let (lazy, _lazy_value) =
+        rooted_semantic_lazy_value(context.values(), "spark-owned lazy claim", move |_| {
+            Ok(Value::Promised(followed.clone()))
+        });
     let promise_root = promise.root(context.values());
     let wait = context
         .lazy_task(&lazy, move |task_context, _| {
@@ -6720,10 +6767,8 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
         })
         .expect("useful waiter should schedule");
 
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "manually blocked spark",
-    )));
+    let (_blocked, blocked) = rooted_inert_lazy_value(context.values(), "manually blocked spark");
+    context.spark_root(blocked);
     let claimed = claim_next_spark(&coordinator);
     coordinator.release_spark(
         claimed,
@@ -6830,10 +6875,16 @@ fn one_promise_completion_wakes_exact_sparks_in_multiple_sessions() {
     let right = fixture.context();
     let coordinator = left.coordinator().expect("coordinator should be live");
     coordinator.executor_started(2);
-    let promise = PromisedValue::new(left.values(), "shared host promise");
+    let (promise, promise_root, first_value) =
+        rooted_promise_value(left.values(), "shared host promise");
 
-    for context in [&left, &right] {
-        context.spark(Value::Promised(promise.clone()));
+    for (index, context) in [&left, &right].into_iter().enumerate() {
+        let value = if index == 0 {
+            first_value.clone()
+        } else {
+            root_promise_value(context.values(), &promise_root)
+        };
+        context.spark_root(value);
         park_next_spark(&coordinator);
     }
 
@@ -6861,12 +6912,14 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(2);
-    let promise_a = PromisedValue::new(context.values(), "promise A");
-    let promise_b = PromisedValue::new(context.values(), "promise B");
+    let (promise_a, _promise_a_root, promise_a_value) =
+        rooted_promise_value(context.values(), "promise A");
+    let (promise_b, _promise_b_root, promise_b_value) =
+        rooted_promise_value(context.values(), "promise B");
 
-    context.spark(Value::Promised(promise_a.clone()));
+    context.spark_root(promise_a_value);
     park_next_spark(&coordinator);
-    context.spark(Value::Promised(promise_b.clone()));
+    context.spark_root(promise_b_value);
     park_next_spark(&coordinator);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
 
@@ -6896,8 +6949,9 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
-    let promise = PromisedValue::new(context.values(), "racing promise");
-    context.spark(Value::Promised(promise.clone()));
+    let (promise, _promise_root, promise_value) =
+        rooted_promise_value(context.values(), "racing promise");
+    context.spark_root(promise_value);
 
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
         panic!("the promise spark should be claimable")
@@ -6997,14 +7051,19 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
     coordinator.executor_started(1);
     context.spark(Value::error(context.values(), "spark failure"));
 
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(mut claimed) = coordinator.select() else {
         panic!("the failing spark should be claimable")
     };
-    let halt = crate::eval::demand_strategy_value(&context, &claimed.value().clone_core_for_test())
-        .expect_err("the spark fixture should fail permanently");
-    assert!(halt.permanent_failure().is_some());
-    assert!(halt.blocked_on().is_none());
-    assert!(halt.unassigned_promise_root().is_none());
+    let poll_context = EvaluationPollContext::for_claim(claimed.demand());
+    let spark_context = EvalContext::for_spark(claimed.demand_session());
+    let mut budget = EvaluationStepBudget::new(256);
+    let poll = poll_context.evaluate(&spark_context, |evaluator| {
+        claimed.poll(&poll_context, evaluator, &spark_context, &mut budget)
+    });
+    assert!(matches!(
+        poll,
+        crate::eval::strategy_machine::StrategyDemandPoll::Failed(_)
+    ));
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
 
     assert_eq!(coordinator.retained_spark_count(), 0);

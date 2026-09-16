@@ -298,7 +298,10 @@ fn claimed_evaluator_dispatches_unit_assertion_through_the_scoped_builtin_path()
     )
     .expect("a scoped unit assertion should return its target");
 
-    assert_eq!(result, target);
+    assert_eq!(
+        eval_value(&context, &result).expect("the assertion result should evaluate"),
+        target
+    );
 }
 
 #[test]
@@ -370,7 +373,10 @@ fn claimed_evaluator_dispatches_object_conditional_and_list_effect_construction(
         vec![Value::List(List::from_values(vec![n(42)]))],
     )
     .expect("claimed conditional selection should return its first result");
-    assert_eq!(selected, n(42));
+    assert_eq!(
+        eval_value(&context, &selected).expect("the selected result should evaluate"),
+        n(42)
+    );
 
     let returned = apply_values_in(
         &evaluator,
@@ -3437,10 +3443,21 @@ fn partial_builtins_share_lazy_arguments() {
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(
-        apply_value(&test_context(), partial.clone(), n(2)).unwrap(),
+        eval_value(
+            &test_context(),
+            &apply_value(&test_context(), partial.clone(), n(2)).unwrap(),
+        )
+        .unwrap(),
         n(42)
     );
-    assert_eq!(apply_value(&test_context(), partial, n(3)).unwrap(), n(43));
+    assert_eq!(
+        eval_value(
+            &test_context(),
+            &apply_value(&test_context(), partial, n(3)).unwrap(),
+        )
+        .unwrap(),
+        n(43)
+    );
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -5138,12 +5155,7 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
     let seq_outputs =
         run_metadata_reflection_update(&seq_context, n(0), vec![initial_metadata()]).unwrap();
     assert_eq!(
-        apply_values(
-            &seq_context,
-            Value::Builtin(Builtin::Seq),
-            vec![seq_outputs[0].clone(), n(42)],
-        )
-        .unwrap(),
+        evaluate_strategy(&seq_context, Builtin::Seq, seq_outputs[0].clone(), n(42)).unwrap(),
         n(42)
     );
     assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
@@ -5162,10 +5174,11 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
         .expect("fresh test session should accept its reflection launcher");
     let spark_outputs =
         run_metadata_reflection_update(&spark_context, n(0), vec![initial_metadata()]).unwrap();
-    let result = apply_values(
+    let result = evaluate_strategy(
         &spark_context,
-        Value::Builtin(Builtin::Spark),
-        vec![spark_outputs[0].clone(), n(43)],
+        Builtin::Spark,
+        spark_outputs[0].clone(),
+        n(43),
     )
     .expect("spark should immediately return its target");
     assert_eq!(result, n(43));
@@ -6210,16 +6223,24 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
     }
 }
 
+fn evaluate_strategy(
+    context: &EvalContext,
+    builtin: Builtin,
+    first: Value,
+    target: Value,
+) -> Result<Value, EvaluationHalt> {
+    let applied = apply_values(context, Value::Builtin(builtin), vec![first, target])?;
+    eval_value(context, &applied)
+}
+
 #[test]
 fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let context = test_context();
-    let error = apply_values(
+    let error = evaluate_strategy(
         &context,
-        Value::Builtin(Builtin::Seq),
-        vec![
-            Value::error(&crate::core::test_value_factory(), "seq forced this error"),
-            n(42),
-        ],
+        Builtin::Seq,
+        Value::error(&crate::core::test_value_factory(), "seq forced this error"),
+        n(42),
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "seq forced this error");
@@ -6280,15 +6301,10 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
         },
     );
 
-    let result = apply_values(
-        &context,
-        Value::Builtin(Builtin::Seq),
-        vec![carrier, target],
-    )
-    .expect("seq should successfully demand hidden metadata");
+    let result = evaluate_strategy(&context, Builtin::Seq, carrier, target)
+        .expect("seq should successfully demand hidden metadata");
     assert_eq!(metadata_forces.load(Ordering::SeqCst), 1);
-    assert_eq!(target_forces.load(Ordering::SeqCst), 0);
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(result, n(42));
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
 }
 
@@ -6371,12 +6387,8 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
         },
     );
 
-    let result = apply_values(
-        &context,
-        Value::Builtin(Builtin::Spark),
-        vec![lazy_carrier, n(42)],
-    )
-    .expect("spark should immediately return its target");
+    let result = evaluate_strategy(&context, Builtin::Spark, lazy_carrier, n(42))
+        .expect("spark should immediately return its target");
     assert_eq!(result, n(42));
     shell_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -6405,12 +6417,8 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
         });
     let carrier = Value::metadata_carrier(Value::Lazy(metadata.clone()));
 
-    let result = apply_values(
-        &context,
-        Value::Builtin(Builtin::Spark),
-        vec![carrier.clone(), n(42)],
-    )
-    .expect("detached metadata failure must not replace the spark target");
+    let result = evaluate_strategy(&context, Builtin::Spark, carrier.clone(), n(42))
+        .expect("detached metadata failure must not replace the spark target");
     assert_eq!(result, n(42));
     attempt_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -6421,7 +6429,7 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
         "the worker must cache the terminal metadata failure",
     );
 
-    let error = apply_values(&context, Value::Builtin(Builtin::Seq), vec![carrier, n(43)])
+    let error = evaluate_strategy(&context, Builtin::Seq, carrier, n(43))
         .expect_err("seq must propagate the cached hidden failure");
     assert_eq!(error.to_string(), "metadata strategy failed");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -6442,12 +6450,8 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
 
     assert_eq!(
-        apply_values(
-            &context,
-            Value::Builtin(Builtin::Seq),
-            vec![outer.clone(), n(42)],
-        )
-        .expect("seq should stop after demanding one hidden metadata value"),
+        evaluate_strategy(&context, Builtin::Seq, outer.clone(), n(42))
+            .expect("seq should stop after demanding one hidden metadata value"),
         n(42)
     );
     assert_eq!(hidden_forces.load(Ordering::SeqCst), 0);
@@ -6606,22 +6610,19 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
     let observer = context.with_new_task().unwrap();
     let carrier = Value::metadata_carrier(Value::Promised(promise.clone()));
 
-    let blocked = apply_values(
+    let applied = apply_values(
         &observer,
         Value::Builtin(Builtin::Seq),
         vec![carrier.clone(), n(42)],
     )
-    .expect_err("seq should block on unresolved hidden metadata");
+    .expect("strategy application should remain lazy");
+    let blocked = eval_value(&observer, &applied)
+        .expect_err("seq should block on unresolved hidden metadata");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&observer, &promise, n(7)).unwrap();
     assert_eq!(
-        apply_values(
-            &observer,
-            Value::Builtin(Builtin::Seq),
-            vec![carrier, n(42)],
-        )
-        .expect("seq should resume after hidden metadata completes"),
+        eval_value(&observer, &applied).expect("seq should resume after hidden metadata completes"),
         n(42)
     );
 }
@@ -6654,12 +6655,8 @@ fn completed_metadata_updates_release_sources_and_task_records() {
         "the unresolved update must retain its prior metadata input"
     );
 
-    let result = apply_values(
-        &context,
-        Value::Builtin(Builtin::Seq),
-        vec![outputs[0].clone(), n(42)],
-    )
-    .expect("seq should complete the derived metadata");
+    let result = evaluate_strategy(&context, Builtin::Seq, outputs[0].clone(), n(42))
+        .expect("seq should complete the derived metadata");
     assert_eq!(result, n(42));
     context
         .values()
@@ -6683,10 +6680,14 @@ fn strategy_annotations_share_builtin_semantics() {
         Key::atom_from_text("seq"),
         Value::error(&crate::core::test_value_factory(), "annotation forced"),
     ));
-    let error = apply_values(
+    let error = eval_value(
         &context,
-        Value::Builtin(Builtin::Anno),
-        vec![seq_annotation, n(42)],
+        &apply_values(
+            &context,
+            Value::Builtin(Builtin::Anno),
+            vec![seq_annotation, n(42)],
+        )
+        .expect("annotation application should remain lazy"),
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "annotation forced");
