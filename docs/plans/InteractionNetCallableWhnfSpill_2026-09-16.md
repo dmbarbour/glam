@@ -1372,6 +1372,14 @@ record that deliberate test boundary; production ownership did not change.
 - remaining synchronous evaluator compatibility; and
 - drift in W6C-W8 caused by the new checkpoint vocabulary.
 
+Completed on 2026-09-16 in
+[`InteractionNetCallableWhnfSpill_2026-09-16.md`](../reviews/InteractionNetCallableWhnfSpill_2026-09-16.md).
+The review found no open correctness defect or unresolved design question.
+It records one resolved aggressive-GC fixture ownership defect, confirms the
+canonical zero-walk state and exact-generation protocol, and finds no
+accidental W6C-W8 drift. W6B.4b.2 is closed; the independent W6B.4b.1 access
+resolution migration remains the only open part of the parent umbrella.
+
 Exit: W6B.4b.2 is complete, reviewed, and ready for parent W6B.4b closure.
 
 ## Verification Matrix

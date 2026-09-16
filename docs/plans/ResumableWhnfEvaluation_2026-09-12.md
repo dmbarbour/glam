@@ -3911,7 +3911,7 @@ as two independently verified checkpoints:
    `resolve_core_access_in` with state retained by the existing resumable
    access owner. Preserve the W6A.0c/W6A.4 key/path conversion assignments and
    force suspension after at least one completed path element.
-2. **W6B.4b.2 — Callable WHNF spill (`-1`).** Execute NC0-NC6 in
+2. **W6B.4b.2 — Complete (2026-09-16): Callable WHNF spill (`-1`).** Execute NC0-NC6 in
    [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md).
    Evaluate a deferred callable as far as the current bounded quantum permits
    and replace its data with one
@@ -3966,6 +3966,13 @@ deferred-callable test seam and closes its exact `OperatorAndNet -1` inventory
 delta. The remaining W6B.4 net declaration is `resolve_core_access_in`, owned
 solely by W6B.4b.1. The checkpoint needs only `Send + 'static`; source-backed
 P3/P4 latches reject copying or equality traits on `NetWhnfState`.
+
+NC6 closure record, 2026-09-16: routine, profiling, forced-order, focused
+aggressive-GC, exact-inventory, and direct-assembly baseline verification all
+pass. The focused post-NC review is recorded in
+[`InteractionNetCallableWhnfSpill_2026-09-16.md`](../reviews/InteractionNetCallableWhnfSpill_2026-09-16.md)
+and finds no open checkpoint defect or W6C-W8 drift. W6B.4b remains open only
+for the independent W6B.4b.1 access-resolution declaration.
 
 Representation revision: NC1's parallel net/regional definitions and borrowed
 projection are correctness scaffolding only. Focused NC2.0 replaces them with
