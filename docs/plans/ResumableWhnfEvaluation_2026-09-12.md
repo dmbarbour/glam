@@ -4492,7 +4492,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4b — Complete (2026-09-17): Object definition adapters** | Preparatory | Convert default/dictionary definitions with explicit ordered demand; the shared synchronous dispatcher remains until its final `object_from_dict` branch moves. No standalone declaration delta. |
 | **W6F.4c — Complete (2026-09-17): Plain-dictionary conversion, dispatch, and spec projection** | 3 S | Convert `object_from_dict`, retire the synchronous object family dispatcher, and access-qualify the object-fixpoint specification-member projection. `-3`. |
 | **W6F.4d.1 — Complete (2026-09-17): Reflection application bridge** | Preparatory | Move initial effect, continuation, and fused-continuation application onto child `WhnfComputation` state owned by the non-cloned decode lane; preserve application/request diagnostic stages and forced no-replay coverage. |
-| **W6F.4d.2 — Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
+| **W6F.4d.2 — Complete (2026-09-17): Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
 | **W6F.4d.3 — Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
 | **W6F.4d.4 — Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
@@ -4620,6 +4620,15 @@ blocked by an independently reproduced baseline fixture defect: several old
 fixtures retain unrooted raw promised values across mutator regions. That
 pre-existing fixture-liveness debt is not part of this reflection application
 change.
+
+W6F.4d.2 completion record, 2026-09-17: saturated function-capture operators
+now validate their final capture arity and construct the function stage within
+their existing `EvaluationValueAccess` region. The redundant regional
+`instantiate_function` helper is removed. This changes no suspendable D.2c
+coordinator: it reduces the complete raw-value API inventory from 455 to 454
+declarations and its regional-access class from 140 to 139. Focused captured-
+function tests pass ordinarily and under `aggressive-gc-verification`, and the
+exact raw-value inventories pass.
 
 #### W6G — Residual resumable-machine overhead
 

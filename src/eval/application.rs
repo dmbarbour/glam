@@ -190,20 +190,3 @@ pub(super) fn apply_effect_function_value(
 pub(super) fn effect_value(_access: &RuntimeValueAccess<'_>, function: Value) -> Value {
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }
-
-pub(super) fn instantiate_function(
-    access: &RuntimeValueAccess<'_>,
-    code: &FunctionCode,
-    captures: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
-    if captures.len() != code.capture_count() {
-        return Err(EvaluationHalt::new("function capture arity mismatch"));
-    }
-    let stage = NetValue::new(code.duplicate_runtime_in(access));
-    let stage = if captures.is_empty() {
-        stage
-    } else {
-        attach_net_many_in(access, stage, captures)
-    };
-    Ok(Value::Function(FunctionValue::new(stage, code.arity())))
-}

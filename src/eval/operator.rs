@@ -137,11 +137,15 @@ pub(super) fn apply_core_operator(
                     Arc::from(captures),
                 )));
             }
-            Ok(OperatorYield::Data(instantiate_function(
-                access.values(),
-                code,
-                captures,
-            )?))
+            if captures.len() != code.capture_count() {
+                return Err(EvaluationHalt::new("function capture arity mismatch"));
+            }
+            let stage = NetValue::new(code.duplicate_runtime_in(access.values()));
+            let stage = attach_net_many_in(access.values(), stage, captures);
+            Ok(OperatorYield::Data(Value::Function(FunctionValue::new(
+                stage,
+                code.arity(),
+            ))))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
             let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
