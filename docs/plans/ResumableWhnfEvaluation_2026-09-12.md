@@ -3723,11 +3723,19 @@ W3B already provides the authoritative resumable application implementation
 in `WhnfComputation`. W6A.2 must not wrap that owner in a synchronous polling
 loop merely to retain `apply_value_in` or `apply_values_in`. Migrate consumers
 in this order: W6B.2 owns operator application and function instantiation;
-W6D.4 owns list-map application; W6E.5-W6E.8 own effect API, effect-map, and
-list-effect application; and W6F.4 owns object composition/instantiation
-application. Each consumer stores or delegates to the same child WHNF
-computation and surfaces its pending/yielded/ready/failed result through its
-own machine poll.
+W6E.5-W6E.8 own effect API, effect-map, and list-effect application; and W6F.4
+owns object composition/instantiation application. Each of these consumers
+stores or delegates to the same child WHNF computation and surfaces its
+pending/yielded/ready/failed result through its own machine poll.
+
+W6D.4 is deliberately not an application consumer in this sequence. Builtin
+list map is a non-forcing structural transform: it constructs ordinary lazy
+application values for visible strict items and recursively wraps lazy list
+holes, but it does not observe the callable or any mapped result. W6D.4
+therefore retires its compatibility application call by constructing those
+managed lazy values under regional access. Ordinary application machinery is
+entered only if a consumer later demands a mapped item; W6D.4 neither retains
+a child `WhnfComputation` nor contributes an application owner to W6A.2.
 
 The reflection machine's `apply_in` compatibility bridge is not a separate
 application semantics. Before W6A.2 closes, migrate that already-resumable
@@ -4123,7 +4131,10 @@ declaration group reaches zero.
 | **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
 | **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
 | **W6D.3 — Complete (2026-09-17): List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
-| **W6D.4 — List transformation and dispatch** | 5 S | Convert concat/map/text-lines/list-like conversion and the family dispatcher, contributing list demand to W6A.0d and map application to W6A.2 closure. `-5`. |
+| **W6D.4a — Structural lazy map** | 1 S | Replace eager list-map traversal with the non-forcing structural transform specified below. It may demand the subject enough to establish the outer list, but preserves internal list holes and does not demand or validate the callable. `-1`. |
+| **W6D.4b — List concatenation** | 1 S | Convert concatenation and its already-regional list-like conversion, contributing only its actual list-demand edges to W6A.0d closure. `-1`. |
+| **W6D.4c — Text lines** | 1 S | Convert resumable binary/text extraction and line construction without retaining access across demand. `-1`. |
+| **W6D.4d — Family dispatch** | 1 S | Move the remaining list-family dispatcher after its transformation leaves and retire the final raw compatibility declaration in W6D.4. `-1`. |
 | **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal, moving the pattern path consumers toward W6A.4 closure. `-10`. |
 | **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
@@ -4157,6 +4168,43 @@ completed prefix is not replayed, and retain the established lazy-prefix
 contract. The obsolete synchronous observation helpers are removed;
 `CollectionsAndPatterns` falls from 30 to 23 and the D.2c manifest from 112
 to 105.
+
+##### W6D.4a — Structural lazy map semantics
+
+Builtin `map` is a homomorphism over the observable list structure rather than
+an eager traversal of the logical list:
+
+```text
+map f (A ++ B) = map f A ++ map f B
+map f (defer X) = defer (map f X)
+```
+
+Here `A` and `B` are strict list fragments and `defer X` denotes a lazy or
+promised list hole. For each value in a visible strict fragment, construct the
+ordinary lazy application `f value`; do not evaluate it. Binary fragments are
+converted to value fragments whose items are lazy applications to the
+corresponding byte numbers. A list hole remains at the same structural
+position and contains a lazy recursive map of that hole. Consequently, a
+strict suffix remains observable from the back without forcing an unrelated
+lazy prefix, and mapping does not sacrifice laziness according to which end a
+consumer chooses.
+
+The callable is shared but not evaluated or validated by `map`. A malformed
+callable fails only when a mapped item is demanded, through the ordinary
+application semantics and lazy cache. The initial implementation may allocate
+one lazy application per visible strict item; a specialized mapped-list node
+belongs to later list-representation/performance work. Structural traversal
+must be iterative and callback-free while regional access is held. It does not
+need a child WHNF application machine because it cannot suspend on the
+applications it constructs.
+
+Test strict value and binary fragments, a lazy middle or prefix with an
+observable strict suffix, callable laziness and sharing, and delayed malformed
+callable failure. In particular, the fixture for the lazy prefix must latch
+that observing the mapped suffix does not force the prefix. A later builtin
+`concatMap` should follow the same structural law: each strict item contributes
+a deferred list segment and each list hole recursively wraps `concatMap`.
+That future operation is a design direction, not part of W6D.4.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary
