@@ -19,7 +19,9 @@ use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
-use super::pattern_machine::{PatternDictPredicateMachine, PatternListMachine, PatternPathMachine};
+use super::pattern_machine::{
+    PatternDictPredicateMachine, PatternDictTakeMachine, PatternListMachine, PatternPathMachine,
+};
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
@@ -45,6 +47,7 @@ pub(crate) enum BuiltinTaskMachine {
     PatternList(PatternListMachine),
     PatternPath(Box<PatternPathMachine>),
     PatternDictPredicate(PatternDictPredicateMachine),
+    PatternDictTake(Box<PatternDictTakeMachine>),
     Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
 }
@@ -92,6 +95,8 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternPathEqual
                 | Builtin::PatternIsDict
                 | Builtin::PatternDictIsEmpty
+                | Builtin::PatternDictTryTake
+                | Builtin::PatternDictTryTakeOptional
         )
     }
 
@@ -134,6 +139,9 @@ impl BuiltinTaskMachine {
             }
             Builtin::PatternIsDict | Builtin::PatternDictIsEmpty => {
                 Self::PatternDictPredicate(PatternDictPredicateMachine::new(builtin, arguments))
+            }
+            Builtin::PatternDictTryTake | Builtin::PatternDictTryTakeOptional => {
+                Self::PatternDictTake(Box::new(PatternDictTakeMachine::new(builtin, arguments)))
             }
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
@@ -191,6 +199,9 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternDictPredicate(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::PatternDictTake(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Provenance(machine) => {

@@ -99,18 +99,20 @@ pub(super) fn apply_builtin_in(
         | Builtin::PatternListIsEmpty
         | Builtin::PatternPathEqual
         | Builtin::PatternIsDict
-        | Builtin::PatternDictIsEmpty => Ok(Value::Lazy(context.construct_lazy(move |access| {
-            LazyValue::from_builtin_in(
-                access,
-                BuiltinCall {
-                    builtin,
-                    arguments: Arc::from(arguments),
-                },
-            )
-        }))),
-        Builtin::PatternEqual
+        | Builtin::PatternDictIsEmpty
         | Builtin::PatternDictTryTake
-        | Builtin::PatternDictTryTakeOptional => pattern::apply(context, builtin, arguments),
+        | Builtin::PatternDictTryTakeOptional => {
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                )
+            })))
+        }
+        Builtin::PatternEqual => pattern::apply(context, builtin, arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq

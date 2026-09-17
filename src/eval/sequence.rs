@@ -1,37 +1,6 @@
 use super::*;
 use crate::core::RuntimeValueAccess;
 
-pub(crate) fn eval_key_path_list_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Vec<Key>, EvaluationHalt> {
-    let value = eval_value_in(context, value)?;
-    let Value::List(list) = value else {
-        return Err(EvaluationHalt::new(
-            "path-list operand must evaluate to a list value",
-        ));
-    };
-
-    let items = std::cell::RefCell::new(Vec::new());
-    list.try_for_each_segment(
-        &mut |bytes| {
-            items
-                .borrow_mut()
-                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
-            Ok::<_, EvaluationHalt>(())
-        },
-        &mut |values| {
-            for value in values.iter() {
-                let value = eval_value_in(context, value)?;
-                items.borrow_mut().push(value_to_key_in(context, &value)?);
-            }
-            Ok(())
-        },
-        &mut |thunk| force_list_thunk_in(context, thunk),
-    )?;
-    Ok(items.into_inner())
-}
-
 pub(super) fn list_to_key_items_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,

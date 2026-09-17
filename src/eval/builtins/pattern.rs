@@ -4,7 +4,6 @@
 //! `.fail`; forcing failures and blocked evaluation propagate normally.
 
 use super::super::*;
-use crate::core::Dict;
 use crate::list::ListItem;
 
 pub(super) fn apply(
@@ -16,14 +15,6 @@ pub(super) fn apply(
         Builtin::PatternEqual => {
             let [expected, value] = super::exact(arguments, "pattern-equal")?;
             pattern_equal(context, &expected, &value)
-        }
-        Builtin::PatternDictTryTake => {
-            let [path, value] = super::exact(arguments, "pattern-dict-try-take")?;
-            pattern_dict_try_take(context, &path, &value, false)
-        }
-        Builtin::PatternDictTryTakeOptional => {
-            let [path, value] = super::exact(arguments, "pattern-dict-try-take-optional")?;
-            pattern_dict_try_take(context, &path, &value, true)
         }
         _ => unreachable!("pattern dispatcher received a non-pattern builtin"),
     }
@@ -55,100 +46,6 @@ fn pattern_equal(
     } else {
         pattern_failure()
     })
-}
-
-fn pattern_dict_try_take(
-    context: &EvaluatorStepContext<'_>,
-    path: &Value,
-    value: &Value,
-    optional: bool,
-) -> Result<Value, EvaluationHalt> {
-    let path = eval_key_path_list_in(context, path)?;
-    if path.is_empty() {
-        return Err(EvaluationHalt::new(
-            "pattern-dict-try-take received an empty compiler path",
-        ));
-    }
-    let Value::Dict(dict) = eval_value_in(context, value)? else {
-        return Ok(pattern_failure());
-    };
-    let (value, rest) = match take_dict_path(context, &dict, &path)? {
-        DictPathTake::Found { value, rest } => (value, rest),
-        DictPathTake::Absent if optional => (Value::Dict(Dict::new_sync()), dict),
-        DictPathTake::Absent | DictPathTake::WrongIntermediateKind => {
-            return Ok(pattern_failure());
-        }
-    };
-    Ok(pattern_success(Value::Dict(
-        Dict::new_sync()
-            .insert((*keys::VALUE).clone(), value)
-            .insert((*keys::REST).clone(), Value::Dict(rest)),
-    )))
-}
-
-enum DictPathTake {
-    Found { value: Value, rest: Dict },
-    Absent,
-    WrongIntermediateKind,
-}
-
-fn take_dict_path(
-    context: &EvaluatorStepContext<'_>,
-    dict: &Dict,
-    path: &[Key],
-) -> Result<DictPathTake, EvaluationHalt> {
-    let Some((head, tail)) = path.split_first() else {
-        return Ok(DictPathTake::Absent);
-    };
-    let Some(selected) = dict.get(head) else {
-        return Ok(DictPathTake::Absent);
-    };
-    let selected = eval_value_in(context, selected)?;
-    if tail.is_empty() {
-        if value_is_logically_undefined(context, &selected)? {
-            return Ok(DictPathTake::Absent);
-        }
-        return Ok(DictPathTake::Found {
-            value: selected,
-            rest: dict.remove(head),
-        });
-    }
-
-    let Value::Dict(child) = selected else {
-        return Ok(DictPathTake::WrongIntermediateKind);
-    };
-    let (value, child_rest) = match take_dict_path(context, &child, tail)? {
-        DictPathTake::Found { value, rest } => (value, rest),
-        other => return Ok(other),
-    };
-    let rest = if child_rest.is_empty() {
-        dict.remove(head)
-    } else {
-        dict.insert(head.clone(), Value::Dict(child_rest))
-    };
-    Ok(DictPathTake::Found { value, rest })
-}
-
-fn value_is_logically_undefined(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<bool, EvaluationHalt> {
-    match eval_value_in(context, value)? {
-        Value::Dict(dict) => dict_is_logically_empty(context, &dict),
-        _ => Ok(false),
-    }
-}
-
-fn dict_is_logically_empty(
-    context: &EvaluatorStepContext<'_>,
-    dict: &Dict,
-) -> Result<bool, EvaluationHalt> {
-    for (_, value) in dict.iter() {
-        if !value_is_logically_undefined(context, value)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn binary_equals_list(

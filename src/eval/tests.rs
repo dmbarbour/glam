@@ -3318,6 +3318,63 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
 }
 
 #[test]
+fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (leaf, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("pattern dictionary leaf"))
+        .expect("the owner should allocate a promised dictionary leaf");
+    let prefix_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&prefix_demands);
+    let foo = Key::atom_from_text("foo");
+    let bar = Key::atom_from_text("bar");
+    let promised_leaf = leaf.clone();
+    let child = Value::semantic_thunk(
+        observer.values(),
+        "instrumented pattern dictionary prefix",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(
+                Dict::new_sync().insert(bar.clone(), Value::Promised(leaf.clone())),
+            ))
+        },
+    );
+    let path = Value::List(List::from_values(vec![
+        key_value(&foo),
+        key_value(&Key::atom_from_text("bar")),
+    ]));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::PatternDictTryTake),
+        vec![path, Value::Dict(Dict::new_sync().insert(foo, child))],
+    )
+    .expect("dictionary extraction application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved leaf should suspend dictionary extraction");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &promised_leaf, n(7)).expect("the owner should resolve the leaf");
+
+    let effect = eval_value(&observer, &application)
+        .expect("dictionary extraction should resume from the leaf");
+    let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
+        .and_then(|value| eval_value(&observer, &value))
+        .expect("the resumed pattern effect should be handled");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+    let [parts]: [Value; 1] = list_to_value_items(&observer, &results)
+        .expect("the pattern result should be readable")
+        .try_into()
+        .expect("successful extraction should return one parts value");
+    let Value::Dict(parts) = parts else {
+        panic!("dictionary extraction should return a parts dictionary")
+    };
+    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
     let key = Key::atom_from_text("key");
     let path = Value::List(List::from_values(vec![key_value(&key)]));
@@ -3501,6 +3558,20 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
             .expect_err("forcing failures along an optional path must propagate")
             .to_string(),
         "optional dict path failed"
+    );
+}
+
+#[test]
+fn compiler_pattern_dictionary_take_rejects_an_empty_compiler_path() {
+    assert_eq!(
+        run_pattern_builtin2(
+            Builtin::PatternDictTryTake,
+            Value::List(List::empty()),
+            Value::Dict(Dict::new_sync()),
+        )
+        .expect_err("an empty compiler path must remain an evaluation error")
+        .to_string(),
+        "pattern-dict-try-take received an empty compiler path"
     );
 }
 

@@ -43,6 +43,30 @@ pub(crate) struct PatternDictPredicateMachine {
     state: PatternDictPredicateState,
 }
 
+pub(crate) struct PatternDictTakeMachine {
+    optional: bool,
+    path: Option<KeyListMachine>,
+    keys: Option<Vec<Key>>,
+    source: Option<WhnfComputation>,
+    original: Option<RuntimeValueRoot>,
+    current: Option<RuntimeValueRoot>,
+    next_key: usize,
+    selected: Option<WhnfComputation>,
+    selected_value: Option<RuntimeValueRoot>,
+    frames: Vec<PatternDictTakeFrame>,
+    undefined: Option<SemanticUndefinedMachine>,
+}
+
+struct PatternDictTakeFrame {
+    parent: RuntimeValueRoot,
+    key: Key,
+}
+
+enum PatternDictSelection {
+    Missing,
+    Present(RuntimeValueRoot),
+}
+
 enum PatternDictPredicateState {
     IsDict(WhnfComputation),
     IsEmpty(SemanticUndefinedMachine),
@@ -110,6 +134,222 @@ impl PatternDictPredicateMachine {
                 }
             }
         }
+    }
+}
+
+impl PatternDictTakeMachine {
+    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [path, source]: [RuntimeValueRoot; 2] = arguments
+            .try_into()
+            .expect("dictionary pattern extraction retains two operands");
+        Self {
+            optional: builtin == Builtin::PatternDictTryTakeOptional,
+            path: Some(KeyListMachine::unowned(path)),
+            keys: None,
+            source: Some(WhnfComputation::from_root(source)),
+            original: None,
+            current: None,
+            next_key: 0,
+            selected: None,
+            selected_value: None,
+            frames: Vec::new(),
+            undefined: None,
+        }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        if let Some(path) = &mut self.path {
+            return match path.poll(poll_context, context, durable_context, step_budget) {
+                ConversionPoll::Ready(keys) if keys.is_empty() => BuiltinTaskPoll::Failed(
+                    context.root_failure(Arc::new(crate::core::EvaluationFailure::message(
+                        "pattern-dict-try-take received an empty compiler path",
+                    ))),
+                ),
+                ConversionPoll::Ready(keys) => {
+                    self.keys = Some(keys);
+                    self.path = None;
+                    BuiltinTaskPoll::Yielded
+                }
+                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
+                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            };
+        }
+
+        if let Some(undefined) = &mut self.undefined {
+            return match undefined.poll(poll_context, context, durable_context, step_budget) {
+                SemanticUndefinedPoll::Ready(true) => self.finish_absent(context),
+                SemanticUndefinedPoll::Ready(false) => self.finish_found(context),
+                SemanticUndefinedPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+                SemanticUndefinedPoll::Yielded => BuiltinTaskPoll::Yielded,
+                SemanticUndefinedPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            };
+        }
+
+        if let Some(selected) = &mut self.selected {
+            let value =
+                match poll_whnf_computation(selected, poll_context, durable_context, step_budget) {
+                    WhnfOwnerPoll::Ready(value) => value,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return BuiltinTaskPoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!(
+                            "dictionary pattern member produced an external {boundary:?} boundary"
+                        )
+                    }
+                };
+            self.selected = None;
+            if self.next_key == self.keys().len() {
+                self.selected_value = Some(value.clone());
+                self.undefined = Some(SemanticUndefinedMachine::new(value));
+                return BuiltinTaskPoll::Yielded;
+            }
+            let is_dict = context
+                .with_value_access(|access| matches!(access.clone_root(&value), Value::Dict(_)));
+            if !is_dict {
+                return rooted_pattern_failure(context);
+            }
+            let key = self.keys()[self.next_key - 1].clone();
+            self.frames.push(PatternDictTakeFrame {
+                parent: self
+                    .current
+                    .as_ref()
+                    .expect("dictionary extraction must retain its current parent")
+                    .clone(),
+                key,
+            });
+            self.current = Some(value);
+            return BuiltinTaskPoll::Yielded;
+        }
+
+        if let Some(source) = &mut self.source {
+            let source =
+                match poll_whnf_computation(source, poll_context, durable_context, step_budget) {
+                    WhnfOwnerPoll::Ready(source) => source,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return BuiltinTaskPoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!(
+                            "dictionary pattern source produced an external {boundary:?} boundary"
+                        )
+                    }
+                };
+            self.source = None;
+            let is_dict = context
+                .with_value_access(|access| matches!(access.clone_root(&source), Value::Dict(_)));
+            if !is_dict {
+                return rooted_pattern_failure(context);
+            }
+            self.original = Some(source.clone());
+            self.current = Some(source);
+            return BuiltinTaskPoll::Yielded;
+        }
+
+        let key = &self.keys()[self.next_key];
+        let selection = context.with_value_access(|access| {
+            let Value::Dict(dict) = access.clone_root(
+                self.current
+                    .as_ref()
+                    .expect("dictionary extraction must retain its current dictionary"),
+            ) else {
+                unreachable!("dictionary extraction advances only through dictionaries")
+            };
+            dict.get(key)
+                .map_or(PatternDictSelection::Missing, |value| {
+                    PatternDictSelection::Present(
+                        access
+                            .values()
+                            .root_runtime_value(access.values().duplicate_value(value)),
+                    )
+                })
+        });
+        match selection {
+            PatternDictSelection::Missing => self.finish_absent(context),
+            PatternDictSelection::Present(value) => {
+                self.next_key += 1;
+                self.selected = Some(WhnfComputation::from_root(value));
+                BuiltinTaskPoll::Yielded
+            }
+        }
+    }
+
+    fn keys(&self) -> &[Key] {
+        self.keys
+            .as_deref()
+            .expect("dictionary extraction path must be ready")
+    }
+
+    fn finish_absent(&self, context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
+        if !self.optional {
+            return rooted_pattern_failure(context);
+        }
+        context.with_value_access(|access| {
+            BuiltinTaskPoll::Ready(pattern_success_in(
+                access.values(),
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert((*keys::VALUE).clone(), Value::Dict(Dict::new_sync()))
+                        .insert(
+                            (*keys::REST).clone(),
+                            access.clone_root(
+                                self.original.as_ref().expect(
+                                    "optional extraction must retain its original dictionary",
+                                ),
+                            ),
+                        ),
+                ),
+            ))
+        })
+    }
+
+    fn finish_found(&self, context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
+        context.with_value_access(|access| {
+            let leaf_parent = self
+                .current
+                .as_ref()
+                .expect("successful extraction must retain its leaf parent");
+            let Value::Dict(leaf_parent) = access.clone_root(leaf_parent) else {
+                unreachable!("the extraction leaf parent must be a dictionary")
+            };
+            let mut rest = leaf_parent.remove(&self.keys()[self.next_key - 1]);
+            for frame in self.frames.iter().rev() {
+                let Value::Dict(parent) = access.clone_root(&frame.parent) else {
+                    unreachable!("an extraction frame parent must be a dictionary")
+                };
+                rest = if rest.is_empty() {
+                    parent.remove(&frame.key)
+                } else {
+                    parent.insert(frame.key.clone(), Value::Dict(rest))
+                };
+            }
+            BuiltinTaskPoll::Ready(pattern_success_in(
+                access.values(),
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert(
+                            (*keys::VALUE).clone(),
+                            access.clone_root(
+                                self.selected_value
+                                    .as_ref()
+                                    .expect("successful extraction must retain its selected value"),
+                            ),
+                        )
+                        .insert((*keys::REST).clone(), Value::Dict(rest)),
+                ),
+            ))
+        })
     }
 }
 

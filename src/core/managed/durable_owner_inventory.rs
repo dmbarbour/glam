@@ -372,6 +372,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6D.4a"
     ),
     closed_durable!(
+        "src/eval/pattern_machine.rs",
+        "compiler-pattern path, dictionary, and collection progress",
+        "canonical RuntimeValueRoot operands, selected values, and dictionary parent frames plus child WHNF, key-list, and semantic-undefined machines",
+        "yielded or dependency-blocked compiler-pattern observation",
+        "saturated pattern builtin admission and bounded traversal-result publication",
+        "pattern completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6D.5"
+    ),
+    closed_durable!(
         "src/eval/object_machine.rs",
         "object-fixpoint, C3-linearization, and mix progress",
         "canonical RuntimeValueRoot object/spec/mixin fields plus child WHNF and list-front machines",
@@ -859,10 +870,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 213;
+const DECLARATION_BASELINE_COUNT: usize = 215;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([144, 188, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_387_689_619_265_452_301;
+    DeclarationSignals::new([143, 193, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 16_902_331_701_430_108_710;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -995,6 +1006,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "list observation operands, traversal progress, and completed prefixes or suffixes"
     } else if declaration.starts_with("src/eval/list_transform_machine.rs::") {
         "structural list-map callable and source progress"
+    } else if declaration.starts_with("src/eval/pattern_machine.rs::") {
+        "compiler-pattern path, dictionary, and collection progress"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
