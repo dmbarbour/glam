@@ -3234,6 +3234,56 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
 }
 
 #[test]
+fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (actual_item, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("pattern path subject item"))
+        .expect("the owner should allocate a promised path item");
+    let expected_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&expected_demands);
+    let expected_item = Value::semantic_thunk(
+        observer.values(),
+        "instrumented expected path item",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::PatternPathEqual),
+        vec![
+            Value::List(List::from_values(vec![expected_item])),
+            Value::List(List::from_values(vec![Value::Promised(
+                actual_item.clone(),
+            )])),
+        ],
+    )
+    .expect("pattern path equality application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved subject item should suspend path equality");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &actual_item, n(42))
+        .expect("the owner should resolve the promised subject item");
+
+    let effect = eval_value(&observer, &application)
+        .expect("path equality should resume from the subject item");
+    let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
+        .and_then(|value| eval_value(&observer, &value))
+        .expect("the resumed pattern effect should be handled");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        [unit_value()]
+    );
+    assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn compiler_pattern_dictionary_operations_preserve_remainders() {
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");

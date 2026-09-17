@@ -131,7 +131,7 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/access_machine.rs",
-        [7, 4],
+        [9, 6],
         "W3C.2-W3C.3 scoped projection and durable access/key/list source owner"
     ),
     context_entry!(
@@ -236,7 +236,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",
-        [13, 0],
+        [9, 0],
         "I3B.1 scoped pattern inspection"
     ),
     context_entry!(
@@ -251,7 +251,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [6, 1],
+        [7, 2],
         "W6D.5 resumable compiler-pattern observations"
     ),
     context_entry!(

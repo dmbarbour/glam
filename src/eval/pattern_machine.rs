@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Atom, Builtin, BuiltinCall, Dict, List, RuntimeValueAccess, Value, keys};
+use crate::core::{Atom, Builtin, BuiltinCall, Dict, Key, List, RuntimeValueAccess, Value, keys};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
 };
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
 
+use super::access_machine::{ConversionPoll, KeyListMachine};
 use super::builtin_machine::BuiltinTaskPoll;
 use super::list_machine::{ListBackMachine, ListBackPoll, ListFrontMachine, ListFrontPoll};
 use super::whnf::WhnfComputation;
@@ -28,6 +29,112 @@ pub(crate) struct PatternListMachine {
     source: WhnfComputation,
     front: Option<ListFrontMachine>,
     back: Option<ListBackMachine>,
+}
+
+pub(crate) struct PatternPathMachine {
+    expected: KeyListMachine,
+    expected_keys: Option<Vec<Key>>,
+    actual: Option<WhnfComputation>,
+    actual_keys: Option<KeyListMachine>,
+}
+
+impl PatternPathMachine {
+    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [expected, actual]: [RuntimeValueRoot; 2] = arguments
+            .try_into()
+            .expect("pattern path equality retains two operands");
+        Self {
+            expected: KeyListMachine::unowned(expected),
+            expected_keys: None,
+            actual: Some(WhnfComputation::from_root(actual)),
+            actual_keys: None,
+        }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        if self.expected_keys.is_none() {
+            return match self
+                .expected
+                .poll(poll_context, context, durable_context, step_budget)
+            {
+                ConversionPoll::Ready(keys) => {
+                    self.expected_keys = Some(keys);
+                    BuiltinTaskPoll::Yielded
+                }
+                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
+                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            };
+        }
+
+        if let Some(actual_keys) = &mut self.actual_keys {
+            return match actual_keys.poll_optional(
+                poll_context,
+                context,
+                durable_context,
+                step_budget,
+            ) {
+                ConversionPoll::Ready(Some(keys)) => {
+                    rooted_pattern_predicate(context, self.expected_keys.as_ref() == Some(&keys))
+                }
+                ConversionPoll::Ready(None) => rooted_pattern_failure(context),
+                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
+                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            };
+        }
+
+        let actual = match poll_whnf_computation(
+            self.actual
+                .as_mut()
+                .expect("pattern path subject must retain demand until ready"),
+            poll_context,
+            durable_context,
+            step_budget,
+        ) {
+            WhnfOwnerPoll::Ready(actual) => actual,
+            WhnfOwnerPoll::Pending(dependency) => {
+                return BuiltinTaskPoll::Pending(dependency);
+            }
+            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
+            WhnfOwnerPoll::External(boundary) => {
+                unreachable!("pattern path subject produced an external {boundary:?} boundary")
+            }
+        };
+        self.actual = None;
+        let shape = context.with_value_access(|access| match access.clone_root(&actual) {
+            Value::Binary(bytes) => PatternPathShape::Binary(bytes),
+            Value::List(_) => PatternPathShape::List,
+            _ => PatternPathShape::Other,
+        });
+        match shape {
+            PatternPathShape::Binary(bytes) => {
+                let keys = bytes
+                    .iter()
+                    .map(|byte| Key::Number(Number::from_u8(*byte)))
+                    .collect::<Vec<_>>();
+                rooted_pattern_predicate(context, self.expected_keys.as_ref() == Some(&keys))
+            }
+            PatternPathShape::List => {
+                self.actual_keys = Some(KeyListMachine::from_ready_unowned(actual));
+                BuiltinTaskPoll::Yielded
+            }
+            PatternPathShape::Other => rooted_pattern_failure(context),
+        }
+    }
+}
+
+enum PatternPathShape {
+    Binary(Bytes),
+    List,
+    Other,
 }
 
 impl PatternListMachine {

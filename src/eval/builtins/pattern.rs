@@ -17,10 +17,6 @@ pub(super) fn apply(
             let [expected, value] = super::exact(arguments, "pattern-equal")?;
             pattern_equal(context, &expected, &value)
         }
-        Builtin::PatternPathEqual => {
-            let [expected, value] = super::exact(arguments, "pattern-path-equal")?;
-            pattern_path_equal(context, &expected, &value)
-        }
         Builtin::PatternIsDict => {
             let [value] = super::exact(arguments, "pattern-is-dict")?;
             pattern_is_dict(context, &value)
@@ -66,87 +62,6 @@ fn pattern_equal(
         pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
-    })
-}
-
-fn pattern_path_equal(
-    context: &EvaluatorStepContext<'_>,
-    expected: &Value,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let expected = eval_key_path_list_in(context, expected)?;
-    let Some(value) = pattern_path_keys(context, value)? else {
-        return Ok(pattern_failure());
-    };
-    Ok(if expected == value {
-        pattern_success(context.context().values().unit())
-    } else {
-        pattern_failure()
-    })
-}
-
-fn pattern_path_keys(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Option<Vec<Key>>, EvaluationHalt> {
-    match eval_value_in(context, value)? {
-        Value::Binary(bytes) => Ok(Some(
-            bytes
-                .iter()
-                .map(|byte| Key::Number(Number::from_u8(*byte)))
-                .collect(),
-        )),
-        Value::List(list) => pattern_list_keys(context, list),
-        _ => Ok(None),
-    }
-}
-
-fn pattern_list_keys(
-    context: &EvaluatorStepContext<'_>,
-    mut list: List,
-) -> Result<Option<Vec<Key>>, EvaluationHalt> {
-    let mut keys = Vec::new();
-    while let Some((value, tail)) = pop_list_front_in(context, &list)? {
-        let Some(key) = pattern_value_key(context, &value)? else {
-            return Ok(None);
-        };
-        keys.push(key);
-        list = tail;
-    }
-    Ok(Some(keys))
-}
-
-fn pattern_value_key(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Option<Key>, EvaluationHalt> {
-    Ok(match eval_value_in(context, value)? {
-        Value::Atom(atom) => Some(Key::Atom(atom)),
-        Value::Number(number) => Some(Key::Number(number)),
-        Value::Binary(bytes) => Some(Key::Binary(bytes)),
-        Value::List(list) => pattern_list_keys(context, list)?.map(|keys| Key::List(keys.into())),
-        Value::Dict(dict) => {
-            let mut entries = Vec::new();
-            for (key, value) in dict.iter() {
-                let Some(value) = pattern_value_key(context, value)? else {
-                    return Ok(None);
-                };
-                if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                    continue;
-                }
-                entries.push((key.clone(), value));
-            }
-            Some(Key::Dict(entries.into()))
-        }
-        Value::Builtin(_)
-        | Value::PartialBuiltin(_)
-        | Value::Function(_)
-        | Value::Net(_)
-        | Value::Metadata(_)
-        | Value::Opaque(_) => None,
-        Value::Lazy(_) | Value::Promised(_) => {
-            unreachable!("eval_value removes suspended values")
-        }
     })
 }
 

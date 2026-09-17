@@ -96,7 +96,8 @@ pub(super) fn apply_builtin_in(
         Builtin::PatternIsList
         | Builtin::PatternListTryUncons
         | Builtin::PatternListTryUnsnoc
-        | Builtin::PatternListIsEmpty => Ok(Value::Lazy(context.construct_lazy(move |access| {
+        | Builtin::PatternListIsEmpty
+        | Builtin::PatternPathEqual => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,
                 BuiltinCall {
@@ -106,7 +107,6 @@ pub(super) fn apply_builtin_in(
             )
         }))),
         Builtin::PatternEqual
-        | Builtin::PatternPathEqual
         | Builtin::PatternIsDict
         | Builtin::PatternDictTryTake
         | Builtin::PatternDictTryTakeOptional

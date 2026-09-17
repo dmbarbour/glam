@@ -252,6 +252,25 @@ impl KeyConversionMachine {
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Key> {
+        match self.poll_optional(poll_context, context, durable_context, step_budget) {
+            ConversionPoll::Ready(Some(key)) => ConversionPoll::Ready(key),
+            ConversionPoll::Ready(None) => ConversionPoll::Failed(root_message(
+                context,
+                "dictionary keys must evaluate to keyable values",
+            )),
+            ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
+            ConversionPoll::Yielded => ConversionPoll::Yielded,
+            ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
+        }
+    }
+
+    pub(crate) fn poll_optional(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> ConversionPoll<Option<Key>> {
         match &mut self.state {
             KeyConversionState::Demand(computation) => {
                 let value = match poll_whnf_computation(
@@ -273,7 +292,7 @@ impl KeyConversionMachine {
                     }
                 };
                 match classify_key_value(context, &value) {
-                    ClassifiedKeyValue::Ready(key) => ConversionPoll::Ready(key),
+                    ClassifiedKeyValue::Ready(key) => ConversionPoll::Ready(Some(key)),
                     ClassifiedKeyValue::List(value) => {
                         self.state = KeyConversionState::List(Box::new(
                             KeyListMachine::from_ready(value, self.source_owner),
@@ -289,16 +308,18 @@ impl KeyConversionMachine {
                         });
                         ConversionPoll::Yielded
                     }
-                    ClassifiedKeyValue::Invalid => ConversionPoll::Failed(root_message(
-                        context,
-                        "dictionary keys must evaluate to keyable values",
-                    )),
+                    ClassifiedKeyValue::Invalid => ConversionPoll::Ready(None),
                 }
             }
             KeyConversionState::Dict(dict) => {
                 if let Some(child) = &mut dict.child {
-                    return match child.poll(poll_context, context, durable_context, step_budget) {
-                        ConversionPoll::Ready(value) => {
+                    return match child.poll_optional(
+                        poll_context,
+                        context,
+                        durable_context,
+                        step_budget,
+                    ) {
+                        ConversionPoll::Ready(Some(value)) => {
                             let (key, _) = &dict.members[dict.next - 1];
                             if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
                                 dict.converted.push((key.clone(), value));
@@ -306,15 +327,16 @@ impl KeyConversionMachine {
                             dict.child = None;
                             ConversionPoll::Yielded
                         }
+                        ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
                         ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
                         ConversionPoll::Yielded => ConversionPoll::Yielded,
                         ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
                     };
                 }
                 let Some((_, value)) = dict.members.get(dict.next) else {
-                    return ConversionPoll::Ready(Key::Dict(Arc::from(std::mem::take(
+                    return ConversionPoll::Ready(Some(Key::Dict(Arc::from(std::mem::take(
                         &mut dict.converted,
-                    ))));
+                    )))));
                 };
                 dict.next += 1;
                 dict.child = Some(Box::new(KeyConversionMachine::new(
@@ -324,10 +346,11 @@ impl KeyConversionMachine {
                 ConversionPoll::Yielded
             }
             KeyConversionState::List(list) => {
-                match list.poll(poll_context, context, durable_context, step_budget) {
-                    ConversionPoll::Ready(items) => {
-                        ConversionPoll::Ready(Key::List(Arc::from(items)))
+                match list.poll_optional(poll_context, context, durable_context, step_budget) {
+                    ConversionPoll::Ready(Some(items)) => {
+                        ConversionPoll::Ready(Some(Key::List(Arc::from(items))))
                     }
+                    ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
                     ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
                     ConversionPoll::Yielded => ConversionPoll::Yielded,
                     ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
@@ -366,6 +389,10 @@ impl KeyListMachine {
         Self::new(value, None)
     }
 
+    pub(crate) fn from_ready_unowned(value: RuntimeValueRoot) -> Self {
+        Self::from_ready(value, None)
+    }
+
     pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
@@ -373,13 +400,33 @@ impl KeyListMachine {
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Vec<Key>> {
+        match self.poll_optional(poll_context, context, durable_context, step_budget) {
+            ConversionPoll::Ready(Some(keys)) => ConversionPoll::Ready(keys),
+            ConversionPoll::Ready(None) => ConversionPoll::Failed(root_message(
+                context,
+                "dictionary keys must evaluate to keyable values",
+            )),
+            ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
+            ConversionPoll::Yielded => ConversionPoll::Yielded,
+            ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
+        }
+    }
+
+    pub(crate) fn poll_optional(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> ConversionPoll<Option<Vec<Key>>> {
         if let Some(child) = &mut self.child {
-            return match child.poll(poll_context, context, durable_context, step_budget) {
-                ConversionPoll::Ready(key) => {
+            return match child.poll_optional(poll_context, context, durable_context, step_budget) {
+                ConversionPoll::Ready(Some(key)) => {
                     self.converted.push(key);
                     self.child = None;
                     ConversionPoll::Yielded
                 }
+                ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
                 ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
                 ConversionPoll::Yielded => ConversionPoll::Yielded,
                 ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
@@ -442,7 +489,7 @@ impl KeyListMachine {
         }
 
         let Some(list) = self.lists.pop() else {
-            return ConversionPoll::Ready(std::mem::take(&mut self.converted));
+            return ConversionPoll::Ready(Some(std::mem::take(&mut self.converted)));
         };
         let step = context.with_value_access(|access| {
             let Value::List(list) = access.clone_root(&list) else {

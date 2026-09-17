@@ -12,6 +12,7 @@ use crate::evaluation::{
     EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
     poll_whnf_computation,
 };
+#[cfg(test)]
 use crate::list::ListItem;
 use crate::number::Number;
 
@@ -1211,6 +1212,7 @@ pub(crate) fn pop_list_front(
     super::with_direct_evaluator(context, |evaluator| pop_list_front_in(evaluator, list))
 }
 
+#[cfg(test)]
 pub(crate) fn pop_list_front_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,
