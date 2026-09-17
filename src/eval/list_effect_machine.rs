@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::core::{
     Builtin, Dict, EvaluationFailure, EvaluationHalt, LazyId, LazyValue, List,
-    ListEffectComputation, ManagedPromiseRoot, Value, keys,
+    ListEffectComputation, ManagedPromiseRoot, RuntimeValueAccess, Value, keys,
 };
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
@@ -155,12 +155,12 @@ impl ListEffectSourceMachine {
                                 return ListEffectSourcePoll::Failed(root_halt(context, error));
                             }
                         };
-                        *demand = application_in(
-                            context,
-                            function,
-                            context.root_value(list_effect_api()),
-                            self.source_owner,
-                        );
+                        let api = context.with_value_access(|access| {
+                            access
+                                .values()
+                                .root_runtime_value(list_effect_api(access.values()))
+                        });
+                        *demand = application_in(context, function, api, self.source_owner);
                         *phase = RunPhase::Application;
                         ListEffectSourcePoll::Yielded
                     }
@@ -354,7 +354,7 @@ fn publish_fix_result(
     Ok(value)
 }
 
-fn list_effect_api() -> Value {
+fn list_effect_api(_access: &RuntimeValueAccess<'_>) -> Value {
     Value::Dict(
         Dict::new_sync()
             .insert(

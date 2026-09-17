@@ -4381,7 +4381,7 @@ show its exact checkpoint delta before proceeding.
 | **W6E.1-W6E.4 — Complete (2026-09-17): Durable annotations** | 15 S, 3 F | Convert recognition, assertions, array/deque/binary traversal, pure and reflection metadata, diagnostic contexts, and reflection deferral as one durable owner. The annotation dispatcher and recognition could not be separated without losing recognition progress. `-18`, plus W6C.2's final `-1` assertion leaf. |
 | **W6E.5 — Complete (2026-09-17): Effect dispatch and fixpoint** | 4 S | Effect application, call preparation, and fixpoint construction now share one durable owner. The effect-map dispatcher remains assigned to W6E.6; the checkpoint removes two effect declarations plus the final synchronous key converter, and closes W6A.4. |
 | **W6E.6 — Complete (2026-09-17): Effect map** | 3 S, 2 F | Convert map construction, the suspendable run step, continuation, and API-call construction; then close W6A.1b by access-qualifying the shared effect constructor. `-5`, plus closure delta `-1`. |
-| **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
+| **W6E.7 — Complete (2026-09-17): List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
 | **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order and move callback application into the W6A.2 owner. `-6`. |
 | **W6E.9 — List-effect source** | 4 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-4`. |
 
@@ -4447,6 +4447,13 @@ fifty-eight to fifty-two. The WHNF census removes the old two direct demands
 and synchronous callable application, while root, owner, access, and regional
 constructor inventories account for the durable map phases and their bounded
 publications.
+
+W6E.7 completion record, 2026-09-17: the list-effect API dictionary is now an
+access-qualified immediate leaf. Its source owner constructs and roots the API
+within one existing evaluator access region before installing the application
+checkpoint; no context-free semantic value constructor remains. The D.2c
+manifest falls from fifty-two to fifty-one declarations and
+`AnnotationsAndEffects` from eleven to ten.
 
 #### W6F — Objects and interaction-net builtins
 
