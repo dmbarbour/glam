@@ -114,6 +114,7 @@ impl BuiltinTaskMachine {
                 | Builtin::DiagnosticObject
                 | Builtin::ObjectWithDefs
                 | Builtin::ObjectComposedDefs
+                | Builtin::ObjectOverrideDefs
                 | Builtin::EffectApply
                 | Builtin::EffectCall
                 | Builtin::EffectMap

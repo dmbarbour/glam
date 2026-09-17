@@ -652,10 +652,13 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6F.3a moves ordinary extension and composed-definition application to one
 // resumable source owner. Lazy applications retain the undemanded stages, so
 // only callable transitions enter the WHNF census.
-const EXPECTED_OCCURRENCES: usize = 215;
-const EXPECTED_FINGERPRINT: u64 = 933_691_275_090_537_814;
+// W6F.3b replaces recursive override demand and traversal with a rooted
+// persistent-dictionary frame stack; only its pending prior-value demand is
+// evaluator work.
+const EXPECTED_OCCURRENCES: usize = 210;
+const EXPECTED_FINGERPRINT: u64 = 7_838_942_823_785_902_898;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 16),
+    (Signal::EvalValue, 13),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 4),
@@ -668,14 +671,14 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 75),
-    (Signal::UserSizedLoop, 49),
+    (Signal::StructuralRecursion, 74),
+    (Signal::UserSizedLoop, 48),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 120),
+    (WorkShape::DemandThenInspect, 118),
     (WorkShape::OrderedOperands, 6),
-    (WorkShape::CollectionWalk, 16),
+    (WorkShape::CollectionWalk, 13),
     (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 5),

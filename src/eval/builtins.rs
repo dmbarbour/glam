@@ -198,7 +198,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject
         | Builtin::ObjectWithDefs
-        | Builtin::ObjectComposedDefs => Ok(Value::Lazy(context.construct_lazy(move |access| {
+        | Builtin::ObjectComposedDefs
+        | Builtin::ObjectOverrideDefs => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,
                 BuiltinCall {
@@ -211,8 +212,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance
         | Builtin::ObjectDefaultDefs
-        | Builtin::ObjectDictDefs
-        | Builtin::ObjectOverrideDefs => object::apply(context, builtin, arguments),
+        | Builtin::ObjectDictDefs => object::apply(context, builtin, arguments),
         Builtin::Fixpoint
         | Builtin::EffectApply
         | Builtin::EffectCall

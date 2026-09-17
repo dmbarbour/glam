@@ -554,6 +554,93 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
 }
 
 #[test]
+fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (nested_prior, _prior_task, _prior_owner) = owner
+        .task_owned_promise(Arc::from("nested object override prior"))
+        .expect("the owner should allocate a promised nested prior value");
+    let update_demands = Arc::new(AtomicUsize::new(0));
+    let observed_updates = Arc::clone(&update_demands);
+    let updates =
+        Value::semantic_thunk(
+            observer.values(),
+            "instrumented object override updates",
+            move |_| {
+                observed_updates.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Dict(
+                    Dict::new_sync()
+                        .insert(Key::binary_from_text("a_early"), n(42))
+                        .insert(
+                            Key::binary_from_text("z_nested"),
+                            Value::Dict(Dict::new_sync().insert(
+                                Key::binary_from_text("new"),
+                                Value::binary_from_text("new"),
+                            )),
+                        ),
+                ))
+            },
+        );
+    let base_demands = Arc::new(AtomicUsize::new(0));
+    let observed_base = Arc::clone(&base_demands);
+    let nested_prior_value = nested_prior.clone();
+    let base = Value::semantic_thunk(
+        observer.values(),
+        "instrumented object override base",
+        move |_| {
+            observed_base.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(
+                Dict::new_sync()
+                    .insert(Key::binary_from_text("a_early"), n(19))
+                    .insert(
+                        Key::binary_from_text("z_nested"),
+                        Value::Promised(nested_prior_value.clone()),
+                    ),
+            ))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectOverrideDefs),
+        vec![updates, base, unit_value()],
+    )
+    .expect("object override definitions should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the nested promised prior should suspend object override");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(update_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    set_promise(
+        &owner,
+        &nested_prior,
+        Value::Dict(
+            Dict::new_sync().insert(Key::binary_from_text("old"), Value::binary_from_text("old")),
+        ),
+    )
+    .expect("the nested prior should accept its assignment");
+
+    let Value::Dict(result) =
+        eval_value(&observer, &application).expect("object override should resume")
+    else {
+        panic!("object override should produce a dictionary")
+    };
+    assert_eq!(result.get(&Key::binary_from_text("a_early")), Some(&n(42)));
+    let Some(Value::Dict(nested)) = result.get(&Key::binary_from_text("z_nested")) else {
+        panic!("the nested object override should remain a dictionary")
+    };
+    assert_eq!(
+        nested.get(&Key::binary_from_text("old")),
+        Some(&Value::binary_from_text("old"))
+    );
+    assert_eq!(
+        nested.get(&Key::binary_from_text("new")),
+        Some(&Value::binary_from_text("new"))
+    );
+    assert_eq!(update_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn claimed_evaluator_dispatches_pure_annotation_branches() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

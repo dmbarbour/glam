@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, LazyValue, List, Value,
-    keys,
+    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, Key, LazyValue, List,
+    Value, keys,
 };
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
@@ -47,13 +47,41 @@ enum CompositionPhase {
         application: WhnfComputation,
         self_value: RuntimeValueRoot,
     },
+    OverrideUpdates {
+        updates: WhnfComputation,
+        base: RuntimeValueRoot,
+    },
+    OverrideBase {
+        updates: RuntimeValueRoot,
+        base: WhnfComputation,
+    },
+    Override(ObjectOverrideMachine),
+}
+
+struct ObjectOverrideMachine {
+    stack: Vec<OverrideFrame>,
+}
+
+struct OverrideFrame {
+    result: RuntimeValueRoot,
+    updates: RuntimeValueRoot,
+    keys: Vec<Key>,
+    next: usize,
+    pending: Option<PendingOverride>,
+    return_key: Option<Key>,
+}
+
+struct PendingOverride {
+    key: Key,
+    update: RuntimeValueRoot,
+    prior: WhnfComputation,
 }
 
 impl ObjectCompositionMachine {
     pub(crate) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
-            Builtin::ObjectWithDefs | Builtin::ObjectComposedDefs
+            Builtin::ObjectWithDefs | Builtin::ObjectComposedDefs | Builtin::ObjectOverrideDefs
         )
     }
 
@@ -78,6 +106,15 @@ impl ObjectCompositionMachine {
                     extension_defs,
                     base,
                     self_value,
+                }
+            }
+            Builtin::ObjectOverrideDefs => {
+                let [updates, base, _self_value]: [RuntimeValueRoot; 3] = arguments
+                    .try_into()
+                    .expect("object override definitions retain three operands");
+                CompositionPhase::OverrideUpdates {
+                    updates: WhnfComputation::from_root(updates),
+                    base,
                 }
             }
             _ => unreachable!("object composition machine received another builtin"),
@@ -193,8 +230,243 @@ impl ObjectCompositionMachine {
                     std::slice::from_ref(self_value),
                 ))
             }
+            CompositionPhase::OverrideUpdates { updates, base } => {
+                let updates = match poll_whnf(updates, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                self.phase = CompositionPhase::OverrideBase {
+                    updates,
+                    base: WhnfComputation::from_root(base.clone()),
+                };
+                BuiltinTaskPoll::Yielded
+            }
+            CompositionPhase::OverrideBase { updates, base } => {
+                let base = match poll_whnf(base, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                let machine = match ObjectOverrideMachine::new(context, base, updates.clone()) {
+                    Ok(machine) => machine,
+                    Err(message) => {
+                        return BuiltinTaskPoll::Failed(root_message(context, message));
+                    }
+                };
+                self.phase = CompositionPhase::Override(machine);
+                BuiltinTaskPoll::Yielded
+            }
+            CompositionPhase::Override(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
         }
     }
+}
+
+impl ObjectOverrideMachine {
+    fn new(
+        context: &EvaluatorStepContext<'_>,
+        base: RuntimeValueRoot,
+        updates: RuntimeValueRoot,
+    ) -> Result<Self, &'static str> {
+        let frame = override_frame(context, base, updates, None)?;
+        Ok(Self { stack: vec![frame] })
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        let pending = self
+            .stack
+            .last_mut()
+            .expect("unfinished object override retains a frame")
+            .pending
+            .take();
+        if let Some(mut pending) = pending {
+            let prior = match poll_whnf(
+                &mut pending.prior,
+                poll_context,
+                durable_context,
+                step_budget,
+            ) {
+                DemandResult::Ready(value) => value,
+                DemandResult::Pending(poll) => {
+                    self.stack
+                        .last_mut()
+                        .expect("pending object override retains its frame")
+                        .pending = Some(pending);
+                    return poll;
+                }
+            };
+            if let Some(child) =
+                nested_override_frame(context, prior, pending.update.clone(), pending.key.clone())
+            {
+                self.stack.push(child);
+            } else {
+                let result = {
+                    let frame = self
+                        .stack
+                        .last()
+                        .expect("pending object override retains its frame");
+                    insert_override_value(context, &frame.result, pending.key, &pending.update)
+                };
+                self.stack
+                    .last_mut()
+                    .expect("pending object override retains its frame")
+                    .result = result;
+            }
+            return BuiltinTaskPoll::Yielded;
+        }
+
+        let complete = {
+            let frame = self
+                .stack
+                .last()
+                .expect("unfinished object override retains a frame");
+            frame.next == frame.keys.len()
+        };
+        if complete {
+            let completed = self
+                .stack
+                .pop()
+                .expect("completed object override retains a frame");
+            let Some(parent) = self.stack.last_mut() else {
+                return BuiltinTaskPoll::Ready(completed.result);
+            };
+            let key = completed
+                .return_key
+                .expect("a nested object override retains its parent key");
+            parent.result = insert_override_value(context, &parent.result, key, &completed.result);
+            return BuiltinTaskPoll::Yielded;
+        }
+
+        let step = {
+            let frame = self
+                .stack
+                .last_mut()
+                .expect("unfinished object override retains a frame");
+            let key = frame.keys[frame.next].clone();
+            frame.next += 1;
+            next_override_step(context, &frame.result, &frame.updates, key)
+        };
+        match step {
+            OverrideStep::Inserted(result) => {
+                self.stack
+                    .last_mut()
+                    .expect("unfinished object override retains a frame")
+                    .result = result;
+            }
+            OverrideStep::DemandPrior { key, update, prior } => {
+                self.stack
+                    .last_mut()
+                    .expect("unfinished object override retains a frame")
+                    .pending = Some(PendingOverride {
+                    key,
+                    update,
+                    prior: WhnfComputation::from_root(prior),
+                });
+            }
+        }
+        BuiltinTaskPoll::Yielded
+    }
+}
+
+enum OverrideStep {
+    Inserted(RuntimeValueRoot),
+    DemandPrior {
+        key: Key,
+        update: RuntimeValueRoot,
+        prior: RuntimeValueRoot,
+    },
+}
+
+fn override_frame(
+    context: &EvaluatorStepContext<'_>,
+    result: RuntimeValueRoot,
+    updates: RuntimeValueRoot,
+    return_key: Option<Key>,
+) -> Result<OverrideFrame, &'static str> {
+    let keys = context.with_value_access(|access| {
+        if !matches!(access.clone_root(&result), Value::Dict(_)) {
+            return Err("object override definitions require dictionary values");
+        }
+        let Value::Dict(update_values) = access.clone_root(&updates) else {
+            return Err("object override definitions require dictionary values");
+        };
+        Ok(update_values.iter().map(|(key, _)| key.clone()).collect())
+    })?;
+    Ok(OverrideFrame {
+        result,
+        updates,
+        keys,
+        next: 0,
+        pending: None,
+        return_key,
+    })
+}
+
+fn nested_override_frame(
+    context: &EvaluatorStepContext<'_>,
+    prior: RuntimeValueRoot,
+    updates: RuntimeValueRoot,
+    return_key: Key,
+) -> Option<OverrideFrame> {
+    let prior_is_dict =
+        context.with_value_access(|access| matches!(access.clone_root(&prior), Value::Dict(_)));
+    prior_is_dict
+        .then(|| override_frame(context, prior, updates, Some(return_key)))
+        .transpose()
+        .expect("nested override updates are already known dictionaries")
+}
+
+fn next_override_step(
+    context: &EvaluatorStepContext<'_>,
+    result: &RuntimeValueRoot,
+    updates: &RuntimeValueRoot,
+    key: Key,
+) -> OverrideStep {
+    context.with_value_access(|access| {
+        let Value::Dict(result_values) = access.clone_root(result) else {
+            unreachable!("object override result remains a dictionary")
+        };
+        let Value::Dict(update_values) = access.clone_root(updates) else {
+            unreachable!("object override updates remain a dictionary")
+        };
+        let update = update_values
+            .get(&key)
+            .expect("an inventoried object override key remains present");
+        if let (Some(prior), Value::Dict(_)) = (result_values.get(&key), update) {
+            return OverrideStep::DemandPrior {
+                key,
+                update: access
+                    .values()
+                    .root_runtime_value(access.values().duplicate_value(update)),
+                prior: access
+                    .values()
+                    .root_runtime_value(access.values().duplicate_value(prior)),
+            };
+        }
+        let result = result_values.insert(key, access.values().duplicate_value(update));
+        OverrideStep::Inserted(access.values().root_runtime_value(Value::Dict(result)))
+    })
+}
+
+fn insert_override_value(
+    context: &EvaluatorStepContext<'_>,
+    result: &RuntimeValueRoot,
+    key: Key,
+    value: &RuntimeValueRoot,
+) -> RuntimeValueRoot {
+    context.with_value_access(|access| {
+        let Value::Dict(result) = access.clone_root(result) else {
+            unreachable!("object override result remains a dictionary")
+        };
+        let result = result.insert(key, access.clone_root(value));
+        access.values().root_runtime_value(Value::Dict(result))
+    })
 }
 
 enum DemandResult {

@@ -428,14 +428,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/eval/object_composition_machine.rs",
-        "ordinary object extension and composed-definition progress",
-        "canonical RuntimeValueRoot object/specification/definition/application fields plus child WHNF machines",
+        "ordinary object extension, composed-definition, and recursive override progress",
+        "canonical RuntimeValueRoot object/specification/definition/application fields plus rooted persistent-dictionary frames and child WHNF machines",
         "yielded or dependency-blocked object composition evaluation",
         "saturated builtin admission and bounded extension or application publication",
         "composition completion, failure, cancellation, or builtin-source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W6F.3a"
+        "W6F.3"
     ),
     closed_durable!(
         "src/eval/list_effect_machine.rs",
@@ -914,10 +914,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 223;
+const DECLARATION_BASELINE_COUNT: usize = 226;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([132, 254, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_296_681_803_257_376_219;
+    DeclarationSignals::new([132, 262, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_579_209_299_934_580_113;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1059,7 +1059,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/object_builtin_machine.rs::") {
         "object specification, diagnostic normalization, and local-name progress"
     } else if declaration.starts_with("src/eval/object_composition_machine.rs::") {
-        "ordinary object extension and composed-definition progress"
+        "ordinary object extension, composed-definition, and recursive override progress"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {

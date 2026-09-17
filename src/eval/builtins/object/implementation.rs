@@ -37,43 +37,6 @@ fn object_spec_from_parts(
         .insert((*keys::DEFS).clone(), defs)
 }
 
-/// Implements the small right-biased record mixin used for assembler-owned
-/// diagnostic fields. It is an internal definitions adapter, not the language
-/// `with` surface or its assertion policy.
-pub(super) fn eval_object_override_defs_builtin(
-    context: &EvaluatorStepContext<'_>,
-    updates: &Value,
-    base: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let updates = eval_value_in(context, updates)?;
-    let base = eval_value_in(context, base)?;
-    let (Value::Dict(updates), Value::Dict(base)) = (updates, base) else {
-        return Err(EvaluationHalt::new(
-            "object override definitions require dictionary values",
-        ));
-    };
-    Ok(Value::Dict(override_dict(context, &base, &updates)?))
-}
-
-fn override_dict(
-    context: &EvaluatorStepContext<'_>,
-    base: &crate::core::Dict,
-    updates: &crate::core::Dict,
-) -> Result<crate::core::Dict, EvaluationHalt> {
-    let mut result = base.clone();
-    for (key, update) in updates.iter() {
-        let update = match (result.get(key), update) {
-            (Some(prior), Value::Dict(update)) => match eval_value_in(context, prior)? {
-                Value::Dict(prior) => Value::Dict(override_dict(context, &prior, update)?),
-                _ => Value::Dict(update.clone()),
-            },
-            _ => update.clone(),
-        };
-        result = result.insert(key.clone(), update);
-    }
-    Ok(result)
-}
-
 pub(super) fn eval_object_from_dict_builtin(
     context: &EvaluatorStepContext<'_>,
     value: &Value,

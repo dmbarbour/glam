@@ -41,11 +41,6 @@ pub(super) fn apply(
                 Value::Dict(merge_dicts_in(access.values(), &base, &dict))
             }))
         }
-        Builtin::ObjectOverrideDefs => {
-            let [updates, base, _self_value] =
-                super::exact(arguments, "overriding object definitions")?;
-            eval_object_override_defs_builtin(context, &updates, &base)
-        }
         _ => unreachable!("object dispatcher received another builtin"),
     }
 }

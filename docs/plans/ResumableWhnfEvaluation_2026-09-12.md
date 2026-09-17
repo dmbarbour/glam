@@ -4487,7 +4487,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.1 — Complete (2026-09-17): Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
 | **W6F.2 — Complete (2026-09-17): Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`; then close W6A.0d for another `-2`. |
 | **W6F.3a — Complete (2026-09-17): Object composition applications** | 2 S | Convert composed and extended definitions through one durable application/WHNF phase owner. `-2`. |
-| **W6F.3b — Recursive object override** | 2 S | Convert overriding definitions and recursive dictionary override through a rooted persistent-dictionary frame stack. `-2`. |
+| **W6F.3b — Complete (2026-09-17): Recursive object override** | 2 S | Convert overriding definitions and recursive dictionary override through a rooted persistent-dictionary frame stack. `-2`. |
 | **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
@@ -4542,6 +4542,19 @@ fixtures prove completed object/prior-definition work is not replayed after
 resumption. The D.2c manifest falls from thirty-one to twenty-nine declarations
 and `Objects` from nine to seven; exact root-publication, durable-owner, access,
 raw-value, and WHNF inventories account for the new owner.
+
+W6F.3b completion record, 2026-09-17: overriding definitions now demand their
+top-level updates and base in the former source order, then traverse nested
+right-biased overrides with an explicit rooted persistent-dictionary frame
+stack. Each frame retains its current result, update dictionary, ordered keys,
+and optional prior-value WHNF computation. A child frame returns its completed
+dictionary through the parent key, so arbitrary nesting uses neither Rust
+recursion nor a regional value across polls. A forced promised nested-prior
+fixture proves the completed earlier key and both top-level operand demands are
+preserved across suspension without replay. The D.2c manifest falls from
+twenty-nine to twenty-seven declarations and `Objects` from seven to five;
+the exact inventories account for the enlarged composition owner and its
+bounded result publications.
 
 #### W6G — Residual resumable-machine overhead
 
