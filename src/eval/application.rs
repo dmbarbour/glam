@@ -12,6 +12,10 @@ pub(super) fn apply_value(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.3 removes the synchronous application compatibility family"
+)]
 pub(super) fn apply_value_in(
     context: &EvaluatorStepContext<'_>,
     function: Value,
@@ -50,6 +54,10 @@ pub(crate) fn apply_values(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.3 removes the synchronous application compatibility family"
+)]
 pub(crate) fn apply_values_in(
     context: &EvaluatorStepContext<'_>,
     function: Value,
@@ -93,6 +101,10 @@ pub(super) fn apply_function_values(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.3 removes the synchronous application compatibility family"
+)]
 fn apply_function_values_in(
     context: &EvaluatorStepContext<'_>,
     function: FunctionValue,
@@ -128,6 +140,10 @@ fn apply_function_values_in(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.3 removes the synchronous application compatibility family"
+)]
 fn apply_dict_value_in(
     context: &EvaluatorStepContext<'_>,
     dict: crate::core::Dict,

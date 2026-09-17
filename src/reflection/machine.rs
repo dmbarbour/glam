@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::Mutex;
-#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::protocol::{
@@ -14,8 +12,6 @@ use super::protocol::{
 use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, VolumeId};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
-#[cfg(test)]
-use crate::core::LazyId;
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
     LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
@@ -140,7 +136,7 @@ struct EffectPhaseProbe {
     fused_requests: AtomicUsize,
     parsed_requests: AtomicUsize,
     dispatched_requests: AtomicUsize,
-    application_lazies: Mutex<Vec<LazyId>>,
+    application_starts: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -190,22 +186,12 @@ impl EffectPhaseProbe {
         self.dispatched_requests.load(Ordering::Acquire)
     }
 
-    fn record_application_lazy(&self, context: &EvaluatorStepContext<'_>, request: &Value) {
-        let Value::Lazy(lazy) = request else {
-            return;
-        };
-        let id = context.with_value_access(|access| lazy.access(access.values()).id());
-        self.application_lazies
-            .lock()
-            .expect("effect application-lazy probe was poisoned")
-            .push(id);
+    fn record_application_start(&self) {
+        self.application_starts.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn application_lazies(&self) -> Vec<LazyId> {
-        self.application_lazies
-            .lock()
-            .expect("effect application-lazy probe was poisoned")
-            .clone()
+    fn application_starts(&self) -> usize {
+        self.application_starts.load(Ordering::Acquire)
     }
 }
 
@@ -875,7 +861,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
             WhnfOwnerPoll::Pending(dependency) => {
                 #[cfg(test)]
-                if matches!(purpose, EffectDecodePurpose::ApplicationResult)
+                if matches!(purpose, EffectDecodePurpose::RequestApplication)
                     && let WorkDependency::Wait(wait) = &dependency
                 {
                     self.eval_context.pause_deferred_pump(wait);
@@ -1039,30 +1025,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     );
                 };
                 if fused {
-                    let effect = context.evaluate(&self.eval_context, |evaluator| {
-                        let function = evaluator.project_root(&value);
-                        let argument = evaluator.project_root(&argument);
-                        apply_in(evaluator, function, vec![argument])
-                            .map(|effect| evaluator.root_value(effect))
-                    });
-                    let effect = match effect {
-                        Ok(effect) => effect,
-                        Err(error) => {
-                            return ScalarDemandStep::Failed(
-                                ScalarDemandWork::new(
-                                    value,
-                                    ScalarDemandPurpose::ApplyContinuation { argument, fused },
-                                    branch,
-                                    scope_depth,
-                                ),
-                                error,
-                            );
-                        }
-                    };
                     self.record_fused_request();
                     branch.control.sequence.pop();
-                    branch.set_effect_root(effect);
-                    MachineStep::Decode(EffectDecodeWork::new(branch, scope_depth))
+                    MachineStep::Decode(EffectDecodeWork::application(
+                        context,
+                        &self.eval_context,
+                        value,
+                        vec![argument],
+                        EffectDecodePurpose::AppliedEffect,
+                        branch,
+                        scope_depth,
+                    ))
                 } else {
                     branch.control.sequence.pop();
                     MachineStep::Continue(MachineWork::apply_roots(
@@ -2110,46 +2083,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
             EffectDecodePurpose::Function => {
-                let request = context.evaluate(&self.eval_context, |evaluator| {
-                    let function = evaluator.project_root(&value);
-                    let api = evaluator.project_root(&self.api);
-                    apply_in(evaluator, function, vec![api])
-                        .map(|request| evaluator.root_value(request))
-                        .map_err(|halt| {
-                            halt.with_core_context(effect_dispatch_context("application"))
-                        })
-                });
-                match request {
-                    Ok(request) => {
-                        #[cfg(test)]
-                        context.evaluate(&self.eval_context, |evaluator| {
-                            let request_value = evaluator.project_root(&request);
-                            if let Some(probe) = &self.phase_probe {
-                                probe.record_application_lazy(evaluator, &request_value);
-                            }
-                        });
-                        #[cfg(test)]
-                        self.eval_context.arm_deferred_pump_pause();
-                        EffectDecodeStep::Continue(EffectDecodeWork::from_root(
-                            request,
-                            EffectDecodePurpose::ApplicationResult,
-                            branch,
-                            scope_depth,
-                        ))
-                    }
-                    Err(error) => EffectDecodeStep::Failed(
-                        EffectDecodeWork::from_root(
-                            value,
-                            EffectDecodePurpose::Function,
-                            branch,
-                            scope_depth,
-                        ),
-                        error,
-                    ),
+                #[cfg(test)]
+                if let Some(probe) = &self.phase_probe {
+                    probe.record_application_start();
                 }
+                #[cfg(test)]
+                self.eval_context.arm_deferred_pump_pause();
+                EffectDecodeStep::Continue(EffectDecodeWork::application(
+                    context,
+                    &self.eval_context,
+                    value,
+                    vec![self.api.clone()],
+                    EffectDecodePurpose::RequestApplication,
+                    branch,
+                    scope_depth,
+                ))
             }
-            EffectDecodePurpose::ApplicationResult => {
+            EffectDecodePurpose::RequestApplication => {
                 EffectDecodeStep::Continue(EffectDecodeWork::request(value, branch, scope_depth))
+            }
+            EffectDecodePurpose::AppliedEffect => {
+                let mut branch = branch;
+                branch.set_effect_root(value);
+                EffectDecodeStep::Complete(MachineWork::Drive {
+                    branch,
+                    scope_depth,
+                })
             }
         }
     }
@@ -2172,24 +2131,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
             MachineWork::Apply {
                 function,
                 arguments,
-                mut branch,
+                branch,
                 scope_depth,
             } => {
-                branch.effect = context.evaluate(&self.eval_context, |evaluator| {
-                    let function = evaluator.project_root(&function);
-                    let arguments = arguments
-                        .iter()
-                        .map(|argument| evaluator.project_root(argument))
-                        .collect();
-                    apply_in(evaluator, function, arguments)
-                        .map(|value| evaluator.root_value(value))
-                })?;
                 #[cfg(test)]
                 self.record_phase(EffectMachinePhase::ContinuationDelivered);
-                Ok(MachineStep::Continue(MachineWork::Drive {
+                Ok(MachineStep::Decode(EffectDecodeWork::application(
+                    context,
+                    &self.eval_context,
+                    function,
+                    arguments,
+                    EffectDecodePurpose::AppliedEffect,
                     branch,
                     scope_depth,
-                }))
+                )))
             }
             MachineWork::Interpret {
                 request,
@@ -3725,7 +3680,8 @@ enum EffectDecodeOperation<R> {
 enum EffectDecodePurpose {
     EffectObject,
     Function,
-    ApplicationResult,
+    RequestApplication,
+    AppliedEffect,
 }
 
 impl<S: TaskSpecialization> EffectDecodeWork<S> {
@@ -3762,6 +3718,36 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
         }
     }
 
+    fn application(
+        poll_context: &EvaluationPollContext,
+        context: &EvalContext,
+        function: RuntimeValueRoot,
+        arguments: Vec<RuntimeValueRoot>,
+        purpose: EffectDecodePurpose,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        debug_assert!(!arguments.is_empty());
+        let computation = poll_context.evaluate(context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let function = access.clone_root(&function);
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| access.clone_root(argument))
+                    .collect::<Vec<_>>();
+                WhnfComputation::from_application_checkpoint_in(&access, function, &arguments)
+            })
+        });
+        Self {
+            operation: EffectDecodeOperation::Whnf {
+                computation,
+                purpose,
+            },
+            branch,
+            scope_depth,
+        }
+    }
+
     fn contextualize(&self, halt: TaskHalt) -> TaskHalt {
         let stage = match &self.operation {
             EffectDecodeOperation::Whnf {
@@ -3773,10 +3759,20 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
                 ..
             } => "function",
             EffectDecodeOperation::Whnf {
-                purpose: EffectDecodePurpose::ApplicationResult,
-                ..
+                purpose: EffectDecodePurpose::RequestApplication,
+                computation,
+            } => {
+                if computation.application_frame_pending() {
+                    "application"
+                } else {
+                    "request"
+                }
             }
-            | EffectDecodeOperation::Request(_) => "request",
+            EffectDecodeOperation::Whnf {
+                purpose: EffectDecodePurpose::AppliedEffect,
+                ..
+            } => return halt,
+            EffectDecodeOperation::Request(_) => "request",
         };
         halt.with_core_context(effect_dispatch_context(stage))
     }
@@ -5466,14 +5462,6 @@ fn alternative_returns_root(
             })
             .expect("alternative return construction requires at least two values")
     })
-}
-
-fn apply_in(
-    context: &EvaluatorStepContext<'_>,
-    function: Value,
-    arguments: Vec<Value>,
-) -> Result<Value, TaskHalt> {
-    eval::apply_values_in(context, function, arguments).map_err(task_eval_error)
 }
 
 pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {

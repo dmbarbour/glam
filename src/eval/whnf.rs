@@ -859,6 +859,20 @@ impl WhnfComputation {
         result.as_ref()
     }
 
+    /// Reports whether an application checkpoint failed before consuming all
+    /// of its arguments. Terminal failure publishes the last regional state,
+    /// so an outer owner can distinguish callable/application failure from a
+    /// failure encountered while forcing the completed result.
+    pub(crate) fn application_frame_pending(&self) -> bool {
+        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
+            return false;
+        };
+        checkpoint
+            .frames
+            .iter()
+            .any(|frame| matches!(frame, DurableWhnfContinuation::Application { .. }))
+    }
+
     pub(crate) fn from_application_checkpoint_in(
         access: &EvaluationValueAccess<'_>,
         function: Value,
@@ -948,12 +962,13 @@ impl WhnfComputation {
         let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
             panic!("a lazy source must install its result before WHNF demand")
         };
-        let work = checkpoint.project(access);
-        match drive_regional(access, work, budget, reduce) {
-            RegionalWhnfDrive::Ready(value) => {
+        let mut work = Some(checkpoint.project(access));
+        match drive_regional_in_place(access, &mut work, budget, reduce) {
+            RegionalWhnfStatus::Ready(value) => {
                 WhnfPoll::Ready(access.values().root_runtime_value(value))
             }
-            RegionalWhnfDrive::Boundary { work, request } => {
+            RegionalWhnfStatus::Boundary(request) => {
+                let work = work.expect("boundary retains regional WHNF state");
                 self.publish_checkpoint(access, work);
                 match request {
                     RegionalBoundaryRequest::Dependency(dependency) => {
@@ -963,11 +978,14 @@ impl WhnfComputation {
                     RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
                 }
             }
-            RegionalWhnfDrive::Yielded(work) => {
+            RegionalWhnfStatus::Yielded => {
+                let work = work.expect("yield retains regional WHNF state");
                 self.publish_checkpoint(access, work);
                 WhnfPoll::Yielded
             }
-            RegionalWhnfDrive::Failed(failure) => {
+            RegionalWhnfStatus::Failed(failure) => {
+                let work = work.expect("failure retains terminal regional WHNF state");
+                self.publish_checkpoint(access, work);
                 WhnfPoll::Failed(access.values().root_runtime_failure(failure))
             }
         }

@@ -4491,7 +4491,10 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4a — Complete (2026-09-17): Object instance construction** | 2 S | Move specification and parts-based instance construction into the durable object builtin owner without demanding specification fields. `-2`. |
 | **W6F.4b — Complete (2026-09-17): Object definition adapters** | Preparatory | Convert default/dictionary definitions with explicit ordered demand; the shared synchronous dispatcher remains until its final `object_from_dict` branch moves. No standalone declaration delta. |
 | **W6F.4c — Complete (2026-09-17): Plain-dictionary conversion, dispatch, and spec projection** | 3 S | Convert `object_from_dict`, retire the synchronous object family dispatcher, and access-qualify the object-fixpoint specification-member projection. `-3`. |
-| **W6F.4d — Application compatibility closure** | 5 S closure | Move the reflection application bridge onto its own child `WhnfComputation`, inline the regional function-construction leaf, migrate tests to production application demand, and delete the five synchronous application helpers. Then close W6A.0c's dictionary-application pair. `-5`, followed by `-2`. |
+| **W6F.4d.1 — Complete (2026-09-17): Reflection application bridge** | Preparatory | Move initial effect, continuation, and fused-continuation application onto child `WhnfComputation` state owned by the non-cloned decode lane; preserve application/request diagnostic stages and forced no-replay coverage. |
+| **W6F.4d.2 — Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
+| **W6F.4d.3 — Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
+| **W6F.4d.4 — Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
@@ -4594,6 +4597,29 @@ raw `Value` callback in its signature. The complete D.2c manifest falls from
 twenty-five to twenty-two declarations and its `Objects` family from three to
 zero. Exact root-publication, durable-owner, access, raw-value, and WHNF
 inventories account for the new phases and the retired synchronous demands.
+
+W6F.4d.1 completion record, 2026-09-17: reflection's initial effect-function,
+ordinary continuation, and fused-continuation applications now retain one
+child `WhnfComputation` in the existing non-cloned decode lane. Retryable
+branch snapshots continue to contain only roots; no evaluator continuation is
+made cloneable. Forced application-boundary fixtures count checkpoint starts
+instead of incidental lazy identities and prove that suspension/resumption
+does not reconstruct the first application or nested reflection task. To
+preserve structured diagnostics without matching error text, terminal WHNF
+failure now publishes its final regional checkpoint before retirement: an
+unconsumed application frame identifies the `application` stage, while a
+consumed frame identifies failure while forcing the produced `request`. The
+reflection-only synchronous application wrapper is removed, reducing the
+reviewed D.2f raw-value manifest from twenty-six to twenty-five declarations.
+The four application and two tagged-dictionary compatibility helpers are
+temporarily annotated with their explicit W6F.4d.3/W6F.4d.4 retirement
+checkpoints so intermediate library targets remain warning-free. The exact
+forced suspension and diagnostic-stage fixtures pass under
+`aggressive-gc-verification`. The broader aggressive reflection suite remains
+blocked by an independently reproduced baseline fixture defect: several old
+fixtures retain unrooted raw promised values across mutator regions. That
+pre-existing fixture-liveness debt is not part of this reflection application
+change.
 
 #### W6G — Residual resumable-machine overhead
 

@@ -1325,7 +1325,8 @@ fn assert_execution_root_inventory(
             match purpose {
                 EffectDecodePurpose::EffectObject
                 | EffectDecodePurpose::Function
-                | EffectDecodePurpose::ApplicationResult => {}
+                | EffectDecodePurpose::RequestApplication
+                | EffectDecodePurpose::AppliedEffect => {}
             }
         }
         EffectDecodeOperation::Request(request) => assert_request_decode_inventory(request),
@@ -5985,7 +5986,7 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
 }
 
 #[test]
-fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() {
+fn resumable_reflection_decode_consumes_one_application_checkpoint_after_resumption() {
     let (assembler, effect) =
         compile_effect(".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
@@ -6026,11 +6027,10 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
             pause_receiver.try_recv().ok()
         })
         .expect("the forced boundary must report its exact application-lazy wait");
-    let first_attempt = probe.application_lazies();
+    let first_attempt = probe.application_starts();
     assert_eq!(
-        first_attempt.len(),
-        1,
-        "the parent must construct exactly one application lazy before suspension"
+        first_attempt, 1,
+        "the parent must construct exactly one application checkpoint before suspension"
     );
     assert!(matches!(
         context.poll_reflection_task(&task),
@@ -6056,24 +6056,15 @@ fn resumable_reflection_decode_consumes_one_application_lazy_after_resumption() 
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("the resumed reflection task should complete")
     };
-    let application_lazies = probe.application_lazies();
-    assert_eq!(
-        application_lazies
-            .iter()
-            .filter(|lazy| **lazy == first_attempt[0])
-            .count(),
-        1,
-        "resumable request decoding must consume the original application result exactly once"
-    );
+    let application_starts = probe.application_starts();
     assert_eq!(
         builds.load(Ordering::Acquire),
         1,
         "replaying request decoding must not duplicate the nested reflection task"
     );
     assert_eq!(
-        application_lazies.len(),
-        3,
-        "the authored sequence, eval, and return requests must each construct one application lazy"
+        application_starts, 3,
+        "the authored sequence, eval, and return requests must each construct one application checkpoint without replaying the first"
     );
     assert_eq!(
         probe.parsed_requests(),
@@ -6143,7 +6134,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
             pause_receiver.try_recv().ok()
         })
         .expect("the request must stop at its forced application-lazy boundary");
-    assert_eq!(probe.application_lazies().len(), 1);
+    assert_eq!(probe.application_starts(), 1);
     assert_eq!(probe.parsed_requests(), 0);
     assert_eq!(probe.dispatched_requests(), 0);
     assert_eq!(builds.load(Ordering::Acquire), 0);
@@ -6165,7 +6156,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
         Value::binary_from_text("request argument"),
     ];
     assert_eq!(error.as_failure().contexts(), expected_contexts);
-    assert_eq!(probe.application_lazies().len(), 1);
+    assert_eq!(probe.application_starts(), 1);
     assert_eq!(probe.parsed_requests(), 1);
     assert_eq!(probe.dispatched_requests(), 1);
     assert_eq!(builds.load(Ordering::Acquire), 1);
@@ -6235,7 +6226,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
         2,
         "the blocked boundary must retain exactly the parent and nested reflection reservations"
     );
-    assert_eq!(probe.application_lazies().len(), 4);
+    assert_eq!(probe.application_starts(), 4);
     assert_eq!(probe.parsed_requests(), 4);
     assert_eq!(probe.dispatched_requests(), 4);
 
@@ -6253,7 +6244,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
             .unwrap(),
         b"ready".as_slice()
     );
-    assert_eq!(probe.application_lazies().len(), 8);
+    assert_eq!(probe.application_starts(), 8);
     assert_eq!(probe.parsed_requests(), 8);
     assert_eq!(probe.dispatched_requests(), 8);
     assert_eq!(builds.load(Ordering::Acquire), 1);

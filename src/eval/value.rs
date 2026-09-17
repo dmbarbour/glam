@@ -1272,6 +1272,10 @@ impl TaggedDictExt for crate::core::Dict {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.4 removes the synchronous tagged-dictionary compatibility pair"
+)]
 pub(super) fn tagged_payload_in(
     dict: &crate::core::Dict,
     context: &EvaluatorStepContext<'_>,
@@ -1292,6 +1296,10 @@ pub(super) fn tagged_payload_in(
     Ok(Some(payload.clone()))
 }
 
+#[allow(
+    dead_code,
+    reason = "W6F.4d.4 removes the synchronous tagged-dictionary compatibility pair"
+)]
 fn is_semantically_undefined_in(
     context: &EvaluatorStepContext<'_>,
     value: &Value,
