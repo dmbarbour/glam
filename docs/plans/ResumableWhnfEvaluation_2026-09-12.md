@@ -1,8 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W5 and their mandatory reviews plus W6.0 are complete by
-2026-09-15; W6A's independent leaves and W6B.1-W6B.4a are complete, while
-the cross-family closures, W6B.4b, and W6C-W8 remain planned. This is the
+Status: W0-W5 and their mandatory reviews plus W6.0-W6D are complete by
+2026-09-17. W6A's remaining cross-family closures depend on W6E/W6F; W6E-W8
+remain planned. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -4138,10 +4138,10 @@ declaration group reaches zero.
 | **W6D.5a.1 — Complete (2026-09-17): Pattern path equality** | 3 S | Reuse key/path conversion through a mismatch-preserving internal poll, retaining invalid expected paths as errors and invalid subject paths as pattern failure. `-3`. |
 | **W6D.5a.2 — Complete (2026-09-17): Pattern dictionary shape and emptiness** | 2 S | Convert dictionary kind and logical emptiness through ordinary WHNF plus the shared iterative semantic-undefined owner. `-2`. |
 | **W6D.5a.3 — Complete (2026-09-17): Pattern dictionary extraction** | 4 S | Convert required and optional recursive path extraction to an iterative owner which rebuilds persistent remainders without Rust recursion and shares semantic-undefined traversal. `-4`. |
-| **W6D.5a.4 — Pattern literal equality** | 1 S | Convert directional literal comparison and binary/list equality. `-1`. |
+| **W6D.5a.4 — Complete (2026-09-17): Pattern literal equality** | 1 S | Convert directional literal comparison and binary/list equality. `-1`. |
 | **W6D.5b.1 — Complete (2026-09-17): Pattern-list structure** | 4 S | Convert list shape, empty, uncons, and unsnoc to shared resumable front/back traversal. `-4`. |
-| **W6D.5b.2 — Pattern-list item leaf (with W6D.5a equality)** | 1 F | Retire the remaining context-free list-item conversion after binary/list literal equality moves to the pattern owner. `-1`. |
-| **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
+| **W6D.5b.2 — Complete (2026-09-17): Pattern-list item leaf** | 1 F | Retire the remaining context-free list-item conversion after binary/list literal equality moves to the pattern owner. `-1`. |
+| **W6D.5c — Complete (2026-09-17): Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
 
 W6D.1-W6D.2 completion record, 2026-09-17: basic dictionary dispatch and
 recursive merge could not form useful independent checkpoints because union
@@ -4340,6 +4340,21 @@ is latched explicitly. The new durable pattern owner and its one regional root
 publication are inventoried. The four recursive synchronous helpers are
 removed, taking W6D.5a from five declarations to one; retiring the final
 `eval_key_path_list_in` caller also moves W6A.4 from two declarations to one.
+
+W6D.5a.4-W6D.5c completion record, 2026-09-17: directional atom, number,
+binary, and binary-versus-list equality now share one durable pattern owner.
+It demands the compiler literal once, then the subject, and advances logical
+list items through the existing resumable front owner. Each exposed item has
+its own retained WHNF computation, so suspension cannot replay the literal or
+an accepted byte; an extra list item mismatches without demanding that item,
+preserving the old directional forcing boundary. Unsupported compiler
+literals are still diagnosed only after subject demand. Result effects are
+published beneath matching regional access. The final context-free item and
+effect constructors, synchronous dispatcher, and obsolete pattern module are
+removed together. `CollectionsAndPatterns` and all W6D checkpoint groups
+reach zero, while the D.2c manifest falls from 86 to 80 declarations. The
+WHNF census records the explicit equality collection loop and the removal of
+four obsolete key-conversion sites.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary

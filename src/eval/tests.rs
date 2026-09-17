@@ -3185,6 +3185,54 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
 }
 
 #[test]
+fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (item, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("pattern equality list item"))
+        .expect("the owner should allocate a promised list item");
+    let literal_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&literal_demands);
+    let expected = Value::semantic_thunk(
+        observer.values(),
+        "instrumented pattern literal",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::binary_from_text("A"))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::PatternEqual),
+        vec![
+            expected,
+            Value::List(List::from_values(vec![Value::Promised(item.clone())])),
+        ],
+    )
+    .expect("pattern equality application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved list item should suspend pattern equality");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &item, n(i64::from(b'A')))
+        .expect("the owner should resolve the promised list item");
+
+    let effect = eval_value(&observer, &application)
+        .expect("pattern equality should resume from the list item");
+    let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
+        .and_then(|value| eval_value(&observer, &value))
+        .expect("the resumed pattern effect should be handled");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        [unit_value()]
+    );
+    assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
     let foo = key_value(&Key::atom_from_text("foo"));
     let expected = Value::List(List::from_values(vec![foo.clone(), n(42)]));

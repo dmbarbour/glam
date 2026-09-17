@@ -235,11 +235,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6D.4 durable list-transform owners and resumable text extraction"
     ),
     context_entry!(
-        "src/eval/builtins/pattern.rs",
-        [3, 0],
-        "I3B.1 scoped pattern inspection"
-    ),
-    context_entry!(
         "src/eval/net.rs",
         [21, 7],
         "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner; NC1 shared net-WHNF budget driver; NC3-NC5 regional callable spill, resumption, and cold exact terminalization; NC6 retired the synchronous deferred-callable context; W6B.4b.1 retired synchronous access resolution"
@@ -251,7 +246,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [11, 4],
+        [12, 5],
         "W6D.5 resumable compiler-pattern observations"
     ),
     context_entry!(

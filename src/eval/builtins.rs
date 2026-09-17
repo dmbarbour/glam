@@ -6,7 +6,6 @@ mod effect;
 mod list_effect;
 mod net;
 mod object;
-mod pattern;
 
 use super::*;
 pub(super) use annotation::is_undefined_value;
@@ -101,18 +100,16 @@ pub(super) fn apply_builtin_in(
         | Builtin::PatternIsDict
         | Builtin::PatternDictIsEmpty
         | Builtin::PatternDictTryTake
-        | Builtin::PatternDictTryTakeOptional => {
-            Ok(Value::Lazy(context.construct_lazy(move |access| {
-                LazyValue::from_builtin_in(
-                    access,
-                    BuiltinCall {
-                        builtin,
-                        arguments: Arc::from(arguments),
-                    },
-                )
-            })))
-        }
-        Builtin::PatternEqual => pattern::apply(context, builtin, arguments),
+        | Builtin::PatternDictTryTakeOptional
+        | Builtin::PatternEqual => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq
