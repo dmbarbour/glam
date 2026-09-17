@@ -81,9 +81,10 @@ pub(crate) use value::{
 };
 
 pub(crate) use access_machine::{ConversionPoll, KeyConversionMachine, KeyListMachine};
-pub(crate) use application::*;
+use application::*;
 #[cfg(test)]
 use builtins::apply_builtin;
+#[cfg(test)]
 use builtins::apply_builtin_in;
 pub(crate) use list_machine::{ListFrontMachine, ListFrontPoll};
 use net::*;

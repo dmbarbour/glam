@@ -141,8 +141,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/application.rs",
-        [4, 3],
-        "I3B.2 and I3D/I3E direct callers"
+        [0, 3],
+        "W6F.4d.3 ordinary lazy application test constructors and access-qualified leaves"
     ),
     context_entry!(
         "src/eval/builtins.rs",

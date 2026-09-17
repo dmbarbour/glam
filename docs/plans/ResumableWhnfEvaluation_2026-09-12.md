@@ -3621,7 +3621,7 @@ delta is the required reduction in the parent D.2c violation count.
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
 | **W6A.1b — Complete (2026-09-17): Cross-family effect-value closure** | 1 F | Family checkpoints moved every context-free caller; W6E.6 now requires access on the shared constructor. `-1` at closure. |
-| **W6A.2 — Cross-family application closure (after W6F.4)** | 5 S | Migrate callers to the existing resumable WHNF application owner as their family checkpoints execute; introduce shared tagged-payload work at the first dictionary consumer, then delete the five synchronous application helpers after the last consumer moves. `-5` at closure. |
+| **W6A.2 — Complete (2026-09-17): Cross-family application closure** | 5 S | Migrate callers to the existing resumable WHNF application owner as their family checkpoints execute; introduce shared tagged-payload work at the first dictionary consumer, then delete the five synchronous application helpers after the last consumer moves. `-5` at closure. |
 | **W6A.3 — Complete (2026-09-15): Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
 | **W6A.4 — Complete (2026-09-17): Cross-family key-sequence closure** | 2 S | Key paths and list keys now use owned traversal throughout; W6E.5 removed the final list-to-key helper and its direct key-conversion dependency. `-2`. |
 
@@ -4493,7 +4493,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4c — Complete (2026-09-17): Plain-dictionary conversion, dispatch, and spec projection** | 3 S | Convert `object_from_dict`, retire the synchronous object family dispatcher, and access-qualify the object-fixpoint specification-member projection. `-3`. |
 | **W6F.4d.1 — Complete (2026-09-17): Reflection application bridge** | Preparatory | Move initial effect, continuation, and fused-continuation application onto child `WhnfComputation` state owned by the non-cloned decode lane; preserve application/request diagnostic stages and forced no-replay coverage. |
 | **W6F.4d.2 — Complete (2026-09-17): Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
-| **W6F.4d.3 — Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
+| **W6F.4d.3 — Complete (2026-09-17): Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
 | **W6F.4d.4 — Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
@@ -4629,6 +4629,21 @@ coordinator: it reduces the complete raw-value API inventory from 455 to 454
 declarations and its regional-access class from 140 to 139. Focused captured-
 function tests pass ordinarily and under `aggressive-gc-verification`, and the
 exact raw-value inventories pass.
+
+W6F.4d.3 completion record, 2026-09-17: direct evaluator fixtures now create
+the same ordinary `LazySource::Application` consumed by the durable WHNF
+application owner. Tests explicitly demand that value when they need an
+application result or failure; application construction itself no longer
+pretends to report non-callability, arity-demand failure, or another semantic
+result. The four recursive synchronous helpers (`apply_value_in`,
+`apply_values_in`, `apply_function_values_in`, and `apply_dict_value_in`) are
+removed, closing W6A.2. The D.2c `ApplicationAndSequence` violation family and
+its W6A.2 checkpoint reach zero. The complete raw-value inventory falls from
+454 to 450 declarations and from 277 to 273 violations; the WHNF census falls
+from 204 to 193 occurrences and no longer contains `ApplyValue`, `ApplyValues`,
+or the compatibility `Application` work shape. Focused evaluator and reflection
+suites pass, as do exact inventories and representative application fixtures
+under `aggressive-gc-verification`.
 
 #### W6G — Residual resumable-machine overhead
 

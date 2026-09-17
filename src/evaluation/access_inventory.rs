@@ -592,6 +592,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/eval/application.rs::apply_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_dependency_completion_before_exact_block_is_not_lost#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -815,6 +816,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(16, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
+        // W6F.4d.3 gives test application construction the same short,
+        // callback-free value region used by production lazy application.
+        ("src/eval/application.rs", GatewayCounts::new(1, 0)),
         // D.2b.2 gives provenance-generated halt context an explicit bounded
         // value region.
         // P2B compares registered net roots under the same explicit access

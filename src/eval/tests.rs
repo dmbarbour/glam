@@ -85,23 +85,6 @@ fn test_effect_value(function: Value) -> Value {
         .with_runtime_value_access(|access| effect_value(&access, function))
 }
 
-#[test]
-fn claimed_and_direct_evaluator_entries_share_the_application_spine() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-
-    let direct = apply_values(&context, Value::Builtin(Builtin::Add), vec![n(19), n(23)])
-        .and_then(|value| eval_value(&context, &value))
-        .expect("direct compatibility entry should evaluate the application");
-    let claimed = apply_values_in(&evaluator, Value::Builtin(Builtin::Add), vec![n(19), n(23)])
-        .and_then(|value| eval_value_in(&evaluator, &value))
-        .expect("claimed evaluator entry should evaluate the application");
-
-    assert_eq!(claimed, direct);
-    assert_eq!(claimed, n(42));
-}
-
 fn wrapper_returning_function_computation(context: &EvalContext) -> LazyValue {
     let returned_code = Arc::new(lower_test_function_code_in(
         context.values(),
@@ -283,120 +266,6 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
 
     demand.abandon();
     assert_eq!(context.client_demand_count_for_test(), 0);
-}
-
-#[test]
-fn claimed_evaluator_dispatches_unit_assertion_through_the_scoped_builtin_path() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-
-    let target = Value::binary_from_text("assertion target");
-    let result = apply_values_in(
-        &evaluator,
-        Value::Builtin(Builtin::AssertUnit),
-        vec![
-            Value::binary_from_text("scoped assertion"),
-            unit_value(),
-            target.clone(),
-        ],
-    )
-    .expect("a scoped unit assertion should return its target");
-
-    assert_eq!(
-        eval_value(&context, &result).expect("the assertion result should evaluate"),
-        target
-    );
-}
-
-#[test]
-fn claimed_evaluator_dispatches_comparison_and_pattern_builtins() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-
-    for (builtin, arguments) in [
-        (Builtin::Equal, vec![n(42), n(42)]),
-        (
-            Builtin::PatternIsList,
-            vec![Value::List(List::from_values(vec![n(42)]))],
-        ),
-    ] {
-        let direct = apply_values(&context, Value::Builtin(builtin), arguments.clone())
-            .expect("direct builtin application should succeed");
-        let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
-            .expect("claimed builtin application should succeed");
-        assert_eq!(
-            eval_value(&context, &claimed).expect("claimed builtin result should evaluate"),
-            eval_value(&context, &direct).expect("direct builtin result should evaluate")
-        );
-    }
-}
-
-#[test]
-fn claimed_evaluator_dispatches_dictionary_and_list_builtins() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-
-    for (builtin, arguments) in [
-        (
-            Builtin::DictSingleton,
-            vec![Value::binary_from_text("answer"), n(42)],
-        ),
-        (
-            Builtin::ListAt,
-            vec![n(1), Value::List(List::from_values(vec![n(19), n(42)]))],
-        ),
-    ] {
-        let direct = apply_values(&context, Value::Builtin(builtin), arguments.clone())
-            .expect("direct builtin application should succeed");
-        let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
-            .expect("claimed builtin application should succeed");
-        assert_eq!(
-            eval_value(&context, &claimed).expect("claimed builtin result should evaluate"),
-            eval_value(&context, &direct).expect("direct builtin result should evaluate")
-        );
-    }
-}
-
-#[test]
-fn claimed_evaluator_dispatches_object_conditional_and_list_effect_construction() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-    let dictionary = Value::Dict(Dict::new_sync().insert(Key::binary_from_text("answer"), n(42)));
-
-    let object_defs = apply_values_in(
-        &evaluator,
-        Value::Builtin(Builtin::ObjectDefaultDefs),
-        vec![dictionary.clone(), unit_value()],
-    )
-    .expect("claimed default object definitions should preserve their base");
-    assert_eq!(
-        eval_value(&context, &object_defs)
-            .expect("claimed default object definitions should evaluate"),
-        dictionary
-    );
-
-    let selected = apply_values_in(
-        &evaluator,
-        Value::Builtin(Builtin::IfResult),
-        vec![Value::List(List::from_values(vec![n(42)]))],
-    )
-    .expect("claimed conditional selection should return its first result");
-    assert_eq!(
-        eval_value(&context, &selected).expect("the selected result should evaluate"),
-        n(42)
-    );
-
-    let returned = apply_values_in(
-        &evaluator,
-        Value::Builtin(Builtin::ListEffectReturn),
-        vec![n(42)],
-    )
-    .expect("claimed list-effect return should construct one result");
-    assert_eq!(returned, Value::List(List::from_values(vec![n(42)])));
 }
 
 #[test]
@@ -766,33 +635,6 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn claimed_evaluator_dispatches_pure_annotation_branches() {
-    let context = test_context();
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-    let annotation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("array")));
-    let target = Value::Binary(Bytes::from_static(&[19, 42]));
-
-    let direct = apply_values(
-        &context,
-        Value::Builtin(Builtin::Anno),
-        vec![annotation.clone(), target.clone()],
-    )
-    .expect("direct array annotation should succeed");
-    let claimed = apply_values_in(
-        &evaluator,
-        Value::Builtin(Builtin::Anno),
-        vec![annotation, target],
-    )
-    .expect("claimed array annotation should succeed");
-    let direct = eval_value(&context, &direct).expect("direct annotation should evaluate");
-    let claimed = eval_value(&context, &claimed).expect("claimed annotation should evaluate");
-
-    assert_eq!(claimed, direct);
-    assert_eq!(claimed, Value::List(List::from_values(vec![n(19), n(42)])));
-}
-
 struct DropSignal(Arc<AtomicBool>);
 
 impl Drop for DropSignal {
@@ -1143,7 +985,7 @@ fn net_arity_functions_attach_to_applications_through_cursors() {
 #[test]
 fn net_arity_contextualizes_failure_while_demanding_its_arity() {
     let net = closed_net(|builder| builder.data(n(42)));
-    let error = apply_values(
+    let application = apply_values(
         &test_context(),
         Value::Builtin(Builtin::NetArity),
         vec![
@@ -1154,7 +996,9 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
             Value::Net(net),
         ],
     )
-    .expect_err("failure while evaluating net arity must propagate");
+    .expect("net-arity application construction should remain lazy");
+    let error = eval_value(&test_context(), &application)
+        .expect_err("failure while evaluating net arity must propagate");
     assert_eq!(
         failure_context_items(&error),
         [evaluation_context_frame("net_arity")]
@@ -1233,6 +1077,8 @@ fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
     let function = FunctionValue::new(one_argument_stage, 2);
     let partial = apply_function_values(&test_context(), function, vec![n(0)])
         .expect("partial application should not inspect the staged interface");
+    let partial = eval_value(&test_context(), &partial)
+        .expect("partial application should produce a function value");
     let Value::Function(partial) = partial else {
         panic!("partial application should retain an ordinary function value")
     };
@@ -1627,6 +1473,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
             Value::Promised(continuation.clone()),
         ],
     )
+    .and_then(|value| eval_value(&session, &value))
     .expect("sequence construction should remain lazy") else {
         panic!("list effect sequence must construct a list")
     };
@@ -1652,6 +1499,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         Value::Builtin(Builtin::ListEffectCut),
         vec![Value::Promised(cut_operation.clone())],
     )
+    .and_then(|value| eval_value(&session, &value))
     .expect("cut construction should remain lazy") else {
         panic!("list effect cut must construct a list")
     };
@@ -1675,6 +1523,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         Value::Builtin(Builtin::ListEffectFix),
         vec![fix_function],
     )
+    .and_then(|value| eval_value(&session, &value))
     .expect("fix construction should remain lazy") else {
         panic!("list effect fix must construct a list")
     };
@@ -1712,6 +1561,7 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
         Value::Builtin(Builtin::ListEffectFix),
         vec![function],
     )
+    .and_then(|value| eval_value(&session, &value))
     .expect("list effect fix construction should not demand its function") else {
         panic!("list effect fix must construct a list")
     };
@@ -3286,7 +3136,9 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         "sealed result: unit expected, received Sealed"
     );
 
-    let application_error = apply_value(&test_context(), carrier.clone(), n(0))
+    let application = apply_value(&test_context(), carrier.clone(), n(0))
+        .expect("application construction should remain lazy");
+    let application_error = eval_value(&test_context(), &application)
         .expect_err("a sealed unit carrier must not be callable");
     assert_eq!(
         application_error.to_string(),
@@ -4731,7 +4583,9 @@ fn non_callable_application_reports_semantic_value_kinds() {
             "application requires a function value, received Number",
         ),
     ] {
-        let error = apply_value(&test_context(), value, n(0))
+        let application = apply_value(&test_context(), value, n(0))
+            .expect("application construction should remain lazy");
+        let error = eval_value(&test_context(), &application)
             .expect_err("applying a non-callable value should fail");
         assert_eq!(error.to_string(), expected);
     }
@@ -5913,12 +5767,10 @@ fn run_metadata_transform(
 ) -> Result<Vec<Value>, EvaluationHalt> {
     let annotation =
         Value::Dict(Dict::new_sync().insert(Key::atom_from_text(annotation_name), function));
-    let result = apply_values(
-        context,
-        Value::Builtin(Builtin::Anno),
+    let result = context.evaluate_builtin_whnf(
+        Builtin::Anno,
         vec![annotation, Value::List(List::from_values(carriers))],
     )?;
-    let result = eval_value(context, &result)?;
     let Value::List(result) = result else {
         panic!("metadata update should return a list");
     };
@@ -7619,6 +7471,8 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
         vec![unforced],
     )
     .expect("partial builtin application should accept its first argument");
+    let partial = eval_value(&test_context(), &partial)
+        .expect("partial builtin application should produce a partial builtin");
 
     match partial {
         Value::PartialBuiltin(call) => {
@@ -7636,8 +7490,7 @@ fn evaluate_strategy(
     first: Value,
     target: Value,
 ) -> Result<Value, EvaluationHalt> {
-    let applied = apply_values(context, Value::Builtin(builtin), vec![first, target])?;
-    eval_value(context, &applied)
+    context.evaluate_builtin_whnf(builtin, vec![first, target])
 }
 
 #[test]

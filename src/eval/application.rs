@@ -7,40 +7,7 @@ pub(super) fn apply_value(
     function: Value,
     argument: Value,
 ) -> Result<Value, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| {
-        apply_value_in(evaluator, function, argument)
-    })
-}
-
-#[allow(
-    dead_code,
-    reason = "W6F.4d.3 removes the synchronous application compatibility family"
-)]
-pub(super) fn apply_value_in(
-    context: &EvaluatorStepContext<'_>,
-    function: Value,
-    argument: Value,
-) -> Result<Value, EvaluationHalt> {
-    match function {
-        Value::Builtin(builtin) => apply_builtin_in(context, builtin, Vec::new(), argument),
-        Value::PartialBuiltin(call) => apply_builtin_in(
-            context,
-            call.builtin,
-            call.arguments.iter().cloned().collect(),
-            argument,
-        ),
-        Value::Function(function) => apply_function_values_in(context, function, vec![argument]),
-        Value::Dict(dict) => apply_dict_value_in(context, dict, argument),
-        Value::Lazy(thunk) => apply_value_in(context, eval_lazy_in(context, &thunk)?, argument),
-        Value::Promised(promise) => apply_value_in(
-            context,
-            eval_value_in(context, &Value::Promised(promise))?,
-            argument,
-        ),
-        value => {
-            Err(context.with_value_access(|access| non_callable_error(access.values(), &value)))
-        }
-    }
+    apply_values(context, function, vec![argument])
 }
 
 #[cfg(test)]
@@ -49,45 +16,16 @@ pub(crate) fn apply_values(
     function: Value,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| {
-        apply_values_in(evaluator, function, arguments)
-    })
-}
-
-#[allow(
-    dead_code,
-    reason = "W6F.4d.3 removes the synchronous application compatibility family"
-)]
-pub(crate) fn apply_values_in(
-    context: &EvaluatorStepContext<'_>,
-    function: Value,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
     if arguments.is_empty() {
         return Ok(function);
     }
-    let mut function = match function {
-        Value::Function(function) => {
-            return apply_function_values_in(context, function, arguments);
-        }
-        function => function,
-    };
-    let mut arguments = arguments.into_iter();
-    loop {
-        let argument = arguments
-            .next()
-            .expect("non-empty application arguments must have a first value");
-        function = apply_value_in(context, function, argument)?;
-        if arguments.as_slice().is_empty() {
-            return Ok(function);
-        }
-        function = match function {
-            Value::Function(function_value) => {
-                return apply_function_values_in(context, function_value, arguments.collect());
-            }
-            function => function,
-        };
-    }
+    Ok(context.values().with_runtime_value_access(|access| {
+        Value::Lazy(LazyValue::from_application_in(
+            &access,
+            function,
+            Arc::from(arguments),
+        ))
+    }))
 }
 
 #[cfg(test)]
@@ -96,74 +34,11 @@ pub(super) fn apply_function_values(
     function: FunctionValue,
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| {
-        apply_function_values_in(evaluator, function, arguments)
-    })
-}
-
-#[allow(
-    dead_code,
-    reason = "W6F.4d.3 removes the synchronous application compatibility family"
-)]
-fn apply_function_values_in(
-    context: &EvaluatorStepContext<'_>,
-    function: FunctionValue,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
     assert!(
         !arguments.is_empty(),
         "function application requires an argument"
     );
-    let remaining = function.remaining_arity();
-    if arguments.len() < remaining {
-        let supplied = arguments.len();
-        let runtime = context.with_value_access(|access| {
-            let stage = function.duplicate_stage_in(access.values());
-            attached_net_runtime(access.values(), stage, arguments)
-        });
-        let stage = NetValue::new(context.construct_core_net(runtime));
-        return Ok(Value::Function(FunctionValue::new(
-            stage,
-            remaining - supplied,
-        )));
-    }
-
-    let mut saturating = arguments;
-    let rest = saturating.split_off(remaining);
-    let result = Value::Lazy(context.construct_lazy(|access| {
-        LazyValue::from_function_call_in(access, function, Arc::from(saturating))
-    }));
-    if rest.is_empty() {
-        Ok(result)
-    } else {
-        apply_values_in(context, result, rest)
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "W6F.4d.3 removes the synchronous application compatibility family"
-)]
-fn apply_dict_value_in(
-    context: &EvaluatorStepContext<'_>,
-    dict: crate::core::Dict,
-    argument: Value,
-) -> Result<Value, EvaluationHalt> {
-    if let Some(function) = tagged_payload_in(&dict, context, &keys::EFF)? {
-        let effect = context.with_value_access(|access| {
-            let function = apply_effect_function_value(access.values(), function, argument);
-            effect_value(access.values(), function)
-        });
-        return Ok(effect);
-    }
-
-    if let Some(function) = dict.get(&*keys::APPLY)
-        && !context.with_value_access(|access| is_undefined_dict_value(access.values(), function))
-    {
-        return apply_value_in(context, eval_value_in(context, function)?, argument);
-    }
-
-    Err(context.with_value_access(|access| non_callable_error(access.values(), &Value::Dict(dict))))
+    apply_values(context, Value::Function(function), arguments)
 }
 
 pub(super) fn non_callable_error(

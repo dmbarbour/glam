@@ -657,14 +657,12 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // evaluator work.
 // W6F.4b moves default and dictionary definition operands into the durable
 // object owner while preserving base-before-dictionary demand.
-const EXPECTED_OCCURRENCES: usize = 204;
-const EXPECTED_FINGERPRINT: u64 = 15_749_213_528_530_641_241;
+const EXPECTED_OCCURRENCES: usize = 193;
+const EXPECTED_FINGERPRINT: u64 = 4_511_624_108_642_639_183;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 8),
-    (Signal::EvalLazy, 2),
+    (Signal::EvalValue, 6),
+    (Signal::EvalLazy, 1),
     (Signal::EvalPromise, 1),
-    (Signal::ApplyValue, 4),
-    (Signal::ApplyValues, 1),
     (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 11),
     (Signal::UnassignedPromise, 2),
@@ -673,15 +671,14 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 74),
-    (Signal::UserSizedLoop, 48),
+    (Signal::StructuralRecursion, 72),
+    (Signal::UserSizedLoop, 47),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
     (WorkShape::DemandThenInspect, 114),
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 11),
-    (WorkShape::Application, 11),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 5),
     (WorkShape::DiagnosticContext, 1),
