@@ -396,6 +396,52 @@ fn claimed_evaluator_dispatches_object_conditional_and_list_effect_construction(
 }
 
 #[test]
+fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _tail_task, _tail_owner) = owner
+        .task_owned_promise(Arc::from("object local-name parts tail"))
+        .expect("the owner should allocate a promised parts tail");
+    let name_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&name_demands);
+    let name = Value::semantic_thunk(observer.values(), "instrumented object name", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::binary_from_text("root"))
+    });
+    let host = Value::Dict(Dict::new_sync().insert(
+        (*keys::SPEC).clone(),
+        Value::Dict(Dict::new_sync().insert((*keys::NAME).clone(), name)),
+    ));
+    let parts = Value::List(List::concat(
+        List::from_values(vec![n(1)]),
+        List::from_thunk(tail.clone().into()),
+    ));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectLocalName),
+        vec![host, parts],
+    )
+    .expect("object local-name application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the lazy parts tail should suspend local-name construction");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(name_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &tail, Value::List(List::from_values(vec![n(2)])))
+        .expect("the parts tail should accept its assignment");
+
+    let Value::List(name) =
+        eval_value(&observer, &application).expect("local-name construction should resume")
+    else {
+        panic!("object local name should produce a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &name).expect("the local name should be readable"),
+        [Value::binary_from_text("root"), n(1), n(2)]
+    );
+    assert_eq!(name_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn claimed_evaluator_dispatches_pure_annotation_branches() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

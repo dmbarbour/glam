@@ -1073,6 +1073,7 @@ impl<V, T> List<V, T> {
         parts
     }
 
+    #[cfg(test)]
     pub fn try_for_each_segment<E>(
         &self,
         on_bytes: &mut impl FnMut(&[u8]) -> Result<(), E>,

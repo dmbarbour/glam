@@ -9,6 +9,7 @@ pub(crate) fn list_to_value_items(
     with_direct_evaluator(context, |evaluator| list_to_value_items_in(evaluator, list))
 }
 
+#[cfg(test)]
 pub(crate) fn list_to_value_items_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,

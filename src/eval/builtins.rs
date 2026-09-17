@@ -3,6 +3,7 @@
 mod net;
 mod object;
 
+use super::sequence::append_values;
 use super::*;
 pub(super) use net::NetConstructionMachine;
 #[cfg(test)]
@@ -193,12 +194,20 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::ObjectSpec
-        | Builtin::ObjectFromDict
-        | Builtin::ObjectLocalName
+        Builtin::ObjectSpec | Builtin::ObjectLocalName | Builtin::DiagnosticObject => {
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                )
+            })))
+        }
+        Builtin::ObjectFromDict
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectInstance
-        | Builtin::DiagnosticObject
         | Builtin::ObjectDefaultDefs
         | Builtin::ObjectDictDefs
         | Builtin::ObjectWithDefs

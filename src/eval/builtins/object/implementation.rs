@@ -62,7 +62,11 @@ pub(super) fn eval_object_with_defs_builtin(
         let extension = apply_value_in(context, extension_defs, object)?;
         return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     }
-    let spec = object_spec_dict(context, &spec)?;
+    let Value::Dict(spec) = spec else {
+        return Err(EvaluationHalt::new(
+            "object instance builtin requires a specification dictionary",
+        ));
+    };
     let name = context.with_value_access(|access| object_spec_name_value(access.values(), &spec));
     let deps = spec
         .get(&*keys::DEPS)
@@ -130,36 +134,6 @@ fn override_dict(
     Ok(result)
 }
 
-pub(super) fn eval_object_spec_builtin(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let value = eval_value_in(context, value)?;
-    let Value::Dict(dict) = value else {
-        return Err(EvaluationHalt::new(
-            "object spec builtin requires an object value",
-        ));
-    };
-
-    let Some(spec) = dict.get(&*keys::SPEC) else {
-        return Err(EvaluationHalt::new(
-            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
-        ));
-    };
-    let spec = eval_value_in(context, spec)?;
-    if context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec)) {
-        return Err(EvaluationHalt::new(
-            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
-        ));
-    }
-    if !matches!(spec, Value::Dict(_)) {
-        return Err(EvaluationHalt::new(
-            "object value requires a dictionary-valued `spec`",
-        ));
-    }
-    Ok(spec)
-}
-
 pub(super) fn eval_object_from_dict_builtin(
     context: &EvaluatorStepContext<'_>,
     value: &Value,
@@ -182,72 +156,6 @@ pub(super) fn eval_object_from_dict_builtin(
 
     let spec = context.with_value_access(|access| dict_object_spec(access.values(), dict));
     eval_object_instance_builtin(context, &spec)
-}
-
-/// Normalizes one diagnostic emission to an object as ordinary semantic work.
-///
-/// The caller composes the returned object with the metadata update before
-/// evaluation begins. If a source field blocks, this builtin remains the
-/// stable intermediate rather than regenerating and immediately demanding a
-/// fresh object fixpoint on every retry.
-pub(super) fn eval_diagnostic_object_builtin(
-    context: &EvaluatorStepContext<'_>,
-    message: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let message = eval_value_in(context, message)?;
-    let Value::Dict(message_dict) = &message else {
-        return Err(EvaluationHalt::new(
-            "object_from_dict requires a dictionary value",
-        ));
-    };
-    let has_defined_spec = match message_dict.get(&*keys::SPEC) {
-        Some(spec) => {
-            let spec = eval_value_in(context, spec)?;
-            !context.with_value_access(|access| is_undefined_dict_value(access.values(), &spec))
-        }
-        None => false,
-    };
-    if has_defined_spec {
-        Ok(message)
-    } else {
-        eval_object_from_dict_builtin(context, &message)
-    }
-}
-
-pub(super) fn eval_object_local_name_builtin(
-    context: &EvaluatorStepContext<'_>,
-    host: &Value,
-    parts: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let host_spec = eval_object_spec_builtin(context, host)?;
-    let host_spec = object_spec_dict(context, &host_spec)?;
-    let host_name =
-        context.with_value_access(|access| object_spec_name_value(access.values(), &host_spec));
-
-    let mut name_parts = vec![eval_value_in(context, &host_name)?];
-    name_parts.extend(match eval_value_in(context, parts)? {
-        Value::List(parts) => list_to_value_items_in(context, &parts)?,
-        Value::Dict(dict) if dict.is_empty() => Vec::new(),
-        _ => {
-            return Err(EvaluationHalt::new(
-                "object local name builtin requires a list of name parts",
-            ));
-        }
-    });
-    Ok(Value::List(List::from_values(name_parts)))
-}
-
-fn object_spec_dict(
-    context: &EvaluatorStepContext<'_>,
-    spec: &Value,
-) -> Result<crate::core::Dict, EvaluationHalt> {
-    let spec = eval_value_in(context, spec)?;
-    let Value::Dict(spec_dict) = spec else {
-        return Err(EvaluationHalt::new(
-            "object instance builtin requires a specification dictionary",
-        ));
-    };
-    Ok(spec_dict)
 }
 
 fn dict_object_spec(_access: &RuntimeValueAccess<'_>, dict: crate::core::Dict) -> Value {

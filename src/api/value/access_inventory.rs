@@ -199,6 +199,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6D.4 non-forcing structural transforms and resumable text extraction"
     ),
     entry!(
+        "src/eval/object_builtin_machine.rs",
+        0,
+        0,
+        4,
+        "durable object specification, diagnostic normalization, and local-name result publication",
+        "W6F.2 resumable object specification ownership"
+    ),
+    entry!(
         "src/eval/object_machine.rs",
         0,
         0,
@@ -539,6 +547,10 @@ impl RootPublicationOccurrence {
                 | "src/eval/list_transform_machine.rs::finish_text_lines"
                 | "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll"
                 | "src/eval/list_transform_machine.rs::impl ListMapMachine::poll"
+                | "src/eval/object_builtin_machine.rs::optional_spec_member"
+                | "src/eval/object_builtin_machine.rs::root_local_name"
+                | "src/eval/object_builtin_machine.rs::root_object_from_dict"
+                | "src/eval/object_builtin_machine.rs::spec_name"
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
                 | "src/eval/object_machine.rs::spec_member_root"
@@ -857,6 +869,10 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::impl ListMapMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
+    "src/eval/object_builtin_machine.rs::optional_spec_member#1|surface=access-publication|scope=production",
+    "src/eval/object_builtin_machine.rs::root_local_name#1|surface=access-publication|scope=production",
+    "src/eval/object_builtin_machine.rs::root_object_from_dict#1|surface=access-publication|scope=production",
+    "src/eval/object_builtin_machine.rs::spec_name#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
@@ -959,6 +975,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/macro_expansion/tests.rs::environment_root#1|surface=compatibility-new|scope=test",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=scoped-factory|scope=production",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=access-publication|scope=production",
+    "src/g_syntax/tests.rs::reflection_test_module#1|surface=scoped-factory|scope=test",
     "src/reflection/machine.rs::alternative_returns_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=production",

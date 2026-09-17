@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::core::ListThunk;
 use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazySource,
-    LazyValue, List, ListThunk, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
-    RuntimeValueAccess, Value, keys,
+    LazyValue, List, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, RuntimeValueAccess, Value,
+    keys,
 };
 use crate::core_net::CoreDataKey;
 use crate::core_net::CoreWaitToken;
@@ -1147,6 +1149,7 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn force_list_thunk_in(
     context: &EvaluatorStepContext<'_>,
     thunk: &ListThunk,

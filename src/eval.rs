@@ -18,6 +18,7 @@ use crate::interaction_net::{
     ActivePairKey, Call, NetBuilder, NetSpecialization, OperatorCall, OperatorYield, Port,
     ReductionKind, StuckReason,
 };
+#[cfg(test)]
 use crate::number::Number;
 #[cfg(test)]
 use crate::{evaluation::OwnedEvalContext, list::ListItem};
@@ -37,6 +38,7 @@ mod list_machine;
 mod list_observation_machine;
 mod list_transform_machine;
 mod net;
+mod object_builtin_machine;
 mod object_machine;
 mod operator;
 mod pattern_machine;
@@ -85,7 +87,8 @@ use builtins::apply_builtin_in;
 pub(crate) use list_machine::{ListFrontMachine, ListFrontPoll};
 use net::*;
 use operator::*;
-pub(crate) use sequence::*;
+#[cfg(test)]
+use sequence::append_sequence;
 #[cfg(test)]
 use test_support::*;
 pub(crate) use value::promise_root_wait;

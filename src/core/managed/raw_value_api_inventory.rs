@@ -96,7 +96,6 @@ enum D2cCheckpoint {
     W6A0aLazyOwnerHandoff,
     W6A0bNumericProjection,
     W6A0cKeyTagUndefined,
-    W6A0dLazyListProjection,
     W8ValueCompatibility,
     W6A1ApplicationLeaves,
     W6A2ApplicationWork,
@@ -123,7 +122,6 @@ enum D2cCheckpoint {
     W6E3MetadataPure,
     W6E4AnnotationReflection,
     W6E6EffectMap,
-    W6F2ObjectSpecification,
     W6F3ObjectComposition,
     W6F4ObjectInstantiation,
     W6F5NetDispatch,
@@ -371,9 +369,6 @@ impl ApiOccurrence {
                 _,
                 "value_to_key_in" | "tagged_payload_in" | "is_semantically_undefined_in",
             ) => W6A0cKeyTagUndefined,
-            (ValueDemand, _, "force_list_thunk_in" | "pop_list_front_in") => {
-                W6A0dLazyListProjection
-            }
             (
                 ValueDemand,
                 _,
@@ -397,9 +392,6 @@ impl ApiOccurrence {
                 "src/eval/sequence.rs",
                 "append_sequence" | "append_values",
             ) => W6A3SequenceLeaves,
-            (ApplicationAndSequence, "src/eval/sequence.rs", "list_to_value_items_in") => {
-                W6A0dLazyListProjection
-            }
             (ApplicationAndSequence, "src/eval/sequence.rs", _) => W6A4SequenceWork,
 
             (
@@ -513,14 +505,6 @@ impl ApiOccurrence {
             | (AnnotationsAndEffects, "src/eval/builtins/effect/implementation.rs", _) => {
                 W6E6EffectMap
             }
-            (
-                Objects,
-                "src/eval/builtins/object/implementation.rs",
-                "eval_diagnostic_object_builtin"
-                | "eval_object_local_name_builtin"
-                | "eval_object_spec_builtin"
-                | "object_spec_dict",
-            ) => W6F2ObjectSpecification,
             (
                 Objects,
                 "src/eval/builtins/object/implementation.rs",
@@ -1374,13 +1358,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        475,
+        469,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        4_020_666_306_328_562_779,
+        9_455_756_789_450_542_158,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1391,9 +1375,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 140),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 144),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        ((ApiKind::Function, ApiDisposition::Violation), 297),
+        ((ApiKind::Function, ApiDisposition::Violation), 287),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1467,7 +1451,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            41,
+            31,
         ),
         (
             (
@@ -1607,10 +1591,10 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         family_counts,
         BTreeMap::from([
-            (D2cFamily::ValueDemand, 10),
-            (D2cFamily::ApplicationAndSequence, 5),
+            (D2cFamily::ValueDemand, 9),
+            (D2cFamily::ApplicationAndSequence, 4),
             (D2cFamily::DispatchScalarAndStrategy, 1),
-            (D2cFamily::Objects, 13),
+            (D2cFamily::Objects, 9),
             (D2cFamily::NetBuiltins, 8),
         ]),
         "each raw evaluator operation needs one stable D.2c family"
@@ -1631,7 +1615,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 33),
+            (D2cCurrentContext::EvaluatorStep, 27),
             (D2cCurrentContext::DurableEval, 2),
             (D2cCurrentContext::ContextFree, 2),
         ]),
@@ -1654,7 +1638,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [2, 35, 0],
+        [2, 29, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1679,13 +1663,13 @@ fn d2c_family_fingerprints_are_exact() {
         .map(|(family, occurrences)| (*family, occurrence_fingerprint(occurrences)))
         .collect::<BTreeMap<_, _>>();
     let expected = BTreeMap::from([
-        (D2cFamily::ValueDemand, 16_951_777_383_940_456_822),
-        (D2cFamily::ApplicationAndSequence, 7_278_529_736_274_756_495),
+        (D2cFamily::ValueDemand, 10_946_888_485_513_425_137),
+        (D2cFamily::ApplicationAndSequence, 4_925_520_474_408_746_135),
         (
             D2cFamily::DispatchScalarAndStrategy,
             183_834_627_390_525_313,
         ),
-        (D2cFamily::Objects, 3_499_565_521_521_024_398),
+        (D2cFamily::Objects, 18_077_038_821_884_489_790),
         (D2cFamily::NetBuiltins, 13_862_576_417_551_920_128),
     ]);
 
@@ -1719,11 +1703,9 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         .collect::<BTreeMap<_, _>>();
     let expected_counts = BTreeMap::from([
         (W6A0cKeyTagUndefined, 2),
-        (W6A0dLazyListProjection, 2),
         (W8ValueCompatibility, 7),
         (W6A2ApplicationWork, 4),
         (W6C1DispatchAndArity, 1),
-        (W6F2ObjectSpecification, 4),
         (W6F3ObjectComposition, 4),
         (W6F4ObjectInstantiation, 5),
         (W6F5NetDispatch, 2),
@@ -1741,11 +1723,9 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         .collect::<BTreeMap<_, _>>();
     let expected_fingerprints = BTreeMap::from([
         (W6A0cKeyTagUndefined, 4_938_813_297_724_122_753),
-        (W6A0dLazyListProjection, 18_060_119_814_284_529_550),
         (W8ValueCompatibility, 15_067_824_851_424_263_475),
         (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
-        (W6F2ObjectSpecification, 17_557_287_365_619_708_655),
         (W6F3ObjectComposition, 12_124_644_744_746_303_865),
         (W6F4ObjectInstantiation, 10_760_564_769_723_657_478),
         (W6F5NetDispatch, 4_216_785_241_083_672_531),

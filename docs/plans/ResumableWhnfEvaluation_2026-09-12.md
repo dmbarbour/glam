@@ -3617,7 +3617,7 @@ delta is the required reduction in the parent D.2c violation count.
 | **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
 | **W6A.0b — Complete (2026-09-15): Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
 | **W6A.0c — Cross-family key/tag/undefined closure (after W6F.4)** | 2 S | W6E.5 removed the final synchronous key converter; retain only the tagged-payload and semantic-undefined compatibility pair until synchronous dictionary application disappears. Remaining delta `-2`. |
-| **W6A.0d — Cross-family lazy-list closure (after W6F.1)** | 2 S | W6E.6 removed effect-map's final direct thunk-forcing use; retain thunk forcing and the list-to-value compatibility walk only for object-parts, then delete the pair after W6F.1 owns traversal. Remaining delta `-2`. |
+| **W6A.0d — Complete (2026-09-17): Cross-family lazy-list closure (after W6F.2)** | 2 S | W6E.6 removed effect-map's final direct thunk-forcing use; W6F.2 moved object local-name parts to `ListFrontMachine`, so the production thunk-forcing and list-to-value compatibility pair is now retired. `-2`. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
 | **W6A.1b — Complete (2026-09-17): Cross-family effect-value closure** | 1 F | Family checkpoints moved every context-free caller; W6E.6 now requires access on the shared constructor. `-1` at closure. |
@@ -3681,12 +3681,12 @@ walker merely for comparison.
 
 Migrate **lazy-list forcing/front extraction** into existing `ListFrontMachine`
 or the family-specific owned collection work selected by W6A.4, W6C.2,
-W6C.3, W6D.3-W6D.5, W6E.1, W6E.5-W6E.6, and W6F.1. No collection callback may
+W6C.3, W6D.3-W6D.5, W6E.1, W6E.5-W6E.6, and W6F.2. No collection callback may
 call the old helper while holding regional access. W6E.5 removed the direct
-front wrapper and final key-list use, and W6E.6 moved effect-map's direct thunk
-forcing into `ListFrontMachine`. Only object-parts remains; W6F.1 must remove
-the list-to-value walk and its thunk-forcing dependency before recording
-W6A.0d's complete delta.
+front wrapper and final key-list use, W6E.6 moved effect-map's direct thunk
+forcing into `ListFrontMachine`, and W6F.2 moved the final object-parts
+consumer. The list-to-value walk and its thunk-forcing dependency are now
+test-only, recording W6A.0d's complete delta.
 
 The closure fixtures must force suspension at every ownership handoff rather
 than rely on thread repetition: nested deferred dictionary members for tag and
@@ -4421,7 +4421,7 @@ including a promised list tail which proves API lookup remains deferred. The
 old fixpoint and effect-call/effect-apply paths are removed, while effect-map
 dispatch is reassigned intact to W6E.6. W6A.4 closes with the recursive key
 helpers removed; W6A.0c retains only its tagged-value pair and W6A.0d retains
-the list-to-value/thunk pair for W6E.6 and W6F.1. `AnnotationsAndEffects`
+the list-to-value/thunk pair for W6E.6 and W6F.2. `AnnotationsAndEffects`
 falls from eighteen to sixteen declarations, `ValueDemand` from eleven to ten,
 and the complete D.2c manifest from sixty-one to fifty-eight. The durable
 owner, root-publication, access, and WHNF inventories account for the new
@@ -4485,7 +4485,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6F.1 — Complete (2026-09-17): Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
-| **W6F.2 — Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`. |
+| **W6F.2 — Complete (2026-09-17): Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`; then close W6A.0d for another `-2`. |
 | **W6F.3 — Object composition** | 4 S | Convert composed/override/extended definitions and dictionary override. `-4`. |
 | **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
@@ -4505,6 +4505,28 @@ projection now require the caller's regional value access. Callers open only
 bounded callback-free regions around these leaves; object demand and fixpoint
 construction remain outside them. The D.2c manifest falls from forty-one to
 thirty-seven declarations and `Objects` from seventeen to thirteen.
+
+W6F.2 completion record, 2026-09-17: object specification, diagnostic-object
+normalization, and local-name construction now share one durable saturated-
+builtin owner. Specification fields, names, and parts retain rooted progress
+across ordinary WHNF suspension; local-name parts traverse their logical list
+through `ListFrontMachine` rather than a synchronous whole-list walk. A forced
+promised-tail fixture proves the already-demanded object name is not replayed
+when traversal resumes. Existing error text and the distinction between a
+missing/undefined specification, a non-dictionary specification, and a
+non-object input remain unchanged. The final production consumers of
+`list_to_value_items_in` and `force_list_thunk_in` disappear, closing W6A.0d;
+the generic segment walker is retained only for compatibility tests. The D.2c
+manifest falls from thirty-seven to thirty-one declarations: `Objects` from
+thirteen to nine, `ValueDemand` from ten to nine, and
+`ApplicationAndSequence` from five to four. Root-publication, durable-owner,
+access, raw-value, and WHNF inventories account for the new owner and its
+bounded publications. Aggressive collection also exposed that the shared
+reflection-module test fixture returned a raw module graph across later
+evaluation steps. The fixture now retains one explicit test-only runtime root
+for the graph's lifetime; the previously failing object-reflection cases pass
+under forced collection instead of relying on the old synchronous path's lack
+of an intervening collection point.
 
 #### W6G — Residual resumable-machine overhead
 

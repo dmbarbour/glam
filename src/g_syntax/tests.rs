@@ -211,6 +211,7 @@ fn reflection_test_module(
     crate::api::Assembler,
     crate::evaluation::EvalContext,
     Value,
+    crate::runtime::RuntimeValueRoot,
     Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
 ) {
     let diagnostics = Arc::new(Mutex::new(Vec::new()));
@@ -253,7 +254,16 @@ fn reflection_test_module(
     let eval_context = assembler.eval_context();
     let definitions = crate::eval::eval_value(&eval_context, &lowered.definitions)
         .expect("reflection-enabled module should expose its dictionary");
-    (assembler, eval_context, definitions, diagnostics)
+    let definitions_root = context
+        .values()
+        .construct_runtime_value_root(|_| definitions.clone());
+    (
+        assembler,
+        eval_context,
+        definitions,
+        definitions_root,
+        diagnostics,
+    )
 }
 
 #[test]
@@ -2319,7 +2329,7 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
         "  .r ()\n",
         "probe = anno { refl:task } \"unreachable\"\n",
     );
-    let (_assembler, eval_context, definitions, _diagnostics) =
+    let (_assembler, eval_context, definitions, _definitions_root, _diagnostics) =
         reflection_test_module(source, &["recursive_do_cycle"], &[]);
     let mut probe = value_at_atom_path(&definitions, &["probe"]).expect("probe should exist");
     let error = loop {
@@ -3943,7 +3953,7 @@ refl.try_match_tentative_rollback = (try_match when {
 })
 ordinary = "ordinary"
 "#;
-    let (assembler, context, module, diagnostics) =
+    let (assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["host_try_test"], &[]);
 
     assert_eq!(
@@ -6499,7 +6509,7 @@ ordinary = "ordinary"
 ordinary_two = "ordinary two"
 probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["module_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(
@@ -6541,7 +6551,7 @@ object foo with
   meta.hidden = "metadata"
   value = "value"
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_refl_test"], &[]);
 
     assert_eq!(
@@ -6577,7 +6587,7 @@ object parent with
 extend parent.child with
   refl.notice := .log 'info { msg:{ text:"extended child reflection task" } }
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["nested_object_refl_test"], &[]);
 
     assert_eq!(
@@ -6606,7 +6616,7 @@ object base with
 object derived extends base with
   refl.notice := .log 'info { msg:{ text:"derived reflection task" } }
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["inherited_object_refl_test"], &[]);
 
     assert_eq!(
@@ -6646,7 +6656,7 @@ object declared with
     refl.notice = .log 'info { msg:{ text:"excluded nested reflection task" } }
     ordinary = "excluded ordinary"
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_expression_refl_test"], &[]);
 
     assert_eq!(
@@ -6669,7 +6679,7 @@ refl := {}
 meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\_tasks -> .r ())))) } "probe"
 ordinary = "ordinary"
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["disabled_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(
@@ -6691,7 +6701,7 @@ refl.bad = .r "not unit"
 meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.error (list.head tasks).task >>= (\_error -> .r ()))))) } "probe"
 ordinary = "ordinary"
 "#;
-    let (_assembler, context, module, diagnostics) =
+    let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["unit_refl_test"], &[("guard", "refl")]);
 
     assert_eq!(

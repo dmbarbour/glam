@@ -186,8 +186,13 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/object/implementation.rs",
-        [11, 0],
-        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction; W5C5-001D lazy diagnostic normalization"
+        [7, 0],
+        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction"
+    ),
+    context_entry!(
+        "src/eval/object_builtin_machine.rs",
+        [9, 2],
+        "W6F.2 durable object specification, diagnostic normalization, and local-name ownership"
     ),
     context_entry!(
         "src/eval/list_effect_machine.rs",

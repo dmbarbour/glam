@@ -21,6 +21,7 @@ use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
+use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::pattern_machine::{
     PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine, PatternListMachine,
     PatternPathMachine,
@@ -49,6 +50,7 @@ pub(crate) enum BuiltinTaskMachine {
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
     Numeric(NumericBuiltinMachine),
+    Object(Box<ObjectBuiltinMachine>),
     PatternList(PatternListMachine),
     PatternPath(Box<PatternPathMachine>),
     PatternDictPredicate(PatternDictPredicateMachine),
@@ -105,6 +107,9 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
                 | Builtin::Anno
+                | Builtin::ObjectSpec
+                | Builtin::ObjectLocalName
+                | Builtin::DiagnosticObject
                 | Builtin::EffectApply
                 | Builtin::EffectCall
                 | Builtin::EffectMap
@@ -149,6 +154,9 @@ impl BuiltinTaskMachine {
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
             Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
+            builtin if ObjectBuiltinMachine::supports(builtin) => {
+                Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
+            }
             builtin if PatternListMachine::supports(builtin) => {
                 Self::PatternList(PatternListMachine::new(builtin, arguments))
             }
@@ -217,6 +225,9 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Numeric(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::Object(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternList(machine) => {

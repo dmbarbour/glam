@@ -11,17 +11,9 @@ pub(super) fn apply(
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     match builtin {
-        Builtin::ObjectSpec => {
-            let [value] = super::exact(arguments, "object spec")?;
-            eval_object_spec_builtin(context, &value)
-        }
         Builtin::ObjectFromDict => {
             let [value] = super::exact(arguments, "object_from_dict")?;
             eval_object_from_dict_builtin(context, &value)
-        }
-        Builtin::ObjectLocalName => {
-            let [host, parts] = super::exact(arguments, "object local name")?;
-            eval_object_local_name_builtin(context, &host, &parts)
         }
         Builtin::ObjectInstanceFromParts => {
             let [name, deps, defs] = super::exact(arguments, "object instance from parts")?;
@@ -30,10 +22,6 @@ pub(super) fn apply(
         Builtin::ObjectInstance => {
             let [spec] = super::exact(arguments, "object instance")?;
             eval_object_instance_builtin(context, &spec)
-        }
-        Builtin::DiagnosticObject => {
-            let [message] = super::exact(arguments, "diagnostic object")?;
-            eval_diagnostic_object_builtin(context, &message)
         }
         Builtin::ObjectDefaultDefs => {
             let [base, _self_value] = super::exact(arguments, "default object definitions")?;

@@ -416,6 +416,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W3B.2b"
     ),
     closed_durable!(
+        "src/eval/object_builtin_machine.rs",
+        "object specification, diagnostic normalization, and local-name progress",
+        "canonical RuntimeValueRoot object/spec/name/parts fields plus child WHNF and list-front machines",
+        "yielded or dependency-blocked object builtin evaluation",
+        "saturated builtin admission and bounded specification or local-name publication",
+        "builtin completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6F.2"
+    ),
+    closed_durable!(
         "src/eval/list_effect_machine.rs",
         "list-effect recipe progress",
         "canonical RuntimeValueRoot continuation/effect/list fields, one managed promise root, and child WHNF/list-front machines",
@@ -892,10 +903,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 219;
+const DECLARATION_BASELINE_COUNT: usize = 221;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([132, 236, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 941_878_572_204_401_024;
+    DeclarationSignals::new([132, 243, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_545_425_269_452_093_439;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1034,6 +1045,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "structural list-map callable and source progress"
     } else if declaration.starts_with("src/eval/pattern_machine.rs::") {
         "compiler-pattern path, dictionary, and collection progress"
+    } else if declaration.starts_with("src/eval/object_builtin_machine.rs::") {
+        "object specification, diagnostic normalization, and local-name progress"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
