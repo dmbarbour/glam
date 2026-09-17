@@ -14,10 +14,6 @@ pub(super) fn apply(
             let [left, right] = super::exact(arguments, "append")?;
             context.with_value_access(|access| append_values(access.values(), left, right))
         }
-        Builtin::ListConcat => {
-            let [value] = super::exact(arguments, "list concat")?;
-            eval_list_concat_builtin(context, &value)
-        }
         Builtin::TextLines => {
             let [value] = super::exact(arguments, "text lines")?;
             eval_text_lines_builtin(context, &value)

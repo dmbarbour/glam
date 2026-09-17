@@ -2526,6 +2526,111 @@ fn list_concat_explicitly_flattens_one_level() {
 }
 
 #[test]
+fn list_concat_defers_outer_children_and_observes_the_suffix_from_the_back() {
+    let context = test_context();
+    let outer = Value::List(List::concat(
+        List::from_thunk(
+            LazyValue::error(context.values(), "list concat forced its unused prefix").into(),
+        ),
+        List::from_values(vec![Value::binary_from_text("B")]),
+    ));
+    let flattened = apply_values(&context, Value::Builtin(Builtin::ListConcat), vec![outer])
+        .and_then(|value| eval_value(&context, &value))
+        .expect("list concat should expose one transformed spine node");
+    let Value::List(flattened) = flattened else {
+        panic!("list concat should produce a list")
+    };
+    let stats = flattened.visit_logical_parts(&mut |_| {});
+    assert_eq!(stats.thunk_items, 2);
+    assert_eq!(stats.value_items, 0);
+
+    let split = apply_values(
+        &context,
+        Value::Builtin(Builtin::ListSplitEnd),
+        vec![n(1), Value::List(flattened)],
+    )
+    .and_then(|value| eval_value(&context, &value))
+    .expect("the flattened suffix should remain observable from the back");
+    let Value::Dict(split) = split else {
+        panic!("split_end should produce a dictionary")
+    };
+    let Value::List(suffix) = split
+        .get(&Key::atom_from_text("right"))
+        .expect("split_end should retain its flattened suffix")
+    else {
+        panic!("split_end suffix should be a list")
+    };
+    assert_eq!(
+        list_output_bytes(&context, suffix).expect("the suffix should evaluate"),
+        b"B"
+    );
+}
+
+#[test]
+fn list_concat_delays_invalid_strict_elements_until_their_output_is_observed() {
+    let context = test_context();
+    let outer = Value::List(List::from_values(vec![n(99), Value::binary_from_text("B")]));
+    let flattened = apply_values(&context, Value::Builtin(Builtin::ListConcat), vec![outer])
+        .and_then(|value| eval_value(&context, &value))
+        .expect("list concat should localize a strict-item failure");
+    let Value::List(flattened) = flattened else {
+        panic!("list concat should produce a list")
+    };
+
+    let split = apply_values(
+        &context,
+        Value::Builtin(Builtin::ListSplitEnd),
+        vec![n(1), Value::List(flattened)],
+    )
+    .and_then(|value| eval_value(&context, &value))
+    .expect("the valid suffix should not observe the invalid prefix item");
+    let Value::Dict(split) = split else {
+        panic!("split_end should produce a dictionary")
+    };
+    let Value::List(suffix) = split
+        .get(&Key::atom_from_text("right"))
+        .expect("split_end should retain its suffix")
+    else {
+        panic!("split_end suffix should be a list")
+    };
+    assert_eq!(list_output_bytes(&context, suffix).unwrap(), b"B");
+}
+
+#[test]
+fn list_concat_resumes_after_its_source_becomes_available() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (source, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("list concat source"))
+        .expect("the owner should allocate a promised concat source");
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ListConcat),
+        vec![Value::Promised(source.clone())],
+    )
+    .expect("list-concat application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved source should suspend list concat");
+    assert!(blocked.blocked_on().is_some());
+
+    set_promise(
+        &owner,
+        &source,
+        Value::List(List::from_values(vec![Value::binary_from_text("A")])),
+    )
+    .expect("the owner should resolve the concat source");
+    let Value::List(flattened) =
+        eval_value(&observer, &application).expect("list concat should resume")
+    else {
+        panic!("list concat should produce a list")
+    };
+    assert_eq!(
+        list_output_bytes(&observer, &flattened).expect("the flattened source should evaluate"),
+        b"A"
+    );
+}
+
+#[test]
 fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
     let expr = builtin2_expr(
         Builtin::Append,

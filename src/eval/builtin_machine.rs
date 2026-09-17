@@ -18,7 +18,7 @@ use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll}
 use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
-use super::list_transform_machine::ListMapMachine;
+use super::list_transform_machine::{ListConcatMachine, ListMapMachine};
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
@@ -38,6 +38,7 @@ pub(crate) enum BuiltinTaskMachine {
     Dictionary(DictBuiltinMachine),
     ListObservation(Box<ListObservationMachine>),
     ListMap(ListMapMachine),
+    ListConcat(ListConcatMachine),
     Numeric(NumericBuiltinMachine),
     Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
@@ -77,6 +78,7 @@ impl BuiltinTaskMachine {
                 | Builtin::ListHead
                 | Builtin::ListTail
                 | Builtin::Map
+                | Builtin::ListConcat
         )
     }
 
@@ -109,6 +111,7 @@ impl BuiltinTaskMachine {
                 Self::ListObservation(Box::new(ListObservationMachine::new(builtin, arguments)))
             }
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
+            Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
             }
@@ -147,6 +150,9 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::ListMap(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::ListConcat(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Numeric(machine) => {

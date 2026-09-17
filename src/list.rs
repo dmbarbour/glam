@@ -386,6 +386,81 @@ impl<V, T> List<V, T> {
         }
     }
 
+    /// Flat-maps exactly one representation node without forcing a deferred
+    /// part.
+    ///
+    /// A reached strict leaf is allowed to produce one list per item. Those
+    /// lists are joined with logarithmic concatenation depth without looking
+    /// inside them. A source concatenation or thunk instead remains deferred,
+    /// matching [`Self::map_root_step`]'s one-node structural boundary.
+    pub(crate) fn flat_map_root_step<U, S, E>(
+        &self,
+        map_byte: &mut impl FnMut(u8) -> Result<List<U, S>, E>,
+        map_value: &mut impl FnMut(&V) -> Result<List<U, S>, E>,
+        defer_list: &mut impl FnMut(Self) -> S,
+        defer_thunk: &mut impl FnMut(&T) -> S,
+    ) -> Result<List<U, S>, E> {
+        let mapped = match self.0.as_ref() {
+            ListNode::Empty => List::empty(),
+            ListNode::Bytes(bytes) => {
+                let mut parts = Vec::with_capacity(bytes.len());
+                for byte in bytes.iter().copied() {
+                    parts.push(map_byte(byte)?);
+                }
+                List::concat_balanced(parts)
+            }
+            ListNode::Values(values) => {
+                let mut parts = Vec::with_capacity(values.len());
+                for value in values.as_slice() {
+                    parts.push(map_value(value)?);
+                }
+                List::concat_balanced(parts)
+            }
+            ListNode::Concat(left, right) => List::concat(
+                List::from_thunk(defer_list(left.clone())),
+                List::from_thunk(defer_list(right.clone())),
+            ),
+            ListNode::Finger(finger) => {
+                let mut parts = Vec::with_capacity(finger.measure().0);
+                for chunk in finger.iter() {
+                    match chunk {
+                        ListChunk::Bytes(bytes) => {
+                            for byte in bytes.iter().copied() {
+                                parts.push(map_byte(byte)?);
+                            }
+                        }
+                        ListChunk::Values(values) => {
+                            for value in values.as_slice() {
+                                parts.push(map_value(value)?);
+                            }
+                        }
+                    }
+                }
+                List::concat_balanced(parts)
+            }
+            ListNode::Thunk(thunk) => List::from_thunk(defer_thunk(thunk)),
+        };
+        Ok(mapped)
+    }
+
+    fn concat_balanced(mut lists: Vec<List<V, T>>) -> Self {
+        if lists.is_empty() {
+            return Self::empty();
+        }
+        while lists.len() > 1 {
+            let mut next = Vec::with_capacity(lists.len().div_ceil(2));
+            let mut current = lists.into_iter();
+            while let Some(left) = current.next() {
+                next.push(match current.next() {
+                    Some(right) => Self::concat(left, right),
+                    None => left,
+                });
+            }
+            lists = next;
+        }
+        lists.pop().expect("a non-empty concatenation has one root")
+    }
+
     fn from_value_slice(values: SharedSlice<V>) -> Self {
         if values.len() == 0 {
             Self::empty()
@@ -1394,6 +1469,79 @@ mod tests {
         assert_eq!(stats.thunk_items, 2);
         assert_eq!(stats.value_items, 0);
         assert_eq!(stats.byte_segments, 0);
+    }
+
+    #[test]
+    fn root_flat_map_defers_both_concat_children_without_visiting_them() {
+        let source = TestList::concat(
+            TestList::from_values(vec![1, 2]),
+            TestList::from_bytes(Bytes::from_static(b"ab")),
+        );
+        let strict_visits = std::cell::Cell::new(0);
+        let deferred_children = std::cell::Cell::new(0);
+        let flattened = source
+            .flat_map_root_step(
+                &mut |_| {
+                    strict_visits.set(strict_visits.get() + 1);
+                    Ok::<_, ()>(TestList::empty())
+                },
+                &mut |_| {
+                    strict_visits.set(strict_visits.get() + 1);
+                    Ok::<_, ()>(TestList::empty())
+                },
+                &mut |_| {
+                    deferred_children.set(deferred_children.get() + 1);
+                    "flattened child"
+                },
+                &mut |_| unreachable!("the source root is not a thunk"),
+            )
+            .unwrap();
+
+        assert_eq!(strict_visits.get(), 0);
+        assert_eq!(deferred_children.get(), 2);
+        let stats = flattened.visit_logical_parts(&mut |_| {});
+        assert_eq!(stats.node_visits, 3);
+        assert_eq!(stats.thunk_items, 2);
+        assert_eq!(stats.value_items, 0);
+        assert_eq!(stats.byte_segments, 0);
+    }
+
+    #[test]
+    fn root_flat_map_balances_a_strict_leaf_without_reordering_parts() {
+        fn concat_depth<V, T>(list: &List<V, T>) -> usize {
+            match list.0.as_ref() {
+                ListNode::Concat(left, right) => 1 + concat_depth(left).max(concat_depth(right)),
+                _ => 0,
+            }
+        }
+
+        let item_count = 257_u32;
+        let source = TestList::from_values((0..item_count).collect());
+        let flattened = source
+            .flat_map_root_step(
+                &mut |_| unreachable!("the source leaf stores values"),
+                &mut |value| Ok::<_, ()>(TestList::from_values(vec![*value])),
+                &mut |_| unreachable!("the source root is not a concat"),
+                &mut |_| unreachable!("the source root is not a thunk"),
+            )
+            .unwrap();
+
+        assert_eq!(flattened.known_len(), Some(item_count as usize));
+        assert!(
+            concat_depth(&flattened) <= 9,
+            "257 singleton parts need no more than ceil(log2(257)) concat levels"
+        );
+        let mut observed = Vec::new();
+        flattened
+            .for_each_segment(
+                &mut |_| unreachable!("the result stores values"),
+                &mut |values| {
+                    observed.extend_from_slice(values);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(observed, (0..item_count).collect::<Vec<_>>());
     }
 
     #[test]

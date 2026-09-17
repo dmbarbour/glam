@@ -178,9 +178,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/list_transform_machine.rs",
         0,
         0,
-        1,
-        "durable structural list-map result publication",
-        "W6D.4a non-forcing structural map owner"
+        2,
+        "durable structural list-transformation result publication",
+        "W6D.4a-W6D.4b non-forcing structural map and concat owners"
     ),
     entry!(
         "src/eval/object_machine.rs",
@@ -499,6 +499,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/list_observation_machine.rs::rooted_list_from_items"
                 | "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root"
                 | "src/eval/list_observation_machine.rs::rooted_split_from_root_and_items"
+                | "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll"
                 | "src/eval/list_transform_machine.rs::impl ListMapMachine::poll"
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
@@ -791,6 +792,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_observation_machine.rs::rooted_list_from_items#1|surface=access-publication|scope=production",
     "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root#1|surface=access-publication|scope=production",
     "src/eval/list_observation_machine.rs::rooted_split_from_root_and_items#1|surface=access-publication|scope=production",
+    "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::impl ListMapMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
     "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",

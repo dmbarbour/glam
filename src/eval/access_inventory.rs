@@ -176,8 +176,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list/implementation.rs",
-        [2, 0],
-        "I3B.1 remaining scoped list transformations"
+        [1, 0],
+        "I3B.1 remaining scoped text-list transformation"
     ),
     context_entry!(
         "src/eval/builtins/list_effect.rs",
@@ -241,8 +241,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_transform_machine.rs",
-        [1, 1],
-        "W6D.4a durable list-map source owner with one-node regional transformation"
+        [2, 2],
+        "W6D.4a-W6D.4b durable list-transform source owners with one-node regional transformation"
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",

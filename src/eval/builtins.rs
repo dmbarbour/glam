@@ -64,18 +64,18 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::Map => Ok(Value::Lazy(context.construct_lazy(move |access| {
-            LazyValue::from_builtin_in(
-                access,
-                BuiltinCall {
-                    builtin,
-                    arguments: Arc::from(arguments),
-                },
-            )
-        }))),
-        Builtin::Append | Builtin::ListConcat | Builtin::TextLines => {
-            list::apply(context, builtin, arguments)
+        Builtin::Map | Builtin::ListConcat => {
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                )
+            })))
         }
+        Builtin::Append | Builtin::TextLines => list::apply(context, builtin, arguments),
         Builtin::Slice
         | Builtin::ListLen
         | Builtin::ListSplit
