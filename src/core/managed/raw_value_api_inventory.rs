@@ -123,7 +123,6 @@ enum D2cCheckpoint {
     W6E3MetadataPure,
     W6E4AnnotationReflection,
     W6E6EffectMap,
-    W6E8ListEffectControl,
     W6E9ListEffectSource,
     W6F1ObjectLeaves,
     W6F2ObjectSpecification,
@@ -516,16 +515,6 @@ impl ApiOccurrence {
             | (AnnotationsAndEffects, "src/eval/builtins/effect/implementation.rs", _) => {
                 W6E6EffectMap
             }
-            (
-                AnnotationsAndEffects,
-                "src/eval/builtins/list_effect/implementation.rs",
-                "cut_list_effect_results"
-                | "eval_list_effect_alt_builtin"
-                | "eval_list_effect_builtin"
-                | "eval_list_effect_cut_builtin"
-                | "eval_list_effect_seq_builtin"
-                | "flat_map_list_effect_results",
-            ) => W6E8ListEffectControl,
             (
                 AnnotationsAndEffects,
                 "src/eval/builtins/list_effect.rs"
@@ -1638,7 +1627,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
             (D2cFamily::ValueDemand, 10),
             (D2cFamily::ApplicationAndSequence, 5),
             (D2cFamily::DispatchScalarAndStrategy, 1),
-            (D2cFamily::AnnotationsAndEffects, 10),
+            (D2cFamily::AnnotationsAndEffects, 3),
             (D2cFamily::Objects, 17),
             (D2cFamily::NetBuiltins, 8),
         ]),
@@ -1660,7 +1649,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 43),
+            (D2cCurrentContext::EvaluatorStep, 36),
             (D2cCurrentContext::DurableEval, 2),
             (D2cCurrentContext::ContextFree, 6),
         ]),
@@ -1683,7 +1672,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [6, 45, 0],
+        [6, 38, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1714,7 +1703,7 @@ fn d2c_family_fingerprints_are_exact() {
             D2cFamily::DispatchScalarAndStrategy,
             183_834_627_390_525_313,
         ),
-        (D2cFamily::AnnotationsAndEffects, 15_166_337_540_888_367_255),
+        (D2cFamily::AnnotationsAndEffects, 1_960_719_924_286_955_414),
         (D2cFamily::Objects, 14_243_874_767_540_971_701),
         (D2cFamily::NetBuiltins, 13_862_576_417_551_920_128),
     ]);
@@ -1753,8 +1742,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W8ValueCompatibility, 7),
         (W6A2ApplicationWork, 4),
         (W6C1DispatchAndArity, 1),
-        (W6E8ListEffectControl, 6),
-        (W6E9ListEffectSource, 4),
+        (W6E9ListEffectSource, 3),
         (W6F1ObjectLeaves, 4),
         (W6F2ObjectSpecification, 4),
         (W6F3ObjectComposition, 4),
@@ -1778,8 +1766,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W8ValueCompatibility, 15_067_824_851_424_263_475),
         (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
-        (W6E8ListEffectControl, 5_599_189_213_790_407_454),
-        (W6E9ListEffectSource, 16_763_173_768_808_435_452),
+        (W6E9ListEffectSource, 1_960_719_924_286_955_414),
         (W6F1ObjectLeaves, 17_471_107_961_031_657_988),
         (W6F2ObjectSpecification, 17_557_287_365_619_708_655),
         (W6F3ObjectComposition, 12_124_644_744_746_303_865),

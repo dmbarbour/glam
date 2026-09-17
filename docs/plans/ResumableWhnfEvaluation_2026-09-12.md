@@ -4382,8 +4382,8 @@ show its exact checkpoint delta before proceeding.
 | **W6E.5 — Complete (2026-09-17): Effect dispatch and fixpoint** | 4 S | Effect application, call preparation, and fixpoint construction now share one durable owner. The effect-map dispatcher remains assigned to W6E.6; the checkpoint removes two effect declarations plus the final synchronous key converter, and closes W6A.4. |
 | **W6E.6 — Complete (2026-09-17): Effect map** | 3 S, 2 F | Convert map construction, the suspendable run step, continuation, and API-call construction; then close W6A.1b by access-qualifying the shared effect constructor. `-5`, plus closure delta `-1`. |
 | **W6E.7 — Complete (2026-09-17): List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
-| **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order and move callback application into the W6A.2 owner. `-6`. |
-| **W6E.9 — List-effect source** | 4 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-4`. |
+| **W6E.8 — Complete (2026-09-17): List-effect control** | 6 S, 1 S closure | Convert alt/cut/seq/flat-map recipe construction without changing branch order, remove the now-redundant run-list wrapper, and keep callback application in the W3/W6A.2 owner. `-7`. |
+| **W6E.9 — List-effect source** | 3 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-3`. |
 
 The W3 lazy list-effect recipes and source owner are already complete and are
 not reimplemented here. Preserve sealed metadata, pure versus reflection
@@ -4454,6 +4454,16 @@ within one existing evaluator access region before installing the application
 checkpoint; no context-free semantic value constructor remains. The D.2c
 manifest falls from fifty-two to fifty-one declarations and
 `AnnotationsAndEffects` from eleven to ten.
+
+W6E.8 completion record, 2026-09-17: list-effect run, sequence, alternative,
+and cut construction now create only explicit W3 source recipes. The family
+dispatcher preserves an immediate outer list shell, alternatives retain
+left-before-right `List::concat` order, and sequence retains its continuation
+application inside the source owner's ordinary lazy application path. The six
+synchronous control helpers and redundant run-list wrapper are removed, so the
+D.2c manifest falls from fifty-one to forty-four declarations and
+`AnnotationsAndEffects` from ten to three. Existing promised sequence/cut
+fixtures continue to force the actual W3 traversal boundaries.
 
 #### W6F — Objects and interaction-net builtins
 

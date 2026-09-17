@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::core::ListEffectComputation;
 
 mod implementation;
 
@@ -12,7 +13,11 @@ pub(super) fn apply(
     match builtin {
         Builtin::ListEffect => {
             let [effect] = super::exact(arguments, "list effect")?;
-            eval_list_effect_builtin(context, &effect)
+            Ok(Value::List(deferred_list(
+                context,
+                "list effect",
+                ListEffectComputation::Run { effect },
+            )))
         }
         Builtin::ListEffectReturn => {
             let [value] = super::exact(arguments, "list effect return")?;
@@ -20,15 +25,41 @@ pub(super) fn apply(
         }
         Builtin::ListEffectSeq => {
             let [operation, continuation] = super::exact(arguments, "list effect seq")?;
-            eval_list_effect_seq_builtin(context, &operation, &continuation)
+            let results = deferred_list(
+                context,
+                "list effect",
+                ListEffectComputation::Run { effect: operation },
+            );
+            Ok(Value::List(deferred_list(
+                context,
+                "list effect seq",
+                ListEffectComputation::Sequence {
+                    results,
+                    continuation,
+                },
+            )))
         }
         Builtin::ListEffectAlt => {
             let [left, right] = super::exact(arguments, "list effect alt")?;
-            eval_list_effect_alt_builtin(context, &left, &right)
+            let left = deferred_list(
+                context,
+                "list effect",
+                ListEffectComputation::Run { effect: left },
+            );
+            let right = deferred_list(
+                context,
+                "list effect",
+                ListEffectComputation::Run { effect: right },
+            );
+            Ok(Value::List(List::concat(left, right)))
         }
         Builtin::ListEffectCut => {
             let [operation] = super::exact(arguments, "list effect cut")?;
-            eval_list_effect_cut_builtin(context, &operation)
+            Ok(Value::List(deferred_list(
+                context,
+                "list effect cut",
+                ListEffectComputation::Cut { operation },
+            )))
         }
         Builtin::ListEffectFix => {
             let [function] = super::exact(arguments, "list effect fix")?;
