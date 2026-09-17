@@ -22,7 +22,6 @@ use super::builtins::{NetConstructionMachine, apply_builtin_in};
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
 use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
-use super::sequence::list_to_key_items_in;
 
 pub(crate) fn failure_diagnostic_value_in(
     access: &RuntimeValueAccess<'_>,
@@ -1145,48 +1144,6 @@ pub(super) fn format_name_part(key: &Key) -> String {
             other => format!("{other:?}"),
         },
         other => format!("{other:?}"),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn value_to_key(context: &EvalContext, value: &Value) -> Result<Key, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| value_to_key_in(evaluator, value))
-}
-
-pub(super) fn value_to_key_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Key, EvaluationHalt> {
-    let value = eval_value_in(context, value)?;
-    match &value {
-        Value::Atom(atom) => Ok(Key::Atom(*atom)),
-        Value::Number(number) => Ok(Key::Number(number.clone())),
-        Value::Binary(bytes) => Ok(Key::Binary(bytes.clone())),
-        Value::List(list) => Ok(Key::List(list_to_key_items_in(context, list)?)),
-        Value::Dict(dict) => Ok(Key::Dict(Arc::from(
-            dict.iter()
-                .map(|(key, value)| {
-                    let value = value_to_key_in(context, value)?;
-                    if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                        return Ok(None);
-                    }
-                    Ok(Some((key.clone(), value)))
-                })
-                .collect::<Result<Vec<_>, EvaluationHalt>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>(),
-        ))),
-        Value::Builtin(_)
-        | Value::PartialBuiltin(_)
-        | Value::Function(_)
-        | Value::Net(_)
-        | Value::Lazy(_)
-        | Value::Promised(_)
-        | Value::Metadata(_)
-        | Value::Opaque(_) => Err(EvaluationHalt::new(
-            "dictionary keys must evaluate to keyable values",
-        )),
     }
 }
 

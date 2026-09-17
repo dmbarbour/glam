@@ -3616,14 +3616,14 @@ delta is the required reduction in the parent D.2c violation count.
 |---|---:|---|
 | **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
 | **W6A.0b — Complete (2026-09-15): Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
-| **W6A.0c — Cross-family key/tag/undefined closure (after W6E.5)** | 3 S | Migrate consumers to explicit key-conversion and tagged-payload work as their family checkpoints execute; delete the three synchronous compatibility helpers after the last consumer moves. `-3` at closure. |
-| **W6A.0d — Cross-family lazy-list closure (after W6E.5)** | 2 S | Migrate consumers to owned list work as their family checkpoints execute; delete thunk-forcing/front-extraction compatibility helpers after the last consumer moves. `-2` at closure. |
+| **W6A.0c — Cross-family key/tag/undefined closure (after W6F.4)** | 2 S | W6E.5 removed the final synchronous key converter; retain only the tagged-payload and semantic-undefined compatibility pair until synchronous dictionary application disappears. Remaining delta `-2`. |
+| **W6A.0d — Cross-family lazy-list closure (after W6F.1)** | 2 S | Retain only thunk forcing and the list-to-value compatibility walk for effect-map and object-parts consumers; delete them after both family checkpoints own traversal. Remaining delta `-2`. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
 | **W6A.1b — Cross-family effect-value closure (after W6E.6)** | 1 F | Move context-free effect-value callers in their assigned family checkpoints, then require access on the shared constructor after the last caller moves. `-1` at closure. |
 | **W6A.2 — Cross-family application closure (after W6F.4)** | 5 S | Migrate callers to the existing resumable WHNF application owner as their family checkpoints execute; introduce shared tagged-payload work at the first dictionary consumer, then delete the five synchronous application helpers after the last consumer moves. `-5` at closure. |
 | **W6A.3 — Complete (2026-09-15): Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
-| **W6A.4 — Cross-family key-sequence closure (after W6E.5)** | 2 S | Migrate key-path and list-to-key consumers to owned traversal as their family checkpoints execute, preserving lazy-list boundaries; delete the two synchronous helpers with the W6A.0c key-conversion closure. `-2` at closure. |
+| **W6A.4 — Complete (2026-09-17): Cross-family key-sequence closure** | 2 S | Key paths and list keys now use owned traversal throughout; W6E.5 removed the final list-to-key helper and its direct key-conversion dependency. `-2`. |
 
 Preserve currying, applicative dictionary behavior, list order, binary/list
 streaming boundaries, and non-forcing constructors. The consumer checkpoints
@@ -3669,21 +3669,23 @@ consumer, remove `value_to_key_in` and its direct compatibility wrapper and
 record W6A.0c's key-conversion share of the delta.
 
 Migrate **singleton-tag inspection** by introducing one owned tagged-payload
-work form at its first real consumer. W6C.3 became that first consumer after
-W6A.2's application migration did not need tag inspection. That owner performs
+work form at its first real consumer. W6C.3 became that first consumer, while
+the remaining synchronous dictionary-application compatibility path still
+needs conversion in W6F.4. The owned path performs
 the recursive semantic-undefined walk,
 retains its dictionary cursor and candidate values durably, and exposes normal
 pending/yielded/ready/failed polls. W6C.3 reuses it for tuple comparison.
-After that final consumer moves, remove `tagged_payload_in` and
+After the W6F.4 consumer moves, remove `tagged_payload_in` and
 `is_semantically_undefined_in`; do not retain a second recursive undefined
 walker merely for comparison.
 
 Migrate **lazy-list forcing/front extraction** into existing `ListFrontMachine`
 or the family-specific owned collection work selected by W6A.4, W6C.2,
-W6C.3, W6D.3-W6D.5, W6E.1, and W6E.5. No collection callback may call the old
-helper while holding regional access. Once W6E.5 moves the final consumer,
-remove `force_list_thunk_in`, `pop_list_front_in`, and the direct test wrapper,
-then record W6A.0d's complete delta.
+W6C.3, W6D.3-W6D.5, W6E.1, W6E.5-W6E.6, and W6F.1. No collection callback may
+call the old helper while holding regional access. W6E.5 removed the direct
+front wrapper and final key-list use. W6E.6 and W6F.1 must remove the remaining
+list-to-value walk and thunk-forcing helper before recording W6A.0d's complete
+delta.
 
 The closure fixtures must force suspension at every ownership handoff rather
 than rely on thread repetition: nested deferred dictionary members for tag and
@@ -3754,6 +3756,13 @@ W6A.0c key-conversion migration. Then remove `eval_key_path_list_in` and
 `list_to_key_items_in` together and record W6A.4's `-2` delta. Forced fixtures
 must suspend within a path element and within a lazy list segment without
 restarting earlier converted keys.
+
+W6A.4 completion record, 2026-09-17: effect-call name and argument preparation
+now reuse the shared key-conversion and list-front owners. The obsolete
+recursive `value_to_key_in` and `list_to_key_items_in` pair is removed, and
+test key conversion goes through the production dictionary-singleton owner.
+The remaining list-to-value compatibility walk is explicitly reclassified as
+W6A.0d work rather than retained under the closed key-sequence checkpoint.
 
 #### W6B — Operators and runtime nets
 
@@ -4369,7 +4378,7 @@ show its exact checkpoint delta before proceeding.
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6E.1-W6E.4 — Complete (2026-09-17): Durable annotations** | 15 S, 3 F | Convert recognition, assertions, array/deque/binary traversal, pure and reflection metadata, diagnostic contexts, and reflection deferral as one durable owner. The annotation dispatcher and recognition could not be separated without losing recognition progress. `-18`, plus W6C.2's final `-1` assertion leaf. |
-| **W6E.5 — Effect dispatch and fixpoint** | 4 S | Convert effect API application, family dispatch, and fixpoint construction; move application into W6A.2 and the final key-conversion/lazy-list consumers, then execute W6A.0c/W6A.0d/W6A.4 closure. `-4`, followed by closure deltas `-3`, `-2`, and `-2`. |
+| **W6E.5 — Complete (2026-09-17): Effect dispatch and fixpoint** | 4 S | Effect application, call preparation, and fixpoint construction now share one durable owner. The effect-map dispatcher remains assigned to W6E.6; the checkpoint removes two effect declarations plus the final synchronous key converter, and closes W6A.4. |
 | **W6E.6 — Effect map** | 1 S, 2 F | Convert the suspendable map step and access-qualify continuation/result constructors. `-3`. |
 | **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
 | **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order and move callback application into the W6A.2 owner. `-6`. |
@@ -4399,6 +4408,25 @@ W6C.2's last assertion compatibility leaf. `AnnotationsAndEffects` falls from
 36 to 18 declarations and the complete D.2c manifest from 80 to 61. The root
 publication and durable-owner inventories explicitly account for the new
 annotation machine.
+
+W6E.5 completion record, 2026-09-17: saturated effect application, effect API
+calls, and function fixpoints now install one durable owner. Effect calls
+retain converted names and completed argument prefixes, traverse lazy argument
+spines through `ListFrontMachine`, and do not inspect the API until the spine
+is complete. Applications delegate to the ordinary WHNF application owner;
+fixpoints demand and validate their function exactly once before publishing
+the computed knot. Deterministic promise fixtures cover all three operations,
+including a promised list tail which proves API lookup remains deferred. The
+old fixpoint and effect-call/effect-apply paths are removed, while effect-map
+dispatch is reassigned intact to W6E.6. W6A.4 closes with the recursive key
+helpers removed; W6A.0c retains only its tagged-value pair and W6A.0d retains
+the list-to-value/thunk pair for W6E.6 and W6F.1. `AnnotationsAndEffects`
+falls from eighteen to sixteen declarations, `ValueDemand` from eleven to ten,
+and the complete D.2c manifest from sixty-one to fifty-eight. The durable
+owner, root-publication, access, and WHNF inventories account for the new
+effect machine. The type-erased effect-task pump's deterministic completion
+allowance rises from 4,096 to 8,192 scheduler units because the new owner
+surfaces its phase handoffs instead of recursively consuming them.
 
 #### W6F — Objects and interaction-net builtins
 

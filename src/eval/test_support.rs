@@ -52,8 +52,20 @@ pub(super) fn lower_test_computation_value(expr: TestExpr) -> Value {
 
 pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
     let context = test_context();
-    let value = eval_value(&context, value)?;
-    value_to_key(&context, &value)
+    let singleton = apply_values(
+        &context,
+        Value::Builtin(Builtin::DictSingleton),
+        vec![value.clone(), Value::Number(1.into())],
+    )?;
+    let Value::Dict(singleton) = eval_value(&context, &singleton)? else {
+        unreachable!("dictionary singleton must produce a dictionary")
+    };
+    Ok(singleton
+        .iter()
+        .next()
+        .expect("a defined singleton value retains its key")
+        .0
+        .clone())
 }
 
 pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {

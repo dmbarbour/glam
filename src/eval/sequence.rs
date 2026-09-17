@@ -1,30 +1,6 @@
 use super::*;
 use crate::core::RuntimeValueAccess;
 
-pub(super) fn list_to_key_items_in(
-    context: &EvaluatorStepContext<'_>,
-    list: &List,
-) -> Result<Arc<[Key]>, EvaluationHalt> {
-    let items = std::cell::RefCell::new(Vec::new());
-    list.try_for_each_segment(
-        &mut |bytes| {
-            items
-                .borrow_mut()
-                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
-            Ok::<_, EvaluationHalt>(())
-        },
-        &mut |values| {
-            for value in values.iter() {
-                let value = eval_value_in(context, value)?;
-                items.borrow_mut().push(value_to_key_in(context, &value)?);
-            }
-            Ok(())
-        },
-        &mut |thunk| force_list_thunk_in(context, thunk),
-    )?;
-    Ok(Arc::from(items.into_inner()))
-}
-
 #[cfg(test)]
 pub(crate) fn list_to_value_items(
     context: &EvalContext,

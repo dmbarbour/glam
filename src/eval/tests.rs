@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::core::{
     ClosedCompatibilityValue, Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key,
-    LazyValue, Value, keys,
+    LazyValue, ListThunk, Value, keys,
 };
 use crate::core_net::CoreRuntimeNet;
 use crate::evaluation::{
@@ -1817,6 +1817,35 @@ fn fixpoint_builtin_reports_a_strict_lazy_dependency_cycle() {
 }
 
 #[test]
+fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (function, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("fixpoint function"))
+        .expect("the owner should allocate a promised function");
+    let fixpoint = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Fixpoint),
+        vec![Value::Promised(function.clone())],
+    )
+    .expect("fixpoint application should build");
+
+    let blocked = eval_value(&observer, &fixpoint)
+        .expect_err("the unresolved function should suspend fixpoint construction");
+    assert!(blocked.blocked_on().is_some());
+
+    set_promise(
+        &owner,
+        &function,
+        closed_function_value_in(observer.values(), 1, TestExpr::Value(n(42))),
+    )
+    .expect("the owner should resolve the promised function");
+    assert_eq!(
+        eval_value(&observer, &fixpoint).expect("fixpoint construction should resume"),
+        n(42)
+    );
+}
+
+#[test]
 fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     let session = test_context();
     let owner = session.with_new_task().unwrap();
@@ -2849,8 +2878,8 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         "application requires a function value, received Sealed"
     );
 
-    let key_error = value_to_key(&test_context(), &carrier)
-        .expect_err("a sealed unit carrier must not become a dictionary key");
+    let key_error =
+        eval_key(&carrier).expect_err("a sealed unit carrier must not become a dictionary key");
     assert_eq!(
         key_error.to_string(),
         "dictionary keys must evaluate to keyable values"
@@ -4140,6 +4169,69 @@ fn effect_values_apply_by_extending_the_effect_function() {
     .and_then(|value| eval_value(&test_context(), &value))
     .expect("extended effect function should evaluate with an API");
     assert_eq!(value, n(42));
+}
+
+#[test]
+fn effect_apply_resumes_from_its_exact_function_operand() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (function, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("effect apply function"))
+        .expect("the owner should allocate a promised function");
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::EffectApply),
+        vec![Value::Promised(function.clone()), n(2), n(40)],
+    )
+    .expect("effect application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved function should suspend effect application");
+    assert!(blocked.blocked_on().is_some());
+
+    set_promise(&owner, &function, Value::Builtin(Builtin::Add))
+        .expect("the owner should resolve the promised function");
+    assert_eq!(
+        eval_value(&observer, &application).expect("effect application should resume"),
+        n(42)
+    );
+}
+
+#[test]
+fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("effect call argument tail"))
+        .expect("the owner should allocate a promised argument tail");
+    let method_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&method_demands);
+    let method = Value::semantic_thunk(observer.values(), "effect API method", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Builtin(Builtin::Add))
+    });
+    let api = Value::Dict(Dict::new_sync().insert(Key::binary_from_text("add"), method));
+    let arguments = Value::List(List::concat(
+        List::from_values(vec![n(19)]),
+        List::from_thunk(ListThunk::Promised(tail.clone())),
+    ));
+    let call = apply_values(
+        &observer,
+        Value::Builtin(Builtin::EffectCall),
+        vec![Value::binary_from_text("add"), arguments, api],
+    )
+    .expect("effect call should build");
+
+    let blocked = eval_value(&observer, &call)
+        .expect_err("the unresolved argument tail should suspend effect dispatch");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(method_demands.load(Ordering::SeqCst), 0);
+
+    set_promise(&owner, &tail, Value::List(List::from_values(vec![n(23)])))
+        .expect("the owner should resolve the promised argument tail");
+    assert_eq!(
+        eval_value(&observer, &call).expect("effect dispatch should resume"),
+        n(42)
+    );
+    assert_eq!(method_demands.load(Ordering::SeqCst), 1);
 }
 
 #[test]

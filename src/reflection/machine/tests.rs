@@ -5093,7 +5093,7 @@ fn evaluation_session_pumps_a_type_erased_effect_task() {
         crate::evaluation::EvaluationPumpOutcome::BudgetExhausted
     );
     assert_eq!(
-        context.pump_wait(task.wait(), 4096),
+        context.pump_wait(task.wait(), 8192),
         crate::evaluation::EvaluationPumpOutcome::TargetReady
     );
     assert!(matches!(
@@ -7537,8 +7537,21 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
     )
     .unwrap();
 
-    let EffectTaskPoll::Blocked(blocked) = task.poll(512) else {
-        panic!("error after an observed alternative should remain retryable")
+    let mut polls = 0;
+    let blocked = loop {
+        assert!(
+            polls < 64,
+            "error after an observed alternative did not reach a stable retry boundary"
+        );
+        polls += 1;
+        match task.poll(512) {
+            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::Blocked(blocked) => break blocked,
+            EffectTaskPoll::Complete(_) => panic!("retryable error unexpectedly completed"),
+            EffectTaskPoll::Failed(error) => panic!("retryable error failed: {error}"),
+            EffectTaskPoll::Cancelled => panic!("retryable error was cancelled"),
+            EffectTaskPoll::Exit(_) => panic!("retryable error voted to exit"),
+        }
     };
     assert!(blocked.dependency.is_none());
     assert!(blocked.observed_generation.is_some());

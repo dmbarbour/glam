@@ -159,6 +159,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6D.1-W6D.2 resumable dictionary ownership"
     ),
     entry!(
+        "src/eval/effect_machine.rs",
+        0,
+        0,
+        3,
+        "durable effect-call arguments, deferred application, and fixpoint result publication",
+        "W6E.5 resumable effect dispatch and fixpoint ownership"
+    ),
+    entry!(
         "src/eval/list_effect_machine.rs",
         0,
         0,
@@ -509,6 +517,9 @@ impl RootPublicationOccurrence {
                 | "src/eval/dict_machine.rs::finish_union"
                 | "src/eval/dict_machine.rs::finish_update"
                 | "src/eval/dict_machine.rs::impl DictBuiltinMachine::poll"
+                | "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll"
+                | "src/eval/effect_machine.rs::root_application"
+                | "src/eval/effect_machine.rs::root_effect_call"
                 | "src/eval/list_effect_machine.rs::effect_function"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
@@ -806,6 +817,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/dict_machine.rs::finish_union#1|surface=access-publication|scope=production",
     "src/eval/dict_machine.rs::finish_update#1|surface=access-publication|scope=production",
     "src/eval/dict_machine.rs::impl DictBuiltinMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::root_application#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::root_effect_call#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",

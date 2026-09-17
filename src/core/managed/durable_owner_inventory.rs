@@ -339,6 +339,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6E.1-W6E.4"
     ),
     closed_durable!(
+        "src/eval/effect_machine.rs",
+        "effect application, API-name/list traversal, and fixpoint progress",
+        "canonical RuntimeValueRoot operands and completed argument prefixes plus child WHNF, key-conversion, and list-front machines",
+        "yielded or dependency-blocked effect/fixpoint evaluation",
+        "saturated builtin admission and bounded application/result publication",
+        "effect/fixpoint completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6E.5"
+    ),
+    closed_durable!(
         "src/eval/access_machine.rs",
         "computed-access source, recursive dictionary-key, and lazy-list progress",
         "canonical RuntimeValueRoot fields plus root-free path/key cursors and accumulators",
@@ -881,10 +892,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 217;
+const DECLARATION_BASELINE_COUNT: usize = 219;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([133, 213, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_649_997_663_912_281_192;
+    DeclarationSignals::new([133, 221, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_795_838_034_781_821_160;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1011,6 +1022,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
     } else if declaration.starts_with("src/eval/annotation_machine.rs::") {
         "annotation recognition, collection, metadata, and reflection progress"
+    } else if declaration.starts_with("src/eval/effect_machine.rs::") {
+        "effect application, API-name/list traversal, and fixpoint progress"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration.starts_with("src/eval/list_machine.rs::") {
@@ -1454,7 +1467,7 @@ fn durable_value_owner_inventory_is_complete() {
     );
     assert_eq!(
         actual_baseline, expected_baseline,
-        "durable declaration source drift requires an ownership review:\n{actual:#?}"
+        "durable declaration source drift requires an ownership review; baseline {actual_baseline:?}:\n{actual:#?}"
     );
 
     let mut owners = BTreeMap::new();

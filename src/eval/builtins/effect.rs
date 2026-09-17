@@ -10,27 +10,6 @@ pub(super) fn apply(
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     match builtin {
-        Builtin::EffectApply => {
-            let [function, argument, api] = super::exact(arguments, "effect apply")?;
-            apply_values_in(
-                context,
-                eval_value_in(context, &function)?,
-                vec![api, argument],
-            )
-        }
-        Builtin::EffectCall => {
-            let [name, arguments, api] = super::exact(arguments, "effect call")?;
-            let name = value_to_key_in(context, &eval_value_in(context, &name)?)?;
-            let arguments = match eval_value_in(context, &arguments)? {
-                Value::List(arguments) => list_to_value_items_in(context, &arguments)?,
-                _ => {
-                    return Err(EvaluationHalt::new(
-                        "effect call builtin requires a list of arguments",
-                    ));
-                }
-            };
-            apply_effect_api(context, &api, &name, arguments)
-        }
         Builtin::EffectMap => {
             let [function, items] = super::exact(arguments, "effect map")?;
             eval_effect_map_builtin(&function, &items)
@@ -44,16 +23,8 @@ pub(super) fn apply(
                 super::exact(arguments, "effect map continuation")?;
             eval_effect_map_continue_builtin(&function, &items, &results, &result)
         }
-        _ => unreachable!("effect dispatcher received another builtin"),
+        _ => unreachable!("effect-map dispatcher received another builtin"),
     }
-}
-
-pub(super) fn apply_fixpoint(
-    context: &EvaluatorStepContext<'_>,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
-    let [function] = super::exact(arguments, "fixpoint")?;
-    eval_fixpoint_builtin(context, &function)
 }
 
 #[cfg(test)]

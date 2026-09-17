@@ -1,22 +1,5 @@
 use super::super::super::*;
-use crate::core::FixpointComputation;
 use crate::list::ListItem;
-
-pub(super) fn eval_fixpoint_builtin(
-    context: &EvaluatorStepContext<'_>,
-    function: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let function = eval_value_in(context, function)?;
-    if !matches!(function, Value::Function(_) | Value::Net(_)) {
-        return Err(EvaluationHalt::new(
-            "fixpoint builtin requires a function value",
-        ));
-    }
-
-    Ok(Value::Lazy(context.construct_lazy(|access| {
-        LazyValue::computed_fixpoint_in(access, "fixpoint", FixpointComputation::Function(function))
-    })))
-}
 
 pub(super) fn eval_effect_map_builtin(
     function: &Value,

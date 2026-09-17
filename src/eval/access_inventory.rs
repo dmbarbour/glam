@@ -151,13 +151,18 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/effect.rs",
-        [2, 0],
+        [1, 0],
         "I3D.1/I3D.2 effect boundary"
     ),
     context_entry!(
         "src/eval/builtins/effect/implementation.rs",
-        [3, 0],
+        [2, 0],
         "I3D.1/I3D.2 effect control and reflection gates"
+    ),
+    context_entry!(
+        "src/eval/effect_machine.rs",
+        [4, 2],
+        "W6E.5 durable effect dispatch and fixpoint construction"
     ),
     context_entry!(
         "src/eval/builtins/list_effect.rs",
@@ -241,7 +246,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/sequence.rs",
-        [3, 3],
+        [2, 3],
         "I3B.2 and I3D/I3E direct sequence callers"
     ),
     context_entry!(
@@ -256,7 +261,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [16, 10],
+        [15, 9],
         "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper"
     ),
 ];

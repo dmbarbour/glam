@@ -17,6 +17,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use super::annotation_machine::AnnotationBuiltinMachine;
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::dict_machine::DictBuiltinMachine;
+use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
@@ -42,6 +43,7 @@ pub(crate) enum BuiltinTaskMachine {
     Conditional(ConditionalBuiltinMachine),
     Comparison(ComparisonBuiltinMachine),
     Dictionary(DictBuiltinMachine),
+    Effect(EffectBuiltinMachine),
     ListObservation(Box<ListObservationMachine>),
     ListMap(ListMapMachine),
     ListConcat(ListConcatMachine),
@@ -103,6 +105,9 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
                 | Builtin::Anno
+                | Builtin::EffectApply
+                | Builtin::EffectCall
+                | Builtin::Fixpoint
         )
     }
 
@@ -115,6 +120,9 @@ impl BuiltinTaskMachine {
         );
         match builtin {
             Builtin::Anno => Self::Annotation(Box::new(AnnotationBuiltinMachine::new(arguments))),
+            builtin if EffectBuiltinMachine::supports(builtin) => {
+                Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
+            }
             Builtin::AssertUnit => Self::Assertion(AssertionBuiltinMachine::new(arguments)),
             Builtin::IfResult | Builtin::MatchResult => {
                 Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
@@ -188,6 +196,9 @@ impl BuiltinTaskMachine {
                 }
             }
             Self::Dictionary(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::Effect(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::ListObservation(machine) => {
