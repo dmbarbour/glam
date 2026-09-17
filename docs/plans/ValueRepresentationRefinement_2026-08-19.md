@@ -248,6 +248,15 @@ request a collector large-object fallback.
 - Replace the monolithic heap-value enum with representation-specific managed
   nodes.
 - Migrate lists and dictionaries without changing their semantic APIs.
+- Review the list representation as its own V3 checkpoint. The bootstrap map
+  transition preserves each `Concat` lazily but deliberately treats a reached
+  `Bytes`, `Values`, or `Finger` representation as one indivisible strict leaf.
+  Reconsider that granularity alongside mapped-list nodes and exact-length
+  nodes such as `Take n xs`, whose contract would guarantee `n` logical items
+  by filling short sources with error values. Such nodes could retain useful
+  length information without requiring ordinary thunks to promise a length.
+  Do not split large strict leaves or add these nodes merely as part of the
+  resumable-WHNF migration.
 - Migrate functions, partial calls, failures, metadata, and deferred values in
   independently testable checkpoints.
 

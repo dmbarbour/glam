@@ -4175,36 +4175,50 @@ Builtin `map` is a homomorphism over the observable list structure rather than
 an eager traversal of the logical list:
 
 ```text
-map f (A ++ B) = map f A ++ map f B
+map f (A ++ B) = defer (map f A) ++ defer (map f B)
 map f (defer X) = defer (map f X)
 ```
 
-Here `A` and `B` are strict list fragments and `defer X` denotes a lazy or
-promised list hole. For each value in a visible strict fragment, construct the
-ordinary lazy application `f value`; do not evaluate it. Binary fragments are
-converted to value fragments whose items are lazy applications to the
-corresponding byte numbers. A list hole remains at the same structural
-position and contains a lazy recursive map of that hole. Consequently, a
-strict suffix remains observable from the back without forcing an unrelated
-lazy prefix, and mapping does not sacrifice laziness according to which end a
+`map` inspects only the root representation node reached by one invocation. A
+`Concat` preserves that node and turns both children into lazy recursive maps,
+regardless of whether either child is already strict. A source thunk remains
+one thunk containing a lazy recursive map. Empty remains empty. A reached
+`Bytes`, `Values`, or `Finger` representation is treated as one indivisible
+strict leaf for this transition: construct the ordinary lazy application
+`f value` for each contained item, but neither split the representation into
+new `Concat` nodes nor evaluate an application. Byte items become their
+corresponding numbers before application.
+
+This one-node unfolding means mapping a `Concat` performs constant structural
+work and allocates no applications for either unused child. A strict suffix
+remains observable from the back without forcing or translating an unrelated
+prefix, and mapping does not sacrifice laziness according to which end a
 consumer chooses.
 
 The callable is shared but not evaluated or validated by `map`. A malformed
 callable fails only when a mapped item is demanded, through the ordinary
-application semantics and lazy cache. The initial implementation may allocate
-one lazy application per visible strict item; a specialized mapped-list node
-belongs to later list-representation/performance work. Structural traversal
-must be iterative and callback-free while regional access is held. It does not
-need a child WHNF application machine because it cannot suspend on the
-applications it constructs.
+application semantics and lazy cache. The initial implementation allocates one
+lazy recursive map per reached `Concat` child and one lazy application per item
+in a reached strict leaf. It does not walk below a `Concat`. A specialized
+mapped-list node belongs to later list-representation/performance work. The
+one-node transformation is callback-free while regional access is held and
+does not need a child WHNF application machine because it cannot suspend on
+the applications it constructs.
 
 Test strict value and binary fragments, a lazy middle or prefix with an
 observable strict suffix, callable laziness and sharing, and delayed malformed
 callable failure. In particular, the fixture for the lazy prefix must latch
-that observing the mapped suffix does not force the prefix. A later builtin
+that constructing the mapped `Concat` visits neither child and that observing
+the mapped suffix does not force or translate the prefix. A later builtin
 `concatMap` should follow the same structural law: each strict item contributes
-a deferred list segment and each list hole recursively wraps `concatMap`.
-That future operation is a design direction, not part of W6D.4.
+a deferred list segment and every `Concat` child or list hole recursively wraps
+`concatMap`. That future operation is a design direction, not part of W6D.4.
+
+Ordinary thunks do not promise a logical length, so `len` still opens every
+mapped structural thunk. Do not introduce special length metadata in W6.
+Exact-length nodes such as `Take n xs`, including their error-filling
+semantics, mapped-list nodes, and finer subdivision of large strict leaves are
+deferred to the value-representation list review.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary
