@@ -860,13 +860,14 @@ fn pattern_effect_in(
     let crate::core::Key::Atom(name) = name else {
         unreachable!("standard effect request names are atom keys")
     };
-    access.root_runtime_value(super::application::effect_value(Value::PartialBuiltin(
-        BuiltinCall {
+    access.root_runtime_value(super::application::effect_value(
+        access,
+        Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::EffectCall,
             arguments: Arc::from([
                 Value::Atom(*name),
                 Value::List(List::from_values(arguments)),
             ]),
-        },
-    )))
+        }),
+    ))
 }

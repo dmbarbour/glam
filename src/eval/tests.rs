@@ -68,7 +68,7 @@ fn cached_value(lazy: &LazyValue) -> Value {
 }
 
 fn list_return_effect(value: Value) -> Value {
-    effect_value(closed_function_value(
+    test_effect_value(closed_function_value(
         1,
         TestExpr::Apply(
             Arc::new(TestExpr::Access(
@@ -78,6 +78,11 @@ fn list_return_effect(value: Value) -> Value {
             Arc::new(TestExpr::Value(value)),
         ),
     ))
+}
+
+fn test_effect_value(function: Value) -> Value {
+    crate::core::test_value_factory()
+        .with_runtime_value_access(|access| effect_value(&access, function))
 }
 
 #[test]
@@ -4134,7 +4139,7 @@ fn method_objects_apply_via_apply_member() {
 
 #[test]
 fn effect_values_apply_by_extending_the_effect_function() {
-    let effect = effect_value(closed_function_value(
+    let effect = test_effect_value(closed_function_value(
         1,
         TestExpr::Access(
             Arc::new(TestExpr::Local(0)),
@@ -4230,6 +4235,43 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
     assert_eq!(
         eval_value(&observer, &call).expect("effect dispatch should resume"),
         n(42)
+    );
+    assert_eq!(method_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn effect_map_finishes_its_list_front_before_observing_the_api() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("effect map list tail"))
+        .expect("the owner should allocate a promised map tail");
+    let method_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&method_demands);
+    let return_method = closed_function_value_in(observer.values(), 1, TestExpr::Local(0));
+    let return_method =
+        Value::semantic_thunk(observer.values(), "effect API return", move |context| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(context.with_value_access(|access| access.values().duplicate_value(&return_method)))
+        });
+    let api = Value::Dict(Dict::new_sync().insert((*keys::R).clone(), return_method));
+    let items = Value::List(List::from_thunk(ListThunk::Promised(tail.clone())));
+    let operation = apply_values(
+        &observer,
+        Value::Builtin(Builtin::EffectMapRun),
+        vec![n(0), items, Value::List(List::empty()), api],
+    )
+    .expect("effect map should build");
+
+    let blocked = eval_value(&observer, &operation)
+        .expect_err("the unresolved list tail should suspend effect map");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(method_demands.load(Ordering::SeqCst), 0);
+
+    set_promise(&owner, &tail, Value::List(List::empty()))
+        .expect("the owner should resolve the promised map tail");
+    assert_eq!(
+        eval_value(&observer, &operation).expect("effect map should resume"),
+        Value::List(List::empty())
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
 }

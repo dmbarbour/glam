@@ -146,7 +146,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/comparison_machine.rs",
         0,
         0,
-        9,
+        10,
         "durable comparison operands, recursive list/dictionary members, and tuple payloads",
         "W6C.3 resumable recursive comparison ownership"
     ),
@@ -162,9 +162,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/effect_machine.rs",
         0,
         0,
-        3,
-        "durable effect-call arguments, deferred application, and fixpoint result publication",
-        "W6E.5 resumable effect dispatch and fixpoint ownership"
+        6,
+        "durable effect-call and map operands, deferred application, continuation, and fixpoint result publication",
+        "W6E.5-W6E.6 resumable effect dispatch, map, and fixpoint ownership"
     ),
     entry!(
         "src/eval/list_effect_machine.rs",
@@ -512,6 +512,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/comparison_machine.rs::classify_equality"
                 | "src/eval/comparison_machine.rs::classify_ordering"
                 | "src/eval/comparison_machine.rs::demand_tuple_payload"
+                | "src/eval/comparison_machine.rs::impl ComparisonBuiltinMachine::finish"
                 | "src/eval/comparison_machine.rs::impl DictEqualityFrame::new"
                 | "src/eval/dict_machine.rs::finish_merge_duplicate"
                 | "src/eval/dict_machine.rs::finish_union"
@@ -520,6 +521,9 @@ impl RootPublicationOccurrence {
                 | "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll"
                 | "src/eval/effect_machine.rs::root_application"
                 | "src/eval/effect_machine.rs::root_effect_call"
+                | "src/eval/effect_machine.rs::root_effect_map"
+                | "src/eval/effect_machine.rs::root_effect_map_continuation"
+                | "src/eval/effect_machine.rs::root_effect_map_sequence"
                 | "src/eval/list_effect_machine.rs::effect_function"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
@@ -809,6 +813,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/comparison_machine.rs::classify_ordering#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_ordering#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::demand_tuple_payload#1|surface=access-publication|scope=production",
+    "src/eval/comparison_machine.rs::impl ComparisonBuiltinMachine::finish#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#3|surface=access-publication|scope=production",
@@ -820,6 +825,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_application#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_call#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::root_effect_map#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::root_effect_map_continuation#1|surface=access-publication|scope=production",
+    "src/eval/effect_machine.rs::root_effect_map_sequence#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",

@@ -340,14 +340,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/eval/effect_machine.rs",
-        "effect application, API-name/list traversal, and fixpoint progress",
-        "canonical RuntimeValueRoot operands and completed argument prefixes plus child WHNF, key-conversion, and list-front machines",
-        "yielded or dependency-blocked effect/fixpoint evaluation",
-        "saturated builtin admission and bounded application/result publication",
-        "effect/fixpoint completion, failure, cancellation, or builtin-source retirement",
+        "effect application, API-name/argument/map-list traversal, and fixpoint progress",
+        "canonical RuntimeValueRoot operands, map accumulators, and completed argument prefixes plus child WHNF, key-conversion, and list-front machines",
+        "yielded or dependency-blocked effect/map/fixpoint evaluation",
+        "saturated builtin admission and bounded application, continuation, or result publication",
+        "effect/map/fixpoint completion, failure, cancellation, or builtin-source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W6E.5"
+        "W6E.5-W6E.6"
     ),
     closed_durable!(
         "src/eval/access_machine.rs",
@@ -894,8 +894,8 @@ fn is_production_source(relative: &Path) -> bool {
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 const DECLARATION_BASELINE_COUNT: usize = 219;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([133, 221, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_795_838_034_781_821_160;
+    DeclarationSignals::new([133, 236, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_983_697_631_372_493_351;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1023,7 +1023,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/annotation_machine.rs::") {
         "annotation recognition, collection, metadata, and reflection progress"
     } else if declaration.starts_with("src/eval/effect_machine.rs::") {
-        "effect application, API-name/list traversal, and fixpoint progress"
+        "effect application, API-name/argument/map-list traversal, and fixpoint progress"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration.starts_with("src/eval/list_machine.rs::") {

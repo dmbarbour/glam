@@ -1,6 +1,5 @@
 //! Saturation and semantic-family dispatch for core builtins.
 
-mod effect;
 mod list_effect;
 mod net;
 mod object;
@@ -147,20 +146,20 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
         | Builtin::ObjectOverrideDefs => object::apply(context, builtin, arguments),
-        Builtin::Fixpoint | Builtin::EffectApply | Builtin::EffectCall => {
-            Ok(Value::Lazy(context.construct_lazy(move |access| {
-                LazyValue::from_builtin_in(
-                    access,
-                    BuiltinCall {
-                        builtin,
-                        arguments: Arc::from(arguments),
-                    },
-                )
-            })))
-        }
-        Builtin::EffectMap | Builtin::EffectMapRun | Builtin::EffectMapContinue => {
-            effect::apply(context, builtin, arguments)
-        }
+        Builtin::Fixpoint
+        | Builtin::EffectApply
+        | Builtin::EffectCall
+        | Builtin::EffectMap
+        | Builtin::EffectMapRun
+        | Builtin::EffectMapContinue => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
         Builtin::InspectOrigin => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(

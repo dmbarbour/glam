@@ -107,6 +107,9 @@ impl BuiltinTaskMachine {
                 | Builtin::Anno
                 | Builtin::EffectApply
                 | Builtin::EffectCall
+                | Builtin::EffectMap
+                | Builtin::EffectMapRun
+                | Builtin::EffectMapContinue
                 | Builtin::Fixpoint
         )
     }

@@ -649,13 +649,13 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6D.1-W6D.2 replace synchronous dictionary dispatch, key-path demand, and
 // recursive merge demand with one durable dictionary owner. Its remaining
 // recursive calls transform already-observed persistent dictionary/key data.
-const EXPECTED_OCCURRENCES: usize = 232;
-const EXPECTED_FINGERPRINT: u64 = 8_507_652_882_593_401_938;
+const EXPECTED_OCCURRENCES: usize = 229;
+const EXPECTED_FINGERPRINT: u64 = 15_586_619_892_042_567_303;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 28),
+    (Signal::EvalValue, 26),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
-    (Signal::ApplyValue, 12),
+    (Signal::ApplyValue, 11),
     (Signal::ApplyValues, 2),
     (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 11),
@@ -670,7 +670,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 132),
+    (WorkShape::DemandThenInspect, 129),
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 21),
     (WorkShape::Application, 11),

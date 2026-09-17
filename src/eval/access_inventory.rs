@@ -150,19 +150,9 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3D/I3E dispatcher and test compatibility"
     ),
     context_entry!(
-        "src/eval/builtins/effect.rs",
-        [1, 0],
-        "I3D.1/I3D.2 effect boundary"
-    ),
-    context_entry!(
-        "src/eval/builtins/effect/implementation.rs",
-        [2, 0],
-        "I3D.1/I3D.2 effect control and reflection gates"
-    ),
-    context_entry!(
         "src/eval/effect_machine.rs",
-        [4, 2],
-        "W6E.5 durable effect dispatch and fixpoint construction"
+        [7, 2],
+        "W6E.5-W6E.6 durable effect dispatch, map traversal, and fixpoint construction"
     ),
     context_entry!(
         "src/eval/builtins/list_effect.rs",

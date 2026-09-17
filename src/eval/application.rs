@@ -134,10 +134,11 @@ fn apply_dict_value_in(
     argument: Value,
 ) -> Result<Value, EvaluationHalt> {
     if let Some(function) = tagged_payload_in(&dict, context, &keys::EFF)? {
-        let function = context.with_value_access(|access| {
-            apply_effect_function_value(access.values(), function, argument)
+        let effect = context.with_value_access(|access| {
+            let function = apply_effect_function_value(access.values(), function, argument);
+            effect_value(access.values(), function)
         });
-        return Ok(effect_value(function));
+        return Ok(effect);
     }
 
     if let Some(function) = dict.get(&*keys::APPLY)
@@ -170,7 +171,7 @@ pub(super) fn apply_effect_function_value(
     })
 }
 
-pub(super) fn effect_value(function: Value) -> Value {
+pub(super) fn effect_value(_access: &RuntimeValueAccess<'_>, function: Value) -> Value {
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }
 

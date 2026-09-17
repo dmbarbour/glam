@@ -3617,10 +3617,10 @@ delta is the required reduction in the parent D.2c violation count.
 | **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
 | **W6A.0b — Complete (2026-09-15): Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
 | **W6A.0c — Cross-family key/tag/undefined closure (after W6F.4)** | 2 S | W6E.5 removed the final synchronous key converter; retain only the tagged-payload and semantic-undefined compatibility pair until synchronous dictionary application disappears. Remaining delta `-2`. |
-| **W6A.0d — Cross-family lazy-list closure (after W6F.1)** | 2 S | Retain only thunk forcing and the list-to-value compatibility walk for effect-map and object-parts consumers; delete them after both family checkpoints own traversal. Remaining delta `-2`. |
+| **W6A.0d — Cross-family lazy-list closure (after W6F.1)** | 2 S | W6E.6 removed effect-map's final direct thunk-forcing use; retain thunk forcing and the list-to-value compatibility walk only for object-parts, then delete the pair after W6F.1 owns traversal. Remaining delta `-2`. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
-| **W6A.1b — Cross-family effect-value closure (after W6E.6)** | 1 F | Move context-free effect-value callers in their assigned family checkpoints, then require access on the shared constructor after the last caller moves. `-1` at closure. |
+| **W6A.1b — Complete (2026-09-17): Cross-family effect-value closure** | 1 F | Family checkpoints moved every context-free caller; W6E.6 now requires access on the shared constructor. `-1` at closure. |
 | **W6A.2 — Cross-family application closure (after W6F.4)** | 5 S | Migrate callers to the existing resumable WHNF application owner as their family checkpoints execute; introduce shared tagged-payload work at the first dictionary consumer, then delete the five synchronous application helpers after the last consumer moves. `-5` at closure. |
 | **W6A.3 — Complete (2026-09-15): Sequence leaves** | 2 F | Access-qualify append validation/construction. `-2`. |
 | **W6A.4 — Complete (2026-09-17): Cross-family key-sequence closure** | 2 S | Key paths and list keys now use owned traversal throughout; W6E.5 removed the final list-to-key helper and its direct key-conversion dependency. `-2`. |
@@ -3683,9 +3683,10 @@ Migrate **lazy-list forcing/front extraction** into existing `ListFrontMachine`
 or the family-specific owned collection work selected by W6A.4, W6C.2,
 W6C.3, W6D.3-W6D.5, W6E.1, W6E.5-W6E.6, and W6F.1. No collection callback may
 call the old helper while holding regional access. W6E.5 removed the direct
-front wrapper and final key-list use. W6E.6 and W6F.1 must remove the remaining
-list-to-value walk and thunk-forcing helper before recording W6A.0d's complete
-delta.
+front wrapper and final key-list use, and W6E.6 moved effect-map's direct thunk
+forcing into `ListFrontMachine`. Only object-parts remains; W6F.1 must remove
+the list-to-value walk and its thunk-forcing dependency before recording
+W6A.0d's complete delta.
 
 The closure fixtures must force suspension at every ownership handoff rather
 than rely on thread repetition: nested deferred dictionary members for tag and
@@ -4379,7 +4380,7 @@ show its exact checkpoint delta before proceeding.
 |---|---:|---|
 | **W6E.1-W6E.4 — Complete (2026-09-17): Durable annotations** | 15 S, 3 F | Convert recognition, assertions, array/deque/binary traversal, pure and reflection metadata, diagnostic contexts, and reflection deferral as one durable owner. The annotation dispatcher and recognition could not be separated without losing recognition progress. `-18`, plus W6C.2's final `-1` assertion leaf. |
 | **W6E.5 — Complete (2026-09-17): Effect dispatch and fixpoint** | 4 S | Effect application, call preparation, and fixpoint construction now share one durable owner. The effect-map dispatcher remains assigned to W6E.6; the checkpoint removes two effect declarations plus the final synchronous key converter, and closes W6A.4. |
-| **W6E.6 — Effect map** | 1 S, 2 F | Convert the suspendable map step and access-qualify continuation/result constructors. `-3`. |
+| **W6E.6 — Complete (2026-09-17): Effect map** | 3 S, 2 F | Convert map construction, the suspendable run step, continuation, and API-call construction; then close W6A.1b by access-qualifying the shared effect constructor. `-5`, plus closure delta `-1`. |
 | **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
 | **W6E.8 — List-effect control** | 6 S | Convert alt/cut/seq/flat-map result traversal without changing branch order and move callback application into the W6A.2 owner. `-6`. |
 | **W6E.9 — List-effect source** | 4 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-4`. |
@@ -4427,6 +4428,25 @@ owner, root-publication, access, and WHNF inventories account for the new
 effect machine. The type-erased effect-task pump's deterministic completion
 allowance rises from 4,096 to 8,192 scheduler units because the new owner
 surfaces its phase handoffs instead of recursively consuming them.
+
+W6E.6 completion record, 2026-09-17: effect-map construction, one-step run,
+and continuation now share the durable effect owner. Run demand retains the
+exact items and results WHNF computations, then delegates its logical list
+front to `ListFrontMachine`; no recursive evaluator or direct thunk-forcing
+callback remains. A non-empty front constructs the mapped lazy application,
+continuation, and `.seq` API call as one regionally rooted graph, avoiding
+intermediate runtime roots. The empty case similarly defers `.r` lookup until
+the front is known. A promised-tail fixture deterministically proves that API
+lookup remains untouched while the list front is blocked and resumes exactly
+after assignment; the source-backed effect-map order fixture continues to
+prove left-to-right results. The obsolete effect-family module is removed.
+Every shared `effect_value` caller now supplies regional access, closing
+W6A.1b. `AnnotationsAndEffects` falls from sixteen declarations to eleven,
+`ApplicationAndSequence` from six to five, and the complete D.2c manifest from
+fifty-eight to fifty-two. The WHNF census removes the old two direct demands
+and synchronous callable application, while root, owner, access, and regional
+constructor inventories account for the durable map phases and their bounded
+publications.
 
 #### W6F — Objects and interaction-net builtins
 

@@ -207,15 +207,18 @@ impl ComparisonBuiltinMachine {
         } else {
             Vec::new()
         };
-        ComparisonBuiltinPoll::Ready(context.root_value(effect_value(Value::PartialBuiltin(
-            BuiltinCall {
-                builtin: Builtin::EffectCall,
-                arguments: Arc::from([
-                    Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(effect))),
-                    Value::List(List::from_values(arguments)),
-                ]),
-            },
-        ))))
+        ComparisonBuiltinPoll::Ready(context.with_value_access(|access| {
+            access.values().root_runtime_value(effect_value(
+                access.values(),
+                Value::PartialBuiltin(BuiltinCall {
+                    builtin: Builtin::EffectCall,
+                    arguments: Arc::from([
+                        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(effect))),
+                        Value::List(List::from_values(arguments)),
+                    ]),
+                }),
+            ))
+        }))
     }
 }
 

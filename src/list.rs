@@ -601,6 +601,7 @@ impl<V, T> List<V, T> {
     /// Removes the first item, using the caller's operation to duplicate a
     /// strict value leaf while all returned list shells continue sharing their
     /// original persistent structure.
+    #[cfg(test)]
     pub fn try_pop_front_by<E, U>(
         &self,
         duplicate_value: &mut impl FnMut(&V) -> U,

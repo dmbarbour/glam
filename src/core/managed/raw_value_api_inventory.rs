@@ -1404,13 +1404,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        490,
+        485,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        10_539_178_243_418_123_725,
+        1_692_220_743_033_773_539,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1421,9 +1421,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 138),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 139),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        ((ApiKind::Function, ApiDisposition::Violation), 314),
+        ((ApiKind::Function, ApiDisposition::Violation), 308),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1497,7 +1497,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            58,
+            52,
         ),
         (
             (
@@ -1638,9 +1638,9 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         family_counts,
         BTreeMap::from([
             (D2cFamily::ValueDemand, 10),
-            (D2cFamily::ApplicationAndSequence, 6),
+            (D2cFamily::ApplicationAndSequence, 5),
             (D2cFamily::DispatchScalarAndStrategy, 1),
-            (D2cFamily::AnnotationsAndEffects, 16),
+            (D2cFamily::AnnotationsAndEffects, 11),
             (D2cFamily::Objects, 17),
             (D2cFamily::NetBuiltins, 8),
         ]),
@@ -1662,9 +1662,9 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 46),
+            (D2cCurrentContext::EvaluatorStep, 43),
             (D2cCurrentContext::DurableEval, 2),
-            (D2cCurrentContext::ContextFree, 10),
+            (D2cCurrentContext::ContextFree, 7),
         ]),
         "the D.2c signature baseline drifted"
     );
@@ -1685,7 +1685,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [10, 48, 0],
+        [7, 45, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1711,15 +1711,12 @@ fn d2c_family_fingerprints_are_exact() {
         .collect::<BTreeMap<_, _>>();
     let expected = BTreeMap::from([
         (D2cFamily::ValueDemand, 16_951_777_383_940_456_822),
-        (
-            D2cFamily::ApplicationAndSequence,
-            16_938_714_455_493_235_635,
-        ),
+        (D2cFamily::ApplicationAndSequence, 7_278_529_736_274_756_495),
         (
             D2cFamily::DispatchScalarAndStrategy,
             183_834_627_390_525_313,
         ),
-        (D2cFamily::AnnotationsAndEffects, 14_028_419_331_802_396_481),
+        (D2cFamily::AnnotationsAndEffects, 2_008_762_037_635_388_575),
         (D2cFamily::Objects, 14_243_874_767_540_971_701),
         (D2cFamily::NetBuiltins, 13_862_576_417_551_920_128),
     ]);
@@ -1756,10 +1753,8 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A0cKeyTagUndefined, 2),
         (W6A0dLazyListProjection, 2),
         (W8ValueCompatibility, 7),
-        (W6A1ApplicationLeaves, 1),
         (W6A2ApplicationWork, 4),
         (W6C1DispatchAndArity, 1),
-        (W6E6EffectMap, 5),
         (W6E7ListEffectApi, 1),
         (W6E8ListEffectControl, 6),
         (W6E9ListEffectSource, 4),
@@ -1784,10 +1779,8 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A0cKeyTagUndefined, 4_938_813_297_724_122_753),
         (W6A0dLazyListProjection, 18_060_119_814_284_529_550),
         (W8ValueCompatibility, 15_067_824_851_424_263_475),
-        (W6A1ApplicationLeaves, 4_928_394_332_436_527_125),
         (W6A2ApplicationWork, 4_925_520_474_408_746_135),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
-        (W6E6EffectMap, 14_259_733_873_682_787_303),
         (W6E7ListEffectApi, 1_964_017_467_539_357_249),
         (W6E8ListEffectControl, 5_599_189_213_790_407_454),
         (W6E9ListEffectSource, 16_763_173_768_808_435_452),
