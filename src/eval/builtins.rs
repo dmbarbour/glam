@@ -2,7 +2,6 @@
 
 mod annotation;
 mod assertion;
-mod dict;
 mod effect;
 mod list;
 mod list_effect;
@@ -106,7 +105,15 @@ pub(super) fn apply_builtin_in(
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
-        | Builtin::MergeDuplicate => dict::apply(context, builtin, arguments),
+        | Builtin::MergeDuplicate => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
         Builtin::ObjectSpec
         | Builtin::ObjectFromDict
         | Builtin::ObjectLocalName

@@ -1,5 +1,5 @@
 use super::super::*;
-use super::dict::eval_dict_union_builtin_in;
+use crate::eval::dict_machine::merge_dicts_in;
 
 mod implementation;
 
@@ -42,7 +42,16 @@ pub(super) fn apply(
         Builtin::ObjectDictDefs => {
             let [dict, base, _self_value] =
                 super::exact(arguments, "dictionary object definitions")?;
-            eval_dict_union_builtin_in(context, &base, &dict)
+            let base = eval_value_in(context, &base)?;
+            let dict = eval_value_in(context, &dict)?;
+            let (Value::Dict(base), Value::Dict(dict)) = (base, dict) else {
+                return Err(EvaluationHalt::new(
+                    "dictionary union requires dictionary values",
+                ));
+            };
+            Ok(context.with_value_access(|access| {
+                Value::Dict(merge_dicts_in(access.values(), &base, &dict))
+            }))
         }
         Builtin::ObjectWithDefs => {
             let [object, extension_defs] = super::exact(arguments, "object with definitions")?;

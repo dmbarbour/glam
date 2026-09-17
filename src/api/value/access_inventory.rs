@@ -143,6 +143,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6C.3 resumable recursive comparison ownership"
     ),
     entry!(
+        "src/eval/dict_machine.rs",
+        0,
+        0,
+        4,
+        "durable dictionary results published before their producing access region closes",
+        "W6D.1-W6D.2 resumable dictionary ownership"
+    ),
+    entry!(
         "src/eval/list_effect_machine.rs",
         0,
         0,
@@ -459,6 +467,10 @@ impl RootPublicationOccurrence {
                 | "src/eval/comparison_machine.rs::classify_ordering"
                 | "src/eval/comparison_machine.rs::demand_tuple_payload"
                 | "src/eval/comparison_machine.rs::impl DictEqualityFrame::new"
+                | "src/eval/dict_machine.rs::finish_merge_duplicate"
+                | "src/eval/dict_machine.rs::finish_union"
+                | "src/eval/dict_machine.rs::finish_update"
+                | "src/eval/dict_machine.rs::impl DictBuiltinMachine::poll"
                 | "src/eval/list_effect_machine.rs::effect_function"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
@@ -728,6 +740,10 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#3|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#4|surface=access-publication|scope=production",
+    "src/eval/dict_machine.rs::finish_merge_duplicate#1|surface=access-publication|scope=production",
+    "src/eval/dict_machine.rs::finish_union#1|surface=access-publication|scope=production",
+    "src/eval/dict_machine.rs::finish_update#1|surface=access-publication|scope=production",
+    "src/eval/dict_machine.rs::impl DictBuiltinMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",

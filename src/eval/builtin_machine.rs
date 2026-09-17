@@ -15,6 +15,7 @@ use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
+use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
@@ -32,6 +33,7 @@ pub(crate) enum BuiltinTaskMachine {
     Assertion(AssertionBuiltinMachine),
     Conditional(ConditionalBuiltinMachine),
     Comparison(ComparisonBuiltinMachine),
+    Dictionary(DictBuiltinMachine),
     Numeric(NumericBuiltinMachine),
     Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
@@ -59,6 +61,10 @@ impl BuiltinTaskMachine {
                 | Builtin::InspectOrigin
                 | Builtin::Seq
                 | Builtin::Spark
+                | Builtin::DictSingleton
+                | Builtin::DictUnion
+                | Builtin::DictUpdate
+                | Builtin::MergeDuplicate
         )
     }
 
@@ -81,6 +87,12 @@ impl BuiltinTaskMachine {
             | Builtin::LessEqual
             | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
             Builtin::InspectOrigin => Self::Provenance(ProvenanceBuiltinMachine::new(arguments)),
+            Builtin::DictSingleton
+            | Builtin::DictUnion
+            | Builtin::DictUpdate
+            | Builtin::MergeDuplicate => {
+                Self::Dictionary(DictBuiltinMachine::new(builtin, arguments))
+            }
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
             }
@@ -111,6 +123,9 @@ impl BuiltinTaskMachine {
                     ComparisonBuiltinPoll::Yielded => BuiltinTaskPoll::Yielded,
                     ComparisonBuiltinPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
                 }
+            }
+            Self::Dictionary(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Numeric(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)

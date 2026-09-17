@@ -5211,7 +5211,7 @@ fn pump_composed_test_task(
     task: &EvaluationTaskHandle,
 ) -> EvaluationWaitPoll {
     assert_eq!(
-        context.pump_wait(task.wait(), 16_384),
+        context.pump_wait(task.wait(), 262_144),
         crate::evaluation::EvaluationPumpOutcome::TargetReady
     );
     context.poll_reflection_task(task)

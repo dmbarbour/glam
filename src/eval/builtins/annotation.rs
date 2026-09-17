@@ -2,8 +2,8 @@ use super::super::*;
 
 mod implementation;
 
+pub(in crate::eval) use implementation::is_undefined_value;
 use implementation::*;
-pub(in crate::eval) use implementation::{annotation_error_value, atom_name, is_undefined_value};
 
 pub(super) fn apply(
     context: &EvaluatorStepContext<'_>,

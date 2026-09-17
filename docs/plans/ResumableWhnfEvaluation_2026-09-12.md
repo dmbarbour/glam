@@ -4128,6 +4128,22 @@ declaration group reaches zero.
 | **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
 
+W6D.1-W6D.2 completion record, 2026-09-17: basic dictionary dispatch and
+recursive merge could not form useful independent checkpoints because union
+and update immediately enter the recursive transformation leaves. They were
+therefore completed as one dictionary-owner checkpoint. Saturated singleton,
+union, update, and duplicate-merge calls now install a durable machine which
+reuses the shared key and key-list owners and retains each completed WHNF
+operand across later suspension. Merge and nested update inspect and transform
+already-observed persistent dictionaries only under regional value access;
+deferred duplicate members and deferred nested paths remain lazy builtin
+applications. Forced promise fixtures cover ordered union and duplicate-merge
+resumption, including no replay of a completed left operand. The obsolete
+dictionary modules are removed, `ObjectDictDefs` shares the regional merge
+leaf pending W6F, and the exact raw-value manifest removes all twelve W6D.1
+and W6D.2 violations: `CollectionsAndPatterns` falls from 42 to 30 and D.2c
+from 124 to 112.
+
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary
 members, lazy list chunks on both sides of a split, refutable remainder

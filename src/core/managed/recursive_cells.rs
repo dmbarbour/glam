@@ -1603,6 +1603,9 @@ mod tests {
                     "src/core.rs::LazyValue::failure_in",
                     "src/core.rs::LazyValue::with_source_in",
                     "src/core.rs::Value::builtin_call_in",
+                    "src/eval/dict_machine.rs::builtin_apply3_value_in",
+                    "src/eval/dict_machine.rs::merge_duplicate_value_in",
+                    "src/eval/dict_machine.rs::update_dict_path_in",
                     "src/eval/net.rs::attach_net_many_in",
                     "src/eval/operator.rs::apply_core_operator",
                     "src/eval/operator.rs::constant_effect_in",
@@ -1634,6 +1637,7 @@ mod tests {
                     "src/api/value.rs::Values::empty_object",
                     "src/api/value.rs::Values::list_slice",
                     "src/compiler.rs::CompileContext::new",
+                    "src/eval/dict_machine.rs::finish_merge_duplicate",
                     "src/evaluation/session.rs::EvalContext::compose_builtin",
                     "src/g_syntax/compiler_values.rs::run_pure_match_resolved",
                     "src/reflection/machine.rs::EffectTask::store_path_step",
@@ -1654,9 +1658,6 @@ mod tests {
                     "src/eval/builtins/annotation/implementation.rs::eval_metadata_pure_annotation",
                     "src/eval/builtins/annotation/implementation.rs::eval_metadata_reflection_annotation",
                     "src/eval/builtins/annotation/implementation.rs::metadata_update_outputs",
-                    "src/eval/builtins/dict/merge.rs::builtin_apply3_value",
-                    "src/eval/builtins/dict/merge.rs::merge_duplicate_dict_value",
-                    "src/eval/builtins/dict/merge.rs::update_nested_dict_path",
                     "src/eval/builtins/effect/implementation.rs::apply_effect_api",
                     "src/eval/builtins/effect/implementation.rs::eval_fixpoint_builtin",
                     "src/eval/list_effect_machine.rs::sequence_result",
@@ -1681,8 +1682,12 @@ mod tests {
             ),
             (
                 RegionalConstructionDisposition::ExactFixtureRoot,
-                "roots the managed net inside the same test access region before carrying it across later observations",
-                &["src/eval/net/tests/nc5.rs::block_task_promise"],
+                "roots the managed value inside the same test access region before carrying it across later observations",
+                &[
+                    "src/eval/net/tests/nc5.rs::block_task_promise",
+                    "src/evaluation/tests.rs::rooted_promise_value",
+                    "src/evaluation/tests.rs::rooted_semantic_lazy_value",
+                ],
             ),
         ];
 

@@ -837,10 +837,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 201;
+const DECLARATION_BASELINE_COUNT: usize = 205;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([144, 167, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_058_911_520_175_969_561;
+    DeclarationSignals::new([144, 172, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_129_265_494_371_552_586;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -975,6 +975,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "list-effect recipe progress"
     } else if declaration.starts_with("src/eval/builtin_machine.rs::")
         || declaration.starts_with("src/eval/comparison_machine.rs::")
+        || declaration.starts_with("src/eval/dict_machine.rs::")
         || declaration.starts_with("src/eval/tagged_machine.rs::")
         || declaration.starts_with("src/eval/strategy_machine.rs::")
     {

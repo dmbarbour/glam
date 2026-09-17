@@ -160,21 +160,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3B.1 scoped annotation assertion compatibility pending W6E.1"
     ),
     context_entry!(
-        "src/eval/builtins/dict.rs",
-        [1, 0],
-        "I3B.1 scoped dictionary dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/dict/basic.rs",
-        [3, 0],
-        "I3B.1 scoped dictionary operations"
-    ),
-    context_entry!(
-        "src/eval/builtins/dict/merge.rs",
-        [6, 0],
-        "I3B.1 scoped dictionary merge"
-    ),
-    context_entry!(
         "src/eval/builtins/effect.rs",
         [2, 0],
         "I3D.1/I3D.2 effect boundary"
@@ -223,6 +208,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/comparison_machine.rs",
         [9, 6],
         "W6C.3 durable recursive comparison owner with scoped classification and result projection"
+    ),
+    context_entry!(
+        "src/eval/dict_machine.rs",
+        [5, 3],
+        "W6D.1-W6D.2 durable dictionary operands with access-qualified merge and update leaves"
     ),
     context_entry!(
         "src/eval/builtins/object.rs",

@@ -646,10 +646,13 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // demand with explicit durable machine stacks and bounded collection walks.
 // W6C.6 gives seq and best-effort sparks one shared resumable demand owner;
 // scheduler admission is a rooted post-access poll disposition.
-const EXPECTED_OCCURRENCES: usize = 273;
-const EXPECTED_FINGERPRINT: u64 = 7_358_313_886_148_540_378;
+// W6D.1-W6D.2 replace synchronous dictionary dispatch, key-path demand, and
+// recursive merge demand with one durable dictionary owner. Its remaining
+// recursive calls transform already-observed persistent dictionary/key data.
+const EXPECTED_OCCURRENCES: usize = 276;
+const EXPECTED_FINGERPRINT: u64 = 2_027_913_545_848_848_894;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 86),
+    (Signal::EvalValue, 81),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 14),
@@ -662,17 +665,17 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 46),
+    (Signal::StructuralRecursion, 54),
     (Signal::UserSizedLoop, 55),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 128),
+    (WorkShape::DemandThenInspect, 131),
     (WorkShape::OrderedOperands, 6),
-    (WorkShape::CollectionWalk, 41),
+    (WorkShape::CollectionWalk, 39),
     (WorkShape::Application, 11),
-    (WorkShape::KeyConversion, 22),
-    (WorkShape::AccessPath, 10),
+    (WorkShape::KeyConversion, 23),
+    (WorkShape::AccessPath, 11),
     (WorkShape::DiagnosticContext, 1),
     (WorkShape::OrchestrationHandoff, 52),
 ];

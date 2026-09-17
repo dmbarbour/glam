@@ -348,7 +348,10 @@ fn claimed_evaluator_dispatches_dictionary_and_list_builtins() {
             .expect("direct builtin application should succeed");
         let claimed = apply_values_in(&evaluator, Value::Builtin(builtin), arguments)
             .expect("claimed builtin application should succeed");
-        assert_eq!(claimed, direct);
+        assert_eq!(
+            eval_value(&context, &claimed).expect("claimed builtin result should evaluate"),
+            eval_value(&context, &direct).expect("direct builtin result should evaluate")
+        );
     }
 }
 
@@ -3893,6 +3896,96 @@ fn dictionary_unions_treat_empty_dictionary_values_as_undefined() {
         value.get_key_path(&[key]),
         Some(&Value::binary_from_text("Hello"))
     );
+}
+
+#[test]
+fn dictionary_union_resumes_without_replaying_a_completed_operand() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (right, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("dictionary union right operand"))
+        .expect("the owner should allocate a promised operand");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let left_key = Key::atom_from_text("left");
+    let left_key_for_thunk = left_key.clone();
+    let left = LazyValue::semantic_thunk(
+        observer.values(),
+        "counted dictionary union left operand",
+        move |_context| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(
+                Dict::new_sync().insert(left_key_for_thunk.clone(), n(41)),
+            ))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::DictUnion),
+        vec![Value::Lazy(left), Value::Promised(right.clone())],
+    )
+    .expect("dictionary union application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved right operand should suspend dictionary union");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let right_key = Key::atom_from_text("right");
+    set_promise(
+        &owner,
+        &right,
+        Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
+    )
+    .expect("the owner should resolve the right operand");
+    let value = eval_value(&observer, &application)
+        .expect("dictionary union should resume after promise assignment");
+    let Value::Dict(dict) = value else {
+        panic!("dictionary union should produce a dictionary");
+    };
+    assert_eq!(dict.get(&left_key), Some(&n(41)));
+    assert_eq!(dict.get(&right_key), Some(&n(42)));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "resumption must retain the completed left operand"
+    );
+}
+
+#[test]
+fn dictionary_duplicate_merge_resumes_its_second_operand() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (right, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("dictionary duplicate right operand"))
+        .expect("the owner should allocate a promised operand");
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::MergeDuplicate),
+        vec![
+            Value::binary_from_text("nested"),
+            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("left"), n(41))),
+            Value::Promised(right.clone()),
+        ],
+    )
+    .expect("duplicate merge application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved right operand should suspend duplicate merge");
+    assert!(blocked.blocked_on().is_some());
+
+    let right_key = Key::atom_from_text("right");
+    set_promise(
+        &owner,
+        &right,
+        Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
+    )
+    .expect("the owner should resolve the duplicate operand");
+    let value = eval_value(&observer, &application)
+        .expect("duplicate merge should resume after promise assignment");
+    let Value::Dict(dict) = value else {
+        panic!("duplicate merge should produce a dictionary");
+    };
+    assert_eq!(dict.get(&Key::atom_from_text("left")), Some(&n(41)));
+    assert_eq!(dict.get(&right_key), Some(&n(42)));
 }
 
 #[test]
