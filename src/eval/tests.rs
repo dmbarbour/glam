@@ -3524,6 +3524,81 @@ fn text_lines_preserves_empty_and_trailing_lines() {
 }
 
 #[test]
+fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (item, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("text-lines item"))
+        .expect("the owner should allocate a promised text byte");
+    let prefix_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&prefix_demands);
+    let prefix = Value::semantic_thunk(observer.values(), "text-lines prefix", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(n(b'a' as i64))
+    });
+    let source = Value::List(List::from_values(vec![
+        prefix,
+        Value::Promised(item.clone()),
+        n(b'\n' as i64),
+        n(b'c' as i64),
+    ]));
+    let application = apply_values(&observer, Value::Builtin(Builtin::TextLines), vec![source])
+        .expect("text-lines application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved byte should suspend text lines");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+
+    set_promise(&owner, &item, n(b'b' as i64)).expect("the owner should resolve the promised byte");
+    let Value::List(lines) = eval_value(&observer, &application).expect("text lines should resume")
+    else {
+        panic!("text lines should produce a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &lines).expect("line list should be readable"),
+        vec![Value::binary_from_text("ab"), Value::binary_from_text("c")]
+    );
+    assert_eq!(
+        prefix_demands.load(Ordering::SeqCst),
+        1,
+        "resumption must retain the completed prefix byte"
+    );
+}
+
+#[test]
+fn text_lines_resumes_a_promised_list_chunk() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("text-lines list tail"))
+        .expect("the owner should allocate a promised list tail");
+    let source = Value::List(List::concat(
+        List::from_bytes(Bytes::from_static(b"a")),
+        List::from_thunk(tail.clone().into()),
+    ));
+    let application = apply_values(&observer, Value::Builtin(Builtin::TextLines), vec![source])
+        .expect("text-lines application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved list chunk should suspend text lines");
+    assert!(blocked.blocked_on().is_some());
+    set_promise(
+        &owner,
+        &tail,
+        Value::List(List::from_bytes(Bytes::from_static(b"b\nc"))),
+    )
+    .expect("the owner should resolve the promised list tail");
+
+    let Value::List(lines) = eval_value(&observer, &application).expect("text lines should resume")
+    else {
+        panic!("text lines should produce a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &lines).expect("line list should be readable"),
+        vec![Value::binary_from_text("ab"), Value::binary_from_text("c")]
+    );
+}
+
+#[test]
 fn evaluates_split_and_split_end_builtins() {
     let split = eval_closed_expr(&builtin2_expr(
         Builtin::ListSplit,

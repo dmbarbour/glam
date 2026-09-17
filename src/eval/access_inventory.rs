@@ -170,16 +170,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3D.1/I3D.2 effect control and reflection gates"
     ),
     context_entry!(
-        "src/eval/builtins/list.rs",
-        [1, 0],
-        "I3B.1 scoped list dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/list/implementation.rs",
-        [1, 0],
-        "I3B.1 remaining scoped text-list transformation"
-    ),
-    context_entry!(
         "src/eval/builtins/list_effect.rs",
         [1, 0],
         "I3B.1 scoped list-effect construction"
@@ -241,8 +231,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_transform_machine.rs",
-        [2, 2],
-        "W6D.4a-W6D.4b durable list-transform source owners with one-node regional transformation"
+        [6, 3],
+        "W6D.4 durable list-transform owners and resumable text extraction"
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",

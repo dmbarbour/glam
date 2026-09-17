@@ -1407,13 +1407,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        532,
+        530,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        5_794_719_448_714_113_604,
+        11_145_800_189_366_703_326,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1426,7 +1426,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let expected = BTreeMap::from([
         ((ApiKind::Function, ApiDisposition::RegionalAccess), 135),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        ((ApiKind::Function, ApiDisposition::Violation), 359),
+        ((ApiKind::Function, ApiDisposition::Violation), 357),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1500,7 +1500,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2cEvaluator,
                 ReplacementShape::EvaluatorQuantum,
             ),
-            103,
+            101,
         ),
         (
             (
@@ -1643,7 +1643,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
             (D2cFamily::ValueDemand, 12),
             (D2cFamily::ApplicationAndSequence, 7),
             (D2cFamily::DispatchScalarAndStrategy, 2),
-            (D2cFamily::CollectionsAndPatterns, 21),
+            (D2cFamily::CollectionsAndPatterns, 19),
             (D2cFamily::AnnotationsAndEffects, 36),
             (D2cFamily::Objects, 17),
             (D2cFamily::NetBuiltins, 8),
@@ -1666,7 +1666,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
     assert_eq!(
         context_counts,
         BTreeMap::from([
-            (D2cCurrentContext::EvaluatorStep, 85),
+            (D2cCurrentContext::EvaluatorStep, 83),
             (D2cCurrentContext::DurableEval, 2),
             (D2cCurrentContext::ContextFree, 16),
         ]),
@@ -1689,7 +1689,7 @@ fn d2c_evaluator_boundary_manifest_is_exact() {
         });
     assert_eq!(
         execution_counts,
-        [16, 87, 0],
+        [16, 85, 0],
         "D.2c starts conservatively: context-free operations need regional authority, while context-bearing operations remain coordinators until audited"
     );
 }
@@ -1723,7 +1723,10 @@ fn d2c_family_fingerprints_are_exact() {
             D2cFamily::DispatchScalarAndStrategy,
             5_656_025_884_590_611_233,
         ),
-        (D2cFamily::CollectionsAndPatterns, 4_390_410_635_724_736_973),
+        (
+            D2cFamily::CollectionsAndPatterns,
+            10_627_186_437_095_443_903,
+        ),
         (D2cFamily::AnnotationsAndEffects, 5_637_277_238_344_972_318),
         (D2cFamily::Objects, 14_243_874_767_540_971_701),
         (D2cFamily::NetBuiltins, 13_862_576_417_551_920_128),
@@ -1766,7 +1769,6 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 2),
         (W6C1DispatchAndArity, 1),
         (W6C2AssertionAndConditional, 1),
-        (W6D4ListTransformAndDispatch, 2),
         (W6D5aPatternDictAndPath, 10),
         (W6D5bPatternList, 5),
         (W6D5cPatternEffectAndDispatch, 4),
@@ -1805,7 +1807,6 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
         (W6A4SequenceWork, 15_567_590_830_686_767_581),
         (W6C1DispatchAndArity, 183_834_627_390_525_313),
         (W6C2AssertionAndConditional, 11_178_720_452_358_268_189),
-        (W6D4ListTransformAndDispatch, 12_784_937_444_701_290_595),
         (W6D5aPatternDictAndPath, 4_701_694_396_283_851_948),
         (W6D5bPatternList, 13_481_016_508_580_392_350),
         (W6D5cPatternEffectAndDispatch, 7_938_764_653_056_697_587),

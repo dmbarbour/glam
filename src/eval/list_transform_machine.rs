@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::core::{
     Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, LazyValue, List, ListThunk, Value,
 };
@@ -12,7 +14,9 @@ use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
 
 use super::builtin_machine::BuiltinTaskPoll;
+use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::sequence::append_sequence;
+use super::value::evaluation_context_frame_in;
 use super::whnf::WhnfComputation;
 
 pub(crate) struct ListMapMachine {
@@ -22,6 +26,130 @@ pub(crate) struct ListMapMachine {
 
 pub(crate) struct ListConcatMachine {
     source: WhnfComputation,
+}
+
+pub(crate) struct TextLinesMachine {
+    source: WhnfComputation,
+    source_ready: bool,
+    front: Option<ListFrontMachine>,
+    item: Option<WhnfComputation>,
+    bytes: Vec<u8>,
+}
+
+impl TextLinesMachine {
+    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [source]: [RuntimeValueRoot; 1] =
+            arguments.try_into().expect("text lines retains one source");
+        Self {
+            source: WhnfComputation::from_root(source),
+            source_ready: false,
+            front: None,
+            item: None,
+            bytes: Vec::new(),
+        }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        if let Some(item) = &mut self.item {
+            let item = match poll_whnf_computation(item, poll_context, durable_context, step_budget)
+            {
+                WhnfOwnerPoll::Ready(item) => item,
+                WhnfOwnerPoll::Pending(dependency) => {
+                    return BuiltinTaskPoll::Pending(dependency);
+                }
+                WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+                WhnfOwnerPoll::Failed(failure) => {
+                    return BuiltinTaskPoll::Failed(contextual_binary_failure(context, failure));
+                }
+                WhnfOwnerPoll::External(boundary) => {
+                    unreachable!("text-lines item produced an external {boundary:?} boundary")
+                }
+            };
+            let item = context.with_value_access(|access| access.clone_root(&item));
+            let item = EvaluatedValue::try_from(item)
+                .expect("text-lines item demand must reach WHNF")
+                .into_value();
+            let byte = match item {
+                Value::Number(number) => match number.to_u8_if_integer() {
+                    Some(byte) => byte,
+                    None => {
+                        return failure(
+                            context,
+                            format!("text lines builtin cannot encode number `{number}` as a byte"),
+                        );
+                    }
+                },
+                other => {
+                    return failure(
+                        context,
+                        format!(
+                            "text lines builtin requires list items to be byte integers, got {other:?}"
+                        ),
+                    );
+                }
+            };
+            self.bytes.push(byte);
+            self.item = None;
+            return BuiltinTaskPoll::Yielded;
+        }
+
+        if let Some(front) = &mut self.front {
+            return match front.poll(poll_context, context, durable_context, step_budget) {
+                ListFrontPoll::Ready(Some((item, tail))) => {
+                    self.front = Some(ListFrontMachine::unowned(tail));
+                    self.item = Some(WhnfComputation::from_root(item));
+                    BuiltinTaskPoll::Yielded
+                }
+                ListFrontPoll::Ready(None) => {
+                    finish_text_lines(context, Bytes::from(std::mem::take(&mut self.bytes)))
+                }
+                ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
+                ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
+                ListFrontPoll::Failed(failure) => {
+                    BuiltinTaskPoll::Failed(contextual_binary_failure(context, failure))
+                }
+            };
+        }
+
+        assert!(
+            !self.source_ready,
+            "finished text-lines work cannot be polled"
+        );
+        let source = match poll_whnf_computation(
+            &mut self.source,
+            poll_context,
+            durable_context,
+            step_budget,
+        ) {
+            WhnfOwnerPoll::Ready(source) => source,
+            WhnfOwnerPoll::Pending(dependency) => {
+                return BuiltinTaskPoll::Pending(dependency);
+            }
+            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
+            WhnfOwnerPoll::External(boundary) => {
+                unreachable!("text-lines source produced an external {boundary:?} boundary")
+            }
+        };
+        self.source_ready = true;
+        match context.with_value_access(|access| access.clone_root(&source)) {
+            Value::Binary(bytes) => finish_text_lines(context, bytes),
+            Value::List(_) => {
+                self.front = Some(ListFrontMachine::unowned(source));
+                BuiltinTaskPoll::Yielded
+            }
+            _ => failure(
+                context,
+                "text lines builtin requires a binary-compatible list or binary value",
+            ),
+        }
+    }
 }
 
 impl ListConcatMachine {
@@ -217,4 +345,39 @@ fn invalid_concat_item_in(access: &crate::core::RuntimeValueAccess<'_>) -> List 
         )
         .into(),
     )
+}
+
+fn finish_text_lines(context: &EvaluatorStepContext<'_>, bytes: Bytes) -> BuiltinTaskPoll {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            lines.push(Value::Binary(bytes.slice(start..index)));
+            start = index + 1;
+        }
+    }
+    lines.push(Value::Binary(bytes.slice(start..bytes.len())));
+    BuiltinTaskPoll::Ready(context.with_value_access(|access| {
+        access
+            .values()
+            .root_runtime_value(Value::List(List::from_values(lines)))
+    }))
+}
+
+fn contextual_binary_failure(
+    context: &EvaluatorStepContext<'_>,
+    failure: crate::runtime::RuntimeFailureRoot,
+) -> crate::runtime::RuntimeFailureRoot {
+    let failure = context.with_value_access(|access| {
+        EvaluationHalt::failure(failure.into_failure()).with_context(
+            access.values(),
+            evaluation_context_frame_in(access.values(), "binary_extraction"),
+        )
+    });
+    context.root_failure(failure.into_permanent_failure())
+}
+
+fn failure(context: &EvaluatorStepContext<'_>, message: impl Into<String>) -> BuiltinTaskPoll {
+    let message = message.into();
+    BuiltinTaskPoll::Failed(context.root_failure(Arc::new(EvaluationFailure::message(message))))
 }

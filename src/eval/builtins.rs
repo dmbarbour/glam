@@ -3,7 +3,6 @@
 mod annotation;
 mod assertion;
 mod effect;
-mod list;
 mod list_effect;
 mod net;
 mod object;
@@ -64,7 +63,7 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::Map | Builtin::ListConcat => {
+        Builtin::Map | Builtin::ListConcat | Builtin::TextLines => {
             Ok(Value::Lazy(context.construct_lazy(move |access| {
                 LazyValue::from_builtin_in(
                     access,
@@ -75,7 +74,10 @@ pub(super) fn apply_builtin_in(
                 )
             })))
         }
-        Builtin::Append | Builtin::TextLines => list::apply(context, builtin, arguments),
+        Builtin::Append => {
+            let [left, right] = exact(arguments, "append")?;
+            context.with_value_access(|access| append_values(access.values(), left, right))
+        }
         Builtin::Slice
         | Builtin::ListLen
         | Builtin::ListSplit

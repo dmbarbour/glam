@@ -4133,8 +4133,8 @@ declaration group reaches zero.
 | **W6D.3 — Complete (2026-09-17): List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
 | **W6D.4a — Complete (2026-09-17): Structural lazy map** | 1 S | Replace eager list-map traversal with the non-forcing structural transform specified below. It may demand the subject enough to establish the outer list, but preserves internal list holes and does not demand or validate the callable. `-1`. |
 | **W6D.4b — Complete (2026-09-17): Structural lazy list concatenation** | 1 S | Convert concatenation to one-node structural flattening, balancing the segments contributed by a reached strict leaf without observing deferred outer children. `-1`. |
-| **W6D.4c — Text lines** | 1 S | Convert resumable binary/text extraction and line construction without retaining access across demand. `-1`. |
-| **W6D.4d — Family dispatch** | 1 S | Move the remaining list-family dispatcher after its transformation leaves and retire the final raw compatibility declaration in W6D.4. `-1`. |
+| **W6D.4c — Complete (2026-09-17): Text lines** | 1 S | Convert binary/text extraction to durable source, list-front, and item demand without retaining access across suspension. `-1`. |
+| **W6D.4d — Complete (2026-09-17): Family dispatch** | 1 S | Inline the immediate append leaf after every suspendable list transformation owns a machine and remove the obsolete family module. `-1`. |
 | **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal, moving the pattern path consumers toward W6A.4 closure. `-10`. |
 | **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
@@ -4270,6 +4270,20 @@ failure for an invalid strict prefix item, and exact resumption after a
 promised outer source resolves. The old synchronous concat implementation is
 removed; `CollectionsAndPatterns` falls from 22 to 21 declarations, W6D.4
 retains two, and the D.2c manifest falls from 104 to 103.
+
+W6D.4c-W6D.4d completion record, 2026-09-17: saturated `text.lines` calls now
+install a durable owner which distinguishes compact binary input from logical
+list input after one source demand. Logical lists advance through the shared
+front machine, and each exposed item has its own retained WHNF computation;
+neither list-chunk nor item suspension replays completed prefix bytes. Only
+the final byte buffer and produced line values are observed under regional
+access. Deterministic promised-item and promised-tail fixtures cover both
+suspension sites, including a demand counter proving exact prefix reuse.
+Compact binary slicing continues to preserve empty and trailing lines. With
+all suspendable list leaves moved, immediate append construction is inlined
+into the parent dispatcher and the obsolete list-family module is removed.
+`CollectionsAndPatterns` falls from 21 to 19 declarations, W6D.4 reaches zero,
+and the D.2c manifest falls from 103 to 101.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary
