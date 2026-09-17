@@ -1171,38 +1171,41 @@ fn generic_client_demand_resumes_composed_access_and_binary_annotation() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let intermediate = PromisedValue::new(context.values(), "access intermediate");
-    let byte = PromisedValue::new(context.values(), "binary byte");
-    let root = Value::Dict(crate::core::Dict::new_sync().insert(
-        crate::core::Key::atom_from_text("outer"),
-        Value::Promised(intermediate.clone()),
-    ));
-    let outer = Value::Lazy(LazyValue::from_access(
-        context.values(),
-        Arc::from([crate::core_net::CoreDataKey::Key(
+    let (intermediate, _intermediate_root, _) =
+        rooted_promise_value(context.values(), "access intermediate");
+    let (byte, _byte_root, _) = rooted_promise_value(context.values(), "binary byte");
+    let binary = context.values().with_runtime_value_access(|access| {
+        let root = Value::Dict(crate::core::Dict::new_sync().insert(
             crate::core::Key::atom_from_text("outer"),
-        )]),
-        Arc::from([root]),
-    ));
-    let member = Value::Lazy(LazyValue::from_access(
-        context.values(),
-        Arc::from([crate::core_net::CoreDataKey::Key(
-            crate::core::Key::atom_from_text("member"),
-        )]),
-        Arc::from([outer]),
-    ));
-    let binary = Value::builtin_call(
-        context.values(),
-        crate::core::Builtin::Anno,
-        vec![
-            Value::Atom(crate::core::Atom::from_key(
-                &crate::core::Key::binary_from_text("binary"),
-            )),
-            member,
-        ],
-    );
+            Value::Promised(intermediate.duplicate_in(&access)),
+        ));
+        let outer = Value::Lazy(LazyValue::from_access_in(
+            &access,
+            Arc::from([crate::core_net::CoreDataKey::Key(
+                crate::core::Key::atom_from_text("outer"),
+            )]),
+            Arc::from([root]),
+        ));
+        let member = Value::Lazy(LazyValue::from_access_in(
+            &access,
+            Arc::from([crate::core_net::CoreDataKey::Key(
+                crate::core::Key::atom_from_text("member"),
+            )]),
+            Arc::from([outer]),
+        ));
+        access.root_runtime_value(Value::builtin_call_in(
+            &access,
+            crate::core::Builtin::Anno,
+            vec![
+                Value::Atom(crate::core::Atom::from_key(
+                    &crate::core::Key::binary_from_text("binary"),
+                )),
+                member,
+            ],
+        ))
+    });
     let handle = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), binary))
+        .demand_whnf(binary)
         .expect("composed semantic demand should be admitted");
 
     assert!(poll_one_runtime_work(&coordinator));

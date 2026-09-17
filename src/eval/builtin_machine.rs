@@ -14,6 +14,7 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
+use super::annotation_machine::AnnotationBuiltinMachine;
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
@@ -36,6 +37,7 @@ pub(crate) enum BuiltinTaskPoll {
 }
 
 pub(crate) enum BuiltinTaskMachine {
+    Annotation(Box<AnnotationBuiltinMachine>),
     Assertion(AssertionBuiltinMachine),
     Conditional(ConditionalBuiltinMachine),
     Comparison(ComparisonBuiltinMachine),
@@ -100,6 +102,7 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternDictTryTake
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
+                | Builtin::Anno
         )
     }
 
@@ -111,6 +114,7 @@ impl BuiltinTaskMachine {
             "a builtin source must contain one saturated call"
         );
         match builtin {
+            Builtin::Anno => Self::Annotation(Box::new(AnnotationBuiltinMachine::new(arguments))),
             Builtin::AssertUnit => Self::Assertion(AssertionBuiltinMachine::new(arguments)),
             Builtin::IfResult | Builtin::MatchResult => {
                 Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
@@ -164,6 +168,9 @@ impl BuiltinTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> BuiltinTaskPoll {
         match self {
+            Self::Annotation(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
             Self::Assertion(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }

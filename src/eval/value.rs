@@ -18,7 +18,7 @@ use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessMachinePoll};
 use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
-use super::builtins::{NetConstructionMachine, apply_builtin_in, is_undefined_value};
+use super::builtins::{NetConstructionMachine, apply_builtin_in};
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
 use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
@@ -1284,7 +1284,7 @@ pub(super) fn is_error_lazy_value(access: &RuntimeValueAccess<'_>, value: &Value
 }
 
 pub(super) fn is_undefined_dict_value(_access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
-    is_undefined_value(value)
+    matches!(value, Value::Dict(dict) if dict.is_empty())
 }
 
 /// Evaluator semantics for extracting the payload of a singleton tagged value.

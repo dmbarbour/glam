@@ -2374,6 +2374,7 @@ impl Value {
     }
 
     /// Returns the canonical carrier whose associated metadata is `{}`.
+    #[cfg(test)]
     pub(crate) fn initial_metadata_carrier(values: &CoreValueFactory) -> Self {
         values.initial_metadata()
     }

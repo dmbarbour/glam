@@ -67,6 +67,7 @@ pub(super) fn list_to_binary_bytes(
     })
 }
 
+#[cfg(test)]
 pub(super) fn list_to_binary_bytes_in(
     context: &EvaluatorStepContext<'_>,
     list: &List,

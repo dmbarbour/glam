@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
-
 #[cfg(test)]
 use crate::core::CoreValueFactory;
 use crate::core::{
@@ -25,6 +23,7 @@ use crate::{evaluation::OwnedEvalContext, list::ListItem};
 #[cfg(test)]
 mod access_inventory;
 mod access_machine;
+mod annotation_machine;
 mod application;
 mod builtin_machine;
 mod builtins;

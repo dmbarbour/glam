@@ -135,6 +135,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W3C.2-W3C.3 scoped projection and durable access/key/list source owner"
     ),
     context_entry!(
+        "src/eval/annotation_machine.rs",
+        [9, 3],
+        "W6E.1-W6E.4 durable annotation recognition, collection, metadata, and reflection owner"
+    ),
+    context_entry!(
         "src/eval/application.rs",
         [4, 3],
         "I3B.2 and I3D/I3E direct callers"
@@ -143,21 +148,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/builtins.rs",
         [1, 1],
         "I3D/I3E dispatcher and test compatibility"
-    ),
-    context_entry!(
-        "src/eval/builtins/annotation.rs",
-        [1, 0],
-        "I3B.1 scoped annotation dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/annotation/implementation.rs",
-        [15, 0],
-        "I3B.1 pure annotations; I3D.1/I3D.2 reflection and strategy seams"
-    ),
-    context_entry!(
-        "src/eval/builtins/assertion.rs",
-        [1, 0],
-        "I3B.1 scoped annotation assertion compatibility pending W6E.1"
     ),
     context_entry!(
         "src/eval/builtins/effect.rs",
@@ -544,8 +534,8 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         "strategy builtins must install durable lazy owners"
     );
     assert!(
-        dispatcher.contains("Builtin::Anno => annotation::apply(context, arguments)"),
-        "annotation dispatch must retain evaluator-step authority"
+        dispatcher.contains("Builtin::Anno => Ok(Value::Lazy("),
+        "annotation dispatch must install its durable lazy owner"
     );
     assert!(
         dispatcher.contains(
@@ -554,14 +544,15 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         "interaction-net dispatch must retain evaluator-step authority"
     );
 
-    let annotation =
-        fs::read_to_string(manifest.join("src/eval/builtins/annotation/implementation.rs"))
-            .expect("annotation implementation source should be readable");
+    let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))
+        .expect("annotation machine source should be readable");
     for annotation_boundary in [
-        "fn defer_reflection_annotation(\n    context: &EvaluatorStepContext<'_>,\n    effect: Value,\n    target: &Value,",
-        "fn defer_metadata_reflection(context: &EvaluatorStepContext<'_>, effect: Value)",
-        "builtin: Builtin::Seq",
-        "builtin: Builtin::Spark",
+        "pub(crate) struct AnnotationBuiltinMachine",
+        "AnnotationPhase::MetadataItems",
+        "LazyValue::from_reflection_gate_in",
+        "Value::reflection_task_result_in",
+        "RecognizedAnnotation::Seq(value)",
+        "RecognizedAnnotation::Spark(value)",
     ] {
         assert!(
             annotation.contains(annotation_boundary),

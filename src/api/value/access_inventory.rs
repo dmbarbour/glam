@@ -135,6 +135,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W3C.2-W3C.3 rooted source progress"
     ),
     entry!(
+        "src/eval/annotation_machine.rs",
+        0,
+        0,
+        12,
+        "durable annotation payload, collection, metadata, and result publication",
+        "W6E.1-W6E.4 resumable annotation ownership"
+    ),
+    entry!(
         "src/eval/comparison_machine.rs",
         0,
         0,
@@ -487,6 +495,12 @@ impl RootPublicationOccurrence {
                 | "src/eval/access_machine.rs::classify_key_value"
                 | "src/eval/access_machine.rs::select_dict_member"
                 | "src/eval/access_machine.rs::value_as_list_root"
+                | "src/eval/annotation_machine.rs::annotation_error_root"
+                | "src/eval/annotation_machine.rs::finish_metadata_update"
+                | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized"
+                | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll"
+                | "src/eval/annotation_machine.rs::recognize_annotation"
+                | "src/eval/annotation_machine.rs::root_builtin"
                 | "src/eval/comparison_machine.rs::classify_equality"
                 | "src/eval/comparison_machine.rs::classify_ordering"
                 | "src/eval/comparison_machine.rs::demand_tuple_payload"
@@ -767,6 +781,18 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/access_machine.rs::classify_key_value#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::value_as_list_root#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::annotation_error_root#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::finish_metadata_update#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#2|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#3|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#4|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#5|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#6|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#7|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::recognize_annotation#1|surface=access-publication|scope=production",
+    "src/eval/annotation_machine.rs::root_builtin#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_ordering#1|surface=access-publication|scope=production",
@@ -883,7 +909,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::exit_readiness_snapshot_root_survives_after_settlement_report_drop#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::exit_wait_does_not_publish_task_status_or_failure#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::forced_deadlock_settlement_preserves_exits_and_kills_other_participants#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",

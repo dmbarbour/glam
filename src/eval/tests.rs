@@ -410,6 +410,8 @@ fn claimed_evaluator_dispatches_pure_annotation_branches() {
         vec![annotation, target],
     )
     .expect("claimed array annotation should succeed");
+    let direct = eval_value(&context, &direct).expect("direct annotation should evaluate");
+    let claimed = eval_value(&context, &claimed).expect("claimed annotation should evaluate");
 
     assert_eq!(claimed, direct);
     assert_eq!(claimed, Value::List(List::from_values(vec![n(19), n(42)])));
@@ -5231,12 +5233,14 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         vec![annotation(), unit],
     )
     .expect("metadata annotation should accept demanded canonical unit");
+    let first = eval_value(&context, &first).expect("metadata initialization should evaluate");
     let second = apply_values(
         &context,
         Value::Builtin(Builtin::Anno),
         vec![annotation(), unit_value()],
     )
     .expect("metadata annotation should reuse its canonical carrier");
+    let second = eval_value(&context, &second).expect("metadata initialization should evaluate");
 
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
     assert_eq!(first, initial_metadata());
@@ -5274,12 +5278,14 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
         (Value::Dict(Dict::new_sync()), "Undefined"),
         (initial_metadata(), "Sealed"),
     ] {
-        let error = apply_values(
+        let result = apply_values(
             &context,
             Value::Builtin(Builtin::Anno),
             vec![annotation(), target],
         )
-        .expect_err("metadata initialization must require canonical unit");
+        .expect("annotation application should remain lazy");
+        let error = eval_value(&context, &result)
+            .expect_err("metadata initialization must require canonical unit");
         assert_eq!(
             error.to_string(),
             format!("unit expected, received {expected_kind}")
@@ -5291,13 +5297,15 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
 fn old_metadata_annotation_spellings_are_unrecognized() {
     let context = test_context();
     let old_initial = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
+    let old_initial = apply_values(
+        &context,
+        Value::Builtin(Builtin::Anno),
+        vec![old_initial, n(42)],
+    )
+    .expect("an unrecognized annotation should apply lazily");
     assert_eq!(
-        apply_values(
-            &context,
-            Value::Builtin(Builtin::Anno),
-            vec![old_initial, n(42)],
-        )
-        .expect("an unrecognized annotation should preserve its target"),
+        eval_value(&context, &old_initial)
+            .expect("an unrecognized annotation should preserve its target"),
         n(42),
         "the old initializer must not create a sealed carrier"
     );
@@ -5317,6 +5325,8 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
         vec![old_update, target.clone()],
     )
     .expect("an unrecognized annotation should preserve its target");
+    let result = eval_value(&context, &result)
+        .expect("the unrecognized annotation should evaluate to its target");
     assert_eq!(result, target);
     let Value::List(result) = result else {
         panic!("the preserved target must remain a list");
@@ -5357,6 +5367,7 @@ fn run_metadata_transform(
         Value::Builtin(Builtin::Anno),
         vec![annotation, Value::List(List::from_values(carriers))],
     )?;
+    let result = eval_value(context, &result)?;
     let Value::List(result) = result else {
         panic!("metadata update should return a list");
     };
@@ -5364,6 +5375,13 @@ fn run_metadata_transform(
 }
 
 fn metadata_reorder_function(indices: &[usize]) -> Value {
+    metadata_reorder_function_in(&crate::core::test_value_factory(), indices)
+}
+
+fn metadata_reorder_function_in(
+    values: &crate::core::CoreValueFactory,
+    indices: &[usize],
+) -> Value {
     let projections = indices
         .iter()
         .map(|index| {
@@ -5374,7 +5392,7 @@ fn metadata_reorder_function(indices: &[usize]) -> Value {
             ))
         })
         .collect::<Vec<_>>();
-    closed_function_value(1, TestExpr::List(Arc::from(projections)))
+    closed_function_value_in(values, 1, TestExpr::List(Arc::from(projections)))
 }
 
 fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, EvaluationHalt> {
@@ -5443,6 +5461,63 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
         vec![n(3), Value::Dict(Dict::new_sync())]
+    );
+}
+
+#[test]
+fn metadata_update_resumes_without_replaying_a_completed_carrier() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (second, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("metadata annotation carrier"))
+        .expect("the owner should allocate a promised carrier");
+    let first_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&first_demands);
+    let first = Value::semantic_thunk(observer.values(), "metadata carrier prefix", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::metadata_carrier(n(1)))
+    });
+    let annotation = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("meta_pure"),
+        metadata_reorder_function_in(observer.values(), &[0, 1]),
+    ));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Anno),
+        vec![
+            annotation,
+            Value::List(List::from_values(vec![
+                first,
+                Value::Promised(second.clone()),
+            ])),
+        ],
+    )
+    .expect("metadata annotation application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved carrier should suspend metadata extraction");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+
+    set_promise(&owner, &second, Value::metadata_carrier(n(2)))
+        .expect("the owner should resolve the promised carrier");
+    let Value::List(carriers) =
+        eval_value(&observer, &application).expect("metadata extraction should resume")
+    else {
+        panic!("metadata update should produce carrier outputs")
+    };
+    let carriers = list_to_value_items(&observer, &carriers).unwrap();
+    assert_eq!(
+        carriers
+            .iter()
+            .map(|carrier| evaluated_metadata(&observer, carrier))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        [n(1), n(2)]
+    );
+    assert_eq!(
+        first_demands.load(Ordering::SeqCst),
+        1,
+        "resumption must retain the completed metadata carrier"
     );
 }
 
@@ -5573,6 +5648,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         Value::Builtin(Builtin::Anno),
         vec![annotation, n(1)],
     )
+    .and_then(|value| eval_value(&context, &value))
     .expect_err("metadata update target must be a list");
     assert_eq!(
         error.to_string(),
@@ -5867,6 +5943,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         Value::Builtin(Builtin::Anno),
         vec![annotation, n(1)],
     )
+    .and_then(|value| eval_value(&invalid_context, &value))
     .expect_err("effectful metadata target must be a list");
     assert_eq!(
         error.to_string(),
@@ -5971,6 +6048,52 @@ fn list_annotations_rebalance_and_flatten_lists() {
     assert_eq!(
         list_to_value_items(&test_context(), &array).unwrap(),
         vec![n(72), n(105)]
+    );
+}
+
+#[test]
+fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (item, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("binary annotation item"))
+        .expect("the owner should allocate a promised byte");
+    let prefix_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&prefix_demands);
+    let prefix = Value::semantic_thunk(observer.values(), "binary annotation prefix", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(n(i64::from(b'a')))
+    });
+    let annotation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+        "binary",
+    )));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Anno),
+        vec![
+            annotation,
+            Value::List(List::from_values(vec![
+                prefix,
+                Value::Promised(item.clone()),
+            ])),
+        ],
+    )
+    .expect("binary annotation application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved byte should suspend binary extraction");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+
+    set_promise(&owner, &item, n(i64::from(b'b')))
+        .expect("the owner should resolve the promised byte");
+    assert_eq!(
+        eval_value(&observer, &application).expect("binary extraction should resume"),
+        Value::binary_from_text("ab")
+    );
+    assert_eq!(
+        prefix_demands.load(Ordering::SeqCst),
+        1,
+        "resumption must retain the completed prefix byte"
     );
 }
 

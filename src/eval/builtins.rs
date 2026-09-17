@@ -1,14 +1,11 @@
 //! Saturation and semantic-family dispatch for core builtins.
 
-mod annotation;
-mod assertion;
 mod effect;
 mod list_effect;
 mod net;
 mod object;
 
 use super::*;
-pub(super) use annotation::is_undefined_value;
 pub(super) use net::NetConstructionMachine;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
@@ -175,7 +172,15 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::Anno => annotation::apply(context, arguments),
+        Builtin::Anno => Ok(Value::Lazy(context.construct_lazy(move |access| {
+            LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin,
+                    arguments: Arc::from(arguments),
+                },
+            )
+        }))),
     }
 }
 

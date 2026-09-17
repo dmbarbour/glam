@@ -323,6 +323,18 @@ impl<V, T> List<V, T> {
         }
     }
 
+    /// Builds the strict values as a finger-tree leaf rather than the compact
+    /// one-slice array representation.
+    pub(crate) fn from_values_balanced(values: Vec<V>) -> Self {
+        if values.is_empty() {
+            Self::empty()
+        } else {
+            Self::from_finger(
+                FingerList::new().push_right(ListChunk::Values(SharedSlice::from_vec(values))),
+            )
+        }
+    }
+
     /// Borrows the one strict value leaf represented by this list.
     ///
     /// The canonical empty list also qualifies. Byte leaves, concatenations,
@@ -516,13 +528,6 @@ impl<V, T> List<V, T> {
     #[cfg(test)]
     pub fn balanced(&self) -> Self {
         Self::from_finger(self.to_finger())
-    }
-
-    pub fn try_balanced<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Self, E> {
-        Ok(Self::from_finger(self.to_finger_with(force_thunk)?))
     }
 
     #[cfg(test)]
@@ -1114,15 +1119,6 @@ impl<V, T> List<V, T> {
         finger
     }
 
-    fn to_finger_with<E>(
-        &self,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<FingerList<V>, E> {
-        let mut finger = FingerList::new();
-        self.push_chunks_into_with(&mut finger, force_thunk)?;
-        Ok(finger)
-    }
-
     #[cfg(test)]
     fn push_chunks_into(&self, finger: &mut FingerList<V>) {
         match self.0.as_ref() {
@@ -1142,31 +1138,6 @@ impl<V, T> List<V, T> {
                 panic!("finger-tree conversion requires all lazy list chunks to be forced")
             }
         }
-    }
-
-    fn push_chunks_into_with<E>(
-        &self,
-        finger: &mut FingerList<V>,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<(), E> {
-        match self.0.as_ref() {
-            ListNode::Empty => {}
-            ListNode::Bytes(bytes) => {
-                *finger = finger.push_right(ListChunk::Bytes(bytes.clone()));
-            }
-            ListNode::Values(values) => {
-                *finger = finger.push_right(ListChunk::Values(values.clone()));
-            }
-            ListNode::Concat(left, right) => {
-                left.push_chunks_into_with(finger, force_thunk)?;
-                right.push_chunks_into_with(finger, force_thunk)?;
-            }
-            ListNode::Finger(right) => *finger = finger.concat(right),
-            ListNode::Thunk(thunk) => {
-                force_thunk(thunk)?.push_chunks_into_with(finger, force_thunk)?;
-            }
-        }
-        Ok(())
     }
 
     #[cfg(test)]

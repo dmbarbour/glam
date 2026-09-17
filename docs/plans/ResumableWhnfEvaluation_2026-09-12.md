@@ -4368,10 +4368,7 @@ show its exact checkpoint delta before proceeding.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6E.1 — Annotation recognition** | 5 S, 2 F | Convert name/value/assertion parsing and diagnostics; keep unit/undefined recognition as regional leaves and contribute list traversal to W6A.0d closure. `-7`. |
-| **W6E.2 — Annotation collections** | 3 S | Convert array, deque, and binary extraction with resumable list traversal. `-3`. |
-| **W6E.3 — Pure metadata** | 3 S | Convert input collection, pure update application, and output selection while preserving sealed carriers. `-3`. |
-| **W6E.4 — Reflection annotations** | 5 S | Convert annotation dispatch plus `refl`/`meta_refl` deferral; reservation and reflection work begin outside access. `-5`. |
+| **W6E.1-W6E.4 — Complete (2026-09-17): Durable annotations** | 15 S, 3 F | Convert recognition, assertions, array/deque/binary traversal, pure and reflection metadata, diagnostic contexts, and reflection deferral as one durable owner. The annotation dispatcher and recognition could not be separated without losing recognition progress. `-18`, plus W6C.2's final `-1` assertion leaf. |
 | **W6E.5 — Effect dispatch and fixpoint** | 4 S | Convert effect API application, family dispatch, and fixpoint construction; move application into W6A.2 and the final key-conversion/lazy-list consumers, then execute W6A.0c/W6A.0d/W6A.4 closure. `-4`, followed by closure deltas `-3`, `-2`, and `-2`. |
 | **W6E.6 — Effect map** | 1 S, 2 F | Convert the suspendable map step and access-qualify continuation/result constructors. `-3`. |
 | **W6E.7 — List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
@@ -4384,6 +4381,24 @@ metadata updates, and abandoned-branch behavior. Force suspension during
 container extraction, metadata input and output traversal, effect-map
 continuation, and list-effect fix/flat-map. Run annotation, metadata, effect,
 list-effect, reflection-reservation, and backtracking suites in both GC modes.
+
+W6E.1-W6E.4 completion record, 2026-09-17: saturated annotations now install
+one durable owner because selecting the annotation and interpreting its branch
+are one resumable computation. The owner retains assertion payload/name/value
+progress, walks array/deque/binary and metadata input lists through the shared
+front machine, and gives each demanded item its own WHNF computation. Pure and
+reflection metadata updates retain sealed-carrier arity and lazy projection;
+reflection gates and metadata reflection tasks are only packaged beneath
+regional access and still activate outside it. Error-message and annotation
+selection failures retain their existing evaluator context frames, while a
+successful context annotation still leaves its context undemanded.
+Deterministic promised-byte and promised-carrier fixtures prove completed
+prefixes are not replayed. The obsolete annotation and assertion modules are
+removed, taking W6E.1-W6E.4 from eighteen declarations to zero and closing
+W6C.2's last assertion compatibility leaf. `AnnotationsAndEffects` falls from
+36 to 18 declarations and the complete D.2c manifest from 80 to 61. The root
+publication and durable-owner inventories explicitly account for the new
+annotation machine.
 
 #### W6F — Objects and interaction-net builtins
 

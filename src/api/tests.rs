@@ -63,6 +63,20 @@ fn public_value(values: &crate::core::CoreValueFactory, value: CoreValue) -> Val
     Values::from_core_factory(values.clone()).wrap(value)
 }
 
+fn public_semantic_thunk(
+    values: &crate::core::CoreValueFactory,
+    label: &'static str,
+    thunk: impl Fn(&crate::evaluation::EvaluatorStepContext<'_>) -> Result<CoreValue, EvaluationHalt>
+    + Send
+    + Sync
+    + 'static,
+) -> Value {
+    Values::from_core_factory(values.clone()).with_access(|scoped| {
+        let lazy = LazyValue::semantic_thunk_in(scoped.runtime_access(), label, thunk);
+        scoped.wrap(CoreValue::Lazy(lazy))
+    })
+}
+
 fn value_i64(assembler: &Assembler, value: &Value) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
@@ -422,17 +436,10 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let demanded_by_thunk = demanded.clone();
     let core_values = assembler.core_values();
     let unit = core_values.unit();
-    let lazy = public_value(
-        &core_values,
-        CoreValue::Lazy(LazyValue::semantic_thunk(
-            &core_values,
-            "no-demand facade fixture",
-            move |_| {
-                demanded_by_thunk.store(true, Ordering::SeqCst);
-                Ok(unit.clone())
-            },
-        )),
-    );
+    let lazy = public_semantic_thunk(&core_values, "no-demand facade fixture", move |_| {
+        demanded_by_thunk.store(true, Ordering::SeqCst);
+        Ok(unit.clone())
+    });
     let (promise, resolver) = assembler.promise("no-demand facade fixture");
 
     let access = values
@@ -594,14 +601,9 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let element = public_value(
-        &core_values,
-        CoreValue::Lazy(LazyValue::semantic_thunk(
-            &core_values,
-            "lazy list element",
-            |_| Ok(CoreValue::Number(Number::integer(7))),
-        )),
-    );
+    let element = public_semantic_thunk(&core_values, "lazy list element", |_| {
+        Ok(CoreValue::Number(Number::integer(7)))
+    });
     let list = values
         .list([element.clone(), values.integer(8)])
         .expect("strict list spine should construct");
@@ -1057,14 +1059,9 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let lazy_element = public_value(
-        &core_values,
-        CoreValue::Lazy(LazyValue::semantic_thunk(
-            &core_values,
-            "unevaluated array member",
-            |_| Ok(CoreValue::Number(Number::integer(1))),
-        )),
-    );
+    let lazy_element = public_semantic_thunk(&core_values, "unevaluated array member", |_| {
+        Ok(CoreValue::Number(Number::integer(1)))
+    });
     let array = EvaluatedValue::from_whnf(
         &values,
         values

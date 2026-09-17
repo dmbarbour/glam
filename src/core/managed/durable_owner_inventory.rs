@@ -328,6 +328,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.2"
     ),
     closed_durable!(
+        "src/eval/annotation_machine.rs",
+        "annotation recognition, collection, metadata, and reflection progress",
+        "canonical RuntimeValueRoot target, payload, list-item, metadata, and child-WHNF fields",
+        "yielded or dependency-blocked annotation evaluation",
+        "saturated annotation admission and bounded child-result publication",
+        "annotation completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6E.1-W6E.4"
+    ),
+    closed_durable!(
         "src/eval/access_machine.rs",
         "computed-access source, recursive dictionary-key, and lazy-list progress",
         "canonical RuntimeValueRoot fields plus root-free path/key cursors and accumulators",
@@ -870,10 +881,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 215;
+const DECLARATION_BASELINE_COUNT: usize = 217;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([143, 193, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 16_902_331_701_430_108_710;
+    DeclarationSignals::new([133, 213, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_649_997_663_912_281_192;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -998,6 +1009,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         )
     {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
+    } else if declaration.starts_with("src/eval/annotation_machine.rs::") {
+        "annotation recognition, collection, metadata, and reflection progress"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration.starts_with("src/eval/list_machine.rs::") {
