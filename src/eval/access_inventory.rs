@@ -191,8 +191,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/object_builtin_machine.rs",
-        [10, 2],
-        "W6F.2/W6F.4a durable object specification, diagnostic normalization, local-name, and instance ownership"
+        [11, 2],
+        "W6F.2/W6F.4a-W6F.4b durable object specification, diagnostic normalization, local-name, instance, and definition-adapter ownership"
     ),
     context_entry!(
         "src/eval/object_composition_machine.rs",

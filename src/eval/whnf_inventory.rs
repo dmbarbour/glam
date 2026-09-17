@@ -655,10 +655,12 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6F.3b replaces recursive override demand and traversal with a rooted
 // persistent-dictionary frame stack; only its pending prior-value demand is
 // evaluator work.
-const EXPECTED_OCCURRENCES: usize = 210;
-const EXPECTED_FINGERPRINT: u64 = 7_838_942_823_785_902_898;
+// W6F.4b moves default and dictionary definition operands into the durable
+// object owner while preserving base-before-dictionary demand.
+const EXPECTED_OCCURRENCES: usize = 207;
+const EXPECTED_FINGERPRINT: u64 = 6_750_004_192_317_772_669;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 13),
+    (Signal::EvalValue, 10),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
     (Signal::ApplyValue, 4),
@@ -676,7 +678,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 118),
+    (WorkShape::DemandThenInspect, 115),
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 13),
     (WorkShape::Application, 11),

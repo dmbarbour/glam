@@ -373,7 +373,11 @@ fn claimed_evaluator_dispatches_object_conditional_and_list_effect_construction(
         vec![dictionary.clone(), unit_value()],
     )
     .expect("claimed default object definitions should preserve their base");
-    assert_eq!(object_defs, dictionary);
+    assert_eq!(
+        eval_value(&context, &object_defs)
+            .expect("claimed default object definitions should evaluate"),
+        dictionary
+    );
 
     let selected = apply_values_in(
         &evaluator,
@@ -666,6 +670,52 @@ fn object_instance_from_parts_builds_through_the_resumable_builtin_owner() {
         spec.get(&*keys::NAME),
         Some(&Value::binary_from_text("root"))
     );
+}
+
+#[test]
+fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (dict, _dict_task, _dict_owner) = owner
+        .task_owned_promise(Arc::from("dictionary object definitions"))
+        .expect("the owner should allocate a promised definitions dictionary");
+    let base_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&base_demands);
+    let base = Value::semantic_thunk(
+        observer.values(),
+        "instrumented object definitions base",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(
+                Dict::new_sync().insert(Key::binary_from_text("base"), n(19)),
+            ))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectDictDefs),
+        vec![Value::Promised(dict.clone()), base, unit_value()],
+    )
+    .expect("dictionary object definitions should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("dictionary definitions should wait after demanding their base");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    set_promise(
+        &owner,
+        &dict,
+        Value::Dict(Dict::new_sync().insert(Key::binary_from_text("dict"), n(42))),
+    )
+    .expect("the definitions dictionary should accept its assignment");
+
+    let Value::Dict(result) =
+        eval_value(&observer, &application).expect("dictionary definitions should resume")
+    else {
+        panic!("dictionary definitions should produce a dictionary")
+    };
+    assert_eq!(result.get(&Key::binary_from_text("base")), Some(&n(19)));
+    assert_eq!(result.get(&Key::binary_from_text("dict")), Some(&n(42)));
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
 }
 
 #[test]

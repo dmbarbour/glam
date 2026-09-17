@@ -202,9 +202,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/object_builtin_machine.rs",
         0,
         0,
-        5,
-        "durable object specification, diagnostic normalization, local-name, and instance result publication",
-        "W6F.2/W6F.4a resumable object builtin ownership"
+        6,
+        "durable object specification, diagnostic normalization, local-name, instance, and definition-adapter result publication",
+        "W6F.2/W6F.4a-W6F.4b resumable object builtin ownership"
     ),
     entry!(
         "src/eval/object_composition_machine.rs",
@@ -556,6 +556,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll"
                 | "src/eval/list_transform_machine.rs::impl ListMapMachine::poll"
                 | "src/eval/object_builtin_machine.rs::optional_spec_member"
+                | "src/eval/object_builtin_machine.rs::finish_dict_defs"
                 | "src/eval/object_builtin_machine.rs::root_local_name"
                 | "src/eval/object_builtin_machine.rs::root_object_from_dict"
                 | "src/eval/object_builtin_machine.rs::root_object_instance"
@@ -884,6 +885,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::impl ListMapMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
+    "src/eval/object_builtin_machine.rs::finish_dict_defs#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::optional_spec_member#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::root_local_name#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::root_object_from_dict#1|surface=access-publication|scope=production",

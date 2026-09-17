@@ -12,6 +12,7 @@ use crate::evaluation::{
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::builtin_machine::BuiltinTaskPoll;
+use super::dict_machine::merge_dicts_in;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::whnf::WhnfComputation;
 
@@ -61,6 +62,17 @@ enum ObjectPhase {
         deps: RuntimeValueRoot,
         defs: RuntimeValueRoot,
     },
+    DefaultDefs {
+        base: WhnfComputation,
+    },
+    DictDefsBase {
+        dict: RuntimeValueRoot,
+        base: WhnfComputation,
+    },
+    DictDefsDict {
+        base: RuntimeValueRoot,
+        dict: WhnfComputation,
+    },
 }
 
 impl ObjectBuiltinMachine {
@@ -72,6 +84,8 @@ impl ObjectBuiltinMachine {
                 | Builtin::DiagnosticObject
                 | Builtin::ObjectInstance
                 | Builtin::ObjectInstanceFromParts
+                | Builtin::ObjectDefaultDefs
+                | Builtin::ObjectDictDefs
         )
     }
 
@@ -113,6 +127,23 @@ impl ObjectBuiltinMachine {
                     .try_into()
                     .expect("parts-based object instance retains three fields");
                 ObjectPhase::InstanceFromParts { name, deps, defs }
+            }
+            Builtin::ObjectDefaultDefs => {
+                let [base, _self_value]: [RuntimeValueRoot; 2] = arguments
+                    .try_into()
+                    .expect("default object definitions retain two operands");
+                ObjectPhase::DefaultDefs {
+                    base: WhnfComputation::from_root(base),
+                }
+            }
+            Builtin::ObjectDictDefs => {
+                let [dict, base, _self_value]: [RuntimeValueRoot; 3] = arguments
+                    .try_into()
+                    .expect("dictionary object definitions retain three operands");
+                ObjectPhase::DictDefsBase {
+                    dict,
+                    base: WhnfComputation::from_root(base),
+                }
             }
             _ => unreachable!("object builtin machine received another builtin"),
         };
@@ -267,7 +298,53 @@ impl ObjectBuiltinMachine {
             ObjectPhase::InstanceFromParts { name, deps, defs } => BuiltinTaskPoll::Ready(
                 root_object_instance(context, ObjectInstanceInput::Parts { name, deps, defs }),
             ),
+            ObjectPhase::DefaultDefs { base } => {
+                match poll_whnf(base, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => BuiltinTaskPoll::Ready(value),
+                    DemandResult::Pending(poll) => poll,
+                }
+            }
+            ObjectPhase::DictDefsBase { dict, base } => {
+                let base = match poll_whnf(base, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                self.phase = ObjectPhase::DictDefsDict {
+                    base,
+                    dict: WhnfComputation::from_root(dict.clone()),
+                };
+                BuiltinTaskPoll::Yielded
+            }
+            ObjectPhase::DictDefsDict { base, dict } => {
+                let dict = match poll_whnf(dict, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                finish_dict_defs(context, base, &dict)
+            }
         }
+    }
+}
+
+fn finish_dict_defs(
+    context: &EvaluatorStepContext<'_>,
+    base: &RuntimeValueRoot,
+    dict: &RuntimeValueRoot,
+) -> BuiltinTaskPoll {
+    let result = context.with_value_access(|access| {
+        let Value::Dict(base) = access.clone_root(base) else {
+            return Err("dictionary union requires dictionary values");
+        };
+        let Value::Dict(dict) = access.clone_root(dict) else {
+            return Err("dictionary union requires dictionary values");
+        };
+        Ok(access
+            .values()
+            .root_runtime_value(Value::Dict(merge_dicts_in(access.values(), &base, &dict))))
+    });
+    match result {
+        Ok(value) => BuiltinTaskPoll::Ready(value),
+        Err(message) => BuiltinTaskPoll::Failed(root_message(context, message)),
     }
 }
 

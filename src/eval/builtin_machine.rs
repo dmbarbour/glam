@@ -117,6 +117,8 @@ impl BuiltinTaskMachine {
                 | Builtin::ObjectOverrideDefs
                 | Builtin::ObjectInstance
                 | Builtin::ObjectInstanceFromParts
+                | Builtin::ObjectDefaultDefs
+                | Builtin::ObjectDictDefs
                 | Builtin::EffectApply
                 | Builtin::EffectCall
                 | Builtin::EffectMap
