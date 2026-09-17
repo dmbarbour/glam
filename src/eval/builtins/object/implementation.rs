@@ -1,5 +1,5 @@
 use super::super::super::*;
-use crate::core::FixpointComputation;
+use crate::core::{FixpointComputation, RuntimeValueAccess};
 
 pub(super) fn eval_object_instance_builtin(
     context: &EvaluatorStepContext<'_>,
@@ -20,11 +20,17 @@ pub(super) fn eval_object_instance_from_parts_builtin(
     deps: Value,
     defs: Value,
 ) -> Result<Value, EvaluationHalt> {
-    let spec = object_spec_from_parts(name, deps, defs);
+    let spec = context
+        .with_value_access(|access| object_spec_from_parts(access.values(), name, deps, defs));
     eval_object_instance_builtin(context, &Value::Dict(spec))
 }
 
-fn object_spec_from_parts(name: Value, deps: Value, defs: Value) -> crate::core::Dict {
+fn object_spec_from_parts(
+    _access: &RuntimeValueAccess<'_>,
+    name: Value,
+    deps: Value,
+    defs: Value,
+) -> crate::core::Dict {
     crate::core::Dict::new_sync()
         .insert((*keys::NAME).clone(), name)
         .insert((*keys::DEPS).clone(), deps)
@@ -57,15 +63,16 @@ pub(super) fn eval_object_with_defs_builtin(
         return super::super::apply_builtin_in(context, Builtin::Fixpoint, Vec::new(), extension);
     }
     let spec = object_spec_dict(context, &spec)?;
-    let name = object_spec_name_value(&spec);
+    let name = context.with_value_access(|access| object_spec_name_value(access.values(), &spec));
     let deps = spec
         .get(&*keys::DEPS)
         .cloned()
         .unwrap_or_else(|| Value::List(List::empty()));
-    let prior_defs = spec
-        .get(&*keys::DEFS)
-        .cloned()
-        .unwrap_or_else(default_object_defs_value);
+    let prior_defs = context.with_value_access(|access| {
+        spec.get(&*keys::DEFS)
+            .cloned()
+            .unwrap_or_else(|| default_object_defs_value(access.values()))
+    });
     let composed_defs = Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::ObjectComposedDefs,
         arguments: Arc::from([prior_defs, extension_defs]),
@@ -173,7 +180,8 @@ pub(super) fn eval_object_from_dict_builtin(
         }
     }
 
-    eval_object_instance_builtin(context, &dict_object_spec(dict))
+    let spec = context.with_value_access(|access| dict_object_spec(access.values(), dict));
+    eval_object_instance_builtin(context, &spec)
 }
 
 /// Normalizes one diagnostic emission to an object as ordinary semantic work.
@@ -213,7 +221,8 @@ pub(super) fn eval_object_local_name_builtin(
 ) -> Result<Value, EvaluationHalt> {
     let host_spec = eval_object_spec_builtin(context, host)?;
     let host_spec = object_spec_dict(context, &host_spec)?;
-    let host_name = object_spec_name_value(&host_spec);
+    let host_name =
+        context.with_value_access(|access| object_spec_name_value(access.values(), &host_spec));
 
     let mut name_parts = vec![eval_value_in(context, &host_name)?];
     name_parts.extend(match eval_value_in(context, parts)? {
@@ -241,7 +250,7 @@ fn object_spec_dict(
     Ok(spec_dict)
 }
 
-fn dict_object_spec(dict: crate::core::Dict) -> Value {
+fn dict_object_spec(_access: &RuntimeValueAccess<'_>, dict: crate::core::Dict) -> Value {
     let defs = Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::ObjectDictDefs,
         arguments: Arc::from([Value::Dict(dict)]),
@@ -256,12 +265,12 @@ fn dict_object_spec(dict: crate::core::Dict) -> Value {
     Value::Dict(spec)
 }
 
-fn object_spec_name_value(spec: &crate::core::Dict) -> Value {
+fn object_spec_name_value(_access: &RuntimeValueAccess<'_>, spec: &crate::core::Dict) -> Value {
     spec.get(&*keys::NAME)
         .cloned()
         .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()))
 }
 
-fn default_object_defs_value() -> Value {
+fn default_object_defs_value(_access: &RuntimeValueAccess<'_>) -> Value {
     Value::Builtin(Builtin::ObjectDefaultDefs)
 }

@@ -4484,7 +4484,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6F.1 — Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
+| **W6F.1 — Complete (2026-09-17): Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
 | **W6F.2 — Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`. |
 | **W6F.3 — Object composition** | 4 S | Convert composed/override/extended definitions and dictionary override. `-4`. |
 | **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
@@ -4498,6 +4498,13 @@ reimplemented. Force suspension during spec dependency/member demand and
 during net-construction replay. Run object/C3/override and direct-style net
 construction/function-binding suites in both GC modes, retaining identity,
 port-family, malformed-request, and callback re-entry fixtures.
+
+W6F.1 completion record, 2026-09-17: default definitions, dictionary-object
+specification construction, parts-based specification construction, and name
+projection now require the caller's regional value access. Callers open only
+bounded callback-free regions around these leaves; object demand and fixpoint
+construction remain outside them. The D.2c manifest falls from forty-one to
+thirty-seven declarations and `Objects` from seventeen to thirteen.
 
 #### W6G — Residual resumable-machine overhead
 
