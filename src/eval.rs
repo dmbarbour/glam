@@ -32,6 +32,7 @@ mod comparison_machine;
 mod dict_machine;
 mod list_effect_machine;
 mod list_machine;
+mod list_observation_machine;
 mod net;
 mod object_machine;
 mod operator;

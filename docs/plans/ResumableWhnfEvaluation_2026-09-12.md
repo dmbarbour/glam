@@ -4122,7 +4122,7 @@ declaration group reaches zero.
 |---|---:|---|
 | **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
 | **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
-| **W6D.3 — List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
+| **W6D.3 — Complete (2026-09-17): List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
 | **W6D.4 — List transformation and dispatch** | 5 S | Convert concat/map/text-lines/list-like conversion and the family dispatcher, contributing list demand to W6A.0d and map application to W6A.2 closure. `-5`. |
 | **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal, moving the pattern path consumers toward W6A.4 closure. `-10`. |
 | **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
@@ -4143,6 +4143,20 @@ dictionary modules are removed, `ObjectDictDefs` shares the regional merge
 leaf pending W6F, and the exact raw-value manifest removes all twelve W6D.1
 and W6D.2 violations: `CollectionsAndPatterns` falls from 42 to 30 and D.2c
 from 124 to 112.
+
+W6D.3 completion record, 2026-09-17: saturated at, head, length, split,
+split-from-end, tail, and slice calls now install one durable list-observation
+owner. Index operands are demanded before subjects as before, and logical-list
+work advances through reusable front/back machines without holding regional
+access across a lazy or promised chunk. Front observations retain completed
+prefix progress; split-from-end walks from the back so a known strict suffix
+does not force an unrelated lazy prefix. Result lists and split dictionaries
+are rooted inside their producing access region. Deterministic promise
+fixtures force suspension on both traversal directions, verify that a
+completed prefix is not replayed, and retain the established lazy-prefix
+contract. The obsolete synchronous observation helpers are removed;
+`CollectionsAndPatterns` falls from 30 to 23 and the D.2c manifest from 112
+to 105.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary

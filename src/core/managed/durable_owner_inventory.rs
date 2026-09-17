@@ -340,14 +340,25 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/eval/list_machine.rs",
-        "logical-list-front source progress",
-        "canonical RuntimeValueRoot current-list and deferred-suffix fields plus one child WhnfComputation",
+        "logical-list front/back source progress",
+        "canonical RuntimeValueRoot current-list and deferred-prefix/suffix fields plus one child WhnfComputation",
         "yielded or dependency-blocked list traversal",
         "source-list publication and deferred-chunk discovery",
-        "front completion, failure, cancellation, or enclosing source retirement",
+        "front/back completion, failure, cancellation, or enclosing source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W3B.2b"
+        "W3B.2b/W6D.3"
+    ),
+    closed_durable!(
+        "src/eval/list_observation_machine.rs",
+        "list observation operands, traversal progress, and completed prefixes or suffixes",
+        "canonical RuntimeValueRoot operands/items plus child WHNF and list front/back machines",
+        "yielded or dependency-blocked list observation",
+        "saturated builtin admission and bounded traversal-result publication",
+        "observation completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6D.3"
     ),
     closed_durable!(
         "src/eval/object_machine.rs",
@@ -837,10 +848,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 205;
+const DECLARATION_BASELINE_COUNT: usize = 212;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([144, 172, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_129_265_494_371_552_586;
+    DeclarationSignals::new([144, 187, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_828_504_202_048_622_288;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -968,7 +979,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration.starts_with("src/eval/list_machine.rs::") {
-        "logical-list-front source progress"
+        "logical-list front/back source progress"
+    } else if declaration.starts_with("src/eval/list_observation_machine.rs::") {
+        "list observation operands, traversal progress, and completed prefixes or suffixes"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {

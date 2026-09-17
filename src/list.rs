@@ -30,6 +30,18 @@ pub(crate) enum ListFrontStep<U, D, V, T> {
     Deferred { deferred: D, suffix: List<V, T> },
 }
 
+/// One non-forcing decomposition of the logical back of a persistent list.
+///
+/// This is the right-to-left counterpart of [`ListFrontStep`]. A deferred
+/// chunk retains the strict prefix which precedes it, allowing callers to
+/// force only holes which must be crossed from the back.
+pub(crate) enum ListBackStep<U, D, V, T> {
+    Empty,
+    Item { init: List<V, T>, item: ListItem<U> },
+    Deferred { prefix: List<V, T>, deferred: D },
+}
+
+#[cfg(test)]
 enum ListLookup<V> {
     Found(ListItem<V>),
     Exhausted(usize),
@@ -365,6 +377,7 @@ impl<V, T> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     pub fn try_len<E>(
         &self,
         force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
@@ -400,22 +413,7 @@ impl<V, T> List<V, T> {
         self.slice_checked(start, end)
     }
 
-    pub fn try_slice<E>(
-        &self,
-        start: usize,
-        end: usize,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<Self>, E> {
-        assert!(start <= end);
-        let Some((_, tail)) = self.try_split_at(start, force_thunk)? else {
-            return Ok(None);
-        };
-        let Some((middle, _)) = tail.try_split_at(end - start, force_thunk)? else {
-            return Ok(None);
-        };
-        Ok(Some(middle))
-    }
-
+    #[cfg(test)]
     pub fn try_split_at<E>(
         &self,
         index: usize,
@@ -427,14 +425,6 @@ impl<V, T> List<V, T> {
     #[cfg(test)]
     pub fn split_from_end(&self, count: usize) -> Option<(Self, Self)> {
         self.split_from_end_checked(count)
-    }
-
-    pub fn try_split_from_end<E>(
-        &self,
-        count: usize,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        self.split_from_end_checked_with(count, force_thunk)
     }
 
     /// Returns the zero-based item at `index`, forcing only lazy chunks which
@@ -458,6 +448,7 @@ impl<V, T> List<V, T> {
     /// The callback is invoked only after any required thunk has been forced,
     /// so a caller may keep forcing and managed-value access in disjoint
     /// scopes.
+    #[cfg(test)]
     pub fn try_at_by<E, U>(
         &self,
         index: usize,
@@ -673,6 +664,84 @@ impl<V, T> List<V, T> {
         }
     }
 
+    /// Performs one non-forcing decomposition from the logical back.
+    ///
+    /// The returned prefix shares the original persistent structure. A
+    /// deferred chunk is reported with the exact strict prefix which must be
+    /// reattached after that chunk is evaluated.
+    pub(crate) fn pop_back_step_by<U, D>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+        duplicate_deferred: &mut impl FnMut(&T) -> D,
+    ) -> ListBackStep<U, D, V, T> {
+        let mut worklist = vec![self.clone()];
+        while let Some(current) = worklist.pop() {
+            match current.0.as_ref() {
+                ListNode::Empty => {}
+                ListNode::Bytes(bytes) => {
+                    let index = bytes.len() - 1;
+                    return ListBackStep::Item {
+                        init: Self::join_logical_prefix(
+                            Self::from_bytes(bytes.slice(0..index)),
+                            &worklist,
+                        ),
+                        item: ListItem::Byte(bytes[index]),
+                    };
+                }
+                ListNode::Values(values) => {
+                    let index = values.len() - 1;
+                    let last = values
+                        .as_slice()
+                        .last()
+                        .expect("a canonical value leaf is never empty");
+                    return ListBackStep::Item {
+                        init: Self::join_logical_prefix(
+                            Self::from_value_slice(values.slice(0, index)),
+                            &worklist,
+                        ),
+                        item: ListItem::Value(duplicate_value(last)),
+                    };
+                }
+                ListNode::Concat(left, right) => {
+                    worklist.push(left.clone());
+                    worklist.push(right.clone());
+                }
+                ListNode::Finger(finger) => {
+                    let (chunk, mut rest) = finger
+                        .view_right()
+                        .expect("a canonical finger-tree node is never empty");
+                    let index = chunk.len() - 1;
+                    let item = chunk
+                        .item_at_by(index, duplicate_value)
+                        .expect("finger trees do not store empty chunks");
+                    if let Some(chunk_init) = chunk.slice(0, index) {
+                        rest = rest.push_right(chunk_init);
+                    }
+                    return ListBackStep::Item {
+                        init: Self::join_logical_prefix(Self::from_finger(rest), &worklist),
+                        item,
+                    };
+                }
+                ListNode::Thunk(thunk) => {
+                    return ListBackStep::Deferred {
+                        prefix: Self::join_logical_prefix(Self::empty(), &worklist),
+                        deferred: duplicate_deferred(thunk),
+                    };
+                }
+            }
+        }
+
+        ListBackStep::Empty
+    }
+
+    fn join_logical_prefix(mut suffix: Self, pending: &[Self]) -> Self {
+        for prefix in pending.iter().rev() {
+            suffix = Self::concat(prefix.clone(), suffix);
+        }
+        suffix
+    }
+
+    #[cfg(test)]
     fn lookup_at_with_by<E, U>(
         &self,
         index: usize,
@@ -1036,6 +1105,7 @@ impl<V, T> List<V, T> {
         }
     }
 
+    #[cfg(test)]
     fn split_at_checked_with<E>(
         &self,
         index: usize,
@@ -1117,46 +1187,6 @@ impl<V, T> List<V, T> {
         }
     }
 
-    fn split_from_end_checked_with<E>(
-        &self,
-        count: usize,
-        force_thunk: &mut impl FnMut(&T) -> Result<Self, E>,
-    ) -> Result<Option<(Self, Self)>, E> {
-        match self.0.as_ref() {
-            ListNode::Concat(left, right) => {
-                let right_len = right.try_len(force_thunk)?;
-                if count < right_len {
-                    let Some((right_left, right_right)) =
-                        right.split_from_end_checked_with(count, force_thunk)?
-                    else {
-                        unreachable!("right branch should split below its length");
-                    };
-                    Ok(Some((Self::concat(left.clone(), right_left), right_right)))
-                } else if count == right_len {
-                    Ok(Some((left.clone(), right.clone())))
-                } else {
-                    let Some((left_left, left_right)) =
-                        left.split_from_end_checked_with(count - right_len, force_thunk)?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((left_left, Self::concat(left_right, right.clone()))))
-                }
-            }
-            ListNode::Thunk(thunk) => {
-                force_thunk(thunk)?.split_from_end_checked_with(count, force_thunk)
-            }
-            _ => {
-                let len = self.try_len(force_thunk)?;
-                if count > len {
-                    Ok(None)
-                } else {
-                    self.split_at_checked_with(len - count, force_thunk)
-                }
-            }
-        }
-    }
-
     #[cfg(test)]
     fn slice_finger(finger: &FingerList<V>, start: usize, end: usize) -> Self {
         let (_, tail) = Self::split_finger_at(finger, start);
@@ -1164,6 +1194,7 @@ impl<V, T> List<V, T> {
         Self::from_finger(middle)
     }
 
+    #[cfg(test)]
     fn split_finger_at(finger: &FingerList<V>, index: usize) -> (FingerList<V>, FingerList<V>) {
         let len = finger.measure().0;
         assert!(index <= len);

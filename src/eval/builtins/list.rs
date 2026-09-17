@@ -14,10 +14,6 @@ pub(super) fn apply(
             let [left, right] = super::exact(arguments, "append")?;
             context.with_value_access(|access| append_values(access.values(), left, right))
         }
-        Builtin::Slice => {
-            let [start, end, value] = super::exact(arguments, "slice")?;
-            eval_slice_builtin(context, &start, &end, &value)
-        }
         Builtin::Map => {
             let [function, value] = super::exact(arguments, "map")?;
             eval_map_builtin(context, &function, &value)
@@ -25,30 +21,6 @@ pub(super) fn apply(
         Builtin::ListConcat => {
             let [value] = super::exact(arguments, "list concat")?;
             eval_list_concat_builtin(context, &value)
-        }
-        Builtin::ListLen => {
-            let [value] = super::exact(arguments, "list len")?;
-            eval_list_len_builtin(context, &value)
-        }
-        Builtin::ListSplit => {
-            let [index, value] = super::exact(arguments, "list split")?;
-            eval_list_split_builtin(context, &index, &value)
-        }
-        Builtin::ListSplitEnd => {
-            let [count, value] = super::exact(arguments, "list split_end")?;
-            eval_list_split_end_builtin(context, &count, &value)
-        }
-        Builtin::ListAt => {
-            let [index, value] = super::exact(arguments, "list at")?;
-            eval_list_at_builtin(context, &index, &value)
-        }
-        Builtin::ListHead => {
-            let [value] = super::exact(arguments, "list head")?;
-            eval_list_head_builtin(context, &value)
-        }
-        Builtin::ListTail => {
-            let [value] = super::exact(arguments, "list tail")?;
-            eval_list_tail_builtin(context, &value)
         }
         Builtin::TextLines => {
             let [value] = super::exact(arguments, "text lines")?;

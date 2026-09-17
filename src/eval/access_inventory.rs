@@ -176,8 +176,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list/implementation.rs",
-        [10, 0],
-        "I3B.1 scoped list operations"
+        [3, 0],
+        "I3B.1 remaining scoped list transformations"
     ),
     context_entry!(
         "src/eval/builtins/list_effect.rs",
@@ -231,8 +231,13 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_machine.rs",
-        [2, 1],
-        "W3B.2b shared resumable logical-list-front owner"
+        [4, 2],
+        "W3B.2b/W6D.3 shared resumable logical-list front and back owners"
+    ),
+    context_entry!(
+        "src/eval/list_observation_machine.rs",
+        [13, 3],
+        "W6D.3 durable list-observation owner with scoped result publication"
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",

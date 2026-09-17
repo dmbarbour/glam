@@ -17,6 +17,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
+use super::list_observation_machine::ListObservationMachine;
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
@@ -34,6 +35,7 @@ pub(crate) enum BuiltinTaskMachine {
     Conditional(ConditionalBuiltinMachine),
     Comparison(ComparisonBuiltinMachine),
     Dictionary(DictBuiltinMachine),
+    ListObservation(Box<ListObservationMachine>),
     Numeric(NumericBuiltinMachine),
     Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
@@ -65,6 +67,13 @@ impl BuiltinTaskMachine {
                 | Builtin::DictUnion
                 | Builtin::DictUpdate
                 | Builtin::MergeDuplicate
+                | Builtin::Slice
+                | Builtin::ListLen
+                | Builtin::ListSplit
+                | Builtin::ListSplitEnd
+                | Builtin::ListAt
+                | Builtin::ListHead
+                | Builtin::ListTail
         )
     }
 
@@ -92,6 +101,9 @@ impl BuiltinTaskMachine {
             | Builtin::DictUpdate
             | Builtin::MergeDuplicate => {
                 Self::Dictionary(DictBuiltinMachine::new(builtin, arguments))
+            }
+            builtin if ListObservationMachine::supports(builtin) => {
+                Self::ListObservation(Box::new(ListObservationMachine::new(builtin, arguments)))
             }
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
@@ -125,6 +137,9 @@ impl BuiltinTaskMachine {
                 }
             }
             Self::Dictionary(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::ListObservation(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Numeric(machine) => {

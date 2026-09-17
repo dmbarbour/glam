@@ -3989,6 +3989,91 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
 }
 
 #[test]
+fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("list-at deferred tail"))
+        .expect("the owner should allocate a promised list tail");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted_attempts = attempts.clone();
+    let prefix = LazyValue::semantic_thunk(
+        observer.values(),
+        "counted list-at prefix",
+        move |_context| {
+            counted_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::List(List::from_values(vec![n(41)])))
+        },
+    );
+    let list = Value::List(List::concat(
+        List::from_thunk(prefix.into()),
+        List::from_thunk(tail.clone().into()),
+    ));
+    let application = apply_values(&observer, Value::Builtin(Builtin::ListAt), vec![n(1), list])
+        .expect("list-at application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved tail should suspend list-at");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
+        .expect("the owner should resolve the list tail");
+    assert_eq!(
+        eval_value(&observer, &application).expect("list-at should resume"),
+        n(42)
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "resumption must retain the completed prefix chunk"
+    );
+}
+
+#[test]
+fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("split-end deferred tail"))
+        .expect("the owner should allocate a promised list tail");
+    let lazy_prefix = LazyValue::error(
+        observer.values(),
+        "split-end forced an unrelated lazy prefix",
+    );
+    let list = Value::List(List::concat(
+        List::from_thunk(lazy_prefix.into()),
+        List::from_thunk(tail.clone().into()),
+    ));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ListSplitEnd),
+        vec![n(1), list],
+    )
+    .expect("split-end application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved tail should suspend split-end");
+    assert!(blocked.blocked_on().is_some());
+    set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
+        .expect("the owner should resolve the list tail");
+
+    let Value::Dict(split) = eval_value(&observer, &application)
+        .expect("split-end should resume without observing its prefix")
+    else {
+        panic!("split-end should produce a dictionary")
+    };
+    let Value::List(suffix) = split
+        .get(&Key::atom_from_text("right"))
+        .expect("split-end should retain its suffix")
+    else {
+        panic!("split-end suffix should be a list")
+    };
+    assert_eq!(
+        list_output_bytes(&observer, suffix).expect("strict suffix should render"),
+        [42]
+    );
+}
+
+#[test]
 fn dictionary_unions_defer_ambiguous_keys_until_observed() {
     let key = Key::atom_from_text("greeting");
     let expr = dict_union_expr(
