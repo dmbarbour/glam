@@ -417,14 +417,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/eval/object_builtin_machine.rs",
-        "object specification, diagnostic normalization, local-name, instance-construction, and definition-adapter progress",
-        "canonical RuntimeValueRoot object/spec/name/parts/definition/base fields plus child WHNF and list-front machines",
+        "object specification, diagnostic normalization, local-name, instance-construction, definition-adapter, and plain-dictionary conversion progress",
+        "canonical RuntimeValueRoot object/spec/name/parts/definition/base/dictionary fields plus child WHNF and list-front machines",
         "yielded or dependency-blocked object builtin evaluation",
         "saturated builtin admission and bounded specification or local-name publication",
         "builtin completion, failure, cancellation, or builtin-source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W6F.2/W6F.4a-W6F.4b"
+        "W6F.2/W6F.4a-W6F.4c"
     ),
     closed_durable!(
         "src/eval/object_composition_machine.rs",
@@ -916,8 +916,8 @@ fn is_production_source(relative: &Path) -> bool {
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 const DECLARATION_BASELINE_COUNT: usize = 227;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([132, 272, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_863_743_436_471_744_080;
+    DeclarationSignals::new([132, 273, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_271_365_846_357_421_791;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1057,7 +1057,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/pattern_machine.rs::") {
         "compiler-pattern path, dictionary, and collection progress"
     } else if declaration.starts_with("src/eval/object_builtin_machine.rs::") {
-        "object specification, diagnostic normalization, local-name, instance-construction, and definition-adapter progress"
+        "object specification, diagnostic normalization, local-name, instance-construction, definition-adapter, and plain-dictionary conversion progress"
     } else if declaration.starts_with("src/eval/object_composition_machine.rs::") {
         "ordinary object extension, composed-definition, and recursive override progress"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {

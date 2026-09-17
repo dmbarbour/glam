@@ -4,8 +4,9 @@
 //! recursive evaluator call or Rust recursion survives a returned poll.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::core::{Builtin, Dict, EvaluationHalt, Key, LazyId, Value, keys};
+use crate::core::{Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, Value, keys};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
 };
@@ -195,9 +196,7 @@ impl ObjectLinearizationMachine {
                     WhnfOwnerPoll::Ready(spec) => {
                         let name = match spec_name_root(context, &spec) {
                             Ok(name) => name,
-                            Err(error) => {
-                                return LinearizationPoll::Failed(root_halt(context, error));
-                            }
+                            Err(failure) => return LinearizationPoll::Failed(failure),
                         };
                         self.top_state(LinearizationState::ConvertName {
                             spec,
@@ -241,11 +240,14 @@ impl ObjectLinearizationMachine {
                         name,
                         anonymous_id,
                     };
-                    let deps = match spec_member_root(context, &spec, &keys::DEPS, || {
-                        Value::List(crate::core::List::empty())
-                    }) {
+                    let deps = match spec_member_root(
+                        context,
+                        &spec,
+                        &keys::DEPS,
+                        SpecMemberDefault::Dependencies,
+                    ) {
                         Ok(deps) => deps,
-                        Err(error) => return LinearizationPoll::Failed(root_halt(context, error)),
+                        Err(failure) => return LinearizationPoll::Failed(failure),
                     };
                     self.top_state(LinearizationState::DemandDeps {
                         entry,
@@ -546,11 +548,14 @@ impl ObjectMixMachine {
             let Some(spec) = self.specs.get(self.next) else {
                 return ObjectFixpointPoll::Ready(self.base.clone());
             };
-            let defs = match spec_member_root(context, spec, &keys::DEFS, || {
-                Value::Builtin(Builtin::ObjectDefaultDefs)
-            }) {
+            let defs = match spec_member_root(
+                context,
+                spec,
+                &keys::DEFS,
+                SpecMemberDefault::Definitions,
+            ) {
                 Ok(defs) => defs,
-                Err(error) => return ObjectFixpointPoll::Failed(root_halt(context, error)),
+                Err(failure) => return ObjectFixpointPoll::Failed(failure),
             };
             self.next += 1;
             self.pending_defs.push(defs);
@@ -607,27 +612,37 @@ fn application_in(
 fn spec_name_root(
     context: &EvaluatorStepContext<'_>,
     spec: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, EvaluationHalt> {
-    spec_member_root(context, spec, &keys::NAME, || Value::Dict(Dict::new_sync()))
+) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
+    spec_member_root(context, spec, &keys::NAME, SpecMemberDefault::Name)
+}
+
+enum SpecMemberDefault {
+    Name,
+    Dependencies,
+    Definitions,
 }
 
 fn spec_member_root(
     context: &EvaluatorStepContext<'_>,
     spec: &RuntimeValueRoot,
     key: &Key,
-    default: impl FnOnce() -> Value,
-) -> Result<RuntimeValueRoot, EvaluationHalt> {
+    default: SpecMemberDefault,
+) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
     context.with_value_access(|access| {
         let Value::Dict(spec) = access.clone_root(spec) else {
-            return Err(EvaluationHalt::new(
+            return Err(context.root_failure(Arc::new(EvaluationFailure::message(
                 "object instance builtin requires a specification dictionary",
-            ));
+            ))));
         };
-        Ok(access.values().root_runtime_value(
-            spec.get(key)
-                .map(|value| access.values().duplicate_value(value))
-                .unwrap_or_else(default),
-        ))
+        let value = spec
+            .get(key)
+            .map(|value| access.values().duplicate_value(value))
+            .unwrap_or_else(|| match default {
+                SpecMemberDefault::Name => Value::Dict(Dict::new_sync()),
+                SpecMemberDefault::Dependencies => Value::List(crate::core::List::empty()),
+                SpecMemberDefault::Definitions => Value::Builtin(Builtin::ObjectDefaultDefs),
+            });
+        Ok(access.values().root_runtime_value(value))
     })
 }
 

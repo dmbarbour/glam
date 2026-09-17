@@ -4490,7 +4490,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.3b — Complete (2026-09-17): Recursive object override** | 2 S | Convert overriding definitions and recursive dictionary override through a rooted persistent-dictionary frame stack. `-2`. |
 | **W6F.4a — Complete (2026-09-17): Object instance construction** | 2 S | Move specification and parts-based instance construction into the durable object builtin owner without demanding specification fields. `-2`. |
 | **W6F.4b — Complete (2026-09-17): Object definition adapters** | Preparatory | Convert default/dictionary definitions with explicit ordered demand; the shared synchronous dispatcher remains until its final `object_from_dict` branch moves. No standalone declaration delta. |
-| **W6F.4c — Plain-dictionary conversion, dispatch, and spec projection** | 3 S | Convert `object_from_dict`, retire the synchronous object family dispatcher, and access-qualify the object-fixpoint specification-member projection. `-3`. |
+| **W6F.4c — Complete (2026-09-17): Plain-dictionary conversion, dispatch, and spec projection** | 3 S | Convert `object_from_dict`, retire the synchronous object family dispatcher, and access-qualify the object-fixpoint specification-member projection. `-3`. |
 | **W6F.4d — Application compatibility closure** | 5 S closure | Move the reflection application bridge onto its own child `WhnfComputation`, inline the regional function-construction leaf, migrate tests to production application demand, and delete the five synchronous application helpers. Then close W6A.0c's dictionary-application pair. `-5`, followed by `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
@@ -4579,6 +4579,21 @@ demand is not replayed. This preparatory checkpoint removes no separately
 inventoried declaration; the exact publication, access, durable-owner, and
 WHNF inventories record the migrated inline dispatcher work. The synchronous
 family dispatcher remains solely for `object_from_dict` and retires in W6F.4c.
+
+W6F.4c completion record, 2026-09-17: plain-dictionary conversion now uses
+the durable object builtin owner. It demands the input dictionary first,
+retains that completed root while an optional `spec` reaches WHNF, and accepts
+only a missing or semantically undefined specification before constructing the
+ordinary object fixpoint. A forced promised-specification fixture proves that
+resumption neither replays the input dictionary nor loses its payload. The
+former error text for non-dictionaries and already-object dictionaries remains
+unchanged. The synchronous object dispatcher and its implementation module are
+removed. Object-fixpoint member projection now accepts a closed default-policy
+enum, publishes either a value root or a failure root, and no longer exposes a
+raw `Value` callback in its signature. The complete D.2c manifest falls from
+twenty-five to twenty-two declarations and its `Objects` family from three to
+zero. Exact root-publication, durable-owner, access, raw-value, and WHNF
+inventories account for the new phases and the retired synchronous demands.
 
 #### W6G — Residual resumable-machine overhead
 

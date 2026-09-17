@@ -719,6 +719,54 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
 }
 
 #[test]
+fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (spec, _spec_task, _spec_owner) = owner
+        .task_owned_promise(Arc::from("plain-dictionary specification"))
+        .expect("the owner should allocate a promised specification");
+    let dictionary_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&dictionary_demands);
+    let promised_spec = spec.clone();
+    let dictionary = Value::semantic_thunk(
+        observer.values(),
+        "instrumented plain dictionary",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(
+                Dict::new_sync()
+                    .insert(
+                        (*keys::SPEC).clone(),
+                        Value::Promised(promised_spec.clone()),
+                    )
+                    .insert(Key::binary_from_text("answer"), n(42)),
+            ))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectFromDict),
+        vec![dictionary],
+    )
+    .expect("plain-dictionary conversion should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the promised specification should suspend plain-dictionary conversion");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
+        .expect("the specification should accept its undefined assignment");
+
+    let Value::Dict(object) =
+        eval_value(&observer, &application).expect("plain-dictionary conversion should resume")
+    else {
+        panic!("plain-dictionary conversion should produce an object dictionary")
+    };
+    assert_eq!(object.get(&Key::binary_from_text("answer")), Some(&n(42)));
+    assert!(matches!(object.get(&*keys::SPEC), Some(Value::Dict(_))));
+    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn claimed_evaluator_dispatches_pure_annotation_branches() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

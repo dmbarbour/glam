@@ -73,6 +73,13 @@ enum ObjectPhase {
         base: RuntimeValueRoot,
         dict: WhnfComputation,
     },
+    FromDictValue {
+        value: WhnfComputation,
+    },
+    FromDictSpec {
+        value: RuntimeValueRoot,
+        spec: WhnfComputation,
+    },
 }
 
 impl ObjectBuiltinMachine {
@@ -86,6 +93,7 @@ impl ObjectBuiltinMachine {
                 | Builtin::ObjectInstanceFromParts
                 | Builtin::ObjectDefaultDefs
                 | Builtin::ObjectDictDefs
+                | Builtin::ObjectFromDict
         )
     }
 
@@ -143,6 +151,14 @@ impl ObjectBuiltinMachine {
                 ObjectPhase::DictDefsBase {
                     dict,
                     base: WhnfComputation::from_root(base),
+                }
+            }
+            Builtin::ObjectFromDict => {
+                let [value]: [RuntimeValueRoot; 1] = arguments
+                    .try_into()
+                    .expect("object-from-dictionary retains one operand");
+                ObjectPhase::FromDictValue {
+                    value: WhnfComputation::from_root(value),
                 }
             }
             _ => unreachable!("object builtin machine received another builtin"),
@@ -322,6 +338,42 @@ impl ObjectBuiltinMachine {
                 };
                 finish_dict_defs(context, base, &dict)
             }
+            ObjectPhase::FromDictValue { value } => {
+                let value = match poll_whnf(value, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                let spec = match optional_spec_member(
+                    context,
+                    &value,
+                    "object_from_dict requires a dictionary value",
+                ) {
+                    Ok(spec) => spec,
+                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                };
+                let Some(spec) = spec else {
+                    return BuiltinTaskPoll::Ready(root_instance_from_plain_dict(context, &value));
+                };
+                self.phase = ObjectPhase::FromDictSpec {
+                    value,
+                    spec: WhnfComputation::from_root(spec),
+                };
+                BuiltinTaskPoll::Yielded
+            }
+            ObjectPhase::FromDictSpec { value, spec } => {
+                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
+                    DemandResult::Ready(value) => value,
+                    DemandResult::Pending(poll) => return poll,
+                };
+                if is_undefined(context, &spec) {
+                    BuiltinTaskPoll::Ready(root_instance_from_plain_dict(context, value))
+                } else {
+                    BuiltinTaskPoll::Failed(root_message(
+                        context,
+                        "object_from_dict requires a plain dictionary, not an object",
+                    ))
+                }
+            }
         }
     }
 }
@@ -371,6 +423,33 @@ fn root_object_instance(
                     .insert((*keys::DEFS).clone(), access.clone_root(defs)),
             ),
         };
+        let object = LazyValue::computed_fixpoint_in(
+            access.values(),
+            "object self",
+            FixpointComputation::ObjectInstance(spec),
+        );
+        access.values().root_runtime_value(Value::Lazy(object))
+    })
+}
+
+fn root_instance_from_plain_dict(
+    context: &EvaluatorStepContext<'_>,
+    value: &RuntimeValueRoot,
+) -> RuntimeValueRoot {
+    context.with_value_access(|access| {
+        let Value::Dict(dict) = access.clone_root(value) else {
+            unreachable!("plain-dictionary conversion retains a validated dictionary")
+        };
+        let defs = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::ObjectDictDefs,
+            arguments: Arc::from([Value::Dict(dict)]),
+        });
+        let spec = Value::Dict(
+            Dict::new_sync()
+                .insert((*keys::NAME).clone(), Value::Dict(Dict::new_sync()))
+                .insert((*keys::DEPS).clone(), Value::List(List::empty()))
+                .insert((*keys::DEFS).clone(), defs),
+        );
         let object = LazyValue::computed_fixpoint_in(
             access.values(),
             "object self",

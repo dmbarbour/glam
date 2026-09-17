@@ -180,19 +180,9 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6D.1-W6D.2 durable dictionary operands with access-qualified merge and update leaves"
     ),
     context_entry!(
-        "src/eval/builtins/object.rs",
-        [1, 0],
-        "I3B.1 scoped object dispatch"
-    ),
-    context_entry!(
-        "src/eval/builtins/object/implementation.rs",
-        [1, 0],
-        "I3B.1 remaining scoped object builtins; W3B.2b pollable source construction"
-    ),
-    context_entry!(
         "src/eval/object_builtin_machine.rs",
-        [11, 2],
-        "W6F.2/W6F.4a-W6F.4b durable object specification, diagnostic normalization, local-name, instance, and definition-adapter ownership"
+        [12, 2],
+        "W6F.2/W6F.4a-W6F.4c durable object specification, diagnostic normalization, local-name, instance, definition-adapter, and plain-dictionary conversion ownership"
     ),
     context_entry!(
         "src/eval/object_composition_machine.rs",

@@ -1,7 +1,6 @@
 //! Saturation and semantic-family dispatch for core builtins.
 
 mod net;
-mod object;
 
 use super::sequence::append_values;
 use super::*;
@@ -203,7 +202,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectInstance
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectDefaultDefs
-        | Builtin::ObjectDictDefs => Ok(Value::Lazy(context.construct_lazy(move |access| {
+        | Builtin::ObjectDictDefs
+        | Builtin::ObjectFromDict => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,
                 BuiltinCall {
@@ -212,7 +212,6 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::ObjectFromDict => object::apply(context, builtin, arguments),
         Builtin::Fixpoint
         | Builtin::EffectApply
         | Builtin::EffectCall
