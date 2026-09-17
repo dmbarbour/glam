@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::value::{evaluation_context_frame_in, force_list_thunk_in};
 use super::*;
 use crate::core::RuntimeValueAccess;
 

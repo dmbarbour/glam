@@ -155,19 +155,14 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6E.5-W6E.6 durable effect dispatch, map traversal, and fixpoint construction"
     ),
     context_entry!(
-        "src/eval/builtins/net.rs",
-        [2, 0],
-        "I3D.4 scoped interaction-net builtin dispatch"
-    ),
-    context_entry!(
         "src/eval/builtins/net/construction.rs",
         [3, 0],
         "I3D.4 scoped result decoding; isolated-search construction takes owned durable context"
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [7, 7],
-        "W6C.2-W6C.6 durable conditional, assertion, numeric, provenance, and strategy owners with callback-free regional result projection"
+        [8, 8],
+        "W6C.2-W6C.6 and W6F.5 durable scalar, strategy, and net-builtin owners with callback-free regional result projection"
     ),
     context_entry!(
         "src/eval/comparison_machine.rs",
@@ -523,10 +518,8 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         "annotation dispatch must install its durable lazy owner"
     );
     assert!(
-        dispatcher.contains(
-            "Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments)"
-        ),
-        "interaction-net dispatch must retain evaluator-step authority"
+        dispatcher.contains("Builtin::InteractionNet | Builtin::NetArity => {\n            Ok(Value::Lazy(context.construct_lazy("),
+        "interaction-net dispatch must install its durable lazy owner"
     );
 
     let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))

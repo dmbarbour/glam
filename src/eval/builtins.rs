@@ -226,7 +226,17 @@ pub(super) fn apply_builtin_in(
                 },
             )
         }))),
-        Builtin::InteractionNet | Builtin::NetArity => net::apply(context, builtin, arguments),
+        Builtin::InteractionNet | Builtin::NetArity => {
+            Ok(Value::Lazy(context.construct_lazy(move |access| {
+                LazyValue::from_builtin_in(
+                    access,
+                    BuiltinCall {
+                        builtin,
+                        arguments: Arc::from(arguments),
+                    },
+                )
+            })))
+        }
         Builtin::InspectOrigin => Ok(Value::Lazy(context.construct_lazy(move |access| {
             LazyValue::from_builtin_in(
                 access,

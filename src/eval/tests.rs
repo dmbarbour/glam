@@ -1006,6 +1006,75 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
 }
 
 #[test]
+fn net_arity_does_not_demand_the_net_before_its_arity() {
+    let context = test_context();
+    let arity = PromisedValue::new(context.values(), "net arity");
+    let net_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&net_demands);
+    let net = closed_net(|builder| builder.data(n(42)));
+    let net = Value::semantic_thunk(context.values(), "instrumented net", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Net(net.clone()))
+    });
+    let application = apply_values(
+        &context,
+        Value::Builtin(Builtin::NetArity),
+        vec![Value::Promised(arity.clone()), net],
+    )
+    .expect("net-arity application should build");
+
+    let blocked = eval_value(&context, &application)
+        .expect_err("net arity must suspend at its first operand");
+    assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+    assert_eq!(net_demands.load(Ordering::SeqCst), 0);
+
+    set_promise(&context, &arity, n(0)).expect("the arity should accept its assignment");
+    assert_eq!(
+        eval_value(&context, &application).expect("net arity should resume in source order"),
+        n(42)
+    );
+    assert_eq!(net_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
+    let context = test_context();
+    let arity_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&arity_demands);
+    let arity = Value::semantic_thunk(context.values(), "instrumented arity", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(n(1))
+    });
+    let net = PromisedValue::new(context.values(), "net-arity net");
+    let application = apply_values(
+        &context,
+        Value::Builtin(Builtin::NetArity),
+        vec![arity, Value::Promised(net.clone())],
+    )
+    .expect("net-arity application should build");
+
+    let blocked = eval_value(&context, &application)
+        .expect_err("net arity must suspend at its unresolved net");
+    assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+    assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
+
+    let identity = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        builder.wire(argument, result);
+        application
+    });
+    set_promise(&context, &net, Value::Net(identity))
+        .expect("the net operand should accept its assignment");
+    let Value::Function(function) =
+        eval_value(&context, &application).expect("net arity should resume at its net")
+    else {
+        panic!("positive net arity should produce a function")
+    };
+    assert_eq!(function.remaining_arity(), 1);
+    assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn observing_a_function_net_preserves_the_net_value() {
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
@@ -1605,6 +1674,27 @@ fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
         lazy.cached(session.values()).is_none(),
         "a retryable construction dependency must not become a cached failure"
     );
+}
+
+#[test]
+fn interaction_net_builtin_dispatches_into_the_construction_owner() {
+    let session = test_context();
+    let (promise, _owner_task, _owner) = session
+        .task_owned_promise(Arc::from("pending builtin net effect"))
+        .expect("the construction effect should have an owner");
+    let observer = session
+        .with_new_task()
+        .expect("the construction effect should have an observer");
+    let construction = apply_values(
+        &observer,
+        Value::Builtin(Builtin::InteractionNet),
+        vec![Value::Promised(promise)],
+    )
+    .expect("interaction-net application should build");
+
+    let blocked = eval_value(&observer, &construction)
+        .expect_err("builtin dispatch should reach the net-construction demand");
+    assert!(blocked.blocked_on().is_some());
 }
 
 #[test]

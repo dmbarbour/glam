@@ -94,6 +94,7 @@ use sequence::append_sequence;
 #[cfg(test)]
 use test_support::*;
 pub(crate) use value::promise_root_wait;
+#[cfg(test)]
 use value::*;
 
 fn with_direct_evaluator<R>(

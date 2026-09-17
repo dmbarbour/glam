@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::core::{Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, Value};
+use crate::core::{
+    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyValue, Value,
+};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
     poll_whnf_computation,
@@ -28,7 +30,7 @@ use super::pattern_machine::{
     PatternPathMachine,
 };
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
-use super::value::number_from_evaluated;
+use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
 use super::whnf::WhnfComputation;
 
 pub(crate) enum BuiltinTaskPoll {
@@ -50,6 +52,7 @@ pub(crate) enum BuiltinTaskMachine {
     ListMap(ListMapMachine),
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
+    Net(NetBuiltinMachine),
     Numeric(NumericBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
@@ -98,6 +101,8 @@ impl BuiltinTaskMachine {
                 | Builtin::Map
                 | Builtin::ListConcat
                 | Builtin::TextLines
+                | Builtin::InteractionNet
+                | Builtin::NetArity
                 | Builtin::PatternIsList
                 | Builtin::PatternListTryUncons
                 | Builtin::PatternListTryUnsnoc
@@ -164,6 +169,9 @@ impl BuiltinTaskMachine {
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
             Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
+            Builtin::InteractionNet | Builtin::NetArity => {
+                Self::Net(NetBuiltinMachine::new(builtin, arguments))
+            }
             builtin if ObjectBuiltinMachine::supports(builtin) => {
                 Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
             }
@@ -237,6 +245,7 @@ impl BuiltinTaskMachine {
             Self::TextLines(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
+            Self::Net(machine) => machine.poll(poll_context, context, durable_context, step_budget),
             Self::Numeric(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
@@ -266,6 +275,129 @@ impl BuiltinTaskMachine {
             }
             Self::Strategy(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
+            }
+        }
+    }
+}
+
+enum NetBuiltinPhase {
+    Construction {
+        effect: RuntimeValueRoot,
+    },
+    Arity {
+        arity: WhnfComputation,
+        net: RuntimeValueRoot,
+    },
+    Net {
+        arity: usize,
+        net: WhnfComputation,
+    },
+}
+
+pub(crate) struct NetBuiltinMachine {
+    phase: NetBuiltinPhase,
+}
+
+impl NetBuiltinMachine {
+    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+        let phase = match builtin {
+            Builtin::InteractionNet => {
+                let [effect]: [RuntimeValueRoot; 1] = arguments
+                    .try_into()
+                    .expect("interaction-net construction retains one effect");
+                NetBuiltinPhase::Construction { effect }
+            }
+            Builtin::NetArity => {
+                let [arity, net]: [RuntimeValueRoot; 2] = arguments
+                    .try_into()
+                    .expect("net arity retains its arity and net operands");
+                NetBuiltinPhase::Arity {
+                    arity: WhnfComputation::from_root(arity),
+                    net,
+                }
+            }
+            _ => unreachable!("net builtin machine received another builtin"),
+        };
+        Self { phase }
+    }
+
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        match &mut self.phase {
+            NetBuiltinPhase::Construction { effect } => {
+                let result = context.with_value_access(|access| {
+                    let effect = access.clone_root(effect);
+                    access.values().root_runtime_value(Value::Lazy(
+                        LazyValue::from_net_construction_in(access.values(), effect),
+                    ))
+                });
+                BuiltinTaskPoll::Ready(result)
+            }
+            NetBuiltinPhase::Arity { arity, net } => {
+                let arity = match poll_demand(arity, poll_context, durable_context, step_budget) {
+                    DemandPoll::Ready(value) => value,
+                    DemandPoll::Failed(failure) => {
+                        let failure = context.with_value_access(|access| {
+                            EvaluationHalt::failure(failure.into_failure()).with_context(
+                                access.values(),
+                                evaluation_context_frame_in(access.values(), "net_arity"),
+                            )
+                        });
+                        return BuiltinTaskPoll::Failed(
+                            context.root_failure(failure.into_permanent_failure()),
+                        );
+                    }
+                    other => return other.into_builtin_poll(),
+                };
+                let arity = context.with_value_access(|access| {
+                    index_from_evaluated(
+                        EvaluatedValue::try_from(access.clone_root(&arity))
+                            .expect("net arity demand must reach WHNF"),
+                        "net_arity",
+                    )
+                });
+                let arity = match arity {
+                    Ok(arity) => arity,
+                    Err(failure) => {
+                        return BuiltinTaskPoll::Failed(
+                            context.root_failure(failure.into_permanent_failure()),
+                        );
+                    }
+                };
+                self.phase = NetBuiltinPhase::Net {
+                    arity,
+                    net: WhnfComputation::from_root(net.clone()),
+                };
+                BuiltinTaskPoll::Yielded
+            }
+            NetBuiltinPhase::Net { arity, net } => {
+                let net = match poll_demand(net, poll_context, durable_context, step_budget) {
+                    DemandPoll::Ready(value) => value,
+                    other => return other.into_builtin_poll(),
+                };
+                let result = context.with_value_access(|access| {
+                    let Value::Net(net) = access.clone_root(&net) else {
+                        return None;
+                    };
+                    let value = if *arity == 0 {
+                        Value::Lazy(LazyValue::from_net_computation_in(access.values(), net))
+                    } else {
+                        Value::Function(FunctionValue::new(net, *arity))
+                    };
+                    Some(access.values().root_runtime_value(value))
+                });
+                match result {
+                    Some(result) => BuiltinTaskPoll::Ready(result),
+                    None => permanent_failure(
+                        context,
+                        "net_arity builtin requires an interaction-net value",
+                    ),
+                }
             }
         }
     }

@@ -4495,7 +4495,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4d.2 — Complete (2026-09-17): Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
 | **W6F.4d.3 — Complete (2026-09-17): Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
 | **W6F.4d.4 — Complete (2026-09-17): Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
-| **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
+| **W6F.5 — Complete (2026-09-17): Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
 
@@ -4656,6 +4656,23 @@ W6A.0c checkpoint reaches zero. The complete raw-value inventory falls from
 from 193 to 189 occurrences. Focused tag-recognition tests pass ordinarily and
 under `aggressive-gc-verification`, with exact inventories updated to the
 durable owner.
+
+W6F.5 completion record, 2026-09-17: `interaction_net` and `net_arity` now
+enter the ordinary durable saturated-builtin owner instead of evaluating in
+the synchronous dispatcher. Interaction-net dispatch publishes the existing
+net-construction lazy source without interpreting its effect; W6F.6 retains
+exclusive ownership of that callback-driven lifecycle. Net arity preserves
+its former source order and diagnostic boundary: it demands and validates the
+arity with `eval:{op:'net_arity}` context, retains the completed index while
+the net reaches WHNF, and adds no such context to a failure from the net
+operand. Forced promise fixtures prove the net is not demanded before the
+arity and that suspension at the net does not replay the completed arity.
+The two synchronous net-dispatch declarations are removed, so `NetBuiltins`
+falls from eight to six declarations, the complete raw-value inventory from
+448 to 446 declarations and from 271 to 269 violations, and the WHNF census
+from 189 to 188 occurrences. Exact root-publication, durable-owner, access,
+raw-value, and WHNF inventories account for the new owner and bounded result
+publication; focused tests pass in ordinary and aggressive-GC modes.
 
 #### W6G — Residual resumable-machine overhead
 

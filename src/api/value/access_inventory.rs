@@ -143,6 +143,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6E.1-W6E.4 resumable annotation ownership"
     ),
     entry!(
+        "src/eval/builtin_machine.rs",
+        0,
+        0,
+        2,
+        "durable interaction-net construction and net-arity result publication",
+        "W6F.5 resumable net builtin ownership"
+    ),
+    entry!(
         "src/eval/comparison_machine.rs",
         0,
         0,
@@ -525,6 +533,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll"
                 | "src/eval/annotation_machine.rs::recognize_annotation"
                 | "src/eval/annotation_machine.rs::root_builtin"
+                | "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll"
                 | "src/eval/comparison_machine.rs::classify_equality"
                 | "src/eval/comparison_machine.rs::classify_ordering"
                 | "src/eval/comparison_machine.rs::demand_tuple_payload"
@@ -837,6 +846,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#7|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::recognize_annotation#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::root_builtin#1|surface=access-publication|scope=production",
+    "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#2|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_ordering#1|surface=access-publication|scope=production",
