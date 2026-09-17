@@ -4592,42 +4592,6 @@ fn non_callable_application_reports_semantic_value_kinds() {
 }
 
 #[test]
-fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
-    let payload = n(42);
-    let lazy_empty = Value::Lazy(LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "empty tag field",
-        |_| Ok(Value::Dict(Dict::new_sync())),
-    ));
-    let recursively_empty =
-        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("nested"), lazy_empty));
-    let tagged = Dict::new_sync()
-        .insert((*keys::TUPLE).clone(), payload.clone())
-        .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
-
-    assert_eq!(
-        tagged
-            .tagged_payload(&test_context(), &keys::TUPLE)
-            .unwrap(),
-        Some(payload)
-    );
-    assert_eq!(
-        tagged
-            .insert(Key::atom_from_text("defined"), n(1))
-            .tagged_payload(&test_context(), &keys::TUPLE)
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        Dict::new_sync()
-            .insert((*keys::TUPLE).clone(), recursively_empty)
-            .tagged_payload(&test_context(), &keys::TUPLE)
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn tuple_ordering_requires_a_singleton_tuple_tag() {
     let left = Value::Dict(
         Dict::new_sync()

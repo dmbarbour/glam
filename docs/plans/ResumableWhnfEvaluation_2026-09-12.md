@@ -3616,7 +3616,7 @@ delta is the required reduction in the parent D.2c violation count.
 |---|---:|---|
 | **W6A.0a — Complete (2026-09-15): Lazy-owner handoff** | 3 S | Make lazy completion/following consume evaluated or rooted handoffs; make cached-error inspection an access-qualified leaf. `-3`. |
 | **W6A.0b — Complete (2026-09-15): Numeric projection** | 2 S | Split resumable operand demand from immediate `Number`/index validation. `-2`. |
-| **W6A.0c — Cross-family key/tag/undefined closure (after W6F.4)** | 2 S | W6E.5 removed the final synchronous key converter; retain only the tagged-payload and semantic-undefined compatibility pair until synchronous dictionary application disappears. Remaining delta `-2`. |
+| **W6A.0c — Complete (2026-09-17): Cross-family key/tag/undefined closure** | 2 S | W6E.5 removed the final synchronous key converter; W6F.4d.4 moved the remaining semantic coverage onto the durable tagged-payload owner and retired the compatibility pair. `-2`. |
 | **W6A.0d — Complete (2026-09-17): Cross-family lazy-list closure (after W6F.2)** | 2 S | W6E.6 removed effect-map's final direct thunk-forcing use; W6F.2 moved object local-name parts to `ListFrontMachine`, so the production thunk-forcing and list-to-value compatibility pair is now retired. `-2`. |
 | **W8 value compatibility** | 6 S, 1 D | Retain exactly `eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`, `await_deferred_task`, `deferred_wait_result`, and `produce_lazy_source_in` until their W6 callers disappear; W6 delta `0`, W8 delta `-7`. |
 | **W6A.1a — Complete (2026-09-15): Application-local leaves** | 2 F | Access-qualify effect-function extension and non-callable diagnostics without introducing suspension. `-2`. |
@@ -4494,7 +4494,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4d.1 — Complete (2026-09-17): Reflection application bridge** | Preparatory | Move initial effect, continuation, and fused-continuation application onto child `WhnfComputation` state owned by the non-cloned decode lane; preserve application/request diagnostic stages and forced no-replay coverage. |
 | **W6F.4d.2 — Complete (2026-09-17): Regional function construction** | 1 S | Inline the access-qualified function-capture construction leaf into the interaction-net operator and remove the synchronous helper. `-1`. |
 | **W6F.4d.3 — Complete (2026-09-17): Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
-| **W6F.4d.4 — Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
+| **W6F.4d.4 — Complete (2026-09-17): Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
@@ -4644,6 +4644,18 @@ from 204 to 193 occurrences and no longer contains `ApplyValue`, `ApplyValues`,
 or the compatibility `Application` work shape. Focused evaluator and reflection
 suites pass, as do exact inventories and representative application fixtures
 under `aggressive-gc-verification`.
+
+W6F.4d.4 completion record, 2026-09-17: singleton-tag semantics are now tested
+directly through `TaggedPayloadMachine`, including recursively undefined
+ignored fields, a defined extra field, an undefined payload, and the existing
+forced nested-promise resumption. The test-only `TaggedDictExt` facade and the
+recursive `tagged_payload_in`/`is_semantically_undefined_in` pair are removed,
+closing W6A.0c. The D.2c `ValueDemand` family falls from nine to seven and its
+W6A.0c checkpoint reaches zero. The complete raw-value inventory falls from
+450 to 448 declarations and from 273 to 271 violations; the WHNF census falls
+from 193 to 189 occurrences. Focused tag-recognition tests pass ordinarily and
+under `aggressive-gc-verification`, with exact inventories updated to the
+durable owner.
 
 #### W6G — Residual resumable-machine overhead
 

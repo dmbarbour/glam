@@ -206,6 +206,57 @@ mod tests {
         })
     }
 
+    fn recognize(context: &EvalContext, dict: &Dict, tag: &Key) -> Option<Value> {
+        let mut machine = context
+            .values()
+            .with_runtime_value_access(|access| TaggedPayloadMachine::new(&access, dict, tag));
+        loop {
+            match poll(&mut machine, context) {
+                TaggedPayloadPoll::Ready(payload) => {
+                    return payload.map(|payload| payload.clone_core_for_test());
+                }
+                TaggedPayloadPoll::Yielded => {}
+                TaggedPayloadPoll::Pending(_) => {
+                    panic!("strict tagged-payload recognition must not suspend")
+                }
+                TaggedPayloadPoll::Failed(error) => {
+                    panic!("closed tagged-payload recognition failed: {error}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tagged_payload_ignores_only_semantically_undefined_extra_entries() {
+        let context = context();
+        let tag = Key::atom_from_text("tuple");
+        let payload = Value::Number(42.into());
+        let recursively_empty = Value::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("nested"), Value::Dict(Dict::new_sync())),
+        );
+        let tagged = Dict::new_sync()
+            .insert(tag.clone(), payload.clone())
+            .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
+
+        assert_eq!(recognize(&context, &tagged, &tag), Some(payload));
+        assert_eq!(
+            recognize(
+                &context,
+                &tagged.insert(Key::atom_from_text("defined"), Value::Number(1.into())),
+                &tag,
+            ),
+            None
+        );
+        assert_eq!(
+            recognize(
+                &context,
+                &Dict::new_sync().insert(tag.clone(), recursively_empty),
+                &tag,
+            ),
+            None
+        );
+    }
+
     #[test]
     fn tagged_payload_resumes_nested_undefined_work_at_the_exact_member() {
         let context = context();
