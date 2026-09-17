@@ -37,6 +37,7 @@ mod list_transform_machine;
 mod net;
 mod object_machine;
 mod operator;
+mod pattern_machine;
 mod sequence;
 pub(crate) mod strategy_machine;
 mod tagged_machine;

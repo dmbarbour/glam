@@ -3502,6 +3502,49 @@ fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
 }
 
 #[test]
+fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (tail, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("pattern unsnoc tail"))
+        .expect("the owner should allocate a promised list tail");
+    let source = Value::List(List::concat(
+        List::from_thunk(
+            LazyValue::error(observer.values(), "pattern unsnoc forced its prefix").into(),
+        ),
+        List::from_thunk(tail.clone().into()),
+    ));
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::PatternListTryUnsnoc),
+        vec![source],
+    )
+    .expect("pattern-unsnoc application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved suffix should suspend pattern unsnoc");
+    assert!(blocked.blocked_on().is_some());
+    set_promise(&owner, &tail, Value::List(List::from_values(vec![n(9)])))
+        .expect("the owner should resolve the promised suffix");
+
+    let effect = eval_value(&observer, &application)
+        .expect("pattern unsnoc should resume without observing its prefix");
+    let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
+        .and_then(|value| eval_value(&observer, &value))
+        .expect("the resumed pattern effect should be handled");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+    let [parts]: [Value; 1] = list_to_value_items(&observer, &results)
+        .expect("the pattern result should be readable")
+        .try_into()
+        .expect("a successful match should have one result");
+    let Value::Dict(parts) = parts else {
+        panic!("unsnoc should return a parts dictionary")
+    };
+    assert_eq!(parts.get(&*keys::LAST), Some(&n(9)));
+}
+
+#[test]
 fn text_lines_preserves_empty_and_trailing_lines() {
     let lines = eval_closed_expr(&builtin1_expr(
         Builtin::TextLines,

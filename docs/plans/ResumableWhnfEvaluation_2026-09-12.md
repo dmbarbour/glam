@@ -4136,7 +4136,8 @@ declaration group reaches zero.
 | **W6D.4c — Complete (2026-09-17): Text lines** | 1 S | Convert binary/text extraction to durable source, list-front, and item demand without retaining access across suspension. `-1`. |
 | **W6D.4d — Complete (2026-09-17): Family dispatch** | 1 S | Inline the immediate append leaf after every suspendable list transformation owns a machine and remove the obsolete family module. `-1`. |
 | **W6D.5a — Pattern dictionaries and paths** | 10 S | Convert dictionary emptiness/take, literal/path comparison, path/key conversion, and undefined traversal, moving the pattern path consumers toward W6A.4 closure. `-10`. |
-| **W6D.5b — Pattern lists** | 4 S, 1 F | Convert list shape, empty, uncons, and unsnoc; access-qualify item construction and contribute lazy-list consumers to W6A.0d closure. `-5`. |
+| **W6D.5b.1 — Complete (2026-09-17): Pattern-list structure** | 4 S | Convert list shape, empty, uncons, and unsnoc to shared resumable front/back traversal. `-4`. |
+| **W6D.5b.2 — Pattern-list item leaf (with W6D.5a equality)** | 1 F | Retire the remaining context-free list-item conversion after binary/list literal equality moves to the pattern owner. `-1`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
 
 W6D.1-W6D.2 completion record, 2026-09-17: basic dictionary dispatch and
@@ -4284,6 +4285,20 @@ all suspendable list leaves moved, immediate append construction is inlined
 into the parent dispatcher and the obsolete list-family module is removed.
 `CollectionsAndPatterns` falls from 21 to 19 declarations, W6D.4 reaches zero,
 and the D.2c manifest falls from 103 to 101.
+
+W6D.5b.1 completion record, 2026-09-17: list shape, emptiness, uncons, and
+unsnoc pattern builtins now install one durable pattern-list owner after
+saturation. The owner demands only the outer source, handles compact binaries
+directly, and delegates logical lists to the shared front/back machines.
+Result effects and decomposition dictionaries are constructed and rooted
+within one regional access; no raw list item crosses a poll boundary. Existing
+pass/fail, compact-remainder, empty-list, forcing-failure, and right-to-left
+prefix-avoidance fixtures continue to pass. A new forced promised-suffix
+fixture proves unsnoc resumes at the exact tail without observing an erroring
+prefix. The four synchronous structural helpers are removed; the one
+context-free item conversion used by literal binary/list equality remains
+explicitly assigned to W6D.5b.2/W6D.5a. `CollectionsAndPatterns` falls from 19
+to 15 declarations, W6D.5b retains one, and D.2c falls from 101 to 97.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary

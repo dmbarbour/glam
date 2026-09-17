@@ -19,6 +19,7 @@ use super::dict_machine::DictBuiltinMachine;
 use super::list_machine::{ListFrontMachine, ListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
+use super::pattern_machine::PatternListMachine;
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::number_from_evaluated;
 use super::whnf::WhnfComputation;
@@ -41,6 +42,7 @@ pub(crate) enum BuiltinTaskMachine {
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
     Numeric(NumericBuiltinMachine),
+    PatternList(PatternListMachine),
     Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
 }
@@ -81,6 +83,10 @@ impl BuiltinTaskMachine {
                 | Builtin::Map
                 | Builtin::ListConcat
                 | Builtin::TextLines
+                | Builtin::PatternIsList
+                | Builtin::PatternListTryUncons
+                | Builtin::PatternListTryUnsnoc
+                | Builtin::PatternListIsEmpty
         )
     }
 
@@ -115,6 +121,9 @@ impl BuiltinTaskMachine {
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
             Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
+            builtin if PatternListMachine::supports(builtin) => {
+                Self::PatternList(PatternListMachine::new(builtin, arguments))
+            }
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
             }
@@ -162,6 +171,9 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Numeric(machine) => {
+                machine.poll(poll_context, context, durable_context, step_budget)
+            }
+            Self::PatternList(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Provenance(machine) => {

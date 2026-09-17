@@ -734,6 +734,7 @@ impl<V, T> List<V, T> {
 
     /// Removes the final item, using the caller's operation to duplicate a
     /// strict value leaf while preserving persistent sharing in the prefix.
+    #[cfg(test)]
     pub fn try_pop_back_by<E, U>(
         &self,
         duplicate_value: &mut impl FnMut(&V) -> U,

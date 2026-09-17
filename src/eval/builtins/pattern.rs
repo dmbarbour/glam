@@ -13,22 +13,6 @@ pub(super) fn apply(
     arguments: Vec<Value>,
 ) -> Result<Value, EvaluationHalt> {
     match builtin {
-        Builtin::PatternIsList => {
-            let [value] = super::exact(arguments, "pattern-is-list")?;
-            pattern_is_list(context, &value)
-        }
-        Builtin::PatternListTryUncons => {
-            let [value] = super::exact(arguments, "pattern-list-try-uncons")?;
-            pattern_list_try_uncons(context, &value)
-        }
-        Builtin::PatternListTryUnsnoc => {
-            let [value] = super::exact(arguments, "pattern-list-try-unsnoc")?;
-            pattern_list_try_unsnoc(context, &value)
-        }
-        Builtin::PatternListIsEmpty => {
-            let [value] = super::exact(arguments, "pattern-list-is-empty")?;
-            pattern_list_is_empty(context, &value)
-        }
         Builtin::PatternEqual => {
             let [expected, value] = super::exact(arguments, "pattern-equal")?;
             pattern_equal(context, &expected, &value)
@@ -55,96 +39,6 @@ pub(super) fn apply(
         }
         _ => unreachable!("pattern dispatcher received a non-pattern builtin"),
     }
-}
-
-fn pattern_is_list(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    Ok(match eval_value_in(context, value)? {
-        Value::Binary(_) | Value::List(_) => pattern_success(context.context().values().unit()),
-        _ => pattern_failure(),
-    })
-}
-
-fn pattern_list_try_uncons(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let parts = match eval_value_in(context, value)? {
-        Value::Binary(bytes) => bytes.first().map(|byte| {
-            (
-                Value::Number(Number::from_u8(*byte)),
-                Value::Binary(bytes.slice(1..bytes.len())),
-            )
-        }),
-        Value::List(list) => list
-            .try_pop_front_by(
-                &mut |value| {
-                    context.with_value_access(|access| access.values().duplicate_value(value))
-                },
-                &mut |thunk| force_list_thunk_in(context, thunk),
-            )?
-            .map(|(head, tail)| (list_item_value(head), Value::List(tail))),
-        _ => None,
-    };
-    Ok(parts.map_or_else(pattern_failure, |(head, tail)| {
-        pattern_success(Value::Dict(
-            Dict::new_sync()
-                .insert((*keys::HEAD).clone(), head)
-                .insert((*keys::TAIL).clone(), tail),
-        ))
-    }))
-}
-
-fn pattern_list_try_unsnoc(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let parts = match eval_value_in(context, value)? {
-        Value::Binary(bytes) => bytes.last().map(|byte| {
-            (
-                Value::Binary(bytes.slice(0..bytes.len() - 1)),
-                Value::Number(Number::from_u8(*byte)),
-            )
-        }),
-        Value::List(list) => list
-            .try_pop_back_by(
-                &mut |value| {
-                    context.with_value_access(|access| access.values().duplicate_value(value))
-                },
-                &mut |thunk| force_list_thunk_in(context, thunk),
-            )?
-            .map(|(init, last)| (Value::List(init), list_item_value(last))),
-        _ => None,
-    };
-    Ok(parts.map_or_else(pattern_failure, |(init, last)| {
-        pattern_success(Value::Dict(
-            Dict::new_sync()
-                .insert((*keys::INIT).clone(), init)
-                .insert((*keys::LAST).clone(), last),
-        ))
-    }))
-}
-
-fn pattern_list_is_empty(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let empty = match eval_value_in(context, value)? {
-        Value::Binary(bytes) => bytes.is_empty(),
-        Value::List(list) => list
-            .try_pop_front_by(&mut |_| (), &mut |thunk| {
-                force_list_thunk_in(context, thunk)
-            })?
-            .is_none(),
-        _ => false,
-    };
-    Ok(if empty {
-        pattern_success(context.context().values().unit())
-    } else {
-        pattern_failure()
-    })
 }
 
 fn pattern_equal(

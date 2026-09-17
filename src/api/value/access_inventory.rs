@@ -191,6 +191,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W3B.2b explicit object-fixpoint source owner"
     ),
     entry!(
+        "src/eval/pattern_machine.rs",
+        0,
+        0,
+        1,
+        "durable compiler-pattern result publication",
+        "W6D.5 resumable pattern observations"
+    ),
+    entry!(
         "src/eval/strategy_machine.rs",
         0,
         0,
@@ -505,6 +513,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
                 | "src/eval/object_machine.rs::spec_member_root"
+                | "src/eval/pattern_machine.rs::pattern_effect_in"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
                 | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
@@ -801,6 +810,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::spec_member_root#1|surface=access-publication|scope=production",
+    "src/eval/pattern_machine.rs::pattern_effect_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#1|surface=access-publication|scope=production",
