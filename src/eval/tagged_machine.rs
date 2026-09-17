@@ -101,7 +101,7 @@ impl TaggedPayloadMachine {
     }
 }
 
-enum SemanticUndefinedPoll {
+pub(crate) enum SemanticUndefinedPoll {
     Ready(bool),
     Pending(WorkDependency),
     Yielded,
@@ -109,20 +109,20 @@ enum SemanticUndefinedPoll {
 }
 
 /// A depth-first semantic-undefined walk with no Rust recursion.
-struct SemanticUndefinedMachine {
+pub(crate) struct SemanticUndefinedMachine {
     remaining: Vec<RuntimeValueRoot>,
     demand: Option<WhnfComputation>,
 }
 
 impl SemanticUndefinedMachine {
-    fn new(value: RuntimeValueRoot) -> Self {
+    pub(crate) fn new(value: RuntimeValueRoot) -> Self {
         Self {
             remaining: vec![value],
             demand: None,
         }
     }
 
-    fn poll(
+    pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,

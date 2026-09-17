@@ -236,7 +236,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",
-        [9, 0],
+        [7, 0],
         "I3B.1 scoped pattern inspection"
     ),
     context_entry!(
@@ -251,7 +251,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [7, 2],
+        [8, 3],
         "W6D.5 resumable compiler-pattern observations"
     ),
     context_entry!(

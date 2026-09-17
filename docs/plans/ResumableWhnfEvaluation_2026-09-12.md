@@ -4136,9 +4136,9 @@ declaration group reaches zero.
 | **W6D.4c — Complete (2026-09-17): Text lines** | 1 S | Convert binary/text extraction to durable source, list-front, and item demand without retaining access across suspension. `-1`. |
 | **W6D.4d — Complete (2026-09-17): Family dispatch** | 1 S | Inline the immediate append leaf after every suspendable list transformation owns a machine and remove the obsolete family module. `-1`. |
 | **W6D.5a.1 — Complete (2026-09-17): Pattern path equality** | 3 S | Reuse key/path conversion through a mismatch-preserving internal poll, retaining invalid expected paths as errors and invalid subject paths as pattern failure. `-3`. |
-| **W6D.5a.2 — Pattern dictionary shape and emptiness** | 3 S | Convert dictionary kind and logical emptiness through ordinary WHNF plus the shared iterative semantic-undefined owner. `-3`. |
-| **W6D.5a.3 — Pattern dictionary extraction** | 2 S | Convert required and optional recursive path extraction to an iterative owner which rebuilds persistent remainders without Rust recursion. `-2`. |
-| **W6D.5a.4 — Pattern literal equality** | 2 S | Convert directional literal comparison and binary/list equality, closing the remaining pattern-list item leaf. `-2`. |
+| **W6D.5a.2 — Complete (2026-09-17): Pattern dictionary shape and emptiness** | 2 S | Convert dictionary kind and logical emptiness through ordinary WHNF plus the shared iterative semantic-undefined owner. `-2`. |
+| **W6D.5a.3 — Pattern dictionary extraction** | 4 S | Convert required and optional recursive path extraction to an iterative owner which rebuilds persistent remainders without Rust recursion and shares semantic-undefined traversal. `-4`. |
+| **W6D.5a.4 — Pattern literal equality** | 1 S | Convert directional literal comparison and binary/list equality. `-1`. |
 | **W6D.5b.1 — Complete (2026-09-17): Pattern-list structure** | 4 S | Convert list shape, empty, uncons, and unsnoc to shared resumable front/back traversal. `-4`. |
 | **W6D.5b.2 — Pattern-list item leaf (with W6D.5a equality)** | 1 F | Retire the remaining context-free list-item conversion after binary/list literal equality moves to the pattern owner. `-1`. |
 | **W6D.5c — Pattern effects and dispatch** | 1 S, 3 F | Convert the dispatcher and access-qualify success/failure/effect constructors. `-4`. |
@@ -4316,6 +4316,16 @@ does not replay the already-completed expected path. The old four synchronous
 path/key helpers are removed. `CollectionsAndPatterns` falls from 15 to 12,
 W6D.5a from ten declarations to seven, and retiring the last production
 `pop_list_front_in` caller also moves W6A.0d from two declarations to one.
+
+W6D.5a.2 completion record, 2026-09-17: dictionary kind and logical-emptiness
+patterns now install one durable predicate owner. Kind checking demands only
+the outer value. Emptiness delegates the entire value to the comparison
+family's existing iterative semantic-undefined machine, so nested dictionary
+members retain exact resumable progress without a second recursion policy.
+An ordered two-member fixture suspends on the second promised value and proves
+the first completed member is not replayed. The synchronous kind and emptiness
+entry points are removed; `CollectionsAndPatterns` falls from 12 to 10 and
+W6D.5a from seven declarations to five.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary

@@ -3380,6 +3380,56 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
 }
 
 #[test]
+fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (second, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("pattern dictionary second member"))
+        .expect("the owner should allocate a promised dictionary member");
+    let first_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&first_demands);
+    let first = Value::semantic_thunk(
+        observer.values(),
+        "instrumented first undefined member",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Dict(Dict::new_sync()))
+        },
+    );
+    let source = Value::Dict(
+        Dict::new_sync()
+            .insert(Key::Number(0.into()), first)
+            .insert(Key::Number(1.into()), Value::Promised(second.clone())),
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::PatternDictIsEmpty),
+        vec![source],
+    )
+    .expect("dictionary emptiness application should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved second member should suspend emptiness traversal");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
+        .expect("the owner should resolve the second dictionary member");
+
+    let effect = eval_value(&observer, &application)
+        .expect("dictionary emptiness should resume from the second member");
+    let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
+        .and_then(|value| eval_value(&observer, &value))
+        .expect("the resumed pattern effect should be handled");
+    let Value::List(results) = handled else {
+        panic!("the list effect handler should return a list")
+    };
+    assert_eq!(
+        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        [unit_value()]
+    );
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors() {
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");

@@ -17,10 +17,6 @@ pub(super) fn apply(
             let [expected, value] = super::exact(arguments, "pattern-equal")?;
             pattern_equal(context, &expected, &value)
         }
-        Builtin::PatternIsDict => {
-            let [value] = super::exact(arguments, "pattern-is-dict")?;
-            pattern_is_dict(context, &value)
-        }
         Builtin::PatternDictTryTake => {
             let [path, value] = super::exact(arguments, "pattern-dict-try-take")?;
             pattern_dict_try_take(context, &path, &value, false)
@@ -28,10 +24,6 @@ pub(super) fn apply(
         Builtin::PatternDictTryTakeOptional => {
             let [path, value] = super::exact(arguments, "pattern-dict-try-take-optional")?;
             pattern_dict_try_take(context, &path, &value, true)
-        }
-        Builtin::PatternDictIsEmpty => {
-            let [value] = super::exact(arguments, "pattern-dict-is-empty")?;
-            pattern_dict_is_empty(context, &value)
         }
         _ => unreachable!("pattern dispatcher received a non-pattern builtin"),
     }
@@ -62,16 +54,6 @@ fn pattern_equal(
         pattern_success(context.context().values().unit())
     } else {
         pattern_failure()
-    })
-}
-
-fn pattern_is_dict(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    Ok(match eval_value_in(context, value)? {
-        Value::Dict(_) => pattern_success(context.context().values().unit()),
-        _ => pattern_failure(),
     })
 }
 
@@ -145,21 +127,6 @@ fn take_dict_path(
         dict.insert(head.clone(), Value::Dict(child_rest))
     };
     Ok(DictPathTake::Found { value, rest })
-}
-
-fn pattern_dict_is_empty(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let empty = match eval_value_in(context, value)? {
-        Value::Dict(dict) => dict_is_logically_empty(context, &dict)?,
-        _ => false,
-    };
-    Ok(if empty {
-        pattern_success(context.context().values().unit())
-    } else {
-        pattern_failure()
-    })
 }
 
 fn value_is_logically_undefined(

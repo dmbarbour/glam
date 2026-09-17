@@ -14,6 +14,7 @@ use crate::runtime::RuntimeValueRoot;
 use super::access_machine::{ConversionPoll, KeyListMachine};
 use super::builtin_machine::BuiltinTaskPoll;
 use super::list_machine::{ListBackMachine, ListBackPoll, ListFrontMachine, ListFrontPoll};
+use super::tagged_machine::{SemanticUndefinedMachine, SemanticUndefinedPoll};
 use super::whnf::WhnfComputation;
 
 #[derive(Clone, Copy)]
@@ -36,6 +37,80 @@ pub(crate) struct PatternPathMachine {
     expected_keys: Option<Vec<Key>>,
     actual: Option<WhnfComputation>,
     actual_keys: Option<KeyListMachine>,
+}
+
+pub(crate) struct PatternDictPredicateMachine {
+    state: PatternDictPredicateState,
+}
+
+enum PatternDictPredicateState {
+    IsDict(WhnfComputation),
+    IsEmpty(SemanticUndefinedMachine),
+}
+
+impl PatternDictPredicateMachine {
+    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+        let [source]: [RuntimeValueRoot; 1] = arguments
+            .try_into()
+            .expect("a dictionary pattern predicate retains one source");
+        let state = match builtin {
+            Builtin::PatternIsDict => {
+                PatternDictPredicateState::IsDict(WhnfComputation::from_root(source))
+            }
+            Builtin::PatternDictIsEmpty => {
+                PatternDictPredicateState::IsEmpty(SemanticUndefinedMachine::new(source))
+            }
+            _ => unreachable!("dictionary predicate machine received another builtin"),
+        };
+        Self { state }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> BuiltinTaskPoll {
+        match &mut self.state {
+            PatternDictPredicateState::IsDict(source) => {
+                let source = match poll_whnf_computation(
+                    source,
+                    poll_context,
+                    durable_context,
+                    step_budget,
+                ) {
+                    WhnfOwnerPoll::Ready(source) => source,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return BuiltinTaskPoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => {
+                        return BuiltinTaskPoll::Failed(failure);
+                    }
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!(
+                            "dictionary pattern predicate produced an external {boundary:?} boundary"
+                        )
+                    }
+                };
+                let is_dict = context.with_value_access(|access| {
+                    matches!(access.clone_root(&source), Value::Dict(_))
+                });
+                rooted_pattern_predicate(context, is_dict)
+            }
+            PatternDictPredicateState::IsEmpty(undefined) => {
+                match undefined.poll(poll_context, context, durable_context, step_budget) {
+                    SemanticUndefinedPoll::Ready(empty) => rooted_pattern_predicate(context, empty),
+                    SemanticUndefinedPoll::Pending(dependency) => {
+                        BuiltinTaskPoll::Pending(dependency)
+                    }
+                    SemanticUndefinedPoll::Yielded => BuiltinTaskPoll::Yielded,
+                    SemanticUndefinedPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                }
+            }
+        }
+    }
 }
 
 impl PatternPathMachine {
