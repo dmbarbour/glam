@@ -1,6 +1,5 @@
 //! Saturation and semantic-family dispatch for core builtins.
 
-mod list_effect;
 mod net;
 mod object;
 
@@ -111,7 +110,66 @@ pub(super) fn apply_builtin_in(
         | Builtin::ListEffectSeq
         | Builtin::ListEffectAlt
         | Builtin::ListEffectCut
-        | Builtin::ListEffectFix => list_effect::apply(context, builtin, arguments),
+        | Builtin::ListEffectFix => {
+            let deferred = |label: &'static str, computation: ListEffectComputation| {
+                List::from_thunk(
+                    context
+                        .construct_lazy(move |access| {
+                            LazyValue::list_effect_computation_in(access, label, computation)
+                        })
+                        .into(),
+                )
+            };
+            match builtin {
+                Builtin::ListEffect => {
+                    let [effect] = exact(arguments, "list effect")?;
+                    Ok(Value::List(deferred(
+                        "list effect",
+                        ListEffectComputation::Run { effect },
+                    )))
+                }
+                Builtin::ListEffectReturn => {
+                    let [value] = exact(arguments, "list effect return")?;
+                    Ok(Value::List(List::from_values(vec![value])))
+                }
+                Builtin::ListEffectSeq => {
+                    let [operation, continuation] = exact(arguments, "list effect seq")?;
+                    let results = deferred(
+                        "list effect",
+                        ListEffectComputation::Run { effect: operation },
+                    );
+                    Ok(Value::List(deferred(
+                        "list effect seq",
+                        ListEffectComputation::Sequence {
+                            results,
+                            continuation,
+                        },
+                    )))
+                }
+                Builtin::ListEffectAlt => {
+                    let [left, right] = exact(arguments, "list effect alt")?;
+                    let left = deferred("list effect", ListEffectComputation::Run { effect: left });
+                    let right =
+                        deferred("list effect", ListEffectComputation::Run { effect: right });
+                    Ok(Value::List(List::concat(left, right)))
+                }
+                Builtin::ListEffectCut => {
+                    let [operation] = exact(arguments, "list effect cut")?;
+                    Ok(Value::List(deferred(
+                        "list effect cut",
+                        ListEffectComputation::Cut { operation },
+                    )))
+                }
+                Builtin::ListEffectFix => {
+                    let [function] = exact(arguments, "list effect fix")?;
+                    Ok(Value::List(deferred(
+                        "list effect fix",
+                        ListEffectComputation::FixFunction { function },
+                    )))
+                }
+                _ => unreachable!("list-effect branch received another builtin"),
+            }
+        }
         Builtin::IfResult | Builtin::MatchResult => {
             Ok(Value::Lazy(context.construct_lazy(move |access| {
                 LazyValue::from_builtin_in(

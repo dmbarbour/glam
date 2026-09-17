@@ -1634,7 +1634,7 @@ pub(crate) enum ListEffectComputation {
     Run { effect: Value },
     Sequence { results: List, continuation: Value },
     Cut { operation: Value },
-    Fix { operation: Value, handle: Value },
+    FixFunction { function: Value },
 }
 
 #[cfg(test)]

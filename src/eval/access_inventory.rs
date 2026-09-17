@@ -155,16 +155,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6E.5-W6E.6 durable effect dispatch, map traversal, and fixpoint construction"
     ),
     context_entry!(
-        "src/eval/builtins/list_effect.rs",
-        [1, 0],
-        "I3B.1 scoped list-effect construction"
-    ),
-    context_entry!(
-        "src/eval/builtins/list_effect/implementation.rs",
-        [10, 0],
-        "I3B.1 list-effect construction; W3D inspectable recipe construction"
-    ),
-    context_entry!(
         "src/eval/builtins/net.rs",
         [2, 0],
         "I3D.4 scoped interaction-net builtin dispatch"

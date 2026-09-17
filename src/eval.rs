@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::core::CoreValueFactory;
+#[cfg(test)]
+use crate::core::PromisedValue;
 use crate::core::{
     Builtin, BuiltinCall, EvaluationHalt, FunctionCode, FunctionValue, Key, LazyValue, List,
-    NetValue, PromisedValue, Value, keys,
+    ListEffectComputation, NetValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::evaluation::{EvalContext, EvaluatorStepContext};

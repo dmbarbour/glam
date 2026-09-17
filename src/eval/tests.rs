@@ -1319,6 +1319,52 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
 }
 
 #[test]
+fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
+    let session = test_context();
+    let (function_promise, _function_task, _function_owner) = session
+        .task_owned_promise(Arc::from("list effect fix function"))
+        .expect("the owner should allocate the fix function promise");
+    let demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&demands);
+    let promised_function = function_promise.clone();
+    let function = Value::semantic_thunk(
+        session.values(),
+        "instrumented list effect fix function",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Promised(promised_function.clone()))
+        },
+    );
+
+    let Value::List(fixed) = apply_values(
+        &session,
+        Value::Builtin(Builtin::ListEffectFix),
+        vec![function],
+    )
+    .expect("list effect fix construction should not demand its function") else {
+        panic!("list effect fix must construct a list")
+    };
+    assert_eq!(demands.load(Ordering::SeqCst), 0);
+
+    let blocked = list_to_value_items(&session, &fixed)
+        .expect_err("observing fix results should wait for its function");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(demands.load(Ordering::SeqCst), 1);
+
+    set_promise(
+        &session,
+        &function_promise,
+        closed_function_value(1, TestExpr::Value(list_return_effect(n(45)))),
+    )
+    .expect("the fix function should accept its assignment");
+    assert_eq!(
+        list_to_value_items(&session, &fixed).expect("fix should resume at its function"),
+        [n(45)]
+    );
+    assert_eq!(demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
     let session = test_context();
     let (promise, _owner_task, _owner) = session

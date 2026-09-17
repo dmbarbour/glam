@@ -39,6 +39,9 @@ enum ListEffectState {
     Cut {
         front: ListFrontMachine,
     },
+    FixFunction {
+        function: WhnfComputation,
+    },
     Fix {
         handle: ManagedPromiseRoot,
         front: ListFrontMachine,
@@ -98,22 +101,14 @@ impl ListEffectSourceMachine {
                     front: ListFrontMachine::new(results, source_owner),
                 }
             }
-            ListEffectComputation::Fix { operation, handle } => {
-                let (operation, handle) = context.with_value_access(|access| {
-                    let Value::Promised(handle) = handle else {
-                        unreachable!("list-effect fix recipe must retain its promise handle")
-                    };
-                    (
-                        access
-                            .values()
-                            .root_runtime_value(access.values().duplicate_value(operation)),
-                        handle.root_in(access.values()),
-                    )
+            ListEffectComputation::FixFunction { function } => {
+                let function = context.with_value_access(|access| {
+                    access
+                        .values()
+                        .root_runtime_value(access.values().duplicate_value(function))
                 });
-                let results = deferred_run_list_root(context, &operation);
-                ListEffectState::Fix {
-                    handle,
-                    front: ListFrontMachine::new(results, source_owner),
+                ListEffectState::FixFunction {
+                    function: WhnfComputation::from_root(function).with_source_owner(source_owner),
                 }
             }
         };
@@ -213,6 +208,43 @@ impl ListEffectSourceMachine {
                     ListFrontPoll::Yielded => ListEffectSourcePoll::Yielded,
                     ListFrontPoll::Failed(failure) => ListEffectSourcePoll::Failed(failure),
                 }
+            }
+            ListEffectState::FixFunction { function } => {
+                let function = match poll_whnf_computation(
+                    function,
+                    poll_context,
+                    durable_context,
+                    step_budget,
+                ) {
+                    WhnfOwnerPoll::Ready(value) => value,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return ListEffectSourcePoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return ListEffectSourcePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => {
+                        return ListEffectSourcePoll::Failed(failure);
+                    }
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!("list effect fix produced an external {boundary:?} boundary")
+                    }
+                };
+                let handle = context.construct_promise("list effect fixpoint");
+                let (handle, operation) = context.with_value_access(|access| {
+                    let handle_root = handle.root_in(access.values());
+                    let operation = LazyValue::from_application_in(
+                        access.values(),
+                        access.clone_root(&function),
+                        Arc::from([Value::Promised(handle.clone())]),
+                    );
+                    let operation = access.values().root_runtime_value(Value::Lazy(operation));
+                    (handle_root, operation)
+                });
+                let results = deferred_run_list_root(context, &operation);
+                self.state = ListEffectState::Fix {
+                    handle,
+                    front: ListFrontMachine::new(results, self.source_owner),
+                };
+                ListEffectSourcePoll::Yielded
             }
             ListEffectState::Fix { handle, front } => {
                 match front.poll(poll_context, context, durable_context, step_budget) {

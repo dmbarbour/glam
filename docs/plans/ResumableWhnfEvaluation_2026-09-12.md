@@ -4383,7 +4383,7 @@ show its exact checkpoint delta before proceeding.
 | **W6E.6 — Complete (2026-09-17): Effect map** | 3 S, 2 F | Convert map construction, the suspendable run step, continuation, and API-call construction; then close W6A.1b by access-qualifying the shared effect constructor. `-5`, plus closure delta `-1`. |
 | **W6E.7 — Complete (2026-09-17): List-effect API** | 1 F | Access-qualify the cached list-effect API construction. `-1`. |
 | **W6E.8 — Complete (2026-09-17): List-effect control** | 6 S, 1 S closure | Convert alt/cut/seq/flat-map recipe construction without changing branch order, remove the now-redundant run-list wrapper, and keep callback application in the W3/W6A.2 owner. `-7`. |
-| **W6E.9 — List-effect source** | 3 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-3`. |
+| **W6E.9 — Complete (2026-09-17): List-effect source** | 3 S | Convert family dispatch and fix/lazy-source handoffs to the existing W3 owner. `-3`. |
 
 The W3 lazy list-effect recipes and source owner are already complete and are
 not reimplemented here. Preserve sealed metadata, pure versus reflection
@@ -4464,6 +4464,21 @@ synchronous control helpers and redundant run-list wrapper are removed, so the
 D.2c manifest falls from fifty-one to forty-four declarations and
 `AnnotationsAndEffects` from ten to three. Existing promised sequence/cut
 fixtures continue to force the actual W3 traversal boundaries.
+
+W6E.9 completion record, 2026-09-17: saturated list-effect construction is
+now part of the generic builtin dispatcher and the obsolete family module is
+removed. Fix construction emits a traced `FixFunction` source recipe without
+demanding its function. The W3 source owner then retains one resumable WHNF
+computation, constructs the promise and ordinary lazy application only after
+the function reaches WHNF, and transitions into its existing fix-result
+frontier. This deliberately moves non-callable failure to observation of the
+lazy result list, matching the other list-effect recipes' demand boundary.
+A forced promised-function fixture proves construction is non-demanding,
+observation suspends at the function, and resumption does not replay the
+completed lazy prefix. The remaining three synchronous declarations disappear,
+so the D.2c manifest falls from forty-four to forty-one declarations and the
+`AnnotationsAndEffects` family reaches zero. The exact root, durable-owner,
+raw-value, access, and WHNF inventories account for the new source phase.
 
 #### W6F — Objects and interaction-net builtins
 

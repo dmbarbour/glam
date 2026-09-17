@@ -130,17 +130,15 @@ impl CompatibilityValueEdges for SemanticComputation {
 impl CompatibilityValueEdges for ListEffectComputation {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         match self {
-            Self::Run { effect } | Self::Cut { operation: effect } => visit(effect),
+            Self::Run { effect }
+            | Self::Cut { operation: effect }
+            | Self::FixFunction { function: effect } => visit(effect),
             Self::Sequence {
                 results,
                 continuation,
             } => {
                 results.visit_compatibility_value_edges(visit);
                 visit(continuation);
-            }
-            Self::Fix { operation, handle } => {
-                visit(operation);
-                visit(handle);
             }
         }
     }

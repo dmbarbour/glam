@@ -170,7 +170,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/list_effect_machine.rs",
         0,
         0,
-        9,
+        11,
         "pollable list-effect recipes and their lazy sequencing/fixpoint handoffs",
         "W3D.2 inspectable list-effect source owner"
     ),
@@ -835,6 +835,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#4|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#5|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#2|surface=access-publication|scope=production",
+    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::publish_fix_result#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::publish_fix_result#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::combine_chunk_and_suffix#1|surface=access-publication|scope=production",
