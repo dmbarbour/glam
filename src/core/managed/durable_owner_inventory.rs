@@ -361,6 +361,17 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6D.3"
     ),
     closed_durable!(
+        "src/eval/list_transform_machine.rs",
+        "structural list-map callable and source progress",
+        "canonical RuntimeValueRoot callable plus one child WhnfComputation",
+        "yielded or dependency-blocked map source demand",
+        "saturated map admission and one-node mapped-list publication",
+        "map completion, failure, cancellation, or builtin-source retirement",
+        ManagedRootSurface,
+        RootSurface,
+        "W6D.4a"
+    ),
+    closed_durable!(
         "src/eval/object_machine.rs",
         "object-fixpoint, C3-linearization, and mix progress",
         "canonical RuntimeValueRoot object/spec/mixin fields plus child WHNF and list-front machines",
@@ -848,10 +859,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 212;
+const DECLARATION_BASELINE_COUNT: usize = 213;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([144, 187, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_828_504_202_048_622_288;
+    DeclarationSignals::new([144, 188, 5, 16, 6, 3, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_387_689_619_265_452_301;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -982,6 +993,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "logical-list front/back source progress"
     } else if declaration.starts_with("src/eval/list_observation_machine.rs::") {
         "list observation operands, traversal progress, and completed prefixes or suffixes"
+    } else if declaration.starts_with("src/eval/list_transform_machine.rs::") {
+        "structural list-map callable and source progress"
     } else if declaration.starts_with("src/eval/object_machine.rs::") {
         "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {

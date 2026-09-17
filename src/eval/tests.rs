@@ -2833,6 +2833,119 @@ fn evaluates_slice_and_map_builtins() {
 }
 
 #[test]
+fn map_defers_concat_children_and_callable_until_the_selected_item_is_observed() {
+    let context = test_context();
+    let callable_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&callable_demands);
+    let callable = Value::semantic_thunk(context.values(), "deferred map callable", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Builtin(Builtin::Floor))
+    });
+    let source = Value::List(List::concat(
+        List::from_thunk(LazyValue::error(context.values(), "map forced its unused prefix").into()),
+        List::from_values(vec![n(7)]),
+    ));
+    let mapped = apply_values(
+        &context,
+        Value::Builtin(Builtin::Map),
+        vec![callable, source],
+    )
+    .and_then(|value| eval_value(&context, &value))
+    .expect("map should expose one transformed spine node");
+    assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
+
+    let Value::List(mapped) = mapped else {
+        panic!("map should produce a list")
+    };
+    let stats = mapped.visit_logical_parts(&mut |_| {});
+    assert_eq!(stats.thunk_items, 2);
+    assert_eq!(stats.value_items, 0);
+
+    let split = apply_values(
+        &context,
+        Value::Builtin(Builtin::ListSplitEnd),
+        vec![n(1), Value::List(mapped)],
+    )
+    .and_then(|value| eval_value(&context, &value))
+    .expect("the mapped suffix should remain observable from the back");
+    let Value::Dict(split) = split else {
+        panic!("split_end should produce a dictionary")
+    };
+    let Value::List(suffix) = split
+        .get(&Key::atom_from_text("right"))
+        .expect("split_end should retain its mapped suffix")
+    else {
+        panic!("split_end suffix should be a list")
+    };
+    assert_eq!(
+        list_output_bytes(&context, suffix).expect("the selected item should evaluate"),
+        [7]
+    );
+    assert_eq!(callable_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn map_delays_a_non_callable_failure_until_an_item_is_observed() {
+    let context = test_context();
+    let mapped = apply_values(
+        &context,
+        Value::Builtin(Builtin::Map),
+        vec![n(99), Value::List(List::from_values(vec![n(1)]))],
+    )
+    .and_then(|value| eval_value(&context, &value))
+    .expect("map must not validate its callable eagerly");
+    let Value::List(mapped) = mapped else {
+        panic!("map should produce a list")
+    };
+    let error = list_output_bytes(&context, &mapped)
+        .expect_err("observing the mapped item should reject the non-callable value");
+    assert!(
+        error
+            .to_string()
+            .contains("application requires a function value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (source, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("map source"))
+        .expect("the owner should allocate a promised map source");
+    let callable_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&callable_demands);
+    let callable = Value::semantic_thunk(observer.values(), "map callable", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Builtin(Builtin::Floor))
+    });
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Map),
+        vec![callable, Value::Promised(source.clone())],
+    )
+    .expect("map application should build");
+
+    let blocked =
+        eval_value(&observer, &application).expect_err("the unresolved source should suspend map");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
+
+    set_promise(&owner, &source, Value::List(List::from_values(vec![n(8)])))
+        .expect("the owner should resolve the map source");
+    let Value::List(mapped) = eval_value(&observer, &application).expect("map should resume")
+    else {
+        panic!("map should produce a list")
+    };
+    assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        list_output_bytes(&observer, &mapped).expect("the mapped value should evaluate"),
+        [8]
+    );
+    assert_eq!(callable_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
     let binary_item = eval_closed_expr(&builtin2_expr(
         Builtin::ListAt,

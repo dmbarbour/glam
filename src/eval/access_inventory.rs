@@ -176,7 +176,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/list/implementation.rs",
-        [3, 0],
+        [2, 0],
         "I3B.1 remaining scoped list transformations"
     ),
     context_entry!(
@@ -238,6 +238,11 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "src/eval/list_observation_machine.rs",
         [13, 3],
         "W6D.3 durable list-observation owner with scoped result publication"
+    ),
+    context_entry!(
+        "src/eval/list_transform_machine.rs",
+        [1, 1],
+        "W6D.4a durable list-map source owner with one-node regional transformation"
     ),
     context_entry!(
         "src/eval/builtins/pattern.rs",

@@ -1,36 +1,5 @@
 use super::super::super::*;
 
-pub(super) fn eval_map_builtin(
-    context: &EvaluatorStepContext<'_>,
-    function: &Value,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let function = eval_value_in(context, function)?;
-    let mapped = match eval_value_in(context, value)? {
-        Value::Binary(bytes) => bytes
-            .iter()
-            .map(|byte| {
-                apply_value_in(
-                    context,
-                    function.clone(),
-                    Value::Number(Number::from_u8(*byte)),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        Value::List(list) => list_to_value_items_in(context, &list)?
-            .into_iter()
-            .map(|item| apply_value_in(context, function.clone(), item))
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => {
-            return Err(EvaluationHalt::new(
-                "map builtin requires a list or binary value",
-            ));
-        }
-    };
-
-    Ok(Value::List(List::from_values(mapped)))
-}
-
 pub(super) fn eval_list_concat_builtin(
     context: &EvaluatorStepContext<'_>,
     value: &Value,

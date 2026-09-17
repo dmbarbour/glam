@@ -342,6 +342,50 @@ impl<V, T> List<V, T> {
         Self(Arc::new(ListNode::Thunk(thunk)))
     }
 
+    /// Maps exactly one representation node without forcing a deferred part.
+    ///
+    /// A concatenation retains its shape, but both children become deferred
+    /// recursive transformations. Strict leaves are transformed as one unit;
+    /// in particular, this operation does not invent finer concatenation
+    /// boundaries for a byte slice, value slice, or finger tree.
+    pub(crate) fn map_root_step<U, S>(
+        &self,
+        map_byte: &mut impl FnMut(u8) -> U,
+        map_value: &mut impl FnMut(&V) -> U,
+        defer_list: &mut impl FnMut(Self) -> S,
+        defer_thunk: &mut impl FnMut(&T) -> S,
+    ) -> List<U, S> {
+        match self.0.as_ref() {
+            ListNode::Empty => List::empty(),
+            ListNode::Bytes(bytes) => {
+                List::from_values(bytes.iter().copied().map(map_byte).collect())
+            }
+            ListNode::Values(values) => {
+                List::from_values(values.as_slice().iter().map(map_value).collect())
+            }
+            ListNode::Concat(left, right) => List::concat(
+                List::from_thunk(defer_list(left.clone())),
+                List::from_thunk(defer_list(right.clone())),
+            ),
+            ListNode::Finger(finger) => {
+                let mut mapped = FingerList::new();
+                for chunk in finger.iter() {
+                    let values = match chunk {
+                        ListChunk::Bytes(bytes) => {
+                            bytes.iter().copied().map(&mut *map_byte).collect()
+                        }
+                        ListChunk::Values(values) => {
+                            values.as_slice().iter().map(&mut *map_value).collect()
+                        }
+                    };
+                    mapped = mapped.push_right(ListChunk::Values(SharedSlice::from_vec(values)));
+                }
+                List::from_finger(mapped)
+            }
+            ListNode::Thunk(thunk) => List::from_thunk(defer_thunk(thunk)),
+        }
+    }
+
     fn from_value_slice(values: SharedSlice<V>) -> Self {
         if values.len() == 0 {
             Self::empty()
@@ -1317,6 +1361,39 @@ mod tests {
         let (left, right) = balanced.try_split_at(1, &mut force).unwrap().unwrap();
         assert_eq!(left.known_len(), Some(1));
         assert_eq!(right.known_len(), Some(1));
+    }
+
+    #[test]
+    fn root_map_defers_both_concat_children_without_visiting_them() {
+        let source = TestList::concat(
+            TestList::from_values(vec![1, 2]),
+            TestList::from_bytes(Bytes::from_static(b"ab")),
+        );
+        let strict_visits = std::cell::Cell::new(0);
+        let deferred_children = std::cell::Cell::new(0);
+        let mapped = source.map_root_step(
+            &mut |_| {
+                strict_visits.set(strict_visits.get() + 1);
+                0
+            },
+            &mut |_| {
+                strict_visits.set(strict_visits.get() + 1);
+                0
+            },
+            &mut |_| {
+                deferred_children.set(deferred_children.get() + 1);
+                "mapped child"
+            },
+            &mut |_| unreachable!("the source root is not a thunk"),
+        );
+
+        assert_eq!(strict_visits.get(), 0);
+        assert_eq!(deferred_children.get(), 2);
+        let stats = mapped.visit_logical_parts(&mut |_| {});
+        assert_eq!(stats.node_visits, 3);
+        assert_eq!(stats.thunk_items, 2);
+        assert_eq!(stats.value_items, 0);
+        assert_eq!(stats.byte_segments, 0);
     }
 
     #[test]

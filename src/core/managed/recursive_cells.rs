@@ -1606,6 +1606,8 @@ mod tests {
                     "src/eval/dict_machine.rs::builtin_apply3_value_in",
                     "src/eval/dict_machine.rs::merge_duplicate_value_in",
                     "src/eval/dict_machine.rs::update_dict_path_in",
+                    "src/eval/list_transform_machine.rs::deferred_map_in",
+                    "src/eval/list_transform_machine.rs::lazy_item_in",
                     "src/eval/net.rs::attach_net_many_in",
                     "src/eval/operator.rs::apply_core_operator",
                     "src/eval/operator.rs::constant_effect_in",

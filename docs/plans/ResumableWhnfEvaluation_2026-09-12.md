@@ -4131,7 +4131,7 @@ declaration group reaches zero.
 | **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
 | **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
 | **W6D.3 — Complete (2026-09-17): List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
-| **W6D.4a — Structural lazy map** | 1 S | Replace eager list-map traversal with the non-forcing structural transform specified below. It may demand the subject enough to establish the outer list, but preserves internal list holes and does not demand or validate the callable. `-1`. |
+| **W6D.4a — Complete (2026-09-17): Structural lazy map** | 1 S | Replace eager list-map traversal with the non-forcing structural transform specified below. It may demand the subject enough to establish the outer list, but preserves internal list holes and does not demand or validate the callable. `-1`. |
 | **W6D.4b — List concatenation** | 1 S | Convert concatenation and its already-regional list-like conversion, contributing only its actual list-demand edges to W6A.0d closure. `-1`. |
 | **W6D.4c — Text lines** | 1 S | Convert resumable binary/text extraction and line construction without retaining access across demand. `-1`. |
 | **W6D.4d — Family dispatch** | 1 S | Move the remaining list-family dispatcher after its transformation leaves and retire the final raw compatibility declaration in W6D.4. `-1`. |
@@ -4219,6 +4219,20 @@ mapped structural thunk. Do not introduce special length metadata in W6.
 Exact-length nodes such as `Take n xs`, including their error-filling
 semantics, mapped-list nodes, and finer subdivision of large strict leaves are
 deferred to the value-representation list review.
+
+W6D.4a completion record, 2026-09-17: saturated `map` calls now install a
+durable source-demand owner while leaving the callable entirely unobserved.
+The persistent-list module owns one-node transformation: `Concat` keeps its
+shape and gains two lazy recursive maps, a source thunk gains one lazy
+recursive map, and a reached strict leaf constructs ordinary lazy item
+applications without evaluating them or inventing new chunk boundaries.
+Deterministic fixtures prove that constructing the mapped concatenation visits
+neither child, right-to-left observation avoids an erroring prefix, callable
+evaluation is delayed and shared, malformed callable failure is delayed until
+item demand, and a promised source resumes through the same owner. The old
+synchronous map implementation is removed; `CollectionsAndPatterns` falls
+from 23 to 22 declarations, W6D.4 retains three, and the D.2c manifest falls
+from 105 to 104.
 
 Preserve `.fail` mismatch semantics separately from permanent evaluation
 failure and preserve optional-dictionary-key behavior. Force lazy dictionary
