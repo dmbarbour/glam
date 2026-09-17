@@ -39,6 +39,7 @@ mod list_observation_machine;
 mod list_transform_machine;
 mod net;
 mod object_builtin_machine;
+mod object_composition_machine;
 mod object_machine;
 mod operator;
 mod pattern_machine;

@@ -649,13 +649,16 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6D.1-W6D.2 replace synchronous dictionary dispatch, key-path demand, and
 // recursive merge demand with one durable dictionary owner. Its remaining
 // recursive calls transform already-observed persistent dictionary/key data.
-const EXPECTED_OCCURRENCES: usize = 221;
-const EXPECTED_FINGERPRINT: u64 = 952_608_516_740_461_389;
+// W6F.3a moves ordinary extension and composed-definition application to one
+// resumable source owner. Lazy applications retain the undemanded stages, so
+// only callable transitions enter the WHNF census.
+const EXPECTED_OCCURRENCES: usize = 215;
+const EXPECTED_FINGERPRINT: u64 = 933_691_275_090_537_814;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 18),
+    (Signal::EvalValue, 16),
     (Signal::EvalLazy, 2),
     (Signal::EvalPromise, 1),
-    (Signal::ApplyValue, 10),
+    (Signal::ApplyValue, 4),
     (Signal::ApplyValues, 2),
     (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 11),
@@ -665,12 +668,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 7),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 73),
+    (Signal::StructuralRecursion, 75),
     (Signal::UserSizedLoop, 49),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 126),
+    (WorkShape::DemandThenInspect, 120),
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::Application, 11),

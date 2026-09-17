@@ -41,15 +41,6 @@ pub(super) fn apply(
                 Value::Dict(merge_dicts_in(access.values(), &base, &dict))
             }))
         }
-        Builtin::ObjectWithDefs => {
-            let [object, extension_defs] = super::exact(arguments, "object with definitions")?;
-            eval_object_with_defs_builtin(context, &object, extension_defs)
-        }
-        Builtin::ObjectComposedDefs => {
-            let [prior_defs, extension_defs, base, self_value] =
-                super::exact(arguments, "composed object definitions")?;
-            eval_object_composed_defs_builtin(context, prior_defs, extension_defs, base, self_value)
-        }
         Builtin::ObjectOverrideDefs => {
             let [updates, base, _self_value] =
                 super::exact(arguments, "overriding object definitions")?;

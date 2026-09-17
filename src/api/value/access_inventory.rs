@@ -207,6 +207,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6F.2 resumable object specification ownership"
     ),
     entry!(
+        "src/eval/object_composition_machine.rs",
+        0,
+        0,
+        4,
+        "durable ordinary extension and composed-definition application results",
+        "W6F.3a resumable object composition ownership"
+    ),
+    entry!(
         "src/eval/object_machine.rs",
         0,
         0,
@@ -551,6 +559,10 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_builtin_machine.rs::root_local_name"
                 | "src/eval/object_builtin_machine.rs::root_object_from_dict"
                 | "src/eval/object_builtin_machine.rs::spec_name"
+                | "src/eval/object_composition_machine.rs::finish_object_extension"
+                | "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll"
+                | "src/eval/object_composition_machine.rs::root_application"
+                | "src/eval/object_composition_machine.rs::root_plain_extension_in"
                 | "src/eval/object_machine.rs::composed_defs_parts"
                 | "src/eval/object_machine.rs::finish_object"
                 | "src/eval/object_machine.rs::spec_member_root"
@@ -873,6 +885,10 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_builtin_machine.rs::root_local_name#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::root_object_from_dict#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::spec_name#1|surface=access-publication|scope=production",
+    "src/eval/object_composition_machine.rs::finish_object_extension#1|surface=access-publication|scope=production",
+    "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll#1|surface=access-publication|scope=production",
+    "src/eval/object_composition_machine.rs::root_application#1|surface=access-publication|scope=production",
+    "src/eval/object_composition_machine.rs::root_plain_extension_in#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
     "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",

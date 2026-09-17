@@ -442,6 +442,118 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
 }
 
 #[test]
+fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (spec, _spec_task, _spec_owner) = owner
+        .task_owned_promise(Arc::from("object extension specification"))
+        .expect("the owner should allocate a promised object specification");
+    let object_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&object_demands);
+    let object_spec = spec.clone();
+    let object = Value::semantic_thunk(observer.values(), "instrumented object", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(Dict::new_sync().insert(
+            (*keys::SPEC).clone(),
+            Value::Promised(object_spec.clone()),
+        )))
+    });
+    let extension = closed_function_value_in(
+        observer.values(),
+        2,
+        TestExpr::Value(Value::Dict(
+            Dict::new_sync().insert(Key::binary_from_text("extended"), n(42)),
+        )),
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectWithDefs),
+        vec![object, extension],
+    )
+    .expect("object extension should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the promised specification should suspend object extension");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(object_demands.load(Ordering::SeqCst), 1);
+    let resolved_spec = Value::Dict(
+        Dict::new_sync()
+            .insert((*keys::NAME).clone(), Value::binary_from_text("root"))
+            .insert((*keys::DEPS).clone(), Value::List(List::empty()))
+            .insert(
+                (*keys::DEFS).clone(),
+                Value::Builtin(Builtin::ObjectDefaultDefs),
+            ),
+    );
+    set_promise(&owner, &spec, resolved_spec)
+        .expect("the object specification should accept its assignment");
+
+    let Value::Dict(result) =
+        eval_value(&observer, &application).expect("object extension should resume")
+    else {
+        panic!("object extension should produce an object dictionary")
+    };
+    assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
+    assert_eq!(object_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (extension, _extension_task, _extension_owner) = owner
+        .task_owned_promise(Arc::from("composed object extension"))
+        .expect("the owner should allocate a promised extension");
+    let prior_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&prior_demands);
+    let prior = Value::semantic_thunk(
+        observer.values(),
+        "instrumented prior defs",
+        move |context| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(closed_function_value_in(
+                context.context().values(),
+                2,
+                TestExpr::Value(Value::Dict(
+                    Dict::new_sync().insert(Key::binary_from_text("prior"), n(19)),
+                )),
+            ))
+        },
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::ObjectComposedDefs),
+        vec![
+            prior,
+            Value::Promised(extension.clone()),
+            Value::Dict(Dict::new_sync()),
+            Value::Dict(Dict::new_sync()),
+        ],
+    )
+    .expect("composed definitions should build");
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the promised extension should suspend composition");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
+    let extension_defs = closed_function_value_in(
+        owner.values(),
+        2,
+        TestExpr::Value(Value::Dict(
+            Dict::new_sync().insert(Key::binary_from_text("extended"), n(42)),
+        )),
+    );
+    set_promise(&owner, &extension, extension_defs)
+        .expect("the composed extension should accept its assignment");
+
+    let Value::Dict(result) =
+        eval_value(&observer, &application).expect("composed definitions should resume")
+    else {
+        panic!("composed definitions should produce a dictionary")
+    };
+    assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
+    assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn claimed_evaluator_dispatches_pure_annotation_branches() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

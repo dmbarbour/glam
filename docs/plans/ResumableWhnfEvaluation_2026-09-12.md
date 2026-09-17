@@ -4486,7 +4486,8 @@ raw-value, access, and WHNF inventories account for the new source phase.
 |---|---:|---|
 | **W6F.1 — Complete (2026-09-17): Object leaves** | 4 F | Access-qualify default definitions and specification constructors/projections. `-4`. |
 | **W6F.2 — Complete (2026-09-17): Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`; then close W6A.0d for another `-2`. |
-| **W6F.3 — Object composition** | 4 S | Convert composed/override/extended definitions and dictionary override. `-4`. |
+| **W6F.3a — Complete (2026-09-17): Object composition applications** | 2 S | Convert composed and extended definitions through one durable application/WHNF phase owner. `-2`. |
+| **W6F.3b — Recursive object override** | 2 S | Convert overriding definitions and recursive dictionary override through a rooted persistent-dictionary frame stack. `-2`. |
 | **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
@@ -4527,6 +4528,20 @@ evaluation steps. The fixture now retains one explicit test-only runtime root
 for the graph's lifetime; the previously failing object-reflection cases pass
 under forced collection instead of relying on the old synchronous path's lack
 of an intervening collection point.
+
+W6F.3a completion record, 2026-09-17: ordinary object extension and composed
+definition application now share one durable saturated-builtin owner. Object,
+specification, definition, self, and intermediate callable roots survive
+suspension without leaving regional access open. Composed definitions preserve
+the old source order: demand `prior_defs base`, retain the lazy
+`prior_stage self` result, then demand `extension_defs prior_result` before
+returning the final lazy self application. The prior result therefore remains
+lazy when an extension ignores it, while callable failures still surface in
+their previous order. Forced promised-specification and promised-extension
+fixtures prove completed object/prior-definition work is not replayed after
+resumption. The D.2c manifest falls from thirty-one to twenty-nine declarations
+and `Objects` from nine to seven; exact root-publication, durable-owner, access,
+raw-value, and WHNF inventories account for the new owner.
 
 #### W6G — Residual resumable-machine overhead
 
