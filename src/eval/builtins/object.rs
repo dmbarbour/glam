@@ -15,14 +15,6 @@ pub(super) fn apply(
             let [value] = super::exact(arguments, "object_from_dict")?;
             eval_object_from_dict_builtin(context, &value)
         }
-        Builtin::ObjectInstanceFromParts => {
-            let [name, deps, defs] = super::exact(arguments, "object instance from parts")?;
-            eval_object_instance_from_parts_builtin(context, name, deps, defs)
-        }
-        Builtin::ObjectInstance => {
-            let [spec] = super::exact(arguments, "object instance")?;
-            eval_object_instance_builtin(context, &spec)
-        }
         Builtin::ObjectDefaultDefs => {
             let [base, _self_value] = super::exact(arguments, "default object definitions")?;
             eval_value_in(context, &base)

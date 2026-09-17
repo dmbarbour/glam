@@ -202,9 +202,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/object_builtin_machine.rs",
         0,
         0,
-        4,
-        "durable object specification, diagnostic normalization, and local-name result publication",
-        "W6F.2 resumable object specification ownership"
+        5,
+        "durable object specification, diagnostic normalization, local-name, and instance result publication",
+        "W6F.2/W6F.4a resumable object builtin ownership"
     ),
     entry!(
         "src/eval/object_composition_machine.rs",
@@ -558,6 +558,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_builtin_machine.rs::optional_spec_member"
                 | "src/eval/object_builtin_machine.rs::root_local_name"
                 | "src/eval/object_builtin_machine.rs::root_object_from_dict"
+                | "src/eval/object_builtin_machine.rs::root_object_instance"
                 | "src/eval/object_builtin_machine.rs::spec_name"
                 | "src/eval/object_composition_machine.rs::finish_object_extension"
                 | "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll"
@@ -886,6 +887,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_builtin_machine.rs::optional_spec_member#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::root_local_name#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::root_object_from_dict#1|surface=access-publication|scope=production",
+    "src/eval/object_builtin_machine.rs::root_object_instance#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::spec_name#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::finish_object_extension#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll#1|surface=access-publication|scope=production",

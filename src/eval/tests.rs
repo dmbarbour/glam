@@ -641,6 +641,34 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
 }
 
 #[test]
+fn object_instance_from_parts_builds_through_the_resumable_builtin_owner() {
+    let context = test_context();
+    let application = apply_values(
+        &context,
+        Value::Builtin(Builtin::ObjectInstanceFromParts),
+        vec![
+            Value::binary_from_text("root"),
+            Value::List(List::empty()),
+            Value::Builtin(Builtin::ObjectDefaultDefs),
+        ],
+    )
+    .expect("parts-based object construction should build");
+
+    let Value::Dict(object) =
+        eval_value(&context, &application).expect("parts-based object construction should finish")
+    else {
+        panic!("parts-based object construction should produce a dictionary")
+    };
+    let Some(Value::Dict(spec)) = object.get(&*keys::SPEC) else {
+        panic!("the constructed object should publish its specification")
+    };
+    assert_eq!(
+        spec.get(&*keys::NAME),
+        Some(&Value::binary_from_text("root"))
+    );
+}
+
+#[test]
 fn claimed_evaluator_dispatches_pure_annotation_branches() {
     let context = test_context();
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);

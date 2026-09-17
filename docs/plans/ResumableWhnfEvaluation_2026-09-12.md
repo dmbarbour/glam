@@ -4488,7 +4488,10 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.2 — Complete (2026-09-17): Object specification** | 4 S | Convert diagnostics, local-name selection, spec selection, and spec dictionary validation. `-4`; then close W6A.0d for another `-2`. |
 | **W6F.3a — Complete (2026-09-17): Object composition applications** | 2 S | Convert composed and extended definitions through one durable application/WHNF phase owner. `-2`. |
 | **W6F.3b — Complete (2026-09-17): Recursive object override** | 2 S | Convert overriding definitions and recursive dictionary override through a rooted persistent-dictionary frame stack. `-2`. |
-| **W6F.4 — Object instantiation** | 5 S | Convert family dispatch, dict conversion, instance construction, managed spec-member projection, and the final object application consumers; then execute W6A.2 closure. `-5`, followed by closure delta `-5`. |
+| **W6F.4a — Complete (2026-09-17): Object instance construction** | 2 S | Move specification and parts-based instance construction into the durable object builtin owner without demanding specification fields. `-2`. |
+| **W6F.4b — Object definition adapters and dispatch** | 1 S | Convert default/dictionary definitions with explicit ordered demand, then retire the synchronous object family dispatcher. `-1`. |
+| **W6F.4c — Plain-dictionary conversion and spec projection** | 2 S | Convert `object_from_dict` and access-qualify the object-fixpoint specification-member projection. `-2`. |
+| **W6F.4d — Application compatibility closure** | 5 S closure | Move the reflection application bridge onto its own child `WhnfComputation`, inline the regional function-construction leaf, migrate tests to production application demand, and delete the five synchronous application helpers. Then close W6A.0c's dictionary-application pair. `-5`, followed by `-2`. |
 | **W6F.5 — Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
@@ -4555,6 +4558,16 @@ preserved across suspension without replay. The D.2c manifest falls from
 twenty-nine to twenty-seven declarations and `Objects` from seven to five;
 the exact inventories account for the enlarged composition owner and its
 bounded result publications.
+
+W6F.4a completion record, 2026-09-17: specification-based and parts-based
+object instance construction now retain their inputs in the durable object
+builtin owner, then construct the ordinary computed-fixpoint lazy value within
+one bounded access. Construction copies but does not demand name, dependency,
+definition, or complete specification fields; the existing object-fixpoint
+machine remains the sole owner of their later evaluation. The D.2c manifest
+falls from twenty-seven to twenty-five declarations and `Objects` from five to
+three. Exact publication and durable-owner inventories account for the added
+instance fields and one shared rooted result constructor.
 
 #### W6G — Residual resumable-machine overhead
 

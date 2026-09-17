@@ -1,42 +1,6 @@
 use super::super::super::*;
 use crate::core::{FixpointComputation, RuntimeValueAccess};
 
-pub(super) fn eval_object_instance_builtin(
-    context: &EvaluatorStepContext<'_>,
-    spec: &Value,
-) -> Result<Value, EvaluationHalt> {
-    Ok(Value::Lazy(context.construct_lazy(|access| {
-        LazyValue::computed_fixpoint_in(
-            access,
-            "object self",
-            FixpointComputation::ObjectInstance(spec.clone()),
-        )
-    })))
-}
-
-pub(super) fn eval_object_instance_from_parts_builtin(
-    context: &EvaluatorStepContext<'_>,
-    name: Value,
-    deps: Value,
-    defs: Value,
-) -> Result<Value, EvaluationHalt> {
-    let spec = context
-        .with_value_access(|access| object_spec_from_parts(access.values(), name, deps, defs));
-    eval_object_instance_builtin(context, &Value::Dict(spec))
-}
-
-fn object_spec_from_parts(
-    _access: &RuntimeValueAccess<'_>,
-    name: Value,
-    deps: Value,
-    defs: Value,
-) -> crate::core::Dict {
-    crate::core::Dict::new_sync()
-        .insert((*keys::NAME).clone(), name)
-        .insert((*keys::DEPS).clone(), deps)
-        .insert((*keys::DEFS).clone(), defs)
-}
-
 pub(super) fn eval_object_from_dict_builtin(
     context: &EvaluatorStepContext<'_>,
     value: &Value,
@@ -58,7 +22,13 @@ pub(super) fn eval_object_from_dict_builtin(
     }
 
     let spec = context.with_value_access(|access| dict_object_spec(access.values(), dict));
-    eval_object_instance_builtin(context, &spec)
+    Ok(Value::Lazy(context.construct_lazy(|access| {
+        LazyValue::computed_fixpoint_in(
+            access,
+            "object self",
+            FixpointComputation::ObjectInstance(spec),
+        )
+    })))
 }
 
 fn dict_object_spec(_access: &RuntimeValueAccess<'_>, dict: crate::core::Dict) -> Value {

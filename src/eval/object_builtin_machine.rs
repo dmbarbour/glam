@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::core::{Builtin, BuiltinCall, Dict, EvaluationFailure, LazyValue, List, Value, keys};
+use crate::core::{
+    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, LazyValue, List, Value,
+    keys,
+};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
 };
@@ -50,13 +53,25 @@ enum ObjectPhase {
         values: Vec<RuntimeValueRoot>,
         front: ListFrontMachine,
     },
+    Instance {
+        spec: RuntimeValueRoot,
+    },
+    InstanceFromParts {
+        name: RuntimeValueRoot,
+        deps: RuntimeValueRoot,
+        defs: RuntimeValueRoot,
+    },
 }
 
 impl ObjectBuiltinMachine {
     pub(crate) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
-            Builtin::ObjectSpec | Builtin::ObjectLocalName | Builtin::DiagnosticObject
+            Builtin::ObjectSpec
+                | Builtin::ObjectLocalName
+                | Builtin::DiagnosticObject
+                | Builtin::ObjectInstance
+                | Builtin::ObjectInstanceFromParts
         )
     }
 
@@ -86,6 +101,18 @@ impl ObjectBuiltinMachine {
                     host: WhnfComputation::from_root(host),
                     parts,
                 }
+            }
+            Builtin::ObjectInstance => {
+                let [spec]: [RuntimeValueRoot; 1] = arguments
+                    .try_into()
+                    .expect("object instance retains one specification");
+                ObjectPhase::Instance { spec }
+            }
+            Builtin::ObjectInstanceFromParts => {
+                let [name, deps, defs]: [RuntimeValueRoot; 3] = arguments
+                    .try_into()
+                    .expect("parts-based object instance retains three fields");
+                ObjectPhase::InstanceFromParts { name, deps, defs }
             }
             _ => unreachable!("object builtin machine received another builtin"),
         };
@@ -233,8 +260,47 @@ impl ObjectBuiltinMachine {
                     ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
                 }
             }
+            ObjectPhase::Instance { spec } => BuiltinTaskPoll::Ready(root_object_instance(
+                context,
+                ObjectInstanceInput::Spec(spec),
+            )),
+            ObjectPhase::InstanceFromParts { name, deps, defs } => BuiltinTaskPoll::Ready(
+                root_object_instance(context, ObjectInstanceInput::Parts { name, deps, defs }),
+            ),
         }
     }
+}
+
+enum ObjectInstanceInput<'a> {
+    Spec(&'a RuntimeValueRoot),
+    Parts {
+        name: &'a RuntimeValueRoot,
+        deps: &'a RuntimeValueRoot,
+        defs: &'a RuntimeValueRoot,
+    },
+}
+
+fn root_object_instance(
+    context: &EvaluatorStepContext<'_>,
+    input: ObjectInstanceInput<'_>,
+) -> RuntimeValueRoot {
+    context.with_value_access(|access| {
+        let spec = match input {
+            ObjectInstanceInput::Spec(spec) => access.clone_root(spec),
+            ObjectInstanceInput::Parts { name, deps, defs } => Value::Dict(
+                Dict::new_sync()
+                    .insert((*keys::NAME).clone(), access.clone_root(name))
+                    .insert((*keys::DEPS).clone(), access.clone_root(deps))
+                    .insert((*keys::DEFS).clone(), access.clone_root(defs)),
+            ),
+        };
+        let object = LazyValue::computed_fixpoint_in(
+            access.values(),
+            "object self",
+            FixpointComputation::ObjectInstance(spec),
+        );
+        access.values().root_runtime_value(Value::Lazy(object))
+    })
 }
 
 enum DemandResult {
