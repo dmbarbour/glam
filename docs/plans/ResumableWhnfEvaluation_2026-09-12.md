@@ -4497,7 +4497,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4d.4 — Complete (2026-09-17): Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Complete (2026-09-17): Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
 | **W6F.6 — Complete (2026-09-18): Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
-| **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
+| **W6F.7 — Complete (2026-09-18): Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
 
 Object-fixpoint C3 traversal, referential identity validation, the mixin fold,
 and the net-construction journal owner are already complete and are not
@@ -4690,6 +4690,22 @@ halt signature. Existing forced dependency, valid replay, backtracking, local
 effect-state, memoization, malformed-result, and port-family fixtures pass in
 ordinary and aggressive-GC modes; exact root-publication, durable-owner,
 access, raw-value, and WHNF inventories account for the rooted handoffs.
+
+W6F.7 completion record, 2026-09-18: a successful isolated construction
+search now transitions into an explicit `Exposed` phase containing the
+selected persistent journal and one rooted `WhnfComputation`. Exposed-port
+demand can therefore yield or suspend without replaying the search or losing
+the selected branch; only the ready rooted result is projected inside bounded
+evaluator access for opaque-port validation and replay. Callback-side public
+port values and evaluator-side rooted values share scalar brand/identity
+validation without sharing a raw-value function boundary. The diagnostic
+context frame is also constructed and published inside admitted access. The
+last three `NetBuiltins` declarations leave the raw-value inventory, reducing
+the complete inventory from 443 to 440 declarations and from 266 to 263
+violations. The D.2c net family and W6F.7 checkpoint reach zero; the WHNF
+census replaces the synchronous `eval_value_in` port demand with the explicit
+user-sized search/WHNF phase. Exact opaque-family, root-publication, access,
+raw-value, and WHNF inventories account for the new boundary.
 
 #### W6G — Residual resumable-machine overhead
 

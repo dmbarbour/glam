@@ -6,7 +6,10 @@ use std::sync::Arc;
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value};
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
-use crate::evaluation::{EvalContext, EvaluatorStepContext, WorkDependency};
+use crate::evaluation::{
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
+    WorkDependency, poll_whnf_computation,
+};
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
@@ -15,7 +18,9 @@ use crate::reflection::{
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::super::super::{EvaluationHalt, eval_value_in};
+use super::super::super::EvaluationHalt;
+use super::super::super::value::evaluation_context_frame_in;
+use super::super::super::whnf::WhnfComputation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ConstructionPortId(NonZeroU64);
@@ -352,7 +357,14 @@ fn request_port(
 ) -> Result<ConstructionPortId, TaskHalt> {
     let values = context.values();
     value
-        .with_core(|value| construction_port_value(values.core(), value, brand))
+        .with_core(|value| {
+            let Value::Opaque(port) = value else {
+                return Err(EvaluationHalt::new(
+                    "interaction-net operation requires a construction port",
+                ));
+            };
+            decode_construction_port(values.core(), port, brand)
+        })
         .map_err(|error| TaskHalt::new(error.to_string()))?
         .map_err(task_eval_error)
 }
@@ -372,7 +384,15 @@ type ConstructionHost = IsolatedTaskHost<()>;
 
 pub(in crate::eval) struct NetConstructionMachine {
     brand: Arc<ConstructionBrand>,
-    search: IsolatedEffectSearch<InteractionNetEffects>,
+    state: NetConstructionState,
+}
+
+enum NetConstructionState {
+    Search(Box<IsolatedEffectSearch<InteractionNetEffects>>),
+    Exposed {
+        journal: ConstructionJournal,
+        demand: WhnfComputation,
+    },
 }
 
 pub(in crate::eval) enum NetConstructionPoll {
@@ -404,7 +424,10 @@ impl NetConstructionMachine {
             context,
         )
         .map_err(TaskHalt::into_evaluation_halt)?;
-        Ok(Self { brand, search })
+        Ok(Self {
+            brand,
+            state: NetConstructionState::Search(Box::new(search)),
+        })
     }
 
     /// Advances construction without losing the freer machine or its journal.
@@ -412,72 +435,118 @@ impl NetConstructionMachine {
     /// only a completed replay publishes a rooted net value.
     pub(in crate::eval) fn poll(
         &mut self,
+        poll_context: &EvaluationPollContext,
         context: &EvaluatorStepContext<'_>,
+        durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> NetConstructionPoll {
-        match self.search.poll_with_budget(step_budget) {
-            IsolatedSearchPoll::Yielded => NetConstructionPoll::Yielded,
-            IsolatedSearchPoll::Blocked(blocked) => {
-                if let Some(dependency) = blocked.dependency().cloned() {
-                    return NetConstructionPoll::Pending(WorkDependency::Wait(dependency));
-                }
-                let error = match blocked.error() {
-                    Some(halt) => {
-                        let values = Values::from_core_factory(context.context().values().clone());
-                        halt.clone()
-                            .with_context(&values, values.wrap(net_construction_context()))
-                            .into_evaluation_halt()
-                    }
-                    None => EvaluationHalt::new(
-                        "interaction-net construction became blocked without a dependency or mutable host observation",
-                    ),
-                };
-                net_construction_halt(context, error)
-            }
-            IsolatedSearchPoll::Complete(branches) => {
-                let mut successes = branches.iter().filter(|branch| branch.value().is_some());
-                let Some(branch) = successes.next() else {
-                    return NetConstructionPoll::Failed(
-                        context.root_failure(
-                            EvaluationHalt::new(
-                                "interaction-net construction produced no successful result",
+        loop {
+            match &mut self.state {
+                NetConstructionState::Search(search) => {
+                    let transition = match search.poll_with_budget(step_budget) {
+                        IsolatedSearchPoll::Yielded => return NetConstructionPoll::Yielded,
+                        IsolatedSearchPoll::Blocked(blocked) => {
+                            if let Some(dependency) = blocked.dependency().cloned() {
+                                return NetConstructionPoll::Pending(WorkDependency::Wait(
+                                    dependency,
+                                ));
+                            }
+                            let error = match blocked.error() {
+                                Some(halt) => {
+                                    let values = Values::from_core_factory(
+                                        context.context().values().clone(),
+                                    );
+                                    halt.clone()
+                                        .with_context(&values, net_construction_context(context))
+                                        .into_evaluation_halt()
+                                }
+                                None => EvaluationHalt::new(
+                                    "interaction-net construction became blocked without a dependency or mutable host observation",
+                                ),
+                            };
+                            return net_construction_halt(context, error);
+                        }
+                        IsolatedSearchPoll::Complete(branches) => {
+                            let mut successes =
+                                branches.iter().filter(|branch| branch.value().is_some());
+                            let Some(branch) = successes.next() else {
+                                return NetConstructionPoll::Failed(context.root_failure(
+                                    EvaluationHalt::new(
+                                        "interaction-net construction produced no successful result",
+                                    )
+                                    .into_permanent_failure(),
+                                ));
+                            };
+                            if successes.next().is_some() {
+                                return NetConstructionPoll::Failed(context.root_failure(
+                                    EvaluationHalt::new(
+                                        "interaction-net construction produced multiple results; use `.cut` to select one",
+                                    )
+                                    .into_permanent_failure(),
+                                ));
+                            }
+                            (
+                                branch.journal().clone(),
+                                branch
+                                    .value()
+                                    .expect("successful branch checked above")
+                                    .clone()
+                                    .into_runtime_root(),
                             )
-                            .into_permanent_failure(),
-                        ),
-                    );
-                };
-                if successes.next().is_some() {
-                    return NetConstructionPoll::Failed(context.root_failure(
-                        EvaluationHalt::new(
-                            "interaction-net construction produced multiple results; use `.cut` to select one",
-                        )
-                        .into_permanent_failure(),
-                    ));
+                        }
+                        IsolatedSearchPoll::Failed(halt) => {
+                            let values =
+                                Values::from_core_factory(context.context().values().clone());
+                            let error = halt
+                                .with_context(&values, net_construction_context(context))
+                                .into_evaluation_halt();
+                            return net_construction_halt(context, error);
+                        }
+                        IsolatedSearchPoll::Cancelled => {
+                            return NetConstructionPoll::Failed(
+                                context.root_failure(
+                                    EvaluationHalt::new(
+                                        "interaction-net construction was cancelled",
+                                    )
+                                    .into_permanent_failure(),
+                                ),
+                            );
+                        }
+                    };
+                    self.state = NetConstructionState::Exposed {
+                        journal: transition.0,
+                        demand: WhnfComputation::from_root(transition.1),
+                    };
                 }
-                let values = Values::from_core_factory(context.context().values().clone());
-                let result = values
-                    .clone_core(branch.value().expect("successful branch checked above"))
-                    .map_err(|error| EvaluationHalt::new(error.to_string()))
-                    .and_then(|exposed| construction_port_in(context, &exposed, &self.brand))
-                    .and_then(|exposed| replay(context, branch.journal(), exposed));
-                match result {
-                    Ok(value) => NetConstructionPoll::Ready(value),
-                    Err(error) => net_construction_halt(context, error),
+                NetConstructionState::Exposed { journal, demand } => {
+                    match poll_whnf_computation(demand, poll_context, durable_context, step_budget)
+                    {
+                        WhnfOwnerPoll::Ready(value) => {
+                            let exposed = context.with_value_access(|access| {
+                                construction_port_value(&access, &value, &self.brand)
+                            });
+                            return match exposed
+                                .and_then(|exposed| replay(context, journal, exposed))
+                            {
+                                Ok(value) => NetConstructionPoll::Ready(value),
+                                Err(error) => net_construction_halt(context, error),
+                            };
+                        }
+                        WhnfOwnerPoll::Pending(dependency) => {
+                            return NetConstructionPoll::Pending(dependency);
+                        }
+                        WhnfOwnerPoll::Yielded => return NetConstructionPoll::Yielded,
+                        WhnfOwnerPoll::Failed(failure) => {
+                            return NetConstructionPoll::Failed(failure);
+                        }
+                        WhnfOwnerPoll::External(boundary) => {
+                            unreachable!(
+                                "net-construction exposed-port demand produced an external {boundary:?} boundary"
+                            )
+                        }
+                    }
                 }
             }
-            IsolatedSearchPoll::Failed(halt) => {
-                let values = Values::from_core_factory(context.context().values().clone());
-                let error = halt
-                    .with_context(&values, values.wrap(net_construction_context()))
-                    .into_evaluation_halt();
-                net_construction_halt(context, error)
-            }
-            IsolatedSearchPoll::Cancelled => NetConstructionPoll::Failed(
-                context.root_failure(
-                    EvaluationHalt::new("interaction-net construction was cancelled")
-                        .into_permanent_failure(),
-                ),
-            ),
         }
     }
 }
@@ -495,8 +564,15 @@ fn net_construction_halt(
     NetConstructionPoll::Failed(context.root_failure(error.into_permanent_failure()))
 }
 
-fn net_construction_context() -> Value {
-    crate::diagnostic::evaluation_context_frame("net_construction")
+fn net_construction_context(context: &EvaluatorStepContext<'_>) -> PublicValue {
+    PublicValue::from_runtime_root(context.with_value_access(|access| {
+        access
+            .values()
+            .root_runtime_value(evaluation_context_frame_in(
+                access.values(),
+                "net_construction",
+            ))
+    }))
 }
 
 fn construct_bind(
@@ -579,25 +655,25 @@ fn port_list(
     )))
 }
 
-fn construction_port_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-    brand: &Arc<ConstructionBrand>,
-) -> Result<ConstructionPortId, EvaluationHalt> {
-    let value = eval_value_in(context, value)?;
-    construction_port_value(context.context().values(), &value, brand)
-}
-
 fn construction_port_value(
-    values: &crate::core::CoreValueFactory,
-    value: &Value,
+    access: &EvaluationValueAccess<'_>,
+    value: &RuntimeValueRoot,
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, EvaluationHalt> {
+    let value = access.clone_root(value);
     let Value::Opaque(port) = value else {
         return Err(EvaluationHalt::new(
             "interaction-net operation requires a construction port",
         ));
     };
+    decode_construction_port(access.values().values(), &port, brand)
+}
+
+fn decode_construction_port(
+    values: &crate::core::CoreValueFactory,
+    port: &OpaqueValue,
+    brand: &Arc<ConstructionBrand>,
+) -> Result<ConstructionPortId, EvaluationHalt> {
     let port = port.downcast::<ConstructionPort>(values).ok_or_else(|| {
         EvaluationHalt::new("interaction-net operation requires a construction port")
     })?;
@@ -701,20 +777,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exposed_port_demand_suspends_without_losing_the_selected_journal() {
+        let context = EvalContext::standalone();
+        let brand = Arc::new(ConstructionBrand);
+        let values = Values::from_core_factory(context.values().clone());
+        let mut journal = ConstructionJournal::default();
+        let [port]: [ConstructionPortId; 1] = journal
+            .allocate_ports(1)
+            .expect("the fixture port should allocate")
+            .try_into()
+            .expect("one allocated port should form a singleton");
+        journal.append(ConstructionOp::Data {
+            port,
+            value: values.wrap(Value::Number(42.into())),
+        });
+
+        let promise = crate::core::PromisedValue::new(
+            context.values(),
+            "suspended construction exposed port",
+        );
+        let exposed = values
+            .wrap(Value::Promised(promise.clone()))
+            .into_runtime_root();
+        let mut machine = NetConstructionMachine {
+            brand: brand.clone(),
+            state: NetConstructionState::Exposed {
+                journal,
+                demand: WhnfComputation::from_root(exposed),
+            },
+        };
+        let poll = EvaluationPollContext::for_context(&context);
+
+        let pending = poll.evaluate(&context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                &context,
+                &mut crate::evaluation::EvaluationStepBudget::new(16),
+            )
+        });
+        let NetConstructionPoll::Pending(WorkDependency::Promise(dependency)) = pending else {
+            panic!("the selected journal should wait on its unresolved exposed port")
+        };
+        assert_eq!(dependency.id(), promise.id(context.values()));
+
+        let exposed_port = Value::Opaque(OpaqueValue::new(
+            context.values(),
+            Arc::new(ConstructionPort { brand, id: port }),
+        ));
+        crate::core::set_test_promise(context.values(), &promise, exposed_port)
+            .expect("the exposed port should accept one assignment");
+
+        let ready = poll.evaluate(&context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                &context,
+                &mut crate::evaluation::EvaluationStepBudget::new(16),
+            )
+        });
+        let NetConstructionPoll::Ready(ready) = ready else {
+            panic!("the retained journal should replay after exposed-port assignment")
+        };
+        assert!(matches!(ready.clone_core_for_test(), Value::Net(_)));
+    }
+
+    #[test]
     fn construction_ports_are_scoped_to_one_invocation() {
         assert_construction_port_family_shape();
         let values = crate::core::test_value_factory();
         let local = Arc::new(ConstructionBrand);
         let foreign = Arc::new(ConstructionBrand);
-        let value = Value::Opaque(OpaqueValue::new(
+        let port = OpaqueValue::new(
             &values,
             Arc::new(ConstructionPort {
                 brand: foreign,
                 id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
             }),
-        ));
+        );
 
-        let error = construction_port_value(&values, &value, &local).unwrap_err();
+        let error = decode_construction_port(&values, &port, &local).unwrap_err();
         assert_eq!(
             error.to_string(),
             "interaction-net construction port belongs to another invocation"

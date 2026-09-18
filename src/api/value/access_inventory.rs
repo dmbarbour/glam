@@ -258,9 +258,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/builtins/net/construction.rs",
         0,
         0,
-        1,
-        "completed interaction-net replay publication",
-        "W6F.6 rooted net-construction lifecycle"
+        2,
+        "interaction-net diagnostic context and completed replay publication",
+        "W6F.6-W6F.7 rooted net-construction lifecycle and context"
     ),
     entry!(
         "src/eval/value.rs",
@@ -542,6 +542,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/annotation_machine.rs::recognize_annotation"
                 | "src/eval/annotation_machine.rs::root_builtin"
                 | "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll"
+                | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
                 | "src/eval/comparison_machine.rs::classify_equality"
                 | "src/eval/comparison_machine.rs::classify_ordering"
@@ -857,6 +858,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/annotation_machine.rs::root_builtin#1|surface=access-publication|scope=production",
     "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/builtin_machine.rs::impl NetBuiltinMachine::poll#2|surface=access-publication|scope=production",
+    "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#1|surface=access-publication|scope=production",
     "src/eval/comparison_machine.rs::classify_equality#2|surface=access-publication|scope=production",

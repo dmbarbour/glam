@@ -647,7 +647,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-                return match machine.poll(context, step_budget) {
+                return match machine.poll(
+                    poll_context,
+                    context,
+                    &durable_context,
+                    step_budget,
+                ) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
                     NetConstructionPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {

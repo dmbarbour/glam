@@ -156,8 +156,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/net/construction.rs",
-        [4, 0],
-        "I3D.4/W6F.6 scoped result decoding and replay; isolated-search construction takes owned durable context"
+        [4, 1],
+        "I3D.4/W6F.6-W6F.7 scoped result decoding and replay with one durable exposed-port WHNF owner"
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
@@ -493,8 +493,10 @@ fn net_construction_callbacks_have_no_direct_compatibility_entry() {
         "copy and ordered wire preparation must remain explicit request-work phases"
     );
     assert!(
-        source.contains("fn construction_port_in(\n    context: &EvaluatorStepContext"),
-        "the completed construction result must retain its owning evaluator-step authority"
+        source.contains("NetConstructionState::Exposed { journal, demand }")
+            && source.contains("demand: WhnfComputation::from_root")
+            && source.contains("construction_port_value(&access, &value, &self.brand)"),
+        "the completed construction result must retain an explicit durable WHNF owner and inspect its port only under evaluator access"
     );
 }
 
