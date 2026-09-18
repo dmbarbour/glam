@@ -609,17 +609,21 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
     let source_owner_transition = source_section(
         whnf,
         "pub(crate) fn with_source_owner(",
-        "    /// Polls one bounded callback-free quantum",
+        "    fn promote_seed_in(",
+    );
+    assert!(
+        source_owner_transition.contains("DurableWhnfCheckpoint::Seed"),
+        "source-owner modification must remain confined to the access-free seed"
     );
     assert_eq!(
         source_owner_transition
-            .matches("checkpoint.source_owner = Some(source_owner)")
+            .matches("*owner = Some(source_owner)")
             .count(),
         1,
-        "only the canonical lazy producer constructor may add a source owner"
+        "the seed modifier must install source ownership exactly once"
     );
     assert_eq!(
-        whnf.matches("checkpoint.source_owner = Some(").count(),
+        whnf.matches("*owner = Some(source_owner)").count(),
         1,
         "new source-owner transitions require an NC5D inventory decision"
     );

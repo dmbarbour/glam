@@ -3735,7 +3735,7 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
                     .iter()
                     .map(|argument| access.clone_root(argument))
                     .collect::<Vec<_>>();
-                WhnfComputation::from_application_checkpoint_in(&access, function, &arguments)
+                WhnfComputation::from_application_checkpoint_in(&access, function, &arguments, None)
             })
         });
         Self {

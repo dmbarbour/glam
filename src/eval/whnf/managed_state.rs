@@ -59,9 +59,9 @@ impl ManagedWhnfCell {
 impl ManagedWhnfRoot {
     /// Allocates and roots one complete regional state before access closes.
     ///
-    /// W6G.3c uses this constructor only in focused foundation tests. W6G.3d
-    /// selects the production seed-promotion and structured-construction call
-    /// sites rather than opening hidden access here.
+    /// W6G.3d routes seed promotion and access-qualified structured
+    /// construction through this caller-supplied access rather than opening a
+    /// hidden nested region.
     pub(crate) fn from_regional_in(
         access: &EvaluationValueAccess<'_>,
         work: RegionalWhnfWork,

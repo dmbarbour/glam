@@ -5034,6 +5034,26 @@ retains both representations, and every promotion remains safe under forced
 collection. Update the constructor inventory after each step rather than
 combining the whole migration into one unreviewable edit.
 
+W6G.3d.2 completion record, 2026-09-18: application and static-access
+constructors now build raw canonical focus/frame edges beneath their caller's
+existing `EvaluationValueAccess`, allocate exactly one `ManagedWhnfRoot`, and
+carry `source_owner` into that cell at construction. The two producer helpers
+which previously appended ownership through `with_source_owner` now supply it
+as constructor metadata; that modifier remains confined to minimal
+access-free seeds.
+
+`application_frame_pending` now reads only the scalar observation stored
+beside the managed root. Each managed poll refreshes that observation from
+the canonical state before releasing the cell lock, so reflection
+contextualization no longer walks durable application frames without access.
+The constructor checkpoint proves access depth remains one, one root is
+published per structured demand, legacy conversion counters remain zero, and
+raw frame edges survive forced collection after their former owner is
+dropped. Ordinary and `aggressive-gc-verification` focused suites cover both
+constructors. The source-entry fixture continues to prove that merely
+installing a result performs no conversion; first demand alone performs its
+one-time promotion.
+
 ##### W6G.3e — Aggregate poll transition
 
 Polling projects the single managed root beneath matching access, locks its

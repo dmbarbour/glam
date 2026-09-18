@@ -473,6 +473,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 &access,
                                 application.function().clone(),
                                 application.arguments(),
+                                None,
                             )
                         });
                         LazyTaskWork::Whnf(computation)
@@ -486,6 +487,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     &access,
                                     function.clone(),
                                     std::slice::from_ref(&marker),
+                                    None,
                                 )
                             });
                             LazyTaskWork::Whnf(computation)

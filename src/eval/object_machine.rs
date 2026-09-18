@@ -604,8 +604,12 @@ fn application_in(
             .iter()
             .map(|argument| access.clone_root(argument))
             .collect::<Vec<_>>();
-        WhnfComputation::from_application_checkpoint_in(&access, function, &arguments)
-            .with_source_owner(source_owner)
+        WhnfComputation::from_application_checkpoint_in(
+            &access,
+            function,
+            &arguments,
+            Some(source_owner),
+        )
     })
 }
 

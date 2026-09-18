@@ -33,7 +33,6 @@ enum BoundaryRole {
     DemandSeed,
     AccessQualifiedStructuredDemand,
     ScalarObserver,
-    DeepObserver,
     SeedModifier,
 }
 
@@ -46,8 +45,9 @@ fn boundary_role(api: CheckpointApi) -> BoundaryRole {
         CheckpointApi::FromApplicationCheckpoint | CheckpointApi::FromStaticAccessCheckpoint => {
             BoundaryRole::AccessQualifiedStructuredDemand
         }
-        CheckpointApi::RuntimeId => BoundaryRole::ScalarObserver,
-        CheckpointApi::ApplicationFramePending => BoundaryRole::DeepObserver,
+        CheckpointApi::RuntimeId | CheckpointApi::ApplicationFramePending => {
+            BoundaryRole::ScalarObserver
+        }
         CheckpointApi::WithSourceOwner => BoundaryRole::SeedModifier,
     }
 }
@@ -331,10 +331,10 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::InstallSourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
-    (CheckpointApi::WithSourceOwner, 12),
+    (CheckpointApi::WithSourceOwner, 10),
 ];
-const EXPECTED_OCCURRENCES: usize = 117;
-const EXPECTED_FINGERPRINT: u64 = 13_860_534_560_837_261_745;
+const EXPECTED_OCCURRENCES: usize = 115;
+const EXPECTED_FINGERPRINT: u64 = 9_762_867_938_261_099_370;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {
@@ -365,6 +365,5 @@ fn checkpoint_boundary_roles_are_compile_exhaustive() {
     assert!(roles.contains(&BoundaryRole::DemandSeed));
     assert!(roles.contains(&BoundaryRole::AccessQualifiedStructuredDemand));
     assert!(roles.contains(&BoundaryRole::ScalarObserver));
-    assert!(roles.contains(&BoundaryRole::DeepObserver));
     assert!(roles.contains(&BoundaryRole::SeedModifier));
 }

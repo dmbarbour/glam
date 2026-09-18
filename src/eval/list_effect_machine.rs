@@ -299,8 +299,12 @@ fn application_in(
     context.with_value_access(|access| {
         let function = access.clone_root(&function);
         let argument = access.clone_root(&argument);
-        WhnfComputation::from_application_checkpoint_in(&access, function, &[argument])
-            .with_source_owner(source_owner)
+        WhnfComputation::from_application_checkpoint_in(
+            &access,
+            function,
+            &[argument],
+            Some(source_owner),
+        )
     })
 }
 

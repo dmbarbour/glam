@@ -1035,14 +1035,12 @@ impl WhnfComputation {
     /// failure encountered while forcing the completed result.
     pub(crate) fn application_frame_pending(&self) -> bool {
         match &self.checkpoint {
-            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => checkpoint
-                .frames
-                .iter()
-                .any(|frame| matches!(frame, DurableWhnfContinuation::Application { .. })),
             DurableWhnfCheckpoint::ManagedDemand { observation, .. } => {
                 observation.application_frame_pending
             }
-            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::Seed { .. } => false,
+            DurableWhnfCheckpoint::Source { .. }
+            | DurableWhnfCheckpoint::Seed { .. }
+            | DurableWhnfCheckpoint::LegacyDemand(_) => false,
         }
     }
 
@@ -1050,27 +1048,24 @@ impl WhnfComputation {
         access: &EvaluationValueAccess<'_>,
         function: Value,
         arguments: &[Value],
+        source_owner: Option<LazyId>,
     ) -> Self {
         assert!(!arguments.is_empty(), "application requires an argument");
-        Self {
-            checkpoint: DurableWhnfCheckpoint::LegacyDemand(DurableWhnfState {
-                focus: access.values().root_runtime_value(function),
-                frames: vec![DurableWhnfContinuation::Application {
-                    arguments: arguments
-                        .iter()
-                        .map(|argument| {
-                            access
-                                .values()
-                                .root_runtime_value(access.values().duplicate_value(argument))
-                        })
-                        .collect(),
-                    next: 0,
-                }],
-                followed: BTreeSet::new(),
-                source_owner: None,
-                cycle_promise: None,
-            }),
-        }
+        let work = RegionalWhnfWork::from_parts(
+            access,
+            function,
+            vec![WhnfContinuation::Application {
+                arguments: arguments
+                    .iter()
+                    .map(|argument| access.values().duplicate_value(argument))
+                    .collect(),
+                next: 0,
+            }],
+            BTreeSet::new(),
+            source_owner,
+            None,
+        );
+        Self::from_structured_work_in(access, work)
     }
 
     pub(crate) fn from_static_access_checkpoint_in(
@@ -1080,17 +1075,20 @@ impl WhnfComputation {
         source_owner: Option<LazyId>,
     ) -> Self {
         let frames = (!keys.is_empty())
-            .then_some(DurableWhnfContinuation::StaticAccess { keys, next: 0 })
+            .then_some(WhnfContinuation::StaticAccess { keys, next: 0 })
             .into_iter()
             .collect();
+        let work =
+            RegionalWhnfWork::from_parts(access, base, frames, BTreeSet::new(), source_owner, None);
+        Self::from_structured_work_in(access, work)
+    }
+
+    fn from_structured_work_in(access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) -> Self {
+        let observation = work.poll_observation();
+        let state = ManagedWhnfRoot::from_regional_in(access, work)
+            .expect("canonical WHNF state must fit its reviewed managed slot");
         Self {
-            checkpoint: DurableWhnfCheckpoint::LegacyDemand(DurableWhnfState {
-                focus: access.values().root_runtime_value(base),
-                frames,
-                followed: BTreeSet::new(),
-                source_owner,
-                cycle_promise: None,
-            }),
+            checkpoint: DurableWhnfCheckpoint::ManagedDemand { state, observation },
         }
     }
 
@@ -1119,10 +1117,9 @@ impl WhnfComputation {
                 source_owner: owner,
                 ..
             } => *owner = Some(source_owner),
-            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => {
-                checkpoint.source_owner = Some(source_owner);
-            }
-            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::ManagedDemand { .. } => {
+            DurableWhnfCheckpoint::Source { .. }
+            | DurableWhnfCheckpoint::LegacyDemand(_)
+            | DurableWhnfCheckpoint::ManagedDemand { .. } => {
                 panic!("a source owner must be installed before managed demand publication")
             }
         }
@@ -1185,11 +1182,12 @@ impl WhnfComputation {
 
     /// Polls one bounded callback-free quantum beneath matching value access.
     ///
-    /// The prior checkpoint remains installed while its regional projection
-    /// is driven and while a replacement is rooted. `publish_checkpoint`
-    /// installs the complete replacement before retiring the old roots.
-    /// Returned boundary dispositions contain no active access and are
-    /// interpreted by the outer owner only after its access callback returns.
+    /// A minimal seed is promoted while its input root remains installed; all
+    /// subsequent managed polls mutate the single canonical state in place.
+    /// The legacy projection/publication branch remains only until W6G.3f
+    /// removes its now-unreachable representation. Returned boundary
+    /// dispositions contain no active access and are interpreted by the outer
+    /// owner only after its access callback returns.
     pub(crate) fn poll_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,

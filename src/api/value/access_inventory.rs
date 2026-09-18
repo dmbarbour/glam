@@ -274,9 +274,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/whnf.rs",
         0,
         1,
-        12,
-        "access-scoped WHNF checkpoint focus/frame publication, application/access-frame publication, one-time managed-state promotion, terminal result rooting, and promise-follower focus construction",
-        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W3B application and W3C access state; W6G.3d managed-state promotion"
+        9,
+        "legacy access-scoped WHNF checkpoint focus/frame publication, terminal result rooting, and promise-follower focus construction",
+        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W6G.3d structured application/access state moved behind one managed root"
     ),
     entry!(
         "src/evaluation/access.rs",
@@ -599,8 +599,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
                 | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
                 | "src/eval/whnf.rs::impl DurableWhnfState::from_regional"
-                | "src/eval/whnf.rs::impl WhnfComputation::from_application_checkpoint_in"
-                | "src/eval/whnf.rs::impl WhnfComputation::from_static_access_checkpoint_in"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::impl WhnfComputation::poll_in"
                 | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
@@ -954,9 +952,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#5|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl DurableWhnfState::from_regional#1|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl WhnfComputation::from_application_checkpoint_in#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
-    "src/eval/whnf.rs::impl WhnfComputation::from_static_access_checkpoint_in#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::poll_in#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::poll_in#2|surface=access-publication|scope=production",
     "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",

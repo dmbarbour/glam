@@ -15,7 +15,7 @@ fn context() -> OwnedEvalContext {
 fn application(context: &EvalContext, function: Value, arguments: &[Value]) -> WhnfComputation {
     let poll = EvaluationPollContext::for_context(context);
     poll.with_value_access(context, |access| {
-        WhnfComputation::from_application_checkpoint_in(&access, function, arguments)
+        WhnfComputation::from_application_checkpoint_in(&access, function, arguments, None)
     })
 }
 
@@ -151,7 +151,7 @@ fn function_application_batches_arguments_without_intermediate_roots() {
     assert_eq!(
         roots_after_checkpoint,
         roots_before + 1,
-        "immediate arguments need no managed roots; only the function stage does"
+        "the function and every argument must share one canonical managed state root"
     );
 
     assert!(matches!(
@@ -160,8 +160,8 @@ fn function_application_batches_arguments_without_intermediate_roots() {
     ));
     assert_eq!(
         context.values().managed_root_registrations_for_test(),
-        roots_after_checkpoint + 1,
-        "regional batching must publish only the resulting partial stage"
+        roots_after_checkpoint,
+        "in-place regional batching must retain the partial stage inside the canonical cell"
     );
     let WhnfPoll::Ready(result) = poll(&context, &mut computation, 1) else {
         panic!("an under-saturated function must become an immediate function value")
