@@ -286,6 +286,24 @@ the common state vocabulary and zero-walk net/regional ownership handoff; a
 second continuation representation is not an acceptable way to optimize the
 concurrent collector.
 
+W6G.1f subsequently distinguishes externally owned WHNF continuations from
+lazy-owned producer checkpoints. The latter are reachable through their
+managed lazy and may point back to that lazy. An independently registered
+`RootFrame` for such a checkpoint would turn the backedge into a permanent
+external root cycle and defeat collection. CG0 must therefore apply the frame
+comparison by ownership class:
+
+- externally owned client, spark, reflection, or other machine continuations
+  may use an ordinary registered `RootFrame` when its external owner is the
+  intended liveness root; while
+- a lazy-owned producer checkpoint must remain a traced managed child or use a
+  conditional trace-immediate sidecar whose registration lifetime follows the
+  parent lazy without independently rooting the child graph.
+
+The initial W6G.1f baseline is a traced managed checkpoint. A conditional
+sidecar requires its own liveness and SATB review; an ordinary external-owner
+lease or finalizer is insufficient when the sidecar can reach its owning lazy.
+
 The comparison is also a liveness gate, not merely a performance exercise.
 W6G.3 deliberately holds the managed-cell mutex for one complete bounded,
 callback-free evaluator quantum. Its reference-collector `Trace` may acquire
@@ -299,7 +317,7 @@ bounded marking pass into evaluator/collector lock convoying.
 Before CG2 enables concurrent tracing, CG0-CG1 must select and implement one
 of these reviewed resolutions for every lock-bearing managed family:
 
-1. **Trace-immediate frame (preferred for WHNF machine state).** Replace
+1. **Trace-immediate frame (preferred for externally owned WHNF machine state).** Replace
    `Root<ManagedWhnfCell>` with the canonical state in a registered
    `RootFrame<WhnfState>`. Starting an epoch closes new frame guards, waits for
    already admitted bounded guards to leave, traces the registered frames as
@@ -327,6 +345,7 @@ an informal scheduler expectation.
 CG0 must revisit this concept against the post-refinement machine inventory and
 decide at least:
 
+- which checkpoints are externally rooted and which are lazy-owned;
 - whether the whole machine state or only its managed semantic substate belongs
   in a frame;
 - whether unique borrowing covers the common edit path or a frame mutex is

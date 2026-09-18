@@ -4758,10 +4758,12 @@ but not every coordinated record is globally executor-visible:
 - a client-evaluation record owns one foreground continuation and its wake
   state;
 - a spark or reflection record owns one background continuation;
-- a canonical lazy-producer record owns the partial source machine shared by
-  every observer of that lazy identity; and
+- the managed lazy identity owns the partial producer checkpoint shared by
+  every observer of that lazy identity;
+- a canonical coordinator route owns only transient claim, block, subscriber,
+  and wake state while at least one observer actively demands that lazy; and
 - completion subscriptions connect those role-specific roots to canonical
-  producers without transferring either continuation into the other record.
+  producers without transferring either continuation into the lazy.
 
 A thread owns only one detached poll claim for one bounded quantum. Thread
 role decides which root work that thread may locate. A canonical producer is
@@ -4800,9 +4802,11 @@ dependency indexes later only with evidence, while preserving the same
 meaning.
 
 The current deferred-value index already prevents two simultaneous producer
-machines for one `DeferredValueId`, but the resulting record inherits the
-first discoverer's demand session, task context, and lifecycle. Preserve the
-canonical index while removing that accidental first-discoverer ownership.
+machines for one `DeferredValueId`, but the resulting coordinator record owns
+the machine and inherits the first discoverer's demand session, task context,
+and lifecycle. Preserve canonical admission while removing both that
+accidental first-discoverer ownership and the coordinator's durable ownership
+of semantic producer progress.
 Canonical lazy production should use a runtime-owned pure-evaluation context
 and the runtime's selected default reflection profile, not the profile of the
 client, spark, or reflection task which happened to inspect the lazy first.
@@ -4840,9 +4844,9 @@ inherits, and which target pump role it implements.
 Distinguish consumer-local partial work from a completion source's shared
 partial work. For an uncached lazy, demonstrate that the client, spark, and
 reflection continuations remain distinct while all three resolve to one
-canonical producer machine. For an ordinary rooted value with no lazy,
-promise, wait, or net identity, preserve independent WHNF requests rather than
-inventing scheduler memoization.
+canonical lazy-owned producer checkpoint. For an ordinary rooted value with no
+lazy, promise, wait, or net identity, preserve independent WHNF requests rather
+than inventing scheduler memoization.
 
 Add deterministic fixtures before changing policy which force, at minimum:
 
@@ -4879,8 +4883,11 @@ client evaluations
 background roots
   SparkId / ReflectionTaskId -> background continuation
 
-shared producers
-  DeferredValueId -> exclusive producer machine + block/terminal state
+managed lazy identities
+  LazyId -> source | partial producer checkpoint | terminal result
+
+active producer routes
+  LazyId -> exclusive claim + block/subscriber/wake state
 
 subscriptions
   completion source -> waiting root record + subscription epoch
@@ -4892,8 +4899,8 @@ capability or lease, and a condition-variable/future wake endpoint. The client
 registry owns the `WhnfComputation` between polls so a wait, handle move, or
 temporary loss of the calling thread does not lose progress. A spark and a
 reflection task continue to own their own outer machines in their respective
-background records. None of these roots embeds or copies the canonical lazy
-producer's partial machine.
+background records. None of these roots or coordinator routes embeds or copies
+the canonical lazy producer's partial checkpoint.
 
 Keep wake registration weak or otherwise acyclic. A published completion must
 address either a client-evaluation record or a background work record together
@@ -4903,25 +4910,37 @@ waker without placing a client record on an executor queue.
 ##### W6G.1c — Session-neutral canonical lazy production
 
 Move canonical lazy-producer lifecycle out of the first observer's demand
-session. Producer admission remains atomic by `DeferredValueId`: racing
-observers may construct candidates outside coordinator state, but exactly one
-producer machine becomes authoritative and every loser subscribes to it.
-Preserve that authoritative machine, including its partial
-`WhnfComputation`, across yields and dependency waits.
+session. The managed lazy cell, not its first coordinator record, becomes the
+authoritative owner of its original source, partial producer checkpoint, or
+terminal result. Producer-route admission remains atomic by
+`DeferredValueId`: racing observers may construct transient route candidates,
+but exactly one active route becomes authoritative and every loser subscribes
+to it. Yields, dependency waits, and removal of the final active route must
+leave the partial checkpoint installed in the lazy.
 
 Claim eligibility is causal rather than stored on the producer. A foreground
 client may claim the producer only after reaching it through its exact
 dependency chain. A worker may claim the same producer only after reaching it
 from a spark or reflection root. If one role already owns the claim, the other
-parks without rebuilding or restarting the producer. Once the producer caches
-its lazy result, wake every subscribed root; each root resumes its own outer
-continuation.
+parks without rebuilding or restarting the producer. A claim temporarily
+retains the exact managed lazy root supplied by causal demand, polls the
+checkpoint in place, and returns that root before the route can retire. Once
+the producer caches its lazy result, wake every subscribed root; each root
+resumes its own outer continuation.
 
 Audit context construction at admission. Pure lazy production must not inherit
 the first observer's close policy or reflection profile. Promise observation
 must retain the declared promise-producer lifecycle, and a client must not
 become the owner of a task-owned promise merely because it encountered that
 promise first.
+
+Do not implement this ownership by placing the existing
+`WhnfComputation`/`ManagedWhnfRoot` inside the managed lazy. A managed object
+must contain traced `Gc` edges or inline traced state, never a registered root.
+Introduce an edge-owned producer-checkpoint form over the existing managed
+WHNF state, and retain the rooted form only for durable owners outside the
+managed graph. The lazy's trace must report every edge in whichever source,
+checkpoint, or terminal-result state is currently authoritative.
 
 ##### W6G.1d — Foreground client evaluation lifecycle
 
@@ -4983,19 +5002,135 @@ opt-in path for helping work outside the client's causal chain.
 
 Make producer retention independent of client-handle retention. Removing a
 subscription cannot cancel or abandon a producer while another subscribed
-root can still reach it. Conversely, the shared producer registry must not
+root can still reach it. Conversely, an inactive coordinator route must not
 keep an otherwise unreachable lazy graph rooted indefinitely merely to retain
-speculative partial progress.
+partial progress. Preserve that progress in the managed lazy itself:
 
-Choose and document the bootstrap policy for a nonterminal producer whose last
-subscriber disappears. The conservative initial choice is to retire the
-coordinator record after any in-flight quantum returns, release its source
-root, and permit a later observer to reconstruct production from the lazy's
-still-authoritative source. Keeping a dormant checkpoint requires either a
-value-owned managed checkpoint or another liveness proof and must not be added
-as an unbounded strong runtime root. Force subscriber-drop both before and
-after claim publication and verify that no completion wake is lost or sent to
-a reused registration epoch.
+```text
+LazyProducerState
+  Source(LazySource)
+  Checkpoint(ManagedLazyCheckpoint)
+
+ManagedLazyCell
+  producer: Mutex<Option<LazyProducerState>>
+  result: OnceLock<LazyResult>
+```
+
+The exact representation may keep `Source` and `Checkpoint` as variants of the
+current source field, and a separately allocated managed checkpoint should be
+preferred where embedding the complete producer state would inflate every
+lazy cell. Terminal publication keeps the current result-before-producer-
+release ordering and lock-free terminal read opportunity.
+
+Do not add a coordinator-calling lazy finalizer as the primary liveness
+mechanism. A coordinator record which retains `ManagedLazyRoot` prevents the
+lazy from becoming unreachable, so the finalizer needed to remove that record
+would never run. Making such cleanup sound would first require a managed weak
+reference, an ephemeron-like registry, or an externally stored trace-immediate
+sidecar. Managed lazy destruction remains passive; no collector finalizer may
+acquire coordinator locks, run evaluator policy, or invoke host callbacks.
+
+The active producer route may retain one `ManagedLazyRoot` while it has at
+least one subscriber or an in-flight claim. When its final subscriber leaves,
+retire the route immediately if it is unclaimed. If a quantum is in flight,
+latch retirement, let that claim publish its checkpoint or terminal result
+back into the lazy, then remove the route and release the temporary root. A
+later demand for a still-reachable lazy creates a new route around the stored
+checkpoint rather than reconstructing the original computation.
+
+This transition covers the complete `LazyTaskWork`, not only its `Whnf`
+variant. Access, builtin, object, list-effect, net-WHNF, reflection,
+net-construction, and host-call states may all cross a scheduling boundary.
+Inventory which fields are traced semantic state, edge-free scalar or task
+identity, and external owner state. A managed checkpoint must not contain a
+`RuntimeValueRoot`, `ManagedLazyRoot`, or other registered root. Convert rooted
+callback results back to managed `Value` edges before publishing a durable
+checkpoint, and represent external owners through reviewed edge-free handles
+whose semantic captures remain visible to the lazy's trace.
+
+In particular, never replay a host callback after its producer crossed the
+`Before -> Invoking` boundary, and never create a second reflection-task
+reservation merely because active demand temporarily fell to zero. Although
+restarting abandoned pure work cannot change a Glam result, those one-shot
+boundaries, reflection traces, diagnostics, and host observations make
+checkpoint loss operationally observable.
+
+Implement this as the following checkpoints. Reorder W6G.1b-W6G.1f where a
+narrower migration sequence avoids maintaining two authoritative producer
+states.
+
+###### W6G.1f.0 — Producer-state and external-boundary inventory
+
+Enumerate every `LazyTaskWork` variant, all roots and semantic edges it retains,
+its callback or task activation boundaries, and whether its current state can
+be reconstructed without replay. Identify the minimum concrete traced
+checkpoint family and the edge-free orchestration tokens which must remain
+outside managed memory. Record source-backed counts so a later producer family
+cannot silently remain coordinator-owned.
+
+###### W6G.1f.1 — Managed lazy checkpoint state
+
+Generalize the lazy's source/result protocol to source/checkpoint/result.
+Introduce an edge-owned managed WHNF checkpoint over the existing canonical
+`WhnfState`; keep `ManagedWhnfRoot` for external owners but prohibit it inside
+managed cells. Route state transitions through the collector edge-transition
+gateway, and make the lazy trace compile-exhaustive over source, every
+checkpoint variant, and terminal success or failure.
+
+Add focused tests proving that a checkpoint which points back to its owning
+lazy is collected when the complete graph is unreachable, remains intact when
+the lazy is reachable without active demand, and resumes without redoing
+completed WHNF transitions.
+
+###### W6G.1f.2 — Demand-backed producer routes
+
+Reduce the coordinator's lazy-producer record to transient claim, blocker,
+subscriber, generation, and wake state. The record owns no durable producer
+machine. Admission receives a temporary root from causal demand, atomically
+installs or finds the route, and polls the lazy-owned checkpoint. A route with
+no subscribers and no claim retires without waiting for GC or a lazy
+finalizer.
+
+Force the final subscriber to disappear before claim, during claim, after
+checkpoint publication, and concurrently with a new subscriber. Verify that
+exactly one route and claim remain authoritative, no registration epoch is
+reused, and a background subscriber outlives closure of the first discovering
+client session.
+
+###### W6G.1f.3 — Complete producer-family migration
+
+Move every remaining `LazyTaskWork` family behind the lazy-owned checkpoint
+protocol. Preserve one-shot host invocation and reflection activation across
+zero-demand intervals. Ensure callback execution, reflection admission, and
+other orchestration still occur only after managed access closes; the lazy
+stores the durable before/after state, not an active callback or held mutator.
+
+If a family requires an external sidecar, the managed lazy must own only an
+edge-free lease/identity and its trace must still account for every semantic
+edge. The sidecar must not retain a root back to the owning lazy or another
+rooted checkpoint which reaches it. Treat any exception as a separate design
+review rather than hiding it behind the external-owner registry.
+
+###### W6G.1f.4 — Retention and collection verification
+
+Add forced client/spark/reflection schedules showing that all observers share
+one advancing lazy checkpoint, that losing the final demand preserves the
+checkpoint while the lazy remains semantically reachable, and that later
+demand resumes rather than restarts it. Count semantic transitions, host-call
+invocations, and reflection reservations rather than relying only on terminal
+equality.
+
+Drop every external value root and route while retaining and then releasing a
+semantic path to the lazy. Under aggressive collection, prove respectively
+that the lazy/checkpoint survives and that source/checkpoint cycles reclaim.
+Audit root counts so inactive routes and external sidecars do not become a new
+permanent root class.
+
+After this boundary is stable, investigate whether the lazy should also own
+its exclusive claim flag, current blocker, or completion subscriptions. That
+may eliminate the transient producer route, but queues, root-role policy,
+fairness, task lifecycle, and cross-source cycle analysis remain coordinator
+responsibilities unless a separate review proves otherwise.
 
 ##### W6G.1g — Drain and quiescence separation
 
@@ -5021,21 +5156,21 @@ remain visible to readiness only through the live roots which demand them.
 After role-specific root discovery is authoritative, delete
 `session_has_running_machine` from global admission and remove only those
 `Busy`/wait checks which existed to compensate for that temporary scan. Exact
-machine claims, canonical deferred producers, subscriptions, and terminal
-publication remain the concurrency authority. Do not retain same-session FIFO
-or one-machine ordering as accidental semantics.
+machine claims, lazy-owned producer checkpoints, demand-backed routes,
+subscriptions, and terminal publication remain the concurrency authority. Do
+not retain same-session FIFO or one-machine ordering as accidental semantics.
 
 Run the forced W6G.1a matrix plus zero-/one-/many-worker client demand,
 reflection, spark, cancellation, owner-close, lost-wakeup, no-false-
 quiescence, last-subscriber retirement, cross-root producer sharing, and
 terminal-publication suites. The sharing fixtures must count source polls and
 prove that all observers see one canonical result without copying the
-producer's `WhnfComputation`. Update current architecture only after
+lazy-owned producer checkpoint. Update current architecture only after
 implementation so it states that workers select background roots and causal
 descendants, clients retain their own registry records, shared producers are
-session-neutral, and explicit drains have distinct claim authority.
-Performance attribution remains W6G.4; W6G.1 records only gross regressions
-which would make the ownership mechanism nonviable.
+session-neutral and lazy-owned, and explicit drains have distinct claim
+authority. Performance attribution remains W6G.4; W6G.1 records only gross
+regressions which would make the ownership mechanism nonviable.
 
 #### W6G.2 — Regional standard-effect fusion investigation
 
@@ -5555,7 +5690,7 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 | Concern | Required evidence |
 | --- | --- |
 | reflection replay | Forced W0A ordering; same application lazy and one request dispatch after resumption. |
-| lazy ownership | Exact temporary owner before admission, canonical producer root after admission, collectible state after completion. |
+| lazy ownership | Source or partial checkpoint owned by the managed lazy; a temporary route root only while subscribed or claimed; source/checkpoint cycles collectible once semantic reachability ends. |
 | promise following | Assigned/unassigned, resolver/task-owned, cross-session, abandonment, and promise-cycle cases. |
 | exact resumption | Phase/counter probes showing no completed prefix executes twice. |
 | delegation | Deep tail chain on a small Rust stack with no per-step semantic allocation or root registration. |
@@ -5563,7 +5698,7 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 | failure contexts | Equal structured context ordering with and without forced suspension. |
 | callbacks | Host and reflection callbacks occur outside access and exactly once. |
 | GC safety | Forced collection between every durable poll under `aggressive-gc-verification`. |
-| work sharing | Two observers share one producer; the loser resumes through the same cached result. |
+| work sharing | Two observers share one lazy-owned producer checkpoint; the loser resumes through the same cached result. |
 | cycle behavior | Pure lazy cycles fail canonically; promise-inclusive cycles remain retryable. |
 | effects | Existing `.alt`, `.cut`, transaction, exit, and task semantics unchanged. |
 | nets | Raw nets remain WHNF; cursor/net-construction worklists preserve identity and restoration. |
@@ -5580,8 +5715,9 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
   stop and repair the regional/durable split before proceeding.
 - If preserving a computation across `.alt` appears to require `Clone`, review
   branch ownership rather than cloning active machine state.
-- If a `LazySource` must be mutated to record progress, review whether the
-  proposed state actually belongs to the lazy producer's machine.
+- If durable lazy-producer progress appears in a coordinator record, registered
+  root, or external sidecar, review why it cannot be represented by the
+  lazy-owned checkpoint and how source/checkpoint cycles remain collectible.
 - If an opaque production `SemanticComputation` or callback can suspend after
   W3D, halt for a representation decision; arbitrary Rust locals cannot be
   reconstructed safely.

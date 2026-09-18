@@ -153,7 +153,9 @@ gone.
 W6G.1 must replace the rule with explicit foreground, worker-background, and
 background-drain claim authority. Role-specific demand roots must retain
 independent continuations while session-neutral canonical lazy producers
-retain partial source work shared across client, reflection, and spark roots.
+retain partial source work in the managed lazy itself, shared across client,
+reflection, and spark roots. Coordinator producer routes remain transient and
+demand-backed.
 The repair must preserve terminal-publication, lost-wakeup,
 no-false-quiescence, and exact-dependency behavior. It must not replace the
 scan with the previously rejected running-session index or a sticky
