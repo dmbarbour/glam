@@ -462,13 +462,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/whnf.rs",
         "resumable WHNF durable checkpoints and dependencies",
-        "rooted focus, retained frame values, dependency promises, and rooted terminal outcomes",
+        "one source/seed root or one ManagedWhnfRoot, dependency promises, and rooted terminal outcomes",
         "one resumable WHNF computation across poll, yield, or dependency boundaries",
-        "complete durable checkpoint construction before managed access closes",
+        "seed promotion or structured construction publishes one canonical managed state cell before access closes",
         "checkpoint replacement, terminal result handoff, cancellation, or owner retirement",
         ManagedRootSurface,
         RootSurface,
-        "W1A"
+        "W6G.3f retired the root-per-field durable mirrors; frame count no longer changes steady checkpoint root ownership"
     ),
     exact_managed!(
         "src/eval/whnf.rs",
@@ -922,10 +922,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 229;
+const DECLARATION_BASELINE_COUNT: usize = 225;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([131, 277, 5, 16, 6, 4, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 18_381_807_267_314_983_524;
+    DeclarationSignals::new([131, 270, 5, 16, 6, 4, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_661_914_265_478_027_353;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1097,10 +1097,6 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if matches!(
         declaration,
         "src/eval/whnf.rs::DurableWhnfCheckpoint"
-            | "src/eval/whnf.rs::DurableWhnfContinuation"
-            | "src/eval/whnf.rs::DurableWhnfFrame"
-            | "src/eval/whnf.rs::DurableWhnfState"
-            | "src/eval/whnf.rs::DurableUndefinedDictionary"
             | "src/eval/whnf.rs::WhnfPoll"
             | "src/evaluation/whnf.rs::WhnfOwnerPoll"
     ) {

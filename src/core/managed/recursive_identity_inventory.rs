@@ -391,13 +391,6 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "poll-spanning list-effect fix state retains its result promise"
     ),
     owner!(
-        "src/eval/whnf.rs::DurableWhnfState",
-        [0, 1, 0],
-        DurableRoot,
-        None,
-        "poll-spanning WHNF state retains its optional source-cycle promise as a registered root"
-    ),
-    owner!(
         "src/eval/whnf.rs::WhnfState",
         [0, 1, 0],
         ExactManagedEdge,
@@ -798,7 +791,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [14, 23, 9],
+        [14, 22, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

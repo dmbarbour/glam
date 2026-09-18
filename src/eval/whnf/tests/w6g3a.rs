@@ -73,7 +73,6 @@ fn assert_wait(outcome: WhnfPoll, expected: &CoreWaitToken) {
 }
 
 fn managed_seed_promotion(frame_count: usize) {
-    WhnfComputation::reset_baseline_metrics_for_test();
     let context = context();
     let values = context.values();
     let empty = values
@@ -161,12 +160,6 @@ fn managed_seed_promotion(frame_count: usize) {
         "an unchanged dependency boundary must retain the same managed state root"
     );
 
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default(),
-        "managed seed polls must perform no legacy projection or reconstruction"
-    );
-
     let registrations_before_ready = values.managed_root_registrations_for_test();
     let mut ready_budget = WhnfStepBudget::new(1);
     let WhnfPoll::Ready(ready) = poll_with(
@@ -184,10 +177,6 @@ fn managed_seed_promotion(frame_count: usize) {
         values.managed_root_registrations_for_test() - registrations_before_ready,
         1,
         "only the terminal result is rooted when no checkpoint is published"
-    );
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default()
     );
     assert_eq!(
         access_entries, 4,
@@ -218,26 +207,16 @@ fn small_and_large_seed_promotions_use_one_managed_root() {
 
 #[test]
 fn source_entry_remains_outside_demand_conversion_accounting() {
-    WhnfComputation::reset_baseline_metrics_for_test();
     let context = context();
     let values = context.values();
     let (lazy, _) = values.rooted_error_lazy_for_test("W6G.3a source entry");
     let mut computation = WhnfComputation::from_lazy_source(lazy, values.runtime_id());
 
     assert!(computation.source_root().is_some());
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default()
-    );
 
     let source_result = root(&context, text("source result"));
     computation.install_source_result(source_result);
     assert!(computation.source_root().is_none());
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default(),
-        "source production is not an ordinary durable demand projection"
-    );
 
     let registrations_before_poll = values.managed_root_registrations_for_test();
     let mut budget = WhnfStepBudget::new(0);
@@ -261,7 +240,6 @@ fn source_entry_remains_outside_demand_conversion_accounting() {
 
 #[test]
 fn structured_constructors_publish_canonical_state_under_existing_access() {
-    WhnfComputation::reset_baseline_metrics_for_test();
     reset_runtime_value_access_depth_for_test();
     let context = context();
     let values = context.values();
@@ -302,11 +280,6 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
     );
     assert!(application.application_frame_pending());
     assert!(!access_path.application_frame_pending());
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default(),
-        "structured construction must bypass legacy root-per-position conversion"
-    );
 
     drop(retained_lazy);
     let retained = values
@@ -369,9 +342,4 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
         panic!("the static-access probe should return its deliberate result")
     };
     assert_eq!(result.clone_core_for_test(), Value::Number(3.into()));
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default(),
-        "structured polls must retain the canonical cell without legacy conversion"
-    );
 }

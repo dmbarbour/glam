@@ -5111,6 +5111,33 @@ one steady-state demand root independent of retained frame count. The
 concurrent-GC plan continues to own comparison with a trace-immediate
 `RootFrame`; W6G.3 neither requires nor approximates that later facility.
 
+W6G.3f completion record, 2026-09-18: the unreachable `LegacyDemand` variant,
+`DurableWhnfState`, durable frame/continuation mirrors, regional projection,
+root-per-field reconstruction, and their test-only conversion counters are
+deleted. `WhnfComputation::poll_in` now accepts only a promoted
+`ManagedDemand` and mutates that one canonical cell. A source-backed
+regression rejects reintroduction of any retired compatibility declaration or
+publication function.
+
+The one-frame fixture retains two frame values, so the former representation
+required three steady roots (focus plus two frame positions). The 32-frame
+fixture retained 64 frame values and therefore required 65 steady roots. Each
+nonterminal repoll also visited every semantic position during both projection
+and reconstruction: 6 position visits and 2 continuation visits for one frame,
+or 130 position visits and 64 continuation visits for 32 frames. Both fixtures
+now retain exactly one `ManagedWhnfRoot`; repolls perform zero root-per-field
+projection, reconstruction, or container copying and publish one aggregate
+edge transition. The first seed promotion may briefly overlap its input root
+with the newly constructed managed root until replacement drops the seed, but
+all steady nonterminal states own one root independent of frame count.
+
+The root-publication, durable-owner, recursive-identity, managed-access,
+raw-value, persistent-edge, and WHNF inventories were rerun and reconciled.
+Focused ordinary and `aggressive-gc-verification` suites cover small/large
+frames, source promotion, structured child frames, exact suspension,
+collection, unwind poisoning, and cross-worker resumption. Comparison with a
+trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
+
 #### W6G.4 — Phase closure and post-W6G review
 
 ##### W6G.4a — Integrated verification and accounting

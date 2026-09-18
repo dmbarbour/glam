@@ -17,8 +17,6 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
-#[cfg(test)]
-use std::cell::Cell;
 
 mod managed_state;
 use managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
@@ -30,55 +28,6 @@ use managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
 /// responsible for the eventual result destination.
 pub(crate) struct WhnfComputation {
     checkpoint: DurableWhnfCheckpoint,
-}
-
-/// Test-only accounting for the fine-grained durable representation which
-/// W6G.3 replaces.
-///
-/// Collector root registrations measure actual root traffic. These counters
-/// record the conversion work which remains invisible to the collector: each
-/// durable-to-regional projection, regional-to-durable reconstruction, and
-/// semantic position visited by those walks.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DurableWhnfBaselineMetrics {
-    pub(crate) demand_polls: usize,
-    pub(crate) durable_projections: usize,
-    pub(crate) durable_reconstructions: usize,
-    pub(crate) projected_value_positions: usize,
-    pub(crate) rooted_value_positions: usize,
-    pub(crate) projected_continuations: usize,
-    pub(crate) rooted_continuations: usize,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct DurableWhnfShape {
-    value_positions: usize,
-    continuations: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static DURABLE_WHNF_BASELINE_METRICS: Cell<DurableWhnfBaselineMetrics> =
-        const { Cell::new(DurableWhnfBaselineMetrics {
-            demand_polls: 0,
-            durable_projections: 0,
-            durable_reconstructions: 0,
-            projected_value_positions: 0,
-            rooted_value_positions: 0,
-            projected_continuations: 0,
-            rooted_continuations: 0,
-        }) };
-}
-
-#[cfg(test)]
-fn update_baseline_metrics(update: impl FnOnce(&mut DurableWhnfBaselineMetrics)) {
-    DURABLE_WHNF_BASELINE_METRICS.with(|metrics| {
-        let mut current = metrics.get();
-        update(&mut current);
-        metrics.set(current);
-    });
 }
 
 /// Durable entry mode for one WHNF request.
@@ -96,7 +45,6 @@ enum DurableWhnfCheckpoint {
         focus: RuntimeValueRoot,
         source_owner: Option<LazyId>,
     },
-    LegacyDemand(DurableWhnfState),
     ManagedDemand {
         state: ManagedWhnfRoot,
         observation: WhnfPollObservation,
@@ -106,53 +54,6 @@ enum DurableWhnfCheckpoint {
 #[derive(Clone, Copy, Default)]
 struct WhnfPollObservation {
     application_frame_pending: bool,
-}
-
-/// Machine-safe state retained whenever regional managed access is closed.
-///
-/// Every semantic value in this type is represented by an exact runtime root.
-/// Region-bound raw values exist only in [`RegionalWhnfWork`].
-pub(crate) struct DurableWhnfState {
-    focus: RuntimeValueRoot,
-    frames: Vec<DurableWhnfContinuation>,
-    followed: BTreeSet<DeferredValueId>,
-    source_owner: Option<LazyId>,
-    cycle_promise: Option<ManagedPromiseRoot>,
-}
-
-/// One suspended caller frame with all cross-boundary semantic values rooted.
-pub(crate) struct DurableWhnfFrame {
-    kind: WhnfFrameKind,
-    cursor: usize,
-    retained: Vec<RuntimeValueRoot>,
-}
-
-enum DurableWhnfContinuation {
-    Generic(DurableWhnfFrame),
-    Application {
-        arguments: Vec<RuntimeValueRoot>,
-        next: usize,
-    },
-    DictionaryApplication {
-        effect_payload: RuntimeValueRoot,
-        remaining_effect_values: Vec<RuntimeValueRoot>,
-        next_effect_value: usize,
-        apply_member: Option<RuntimeValueRoot>,
-    },
-    SemanticUndefined {
-        purpose: UndefinedPurpose,
-        ancestors: Vec<DurableUndefinedDictionary>,
-        phase: UndefinedPhase,
-    },
-    StaticAccess {
-        keys: Arc<[crate::core::Key]>,
-        next: usize,
-    },
-}
-
-struct DurableUndefinedDictionary {
-    members: Vec<RuntimeValueRoot>,
-    next: usize,
 }
 
 /// Complete raw-edge WHNF state shared by regional execution and net-owned
@@ -182,8 +83,7 @@ pub(crate) struct RegionalWhnfState<'state>(&'state mut WhnfState);
 
 /// Complete WHNF state stored as traced edges inside a runtime net.
 ///
-/// Unlike [`DurableWhnfState`], this representation owns no registered roots.
-/// Unlike [`RegionalWhnfWork`], it may outlive one access region because its
+/// Unlike [`RegionalWhnfWork`], this representation may outlive one access region because its
 /// enclosing managed net traces every semantic edge below. Claiming and
 /// publishing this state consume one role wrapper and install the other; they
 /// never project a copy or rebuild a continuation.
@@ -202,12 +102,17 @@ pub(crate) struct NetWhnfObservation {
     pub(crate) cycle_promise: Option<crate::core::PromiseId>,
 }
 
-/// Regional counterpart of [`DurableWhnfFrame`].
-///
-/// These raw values may be copied and rearranged only while the evaluator's
-/// matching mutator remains active. This type never enters a machine field.
+/// One generic frame inside the canonical traced WHNF state.
 pub(crate) struct WhnfFrame {
+    #[allow(
+        dead_code,
+        reason = "the W1 synthetic frame algebra observes control fields only in protocol fixtures"
+    )]
     kind: WhnfFrameKind,
+    #[allow(
+        dead_code,
+        reason = "the W1 synthetic frame algebra observes control fields only in protocol fixtures"
+    )]
     cursor: usize,
     retained: Vec<Value>,
 }
@@ -298,20 +203,6 @@ impl RegionalWhnfWork {
         access: &RuntimeValueAccess<'_>,
     ) -> NetWhnfObservation {
         self.0.observation_for_test(access)
-    }
-
-    #[cfg(test)]
-    fn baseline_shape(&self) -> DurableWhnfShape {
-        DurableWhnfShape {
-            value_positions: 1
-                + self
-                    .frames
-                    .iter()
-                    .map(WhnfContinuation::value_positions_for_test)
-                    .sum::<usize>()
-                + usize::from(self.cycle_promise.is_some()),
-            continuations: self.frames.len(),
-        }
     }
 }
 
@@ -553,200 +444,6 @@ pub(crate) enum WhnfPoll {
     Failed(RuntimeFailureRoot),
 }
 
-impl DurableWhnfState {
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
-        RegionalWhnfWork::from_parts(
-            access,
-            access.clone_root(&self.focus),
-            self.frames
-                .iter()
-                .map(|frame| frame.project(access))
-                .collect(),
-            self.followed.clone(),
-            self.source_owner,
-            self.cycle_promise
-                .as_ref()
-                .map(|promise| PromisedValue::from_root(promise, access.values())),
-        )
-    }
-
-    fn from_regional(access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) -> Self {
-        let RegionalWhnfWork(work) = work;
-        Self {
-            focus: access.values().root_runtime_value(work.focus),
-            frames: work
-                .frames
-                .into_iter()
-                .map(|frame| DurableWhnfContinuation::root_continuation(access, frame))
-                .collect(),
-            followed: work.followed,
-            source_owner: work.source_owner,
-            cycle_promise: work
-                .cycle_promise
-                .map(|promise| promise.root_in(access.values())),
-        }
-    }
-
-    #[cfg(test)]
-    fn baseline_shape(&self) -> DurableWhnfShape {
-        DurableWhnfShape {
-            value_positions: 1
-                + self
-                    .frames
-                    .iter()
-                    .map(DurableWhnfContinuation::value_positions_for_test)
-                    .sum::<usize>()
-                + usize::from(self.cycle_promise.is_some()),
-            continuations: self.frames.len(),
-        }
-    }
-}
-
-impl DurableWhnfFrame {
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> WhnfFrame {
-        WhnfFrame {
-            kind: self.kind,
-            cursor: self.cursor,
-            retained: self
-                .retained
-                .iter()
-                .map(|value| access.clone_root(value))
-                .collect(),
-        }
-    }
-
-    fn root_regional(access: &EvaluationValueAccess<'_>, frame: WhnfFrame) -> Self {
-        Self {
-            kind: frame.kind,
-            cursor: frame.cursor,
-            retained: frame
-                .retained
-                .into_iter()
-                .map(|value| access.values().root_runtime_value(value))
-                .collect(),
-        }
-    }
-}
-
-impl DurableWhnfContinuation {
-    fn project(&self, access: &EvaluationValueAccess<'_>) -> WhnfContinuation {
-        match self {
-            Self::Generic(frame) => WhnfContinuation::Generic(frame.project(access)),
-            Self::Application { arguments, next } => WhnfContinuation::Application {
-                arguments: arguments
-                    .iter()
-                    .map(|argument| access.clone_root(argument))
-                    .collect(),
-                next: *next,
-            },
-            Self::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            } => WhnfContinuation::DictionaryApplication {
-                effect_payload: access.clone_root(effect_payload),
-                remaining_effect_values: remaining_effect_values
-                    .iter()
-                    .map(|value| access.clone_root(value))
-                    .collect(),
-                next_effect_value: *next_effect_value,
-                apply_member: apply_member.as_ref().map(|value| access.clone_root(value)),
-            },
-            Self::SemanticUndefined {
-                purpose,
-                ancestors,
-                phase,
-            } => WhnfContinuation::SemanticUndefined {
-                purpose: *purpose,
-                ancestors: ancestors
-                    .iter()
-                    .map(|ancestor| WhnfUndefinedDictionary {
-                        members: ancestor
-                            .members
-                            .iter()
-                            .map(|value| access.clone_root(value))
-                            .collect(),
-                        next: ancestor.next,
-                    })
-                    .collect(),
-                phase: *phase,
-            },
-            Self::StaticAccess { keys, next } => WhnfContinuation::StaticAccess {
-                keys: Arc::clone(keys),
-                next: *next,
-            },
-        }
-    }
-
-    fn root_continuation(access: &EvaluationValueAccess<'_>, frame: WhnfContinuation) -> Self {
-        match frame {
-            WhnfContinuation::Generic(frame) => {
-                Self::Generic(DurableWhnfFrame::root_regional(access, frame))
-            }
-            WhnfContinuation::Application { arguments, next } => Self::Application {
-                arguments: arguments
-                    .into_iter()
-                    .map(|argument| access.values().root_runtime_value(argument))
-                    .collect(),
-                next,
-            },
-            WhnfContinuation::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                next_effect_value,
-                apply_member,
-            } => Self::DictionaryApplication {
-                effect_payload: access.values().root_runtime_value(effect_payload),
-                remaining_effect_values: remaining_effect_values
-                    .into_iter()
-                    .map(|value| access.values().root_runtime_value(value))
-                    .collect(),
-                next_effect_value,
-                apply_member: apply_member.map(|value| access.values().root_runtime_value(value)),
-            },
-            WhnfContinuation::SemanticUndefined {
-                purpose,
-                ancestors,
-                phase,
-            } => Self::SemanticUndefined {
-                purpose,
-                ancestors: ancestors
-                    .into_iter()
-                    .map(|ancestor| DurableUndefinedDictionary {
-                        members: ancestor
-                            .members
-                            .into_iter()
-                            .map(|value| access.values().root_runtime_value(value))
-                            .collect(),
-                        next: ancestor.next,
-                    })
-                    .collect(),
-                phase,
-            },
-            WhnfContinuation::StaticAccess { keys, next } => Self::StaticAccess { keys, next },
-        }
-    }
-
-    #[cfg(test)]
-    fn value_positions_for_test(&self) -> usize {
-        match self {
-            Self::Generic(frame) => frame.retained.len(),
-            Self::Application { arguments, .. } => arguments.len(),
-            Self::DictionaryApplication {
-                remaining_effect_values,
-                apply_member,
-                ..
-            } => 1 + remaining_effect_values.len() + usize::from(apply_member.is_some()),
-            Self::SemanticUndefined { ancestors, .. } => ancestors
-                .iter()
-                .map(|ancestor| ancestor.members.len())
-                .sum(),
-            Self::StaticAccess { .. } => 0,
-        }
-    }
-}
-
 impl NetWhnfState {
     /// Publishes one complete regional successor into net-owned storage.
     ///
@@ -907,24 +604,6 @@ impl WhnfState {
 }
 
 impl WhnfContinuation {
-    #[cfg(test)]
-    fn value_positions_for_test(&self) -> usize {
-        match self {
-            Self::Generic(frame) => frame.retained.len(),
-            Self::Application { arguments, .. } => arguments.len(),
-            Self::DictionaryApplication {
-                remaining_effect_values,
-                apply_member,
-                ..
-            } => 1 + remaining_effect_values.len() + usize::from(apply_member.is_some()),
-            Self::SemanticUndefined { ancestors, .. } => ancestors
-                .iter()
-                .map(|ancestor| ancestor.members.len())
-                .sum(),
-            Self::StaticAccess { .. } => 0,
-        }
-    }
-
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
             Self::Generic(frame) => trace_whnf_values(&frame.retained, visitor),
@@ -1038,9 +717,7 @@ impl WhnfComputation {
             DurableWhnfCheckpoint::ManagedDemand { observation, .. } => {
                 observation.application_frame_pending
             }
-            DurableWhnfCheckpoint::Source { .. }
-            | DurableWhnfCheckpoint::Seed { .. }
-            | DurableWhnfCheckpoint::LegacyDemand(_) => false,
+            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::Seed { .. } => false,
         }
     }
 
@@ -1106,7 +783,6 @@ impl WhnfComputation {
         match &self.checkpoint {
             DurableWhnfCheckpoint::Source { runtime, .. } => *runtime,
             DurableWhnfCheckpoint::Seed { focus, .. } => focus.runtime_id(),
-            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => checkpoint.focus.runtime_id(),
             DurableWhnfCheckpoint::ManagedDemand { state, .. } => state.runtime_id(),
         }
     }
@@ -1117,9 +793,7 @@ impl WhnfComputation {
                 source_owner: owner,
                 ..
             } => *owner = Some(source_owner),
-            DurableWhnfCheckpoint::Source { .. }
-            | DurableWhnfCheckpoint::LegacyDemand(_)
-            | DurableWhnfCheckpoint::ManagedDemand { .. } => {
+            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::ManagedDemand { .. } => {
                 panic!("a source owner must be installed before managed demand publication")
             }
         }
@@ -1152,7 +826,6 @@ impl WhnfComputation {
                 None,
             )),
             DurableWhnfCheckpoint::Source { result: None, .. }
-            | DurableWhnfCheckpoint::LegacyDemand(_)
             | DurableWhnfCheckpoint::ManagedDemand { .. } => None,
         };
         let Some(work) = work else {
@@ -1170,24 +843,12 @@ impl WhnfComputation {
         drop(prior);
     }
 
-    #[cfg(test)]
-    pub(crate) fn reset_baseline_metrics_for_test() {
-        DURABLE_WHNF_BASELINE_METRICS.with(|metrics| metrics.set(Default::default()));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn baseline_metrics_for_test() -> DurableWhnfBaselineMetrics {
-        DURABLE_WHNF_BASELINE_METRICS.with(Cell::get)
-    }
-
     /// Polls one bounded callback-free quantum beneath matching value access.
     ///
     /// A minimal seed is promoted while its input root remains installed; all
-    /// subsequent managed polls mutate the single canonical state in place.
-    /// The legacy projection/publication branch remains only until W6G.3f
-    /// removes its now-unreachable representation. Returned boundary
-    /// dispositions contain no active access and are interpreted by the outer
-    /// owner only after its access callback returns.
+    /// subsequent polls mutate the single canonical managed state in place.
+    /// Returned boundary dispositions contain no active access and are
+    /// interpreted by the outer owner only after its access callback returns.
     pub(crate) fn poll_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
@@ -1196,104 +857,49 @@ impl WhnfComputation {
     ) -> WhnfPoll {
         self.promote_seed_in(access);
         let mut reduce = reduce;
-        if let DurableWhnfCheckpoint::ManagedDemand { state, observation } = &mut self.checkpoint {
-            let managed = state.access(access).unwrap_or_else(|error| match error {
-                ManagedWhnfAccessError::RuntimeMismatch => {
-                    panic!("managed WHNF state and poll access must share one runtime")
-                }
-                ManagedWhnfAccessError::Poisoned => {
-                    panic!("poison must be reported while locking managed WHNF state")
-                }
-            });
-            let transition = managed.with_state_transition(|work| {
-                let status = drive_regional_state_in_place(access, work, budget, &mut reduce);
-                (status, work.poll_observation())
-            });
-            let (status, observed) = match transition {
-                Ok(result) => result,
-                Err(ManagedWhnfAccessError::RuntimeMismatch) => {
-                    unreachable!("managed WHNF access was already provenance-checked")
-                }
-                Err(ManagedWhnfAccessError::Poisoned) => {
-                    let failure = Arc::new(EvaluationFailure::message(
-                        "managed WHNF evaluation state was poisoned by an earlier unwind",
-                    ));
-                    return WhnfPoll::Failed(access.values().root_runtime_failure(failure));
-                }
-            };
-            *observation = observed;
-            return match status {
-                RegionalWhnfStatus::Ready(value) => {
-                    WhnfPoll::Ready(access.values().root_runtime_value(value))
-                }
-                RegionalWhnfStatus::Boundary(request) => match request {
-                    RegionalBoundaryRequest::Dependency(dependency) => {
-                        WhnfPoll::Pending(dependency)
-                    }
-                    RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                    RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-                },
-                RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
-                RegionalWhnfStatus::Failed(failure) => {
-                    WhnfPoll::Failed(access.values().root_runtime_failure(failure))
-                }
-            };
-        }
-        let DurableWhnfCheckpoint::LegacyDemand(checkpoint) = &self.checkpoint else {
+        let DurableWhnfCheckpoint::ManagedDemand { state, observation } = &mut self.checkpoint
+        else {
             panic!("a lazy source must install its result before WHNF demand")
         };
-        #[cfg(test)]
-        {
-            let shape = checkpoint.baseline_shape();
-            update_baseline_metrics(|metrics| {
-                metrics.demand_polls += 1;
-                metrics.durable_projections += 1;
-                metrics.projected_value_positions += shape.value_positions;
-                metrics.projected_continuations += shape.continuations;
-            });
-        }
-        let mut work = checkpoint.project(access);
-        match drive_regional_in_place(access, &mut work, budget, reduce) {
+        let managed = state.access(access).unwrap_or_else(|error| match error {
+            ManagedWhnfAccessError::RuntimeMismatch => {
+                panic!("managed WHNF state and poll access must share one runtime")
+            }
+            ManagedWhnfAccessError::Poisoned => {
+                panic!("poison must be reported while locking managed WHNF state")
+            }
+        });
+        let transition = managed.with_state_transition(|work| {
+            let status = drive_regional_state_in_place(access, work, budget, &mut reduce);
+            (status, work.poll_observation())
+        });
+        let (status, observed) = match transition {
+            Ok(result) => result,
+            Err(ManagedWhnfAccessError::RuntimeMismatch) => {
+                unreachable!("managed WHNF access was already provenance-checked")
+            }
+            Err(ManagedWhnfAccessError::Poisoned) => {
+                let failure = Arc::new(EvaluationFailure::message(
+                    "managed WHNF evaluation state was poisoned by an earlier unwind",
+                ));
+                return WhnfPoll::Failed(access.values().root_runtime_failure(failure));
+            }
+        };
+        *observation = observed;
+        match status {
             RegionalWhnfStatus::Ready(value) => {
                 WhnfPoll::Ready(access.values().root_runtime_value(value))
             }
-            RegionalWhnfStatus::Boundary(request) => {
-                self.publish_checkpoint(access, work);
-                match request {
-                    RegionalBoundaryRequest::Dependency(dependency) => {
-                        WhnfPoll::Pending(dependency)
-                    }
-                    RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                    RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-                }
-            }
-            RegionalWhnfStatus::Yielded => {
-                self.publish_checkpoint(access, work);
-                WhnfPoll::Yielded
-            }
+            RegionalWhnfStatus::Boundary(request) => match request {
+                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
+                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
+                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+            },
+            RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
             RegionalWhnfStatus::Failed(failure) => {
-                self.publish_checkpoint(access, work);
                 WhnfPoll::Failed(access.values().root_runtime_failure(failure))
             }
         }
-    }
-
-    fn publish_checkpoint(&mut self, access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) {
-        #[cfg(test)]
-        {
-            let shape = work.baseline_shape();
-            update_baseline_metrics(|metrics| {
-                metrics.durable_reconstructions += 1;
-                metrics.rooted_value_positions += shape.value_positions;
-                metrics.rooted_continuations += shape.continuations;
-            });
-        }
-        let replacement = DurableWhnfState::from_regional(access, work);
-        let prior = std::mem::replace(
-            &mut self.checkpoint,
-            DurableWhnfCheckpoint::LegacyDemand(replacement),
-        );
-        drop(prior);
     }
 
     /// Polls the production outer-shell reducer beneath one managed region.
@@ -1824,44 +1430,26 @@ mod tests {
         }
     }
 
-    fn declaration<'source>(source: &'source str, start: &str, next: &str) -> &'source str {
-        let start = source
-            .find(start)
-            .unwrap_or_else(|| panic!("missing declaration `{start}`"));
-        let rest = &source[start..];
-        let end = rest
-            .find(next)
-            .unwrap_or_else(|| panic!("missing declaration terminator `{next}`"));
-        &rest[..end]
-    }
-
     #[test]
-    fn durable_state_contains_only_rooted_semantic_values() {
+    fn root_per_field_whnf_compatibility_is_retired() {
         let source = include_str!("whnf.rs");
-        for declaration in [
-            declaration(
-                source,
-                "pub(crate) struct DurableWhnfState",
-                "/// One suspended caller frame",
-            ),
-            declaration(
-                source,
-                "pub(crate) struct DurableWhnfFrame",
-                "/// Complete raw-edge WHNF state",
-            ),
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("WHNF source should retain its test boundary")
+            .0;
+        for retired in [
+            "struct DurableWhnfState",
+            "struct DurableWhnfFrame",
+            "enum DurableWhnfContinuation",
+            "struct DurableUndefinedDictionary",
+            "LegacyDemand",
+            "fn publish_checkpoint",
+            "fn root_continuation",
         ] {
-            for forbidden in [
-                "focus: Value",
-                "Vec<Value>",
-                "RuntimeValueAccess",
-                "EvaluationValueAccess",
-                "EvaluatorStepContext",
-            ] {
-                assert!(
-                    !declaration.contains(forbidden),
-                    "durable WHNF state must not contain `{forbidden}`"
-                );
-            }
+            assert!(
+                !production.contains(retired),
+                "W6G.3f must retire `{retired}` instead of leaving an unreachable compatibility path"
+            );
         }
     }
 

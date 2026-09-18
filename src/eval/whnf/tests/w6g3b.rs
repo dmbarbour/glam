@@ -72,7 +72,6 @@ fn multi_frame_work(access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
 
 #[test]
 fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots() {
-    WhnfComputation::reset_baseline_metrics_for_test();
     let context = context();
     let values = context.values();
     let registrations_before = values.managed_root_registrations_for_test();
@@ -103,10 +102,6 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
     assert_eq!(
         values.managed_root_registrations_for_test(),
         registrations_before
-    );
-    assert_eq!(
-        WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics::default()
     );
 }
 

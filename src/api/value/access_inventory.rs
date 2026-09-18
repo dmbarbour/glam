@@ -274,9 +274,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/whnf.rs",
         0,
         1,
-        9,
-        "legacy access-scoped WHNF checkpoint focus/frame publication, terminal result rooting, and promise-follower focus construction",
-        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W6G.3d structured application/access state moved behind one managed root"
+        1,
+        "terminal WHNF result rooting and promise-follower focus construction",
+        "W2B.2 promise-follower ownership; W6G.3f retired root-per-field checkpoint publication in favor of one managed state root"
     ),
     entry!(
         "src/evaluation/access.rs",
@@ -596,9 +596,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
-                | "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation"
-                | "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional"
-                | "src/eval/whnf.rs::impl DurableWhnfState::from_regional"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::impl WhnfComputation::poll_in"
                 | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
@@ -945,21 +942,15 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#5|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#6|surface=access-publication|scope=production",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",
-    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#1|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#2|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#3|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#4|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfContinuation::root_continuation#5|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfFrame::root_regional#1|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl DurableWhnfState::from_regional#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::poll_in#1|surface=access-publication|scope=production",
-    "src/eval/whnf.rs::impl WhnfComputation::poll_in#2|surface=access-publication|scope=production",
     "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w1c.rs::root#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w2a.rs::lazy_computation#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w2b.rs::promise_computation#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w6g3a.rs::root#1|surface=scoped-factory|scope=test",
+    "src/eval/whnf/tests/w6g3e.rs::managed_checkpoint_resumes_on_another_worker_after_collection#1|surface=scoped-factory|scope=test",
+    "src/eval/whnf/tests/w6g3e.rs::one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
     "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=test",
