@@ -737,7 +737,7 @@ impl EvaluationDemandState {
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
     ) -> Option<ClaimedTask> {
-        let work = coordinator.claim_ready_task_for_session(self.id)?;
+        let work = coordinator.claim_ready_reflection_for_session(self.id)?;
         Some(ClaimedTask::new(coordinator.clone(), work))
     }
 

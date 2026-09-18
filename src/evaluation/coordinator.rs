@@ -1040,12 +1040,12 @@ impl EvaluationWorkCoordinator {
                 claim_ready_spark(&mut state, self.runtime)
                     .map(CoordinatorSelection::Spark)
                     .or_else(|| {
-                        claim_ready_background_task(&mut state, self.runtime, true)
+                        claim_ready_background_task(&mut state, self.runtime, true, None)
                             .map(CoordinatorSelection::Task)
                     })
                     .unwrap_or(CoordinatorSelection::None)
             } else {
-                claim_ready_background_task(&mut state, self.runtime, true)
+                claim_ready_background_task(&mut state, self.runtime, true, None)
                     .map(CoordinatorSelection::Task)
                     .or_else(|| {
                         claim_ready_spark(&mut state, self.runtime).map(CoordinatorSelection::Spark)
@@ -1082,7 +1082,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
-            let selection = claim_ready_background_task(&mut state, self.runtime, false)
+            let selection = claim_ready_background_task(&mut state, self.runtime, false, None)
                 .map(CoordinatorSelection::Task)
                 .unwrap_or(CoordinatorSelection::None);
             if !matches!(selection, CoordinatorSelection::None) {
@@ -1151,6 +1151,33 @@ impl EvaluationWorkCoordinator {
         self.work_available.notify_all();
     }
 
+    pub(super) fn claim_ready_reflection_for_session(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Option<ClaimedTaskWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed =
+                claim_ready_background_task(&mut state, self.runtime, false, Some(session));
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    /// Transitional exact-demand fallback for reflection/effect child work
+    /// whose causal relationship is not yet represented by a dependency.
+    /// Session drains use `claim_ready_reflection_for_session` instead.
     pub(super) fn claim_ready_task_for_session(
         &self,
         session: EvaluationSessionId,
@@ -2035,11 +2062,13 @@ fn claim_ready_background_task(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
     include_sparks: bool,
+    root_session: Option<EvaluationSessionId>,
 ) -> Option<ClaimedTaskWork> {
     loop {
         let position = state.ready_tasks.iter().position(|id| {
             state.work.get(id).is_some_and(|record| {
                 matches!(record.kind, WorkKind::Reflection(_))
+                    && root_session.is_none_or(|session| record.demand_session == session)
                     && !session_has_running_machine(state, record.demand_session)
             })
         });
@@ -2062,7 +2091,8 @@ fn claim_ready_background_task(
         .filter_map(|(id, record)| {
             (matches!(record.state, WorkState::Blocked)
                 && (matches!(record.kind, WorkKind::Reflection(_))
-                    || (include_sparks && matches!(record.kind, WorkKind::Spark(_)))))
+                    || (include_sparks && matches!(record.kind, WorkKind::Spark(_))))
+                && root_session.is_none_or(|session| record.demand_session == session))
             .then_some(*id)
         })
         .collect::<Vec<_>>();
@@ -2117,19 +2147,19 @@ fn background_descendant_candidate(
             return None;
         }
         let record = state.work.get(&id)?;
-        match record.state {
-            WorkState::Queued
-                if matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_)) =>
-            {
-                return Some(id);
+        match (&record.kind, record.state) {
+            (WorkKind::Deferred(_), WorkState::Queued) => return Some(id),
+            (WorkKind::Deferred(_), WorkState::Blocked) => {
+                dependency = work_dependency(record)?.clone()
             }
-            WorkState::Blocked => dependency = work_dependency(record)?.clone(),
-            WorkState::Dormant
-            | WorkState::Reserved
-            | WorkState::Queued
-            | WorkState::Running
-            | WorkState::ExitWaiting
-            | WorkState::Terminalizing => return None,
+            (WorkKind::Reflection(_), _)
+            | (WorkKind::Spark(_), _)
+            | (WorkKind::ClientDemand(_), _)
+            | (WorkKind::Deferred(_), WorkState::Dormant)
+            | (WorkKind::Deferred(_), WorkState::Reserved)
+            | (WorkKind::Deferred(_), WorkState::Running)
+            | (WorkKind::Deferred(_), WorkState::ExitWaiting)
+            | (WorkKind::Deferred(_), WorkState::Terminalizing) => return None,
         }
     }
 }

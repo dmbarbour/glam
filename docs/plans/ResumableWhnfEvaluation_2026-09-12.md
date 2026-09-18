@@ -5002,10 +5002,27 @@ deferred causal traversal:
   unrooted promoted producer, a spark-rooted deferred descendant, and
   reflection-rooted patient/owner-close schedules. The generic ready-task
   selector survives only as a test compatibility aid pending W6G.1e.3.
-- **W6G.1e.3 — drain and admission cleanup.** Restrict session/runtime drains
-  to their declared reflection scope, then remove the unrelated same-session
-  fallback and temporary `session_has_running_machine` policy after root
-  registries express affinity directly.
+- **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
+  serialization policy cannot be removed before the registry topology which
+  replaces it exists:
+  - **W6G.1e.3a — drain authority — Complete (2026-09-18).** Session drains
+    now begin only at reflection roots owned by that session and may follow
+    exact deferred-producer dependencies. They do not claim another session's
+    independently owned reflection root. A forced fixture keeps queued client
+    and spark roots present while proving the session drain selects only
+    reflection work.
+  - **W6G.1e.3b — implicit-child audit and fallback retirement.** Exact demand
+    pumping still has a same-session reflection fallback. The attempted direct
+    removal exposed reflection/effect flows which launch causally related
+    child work before publishing an exact dependency edge. Inventory those
+    routes, make causal child ownership explicit, then remove the fallback;
+    do not misclassify those children as arbitrary unrelated work merely to
+    preserve the current scheduler heuristic.
+  - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
+    root affinity and producer ownership directly, remove
+    `session_has_running_machine` and its compensating busy waits. This is the
+    implementation part of W6G.1h; do not perform it as an isolated scheduler
+    relaxation.
 
 Replace the generic executor `select` path with role-specific selectors. A
 worker locates a ready spark or reflection root, or rediscovers the deepest
