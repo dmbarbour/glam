@@ -4037,7 +4037,7 @@ until W6G.3 aggregates it.
 | **W6C.1a — Complete (2026-09-16): Generic arity extraction** | 1 F | Remove raw-value ownership from exact-arity extraction by making it a generic container operation. `-1`. |
 | **W6C.1b — Complete (2026-09-18): Final builtin dispatcher closure** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
 | **W6C.2a — Complete (2026-09-16): Builtin assertions and conditionals** | 2 S | Separate builtin operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-2`. |
-| **W6C.2b — Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
+| **W6C.2b — Complete (2026-09-17): Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
 | **W6C.3a — Complete (2026-09-16): Shared tagged payload** | prerequisite | Introduce the first shared tagged-payload owner and its iterative semantic-undefined stack; retain the compatibility helpers until W6A.0c closes. |
 | **W6C.3b — Complete (2026-09-16): Comparison** | 6 S, 3 F | Convert ordered/equality operand work, reuse W6C.3a tagged-payload work, and move list-front demand toward W6A.0d closure; keep condition/effect constructors immediate. `-9`. |
 | **W6C.4 — Complete (2026-09-16): Numeric** | 5 S | Convert numeric operand sequencing, leaving arithmetic on immediate `Number` data. `-5`. |
@@ -4151,8 +4151,8 @@ declaration group reaches zero.
 
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
-| **W6D.1 — Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
-| **W6D.2 — Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
+| **W6D.1 — Complete (2026-09-17): Basic dictionaries** | 4 S | Convert dispatch, singleton, union, and update entry points, reusing W6A.0c key-conversion and W6A.4 key-path work. `-4`. |
+| **W6D.2 — Complete (2026-09-17): Dictionary merge** | 6 S, 2 F | Convert recursive merge/update and duplicate handling; access-qualify key/path value leaves. `-8`. |
 | **W6D.3 — Complete (2026-09-17): List observation** | 7 S | Convert at/head/len/split/tail/slice work with no access spanning lazy-tail demand, contributing its consumers to W6A.0d closure. `-7`. |
 | **W6D.4a — Complete (2026-09-17): Structural lazy map** | 1 S | Replace eager list-map traversal with the non-forcing structural transform specified below. It may demand the subject enough to establish the outer list, but preserves internal list holes and does not demand or validate the callable. `-1`. |
 | **W6D.4b — Complete (2026-09-17): Structural lazy list concatenation** | 1 S | Convert concatenation to one-node structural flattening, balancing the segments contributed by a reached strict leaf without observing deferred outer children. `-1`. |
