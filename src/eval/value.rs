@@ -803,22 +803,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
             }
 
-            let source_result = match &self.work {
-                LazyTaskWork::Whnf(computation) => computation.source_result().cloned(),
-                _ => None,
-            };
-            if let Some(source_result) = source_result {
-                let value = context.project_root(&source_result);
-                return match eval_value_in(context, &value) {
-                    Ok(value) => self.complete(
-                        context,
-                        EvaluatedValue::try_from(value)
-                            .expect("source WHNF must eliminate the outer deferred variant"),
-                    ),
-                    Err(error) => self.fail(context, error),
-                };
-            }
-
             let LazyTaskWork::Whnf(computation) = &mut self.work else {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };

@@ -5002,6 +5002,25 @@ it exactly once on first poll. Keep source-entry ownership unchanged and
 promote an installed source result only when its demand is first polled.
 Publication installs the managed cell before retiring the seed root.
 
+W6G.3d.1 completion record, 2026-09-18: access-free `from_root` now retains
+one `RuntimeValueRoot` plus optional scalar source ownership in a dedicated
+seed checkpoint. Its first poll allocates and publishes one
+`ManagedWhnfRoot` while the seed remains rooted, then retires the seed only
+after replacement publication. Repeated yield and dependency polls retain
+that same managed root without projection, reconstruction, or new root
+registration; one-frame and 32-frame fixtures both retain exactly one live
+demand root.
+
+The source-entry checkpoint still owns its original lazy and separately
+installed result. Installation itself performs no conversion. Its first
+demand poll promotes the result into canonical state with the lazy identity
+as `source_owner`, after which the source result is no longer projected
+through the synchronous evaluator. The managed cell supplies the minimal
+in-place poll path needed to make promotion usable; W6G.3e still owns the
+complete boundary, scheduler, cancellation, and unwind matrix. A reducer
+unwind poisons ordinary repolling but leaves the structurally installed state
+traceable, matching the policy established in W6G.3c.
+
 ###### W6G.3d.2 — Access-qualified structured construction
 
 Allocate the cell directly from application, static-access, and other

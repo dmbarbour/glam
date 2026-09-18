@@ -33,17 +33,22 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
 
     for _ in 0..2 {
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            dependency: Some(WorkDependency::Wait(_)),
+            dependency: Some(WorkDependency::Promise(dependency)),
             ..
         }) = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         else {
-            panic!("the retained source result must wait on its canonical promise follower")
+            panic!("the retained source result must wait on its exact promise")
         };
+        assert_eq!(dependency.id(), promise.id(context.values()));
         assert_eq!(evaluations.load(Ordering::SeqCst), 1);
     }
 
     crate::core::set_test_promise(context.values(), &promise, Value::Number(79.into()))
         .expect("the source-result promise should accept one assignment");
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
     let EvaluationMachinePoll::Complete(value) =
         machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
     else {

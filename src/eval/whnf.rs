@@ -20,11 +20,8 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 #[cfg(test)]
 use std::cell::Cell;
 
-#[allow(
-    dead_code,
-    reason = "W6G.3c establishes managed WHNF ownership before W6G.3d migrates production constructors"
-)]
 mod managed_state;
+use managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
 ///
@@ -95,7 +92,20 @@ enum DurableWhnfCheckpoint {
         runtime: crate::runtime::EvaluationRuntimeId,
         result: Option<RuntimeValueRoot>,
     },
-    Demand(DurableWhnfState),
+    Seed {
+        focus: RuntimeValueRoot,
+        source_owner: Option<LazyId>,
+    },
+    LegacyDemand(DurableWhnfState),
+    ManagedDemand {
+        state: ManagedWhnfRoot,
+        observation: WhnfPollObservation,
+    },
+}
+
+#[derive(Clone, Copy, Default)]
+struct WhnfPollObservation {
+    application_frame_pending: bool,
 }
 
 /// Machine-safe state retained whenever regional managed access is closed.
@@ -306,6 +316,15 @@ impl RegionalWhnfWork {
 }
 
 impl WhnfState {
+    fn poll_observation(&self) -> WhnfPollObservation {
+        WhnfPollObservation {
+            application_frame_pending: self
+                .frames
+                .iter()
+                .any(|frame| matches!(frame, WhnfContinuation::Application { .. })),
+        }
+    }
+
     fn regional_in<'access, 'scope>(
         &'access mut self,
         _access: &'access EvaluationValueAccess<'scope>,
@@ -444,6 +463,16 @@ pub(crate) fn drive_regional_in_place<'scope>(
     access: &EvaluationValueAccess<'scope>,
     work: &mut RegionalWhnfWork,
     budget: &mut WhnfStepBudget,
+    reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
+) -> RegionalWhnfStatus {
+    let mut active = work.state_in(access);
+    drive_regional_state_in_place(access, &mut active, budget, reduce)
+}
+
+fn drive_regional_state_in_place<'scope>(
+    access: &EvaluationValueAccess<'scope>,
+    work: &mut RegionalWhnfState<'_>,
+    budget: &mut WhnfStepBudget,
     mut reduce: impl FnMut(
         &EvaluationValueAccess<'scope>,
         &mut RegionalWhnfState<'_>,
@@ -453,9 +482,8 @@ pub(crate) fn drive_regional_in_place<'scope>(
         if !budget.try_consume() {
             return RegionalWhnfStatus::Yielded;
         }
-        let mut active = work.state_in(access);
-        match reduce(access, &mut active) {
-            RegionalWhnfStep::Delegate(focus) => active.focus = focus,
+        match reduce(access, work) {
+            RegionalWhnfStep::Delegate(focus) => work.focus = focus,
             RegionalWhnfStep::Ready(value) => return RegionalWhnfStatus::Ready(value),
             RegionalWhnfStep::Boundary(request) => {
                 return RegionalWhnfStatus::Boundary(request);
@@ -959,13 +987,10 @@ unsafe impl crate::core::ManagedFamily for NetWhnfState {
 impl WhnfComputation {
     pub(crate) fn from_root(focus: RuntimeValueRoot) -> Self {
         Self {
-            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
+            checkpoint: DurableWhnfCheckpoint::Seed {
                 focus,
-                frames: Vec::new(),
-                followed: BTreeSet::new(),
                 source_owner: None,
-                cycle_promise: None,
-            }),
+            },
         }
     }
 
@@ -1004,25 +1029,21 @@ impl WhnfComputation {
         *result = Some(focus);
     }
 
-    pub(crate) fn source_result(&self) -> Option<&RuntimeValueRoot> {
-        let DurableWhnfCheckpoint::Source { result, .. } = &self.checkpoint else {
-            return None;
-        };
-        result.as_ref()
-    }
-
     /// Reports whether an application checkpoint failed before consuming all
     /// of its arguments. Terminal failure publishes the last regional state,
     /// so an outer owner can distinguish callable/application failure from a
     /// failure encountered while forcing the completed result.
     pub(crate) fn application_frame_pending(&self) -> bool {
-        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
-            return false;
-        };
-        checkpoint
-            .frames
-            .iter()
-            .any(|frame| matches!(frame, DurableWhnfContinuation::Application { .. }))
+        match &self.checkpoint {
+            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => checkpoint
+                .frames
+                .iter()
+                .any(|frame| matches!(frame, DurableWhnfContinuation::Application { .. })),
+            DurableWhnfCheckpoint::ManagedDemand { observation, .. } => {
+                observation.application_frame_pending
+            }
+            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::Seed { .. } => false,
+        }
     }
 
     pub(crate) fn from_application_checkpoint_in(
@@ -1032,7 +1053,7 @@ impl WhnfComputation {
     ) -> Self {
         assert!(!arguments.is_empty(), "application requires an argument");
         Self {
-            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
+            checkpoint: DurableWhnfCheckpoint::LegacyDemand(DurableWhnfState {
                 focus: access.values().root_runtime_value(function),
                 frames: vec![DurableWhnfContinuation::Application {
                     arguments: arguments
@@ -1063,7 +1084,7 @@ impl WhnfComputation {
             .into_iter()
             .collect();
         Self {
-            checkpoint: DurableWhnfCheckpoint::Demand(DurableWhnfState {
+            checkpoint: DurableWhnfCheckpoint::LegacyDemand(DurableWhnfState {
                 focus: access.values().root_runtime_value(base),
                 frames,
                 followed: BTreeSet::new(),
@@ -1086,16 +1107,70 @@ impl WhnfComputation {
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
         match &self.checkpoint {
             DurableWhnfCheckpoint::Source { runtime, .. } => *runtime,
-            DurableWhnfCheckpoint::Demand(checkpoint) => checkpoint.focus.runtime_id(),
+            DurableWhnfCheckpoint::Seed { focus, .. } => focus.runtime_id(),
+            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => checkpoint.focus.runtime_id(),
+            DurableWhnfCheckpoint::ManagedDemand { state, .. } => state.runtime_id(),
         }
     }
 
     pub(crate) fn with_source_owner(mut self, source_owner: LazyId) -> Self {
-        let DurableWhnfCheckpoint::Demand(checkpoint) = &mut self.checkpoint else {
-            panic!("a source-entry checkpoint already owns its lazy identity")
-        };
-        checkpoint.source_owner = Some(source_owner);
+        match &mut self.checkpoint {
+            DurableWhnfCheckpoint::Seed {
+                source_owner: owner,
+                ..
+            } => *owner = Some(source_owner),
+            DurableWhnfCheckpoint::LegacyDemand(checkpoint) => {
+                checkpoint.source_owner = Some(source_owner);
+            }
+            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::ManagedDemand { .. } => {
+                panic!("a source owner must be installed before managed demand publication")
+            }
+        }
         self
+    }
+
+    fn promote_seed_in(&mut self, access: &EvaluationValueAccess<'_>) {
+        let work = match &self.checkpoint {
+            DurableWhnfCheckpoint::Seed {
+                focus,
+                source_owner,
+            } => Some(RegionalWhnfWork::from_parts(
+                access,
+                access.clone_root(focus),
+                Vec::new(),
+                BTreeSet::new(),
+                *source_owner,
+                None,
+            )),
+            DurableWhnfCheckpoint::Source {
+                lazy,
+                result: Some(result),
+                ..
+            } => Some(RegionalWhnfWork::from_parts(
+                access,
+                access.clone_root(result),
+                Vec::new(),
+                BTreeSet::new(),
+                Some(lazy.id()),
+                None,
+            )),
+            DurableWhnfCheckpoint::Source { result: None, .. }
+            | DurableWhnfCheckpoint::LegacyDemand(_)
+            | DurableWhnfCheckpoint::ManagedDemand { .. } => None,
+        };
+        let Some(work) = work else {
+            return;
+        };
+        let state = ManagedWhnfRoot::from_regional_in(access, work)
+            .expect("canonical WHNF state must fit its reviewed managed slot");
+        let prior = std::mem::replace(
+            &mut self.checkpoint,
+            DurableWhnfCheckpoint::ManagedDemand {
+                state,
+                observation: WhnfPollObservation::default(),
+            },
+        );
+        drop(prior);
     }
 
     #[cfg(test)]
@@ -1121,7 +1196,52 @@ impl WhnfComputation {
         budget: &mut WhnfStepBudget,
         reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
     ) -> WhnfPoll {
-        let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
+        self.promote_seed_in(access);
+        let mut reduce = reduce;
+        if let DurableWhnfCheckpoint::ManagedDemand { state, observation } = &mut self.checkpoint {
+            let managed = state.access(access).unwrap_or_else(|error| match error {
+                ManagedWhnfAccessError::RuntimeMismatch => {
+                    panic!("managed WHNF state and poll access must share one runtime")
+                }
+                ManagedWhnfAccessError::Poisoned => {
+                    panic!("poison must be reported while locking managed WHNF state")
+                }
+            });
+            let transition = managed.with_state_transition(|work| {
+                let status = drive_regional_state_in_place(access, work, budget, &mut reduce);
+                (status, work.poll_observation())
+            });
+            let (status, observed) = match transition {
+                Ok(result) => result,
+                Err(ManagedWhnfAccessError::RuntimeMismatch) => {
+                    unreachable!("managed WHNF access was already provenance-checked")
+                }
+                Err(ManagedWhnfAccessError::Poisoned) => {
+                    let failure = Arc::new(EvaluationFailure::message(
+                        "managed WHNF evaluation state was poisoned by an earlier unwind",
+                    ));
+                    return WhnfPoll::Failed(access.values().root_runtime_failure(failure));
+                }
+            };
+            *observation = observed;
+            return match status {
+                RegionalWhnfStatus::Ready(value) => {
+                    WhnfPoll::Ready(access.values().root_runtime_value(value))
+                }
+                RegionalWhnfStatus::Boundary(request) => match request {
+                    RegionalBoundaryRequest::Dependency(dependency) => {
+                        WhnfPoll::Pending(dependency)
+                    }
+                    RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
+                    RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+                },
+                RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    WhnfPoll::Failed(access.values().root_runtime_failure(failure))
+                }
+            };
+        }
+        let DurableWhnfCheckpoint::LegacyDemand(checkpoint) = &self.checkpoint else {
             panic!("a lazy source must install its result before WHNF demand")
         };
         #[cfg(test)]
@@ -1173,7 +1293,7 @@ impl WhnfComputation {
         let replacement = DurableWhnfState::from_regional(access, work);
         let prior = std::mem::replace(
             &mut self.checkpoint,
-            DurableWhnfCheckpoint::Demand(replacement),
+            DurableWhnfCheckpoint::LegacyDemand(replacement),
         );
         drop(prior);
     }

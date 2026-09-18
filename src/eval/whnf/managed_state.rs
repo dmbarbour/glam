@@ -97,6 +97,7 @@ impl ManagedWhnfRoot {
 }
 
 impl ManagedWhnfAccess<'_, '_> {
+    #[cfg(test)]
     pub(crate) fn inspect<R>(
         &self,
         operation: impl FnOnce(&WhnfState) -> R,

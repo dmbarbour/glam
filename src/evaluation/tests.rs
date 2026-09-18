@@ -1035,7 +1035,8 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "synchronous client input");
+    let (promise, _promise_root, _promise_value_root) =
+        rooted_promise_value(context.values(), "synchronous client input");
     let promised = Value::Promised(promise.clone());
 
     let halt = context

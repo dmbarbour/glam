@@ -274,9 +274,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/whnf.rs",
         0,
         1,
-        11,
-        "access-scoped WHNF checkpoint focus/frame publication, application/access-frame publication, terminal result rooting, and promise-follower focus construction",
-        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W3B application and W3C access state"
+        12,
+        "access-scoped WHNF checkpoint focus/frame publication, application/access-frame publication, one-time managed-state promotion, terminal result rooting, and promise-follower focus construction",
+        "W1C regional-to-durable checkpoint publication; W2B.2 promise-follower ownership; W3B application and W3C access state; W6G.3d managed-state promotion"
     ),
     entry!(
         "src/evaluation/access.rs",
@@ -958,6 +958,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::from_static_access_checkpoint_in#1|surface=access-publication|scope=production",
     "src/eval/whnf.rs::impl WhnfComputation::poll_in#1|surface=access-publication|scope=production",
+    "src/eval/whnf.rs::impl WhnfComputation::poll_in#2|surface=access-publication|scope=production",
     "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w1c.rs::root#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w2a.rs::lazy_computation#1|surface=scoped-factory|scope=test",

@@ -69,7 +69,7 @@ fn assert_wait(outcome: WhnfPoll, expected: &CoreWaitToken) {
     assert_eq!(&observed, expected);
 }
 
-fn conversion_baseline(frame_count: usize) {
+fn managed_seed_promotion(frame_count: usize) {
     WhnfComputation::reset_baseline_metrics_for_test();
     let context = context();
     let values = context.values();
@@ -79,7 +79,6 @@ fn conversion_baseline(frame_count: usize) {
     let wait = synthetic_wait(&context);
     let mut computation = WhnfComputation::from_root(root(&context, text("initial")));
     let registrations_before = values.managed_root_registrations_for_test();
-    let retained_positions = 1 + 2 * frame_count;
     let mut access_entries = 0;
 
     let mut install_budget = WhnfStepBudget::new(1);
@@ -112,8 +111,8 @@ fn conversion_baseline(frame_count: usize) {
     assert_eq!((install_budget.spent(), install_budget.remaining()), (1, 0));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_before,
-        retained_positions as u64,
-        "installing the frame stack must register one root per retained value position"
+        1,
+        "first poll must replace the seed with one managed state root"
     );
 
     let registrations_after_install = values.managed_root_registrations_for_test();
@@ -131,8 +130,8 @@ fn conversion_baseline(frame_count: usize) {
     assert_eq!((yield_budget.spent(), yield_budget.remaining()), (0, 0));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_after_install,
-        retained_positions as u64,
-        "a zero-work yield currently reconstructs every retained durable root"
+        0,
+        "a zero-work yield must retain the same managed state root"
     );
 
     let registrations_after_yield = values.managed_root_registrations_for_test();
@@ -155,22 +154,14 @@ fn conversion_baseline(frame_count: usize) {
     );
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_after_yield,
-        retained_positions as u64,
-        "an unchanged dependency boundary currently reconstructs every durable root"
+        0,
+        "an unchanged dependency boundary must retain the same managed state root"
     );
 
-    let expected_after_boundaries = DurableWhnfBaselineMetrics {
-        demand_polls: 3,
-        durable_projections: 3,
-        durable_reconstructions: 3,
-        projected_value_positions: 1 + 2 * retained_positions,
-        rooted_value_positions: 3 * retained_positions,
-        projected_continuations: 2 * frame_count,
-        rooted_continuations: 3 * frame_count,
-    };
     assert_eq!(
         WhnfComputation::baseline_metrics_for_test(),
-        expected_after_boundaries
+        DurableWhnfBaselineMetrics::default(),
+        "managed seed polls must perform no legacy projection or reconstruction"
     );
 
     let registrations_before_ready = values.managed_root_registrations_for_test();
@@ -193,15 +184,7 @@ fn conversion_baseline(frame_count: usize) {
     );
     assert_eq!(
         WhnfComputation::baseline_metrics_for_test(),
-        DurableWhnfBaselineMetrics {
-            demand_polls: 4,
-            durable_projections: 4,
-            durable_reconstructions: 3,
-            projected_value_positions: 1 + 3 * retained_positions,
-            rooted_value_positions: 3 * retained_positions,
-            projected_continuations: 3 * frame_count,
-            rooted_continuations: 3 * frame_count,
-        }
+        DurableWhnfBaselineMetrics::default()
     );
     assert_eq!(
         access_entries, 4,
@@ -214,7 +197,8 @@ fn conversion_baseline(frame_count: usize) {
         .expect("the installed checkpoint should remain collectible");
     assert_eq!(
         retained.root_entries(),
-        empty.root_entries() + retained_positions
+        empty.root_entries() + 1,
+        "frame count must not change the single steady-state demand root"
     );
     drop(computation);
     let retired = values
@@ -224,9 +208,9 @@ fn conversion_baseline(frame_count: usize) {
 }
 
 #[test]
-fn small_and_large_durable_checkpoints_latch_conversion_costs() {
-    conversion_baseline(1);
-    conversion_baseline(32);
+fn small_and_large_seed_promotions_use_one_managed_root() {
+    managed_seed_promotion(1);
+    managed_seed_promotion(32);
 }
 
 #[test]
@@ -243,18 +227,31 @@ fn source_entry_remains_outside_demand_conversion_accounting() {
         DurableWhnfBaselineMetrics::default()
     );
 
-    computation.install_source_result(root(&context, text("source result")));
+    let source_result = root(&context, text("source result"));
+    computation.install_source_result(source_result);
     assert!(computation.source_root().is_none());
-    assert_eq!(
-        computation
-            .source_result()
-            .expect("the source result should remain separately rooted")
-            .clone_core_for_test(),
-        text("source result")
-    );
     assert_eq!(
         WhnfComputation::baseline_metrics_for_test(),
         DurableWhnfBaselineMetrics::default(),
         "source production is not an ordinary durable demand projection"
+    );
+
+    let registrations_before_poll = values.managed_root_registrations_for_test();
+    let mut budget = WhnfStepBudget::new(0);
+    let mut access_entries = 0;
+    assert!(matches!(
+        poll_with(
+            &context,
+            &mut computation,
+            &mut budget,
+            &mut access_entries,
+            |_access, _work| panic!("an empty budget must not enter the reducer"),
+        ),
+        WhnfPoll::Yielded
+    ));
+    assert_eq!(
+        values.managed_root_registrations_for_test() - registrations_before_poll,
+        1,
+        "first demand must publish exactly one managed state root"
     );
 }

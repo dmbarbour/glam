@@ -53,8 +53,8 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
         assert!(thread_has_runtime_value_access_for_test());
         assert_eq!(
             values.managed_root_registrations_for_test(),
-            registrations_before + 3,
-            "focus and two retained values must be rooted before access closes"
+            registrations_before + 1,
+            "the seed and all retained values must publish as one managed state root"
         );
         outcome
     });
@@ -111,8 +111,8 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
         assert!(thread_has_runtime_value_access_for_test());
         assert_eq!(
             values.managed_root_registrations_for_test(),
-            registrations_before + 2,
-            "the failure emission and context must be rooted before access closes"
+            registrations_before + 3,
+            "seed promotion plus the failure emission and context must publish before access closes"
         );
         failed
     });
@@ -126,7 +126,7 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
 }
 
 #[test]
-fn unwind_preserves_a_nonempty_prior_checkpoint() {
+fn unwind_poison_is_reported_without_reentering_the_reducer() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
@@ -171,19 +171,18 @@ fn unwind_preserves_a_nonempty_prior_checkpoint() {
 
     let mut resume_budget = WhnfStepBudget::new(1);
     let resumed = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut resume_budget, |_access, work| {
-            assert_eq!(work.focus, text("prior"));
-            assert_eq!(work.frames.len(), 1);
-            let WhnfContinuation::Generic(frame) = &work.frames[0] else {
-                panic!("expected a generic access-path frame")
-            };
-            assert_eq!(frame.kind, WhnfFrameKind::AccessPath);
-            assert_eq!(frame.cursor, 11);
-            assert_eq!(frame.retained, [text("retained")]);
-            RegionalWhnfStep::Ready(Value::Number(17.into()))
+        computation.poll_in(&access, &mut resume_budget, |_access, _work| {
+            panic!("a poisoned state must fail before reducer reentry")
         })
     });
-    assert!(matches!(resumed, WhnfPoll::Ready(_)));
+    let WhnfPoll::Failed(failure) = resumed else {
+        panic!("an unwind-poisoned managed state must report a rooted failure")
+    };
+    assert!(
+        failure
+            .to_string()
+            .contains("managed WHNF evaluation state was poisoned")
+    );
 }
 
 #[test]
@@ -215,7 +214,7 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
     let suspended = values
         .collect_managed_for_test()
         .expect("a complete suspended checkpoint should remain live");
-    assert_eq!(suspended.root_entries(), baseline.root_entries() + 3);
+    assert_eq!(suspended.root_entries(), baseline.root_entries() + 1);
     assert_eq!(
         suspended.finalized_slots(),
         1,
@@ -227,7 +226,11 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
         .collect_managed_for_test()
         .expect("dropping the computation should retire its checkpoint");
     assert_eq!(cancelled.root_entries(), baseline.root_entries());
-    assert_eq!(cancelled.finalized_slots(), 3);
+    assert_eq!(
+        cancelled.finalized_slots(),
+        1,
+        "the passive managed state does not add finalizer work"
+    );
 }
 
 #[cfg(feature = "aggressive-gc-verification")]

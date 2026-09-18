@@ -22,7 +22,6 @@ enum CheckpointApi {
     FromPromiseRoot,
     SourceRoot,
     InstallSourceResult,
-    SourceResult,
     ApplicationFramePending,
     RuntimeId,
     WithSourceOwner,
@@ -42,8 +41,7 @@ fn boundary_role(api: CheckpointApi) -> BoundaryRole {
     match api {
         CheckpointApi::FromLazySource
         | CheckpointApi::SourceRoot
-        | CheckpointApi::InstallSourceResult
-        | CheckpointApi::SourceResult => BoundaryRole::SourceEntry,
+        | CheckpointApi::InstallSourceResult => BoundaryRole::SourceEntry,
         CheckpointApi::FromRoot | CheckpointApi::FromPromiseRoot => BoundaryRole::DemandSeed,
         CheckpointApi::FromApplicationCheckpoint | CheckpointApi::FromStaticAccessCheckpoint => {
             BoundaryRole::AccessQualifiedStructuredDemand
@@ -211,7 +209,6 @@ fn method_api(name: &str, declaration: &str) -> Option<CheckpointApi> {
     match name {
         "source_root" => Some(CheckpointApi::SourceRoot),
         "install_source_result" => Some(CheckpointApi::InstallSourceResult),
-        "source_result" => Some(CheckpointApi::SourceResult),
         "application_frame_pending" => Some(CheckpointApi::ApplicationFramePending),
         "with_source_owner" => Some(CheckpointApi::WithSourceOwner),
         "runtime_id" if declaration.ends_with("ClientDemandOperation::runtime_id") => {
@@ -332,13 +329,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::FromPromiseRoot, 2),
     (CheckpointApi::SourceRoot, 1),
     (CheckpointApi::InstallSourceResult, 1),
-    (CheckpointApi::SourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
     (CheckpointApi::WithSourceOwner, 12),
 ];
-const EXPECTED_OCCURRENCES: usize = 118;
-const EXPECTED_FINGERPRINT: u64 = 12_495_760_878_843_214_492;
+const EXPECTED_OCCURRENCES: usize = 117;
+const EXPECTED_FINGERPRINT: u64 = 13_860_534_560_837_261_745;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

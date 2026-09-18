@@ -942,8 +942,8 @@ fn evaluator_preserves_public_input_ownership_for_whnf_completion() {
             .values()
             .core
             .managed_root_registrations_for_test(),
-        registrations_before + 1,
-        "evaluation should register only its completed client-demand value"
+        registrations_before + 2,
+        "evaluation should register its one-time managed demand promotion and completed value"
     );
     let after = runtime
         .collect_managed_for_maintenance()
@@ -957,7 +957,7 @@ fn evaluator_preserves_public_input_ownership_for_whnf_completion() {
         .values()
         .core
         .managed_root_registrations_for_test();
-    assert_eq!(registrations_after_alias, registrations_before + 1);
+    assert_eq!(registrations_after_alias, registrations_before + 2);
     drop(completion_alias);
 }
 
