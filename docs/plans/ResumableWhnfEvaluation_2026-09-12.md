@@ -4991,9 +4991,17 @@ deferred causal traversal:
   background selectors reject a queued foreground record while the exact
   client claim remains live. The temporary same-session admission guard and
   the combined client registry remain transitional.
-- **W6G.1e.2 — causal background traversal.** Replace globally ready deferred
-  selection with traversal from a selected spark or reflection root. Keep the
-  exact `claim_task` primitive and forced terminal-publication races.
+- **W6G.1e.2 — causal background traversal — Complete (2026-09-18).** Workers
+  now begin with a ready spark/reflection root or scan a blocked background
+  root's exact dependency chain for the first queued reflection/deferred
+  descendant. The explicit runtime drain uses the same traversal from
+  reflection roots only. Promoted deferred producers with no such root remain
+  invisible to both selectors while exact foreground claims remain valid.
+  Runtime pump activity uses the same causal predicate, so an unrooted queued
+  producer cannot make the background drain spin. Forced fixtures cover an
+  unrooted promoted producer, a spark-rooted deferred descendant, and
+  reflection-rooted patient/owner-close schedules. The generic ready-task
+  selector survives only as a test compatibility aid pending W6G.1e.3.
 - **W6G.1e.3 — drain and admission cleanup.** Restrict session/runtime drains
   to their declared reflection scope, then remove the unrelated same-session
   fallback and temporary `session_has_running_machine` policy after root

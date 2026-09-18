@@ -867,6 +867,9 @@ impl EvalContext {
             if let Some(claimed) = coordinator.claim_ready_client_demand_for_test() {
                 coordinator.poll_claimed_client_demand(claimed);
                 true
+            } else if let Some(claimed) = coordinator.claim_ready_task_for_test() {
+                coordinator.poll_claimed_task(claimed);
+                true
             } else {
                 coordinator.poll_runtime_work()
             }

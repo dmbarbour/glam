@@ -1970,6 +1970,112 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
 }
 
 #[test]
+fn background_selectors_reject_an_unrooted_promoted_deferred_producer() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(
+        &session.demand.values,
+        "foreground-only promoted producer",
+        |_| panic!("causal selection test never polls its synthetic machine"),
+    );
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh lazy should reserve one producer")
+    };
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("deferred work should retain its wait index");
+    assert!(coordinator.promote_deferred_wait(&wait));
+
+    assert!(matches!(
+        coordinator.select_worker(),
+        CoordinatorSelection::None
+    ));
+    assert!(matches!(
+        coordinator.select_runtime_pump(),
+        CoordinatorSelection::None
+    ));
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_task(task)
+        .expect("an exact foreground dependency retains claim authority")
+    else {
+        panic!("the exact claim should preserve deferred work")
+    };
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    settle_test_deferred(&coordinator, work);
+}
+
+#[test]
+fn worker_follows_a_spark_root_to_its_exact_deferred_descendant() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let producer = TestDemand::new(&coordinator);
+    let observer = TestDemand::new(&coordinator);
+    coordinator.executor_started(1);
+    let task = super::super::allocate_task_id(&producer.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&producer.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(&producer.demand.values, "spark-rooted producer", |_| {
+        panic!("causal selection test never polls its synthetic machine")
+    });
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &producer.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&producer.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open producer session should reserve deferred work")
+    else {
+        panic!("fresh lazy should reserve one producer")
+    };
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("deferred work should retain its wait index");
+
+    coordinator.submit_spark(observer.demand.clone(), crate::core::keys::unit_value());
+    let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
+        panic!("the background spark root should be claimable")
+    };
+    coordinator.release_spark(
+        spark,
+        SparkWorkPoll::Blocked(WorkDependency::Wait(wait.clone())),
+    );
+
+    assert!(matches!(
+        coordinator.select_runtime_pump(),
+        CoordinatorSelection::None
+    ));
+    let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
+        coordinator.select_worker()
+    else {
+        panic!("worker must reach the exact deferred descendant from its spark root")
+    };
+    assert_eq!(claimed.task, task);
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    settle_test_deferred(&coordinator, work);
+    finish_queued_test_spark(&coordinator);
+    coordinator.executor_stopped();
+}
+
+#[test]
 fn exact_deferred_demand_remains_local_across_a_cooperative_yield() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
@@ -2620,11 +2726,10 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
         }),
     );
     assert!(release.remains_blocked);
-    let ClaimedTaskWork::Deferred(producer) = coordinator
-        .claim_ready_task_for_session(producer_session.demand.id)
-        .expect("publishing the outer dependency should promote its dormant producer")
+    let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(producer)) =
+        coordinator.select_runtime_pump()
     else {
-        panic!("promoted producer should preserve its deferred kind")
+        panic!("the reflection drain must reach its exact deferred descendant")
     };
     let release = coordinator.release_deferred(producer, DeferredWorkPoll::Terminal);
     assert!(release.terminal);

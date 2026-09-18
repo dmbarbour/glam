@@ -236,6 +236,10 @@ fn poll_one_runtime_work(coordinator: &Arc<EvaluationWorkCoordinator>) -> bool {
         coordinator.poll_claimed_client_demand(claimed);
         return true;
     }
+    if let Some(claimed) = coordinator.claim_ready_task_for_test() {
+        coordinator.poll_claimed_task(claimed);
+        return true;
+    }
     match coordinator.select_worker() {
         coordinator::CoordinatorSelection::Task(work) => {
             coordinator.poll_claimed_task(work);
@@ -671,21 +675,10 @@ fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
         .demand_whnf(client_lazy_root(&context, lazy.clone()))
         .expect("cycle demand should be admitted");
 
-    assert!(poll_one_runtime_work(
-        &context
-            .coordinator()
-            .expect("coordinator should remain live")
-    ));
-    fixture.runtime.pump_until_stable();
-    assert!(poll_one_runtime_work(
-        &context
-            .coordinator()
-            .expect("coordinator should remain live")
-    ));
-
-    let Some(ClientDemandResult::Failed(failure)) = handle.poll() else {
-        panic!("pure lazy cycle must become the client demand's terminal failure")
-    };
+    let failure = context
+        .drive_client_demand_for_test(handle)
+        .expect_err("pure lazy cycle must become the client demand's terminal failure")
+        .into_permanent_failure();
     assert!(failure.to_string().contains("lazy dependency cycle"));
     let cached = context
         .lazy_failure(&lazy)
@@ -1618,10 +1611,12 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
             })
         })
         .expect("running deferred owner-drop task should schedule");
-    assert!(
-        coordinator.promote_deferred_wait(&wait),
-        "the test's explicit demand should make the deferred producer runnable"
-    );
+    let background_root = context
+        .schedule_task({
+            let wait = wait.clone();
+            move |_| Ok(Box::new(BlockOnceOnWait(Some(wait))))
+        })
+        .expect("the deferred producer should have a causal reflection root");
     started_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should claim the deferred machine");
@@ -1633,6 +1628,10 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Pending(_)
+    ));
+    assert!(matches!(
+        context.poll_reflection_task(&background_root),
+        EvaluationWaitPoll::Abandoned
     ));
 
     release_sender
@@ -2349,6 +2348,27 @@ impl EvaluationTaskMachine for SpawnSignal {
 struct CompleteAfterRelease {
     started: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
+}
+
+struct BlockOnceOnWait(Option<EvaluationWaitToken>);
+
+impl EvaluationTaskMachine for BlockOnceOnWait {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        match self.0.take() {
+            Some(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Wait(wait)),
+                observed_epoch: None,
+                error: None,
+            }),
+            None => {
+                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+            }
+        }
+    }
 }
 
 impl EvaluationTaskMachine for CompleteAfterRelease {
@@ -3287,9 +3307,6 @@ fn patient_claimed_task_wait_releases_mutator() {
         session.demand.default_reflection_profile.clone(),
     )
     .with_claimed_task_wait_probe(waiting_sender);
-    let coordinator = context
-        .coordinator()
-        .expect("patient wait should retain its coordinator");
     let lazy = inert_lazy_for(context.values(), "patient worker-owned dependency");
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
@@ -3301,7 +3318,12 @@ fn patient_claimed_task_wait_releases_mutator() {
             })
         })
         .expect("patient dependency should register");
-    assert!(coordinator.promote_deferred_wait(&wait));
+    let background_root = context
+        .schedule_task({
+            let wait = wait.clone();
+            move |_| Ok(Box::new(BlockOnceOnWait(Some(wait))))
+        })
+        .expect("the patient dependency should have a causal reflection root");
     started_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should claim the patient dependency");
@@ -3337,6 +3359,18 @@ fn patient_claimed_task_wait_releases_mutator() {
     evaluation
         .join()
         .expect("patient evaluator should not panic");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while matches!(
+        context.poll_reflection_task(&background_root),
+        EvaluationWaitPoll::Pending(_)
+    ) && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        context.poll_reflection_task(&background_root),
+        EvaluationWaitPoll::Complete(_)
+    ));
 }
 
 #[test]
