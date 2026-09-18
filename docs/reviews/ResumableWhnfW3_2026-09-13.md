@@ -251,8 +251,11 @@ removed that evaluator but deliberately did not change scheduler policy in
 the same checkpoint. W6G.1 must replace it with role-specific foreground,
 worker-background, and explicit-drain selectors, using causal traversal from
 spark/reflection roots rather than sticky metadata on deferred descendants.
-W6G.4 owns residual measurement. The temporary rule must not silently become
-a semantic ordering guarantee.
+The replacement separates those role-specific roots from session-neutral
+canonical lazy producers so foreground and background observers share source
+progress without sharing their outer continuations. W6G.4 owns residual
+measurement. The temporary rule must not silently become a semantic ordering
+guarantee.
 
 ### WHNFW3R-005 — Full command verification includes a pre-existing very slow executable fixture
 

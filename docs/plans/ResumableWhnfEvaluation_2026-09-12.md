@@ -4751,18 +4751,39 @@ thread role is authorized to claim a machine.
 #### W6G.1 — Role-specific pumping and causal work ownership
 
 Replace the current shared work-stealing policy with an explicit distinction
-between durable machine ownership and temporary poll authority. The runtime
-coordinator continues to own every queued or blocked machine, and a demand
-session continues to own lifecycle, reporting, and cancellation. A thread
-owns only one detached poll claim for one bounded quantum. Thread role decides
-which root work that thread may locate; it does not permanently affinitize a
-machine to a thread.
+between demand roots, shared completion-source producers, and temporary poll
+authority. The runtime coordinator remains the common coordination boundary,
+but not every coordinated record is globally executor-visible:
+
+- a client-evaluation record owns one foreground continuation and its wake
+  state;
+- a spark or reflection record owns one background continuation;
+- a canonical lazy-producer record owns the partial source machine shared by
+  every observer of that lazy identity; and
+- completion subscriptions connect those role-specific roots to canonical
+  producers without transferring either continuation into the other record.
+
+A thread owns only one detached poll claim for one bounded quantum. Thread
+role decides which root work that thread may locate. A canonical producer is
+not permanently affinitized to whichever role first discovered it: if a
+foreground and background root both demand the same producer, either
+authorized causal traversal may win its exclusive claim and both benefit from
+the same partial source evaluation and terminal cache.
+
+Do not share every `WhnfComputation` merely because two roots currently focus
+on the same `RuntimeValueRoot`. The outer continuation, source-owner state,
+and failure context belong to the observing root, and an ordinary value is not
+a scheduler-visible completion identity. Shared work begins at an explicit
+semantic identity: a lazy producer, a promise/wait completion source, or
+shared interaction-net state. Code which wants arbitrary pure computation to
+be memoized must introduce such a boundary rather than relying on accidental
+root or pointer identity.
 
 The target pump policy is:
 
 | Pump role | Claimable root work |
 | --- | --- |
-| foreground library-client thread | its exact `ClientDemand` and the transitive exact dependency chain required to complete it |
+| foreground library-client thread | its exact client-evaluation record and the transitive exact dependency chain required to complete it |
 | executor worker | ready sparks, ready reflection tasks, and the transitive exact dependency chains required by those background roots |
 | explicit session/runtime background drain | reflection tasks in its selected scope and their transitive exact dependency chains, but never sparks |
 | observational readiness/quiescence query | no work merely by observing |
@@ -4777,6 +4798,18 @@ foreground/background field to the deferred record merely to implement this
 policy. Begin with causal traversal from the selected root; optimize root or
 dependency indexes later only with evidence, while preserving the same
 meaning.
+
+The current deferred-value index already prevents two simultaneous producer
+machines for one `DeferredValueId`, but the resulting record inherits the
+first discoverer's demand session, task context, and lifecycle. Preserve the
+canonical index while removing that accidental first-discoverer ownership.
+Canonical lazy production should use a runtime-owned pure-evaluation context
+and the runtime's selected default reflection profile, not the profile of the
+client, spark, or reflection task which happened to inspect the lazy first.
+A promise with an explicit producer task remains owned by that task; its
+observers share the completion subscription and assigned value, not ownership
+of the producer task. Split the present combined deferred representation where
+those lifecycle rules cannot be stated honestly through one record type.
 
 Small callback-free builtins execute within the quantum which already owns
 their enclosing computation. They are not globally selectable scheduler
@@ -4795,19 +4828,35 @@ away from the target policy. Replace the selectors first, then remove the scan
 and its compensating waits. `work_by_session` remains a lifecycle/reporting
 index, not an execution lane.
 
-##### W6G.1a — Baseline ownership matrix and forced schedules
+##### W6G.1a — Baseline ownership and sharing matrix
 
 Inventory every production selector and caller: executor selection,
 synchronous client demand, exact dependency pumping, session draining, runtime
-draining, spark polling, and quiescence observation. Record which work kind it
-can claim today and which target pump role it implements. Add deterministic
-fixtures before changing policy which force, at minimum:
+draining, spark polling, deferred producer admission, completion subscription,
+and quiescence observation. Record which work kind it can claim today, which
+record owns the resumable machine, which demand session or task profile it
+inherits, and which target pump role it implements.
+
+Distinguish consumer-local partial work from a completion source's shared
+partial work. For an uncached lazy, demonstrate that the client, spark, and
+reflection continuations remain distinct while all three resolve to one
+canonical producer machine. For an ordinary rooted value with no lazy,
+promise, wait, or net identity, preserve independent WHNF requests rather than
+inventing scheduler memoization.
+
+Add deterministic fixtures before changing policy which force, at minimum:
 
 - a queued foreground client demand while an executor worker is available;
 - an unclaimed foreground-only deferred dependency while a worker searches;
 - a reflection task blocked through one or more exact deferred producers;
 - a spark blocked through the same kind of producer chain;
-- one canonical lazy demanded concurrently by foreground and background roots;
+- one canonical lazy demanded concurrently by a client, reflection task, and
+  spark, with each possible claimant winning the producer claim;
+- the first discovering client session closing while a background root still
+  depends on the canonical producer;
+- a client root being released while another foreground client still depends
+  on the same producer;
+- the last subscriber disappearing before producer completion;
 - explicit background draining with both client demand and spark work present;
 - terminal publication racing an exact claimant; and
 - independent work in one demand session while another machine is running.
@@ -4817,7 +4866,94 @@ Repeated parallel runs are stress evidence only. Preserve a red or explicitly
 current-behavior assertion for each mismatch so the transition demonstrates
 which policy changed.
 
-##### W6G.1b — Role-specific root selection
+##### W6G.1b — Separate demand-root and producer registries
+
+Refactor the coordinator topology so role-specific root records and shared
+producer records are distinct even if they initially remain beneath one state
+mutex and one mutation-admission boundary. The target logical shape is:
+
+```text
+client evaluations
+  ClientEvaluationId -> foreground continuation + wake state
+
+background roots
+  SparkId / ReflectionTaskId -> background continuation
+
+shared producers
+  DeferredValueId -> exclusive producer machine + block/terminal state
+
+subscriptions
+  completion source -> waiting root record + subscription epoch
+```
+
+Retire `WorkKind::ClientDemand` from globally selectable work. A client-facing
+handle retains only the client-evaluation identity, matching-runtime
+capability or lease, and a condition-variable/future wake endpoint. The client
+registry owns the `WhnfComputation` between polls so a wait, handle move, or
+temporary loss of the calling thread does not lose progress. A spark and a
+reflection task continue to own their own outer machines in their respective
+background records. None of these roots embeds or copies the canonical lazy
+producer's partial machine.
+
+Keep wake registration weak or otherwise acyclic. A published completion must
+address either a client-evaluation record or a background work record together
+with the subscription epoch, make that root ready, and signal its appropriate
+waker without placing a client record on an executor queue.
+
+##### W6G.1c — Session-neutral canonical lazy production
+
+Move canonical lazy-producer lifecycle out of the first observer's demand
+session. Producer admission remains atomic by `DeferredValueId`: racing
+observers may construct candidates outside coordinator state, but exactly one
+producer machine becomes authoritative and every loser subscribes to it.
+Preserve that authoritative machine, including its partial
+`WhnfComputation`, across yields and dependency waits.
+
+Claim eligibility is causal rather than stored on the producer. A foreground
+client may claim the producer only after reaching it through its exact
+dependency chain. A worker may claim the same producer only after reaching it
+from a spark or reflection root. If one role already owns the claim, the other
+parks without rebuilding or restarting the producer. Once the producer caches
+its lazy result, wake every subscribed root; each root resumes its own outer
+continuation.
+
+Audit context construction at admission. Pure lazy production must not inherit
+the first observer's close policy or reflection profile. Promise observation
+must retain the declared promise-producer lifecycle, and a client must not
+become the owner of a task-owned promise merely because it encountered that
+promise first.
+
+##### W6G.1d — Foreground client evaluation lifecycle
+
+Introduce the client-only registry before deciding whether to expose its
+driver publicly. Shape the internal handle so a later public `Evaluation`
+facade can offer bounded `try_advance` plus blocking `run`/`eval` without
+moving the computation back into the caller. `ValueEvaluator::eval` remains a
+blocking convenience layered over the same foreground driver rather than a
+second evaluator path.
+
+One bounded advance claims and polls only the matching client-evaluation
+record and its transitive exact dependencies. It returns a terminal value or
+failure, budget exhaustion, or an exact parked dependency; the last case
+registers a wake before reporting that no local progress is available. The
+client record is affine with respect to polling even if its handle may move
+between threads.
+
+Select the public-handle drop contract before exposing the incremental API.
+At minimum, preserve distinct internal operations for:
+
+- canceling the client root and removing its subscriptions;
+- retaining an inactive handle/record for later client resumption; and
+- explicitly transferring the root continuation to background ownership when
+  callers want evaluation to continue without the client.
+
+Ordinary handle destruction must not silently make arbitrary client work
+worker-eligible. Regardless of the selected default, releasing one client root
+removes only that root's subscriptions. A canonical producer which is still
+demanded by a spark, reflection task, or another client remains live and keeps
+its partial progress.
+
+##### W6G.1e — Role-specific root selection
 
 Replace the generic executor `select` path with role-specific selectors. A
 worker locates a ready spark or reflection root, or rediscovers the deepest
@@ -4836,22 +4972,32 @@ surviving worker return. If the straightforward traversal is too expensive,
 add a coordinator index of background *roots or causal routes*, not a semantic
 eligibility bit on each descendant.
 
-##### W6G.1c — Foreground client ownership
-
-Make synchronous client demand claim and poll its exact `ClientDemand`
-regardless of configured worker count. Follow only its transitive exact
-dependency chain. Remove the unrelated same-session fallback from ordinary
-foreground demand pumping; explicit `run_until_quiescent` or runtime draining
-is the opt-in path for helping background work. A foreground thread may race a
-worker for a shared canonical dependency but never claims or polls the spark
-record itself.
-
 Do not leave worker count as an execution-policy switch for client calls.
 Zero-, one-, and many-worker configurations must differ only in available
 background progress and performance, not in which thread role is responsible
-for the foreground root.
+for the foreground root. Remove the unrelated same-session fallback from
+ordinary foreground demand pumping; explicit background draining is the
+opt-in path for helping work outside the client's causal chain.
 
-##### W6G.1d — Drain and quiescence separation
+##### W6G.1f — Producer retention and last-subscriber policy
+
+Make producer retention independent of client-handle retention. Removing a
+subscription cannot cancel or abandon a producer while another subscribed
+root can still reach it. Conversely, the shared producer registry must not
+keep an otherwise unreachable lazy graph rooted indefinitely merely to retain
+speculative partial progress.
+
+Choose and document the bootstrap policy for a nonterminal producer whose last
+subscriber disappears. The conservative initial choice is to retire the
+coordinator record after any in-flight quantum returns, release its source
+root, and permit a later observer to reconstruct production from the lazy's
+still-authoritative source. Keeping a dormant checkpoint requires either a
+value-owned managed checkpoint or another liveness proof and must not be added
+as an unbounded strong runtime root. Force subscriber-drop both before and
+after claim publication and verify that no completion wake is lost or sent to
+a reused registration epoch.
+
+##### W6G.1g — Drain and quiescence separation
 
 Narrow session and runtime drains to their documented background scopes.
 Runtime-wide draining may traverse newly created reflection roots across
@@ -4864,7 +5010,13 @@ Separate “help execute background reflection work” from “classify stable
 runtime state” in names and tests even if the public `pump_until_stable`
 convenience operation performs both in sequence.
 
-##### W6G.1e — Serialization retirement and verification
+Client-evaluation records are external demand, not executor work. Define
+whether an outstanding parked client handle contributes an external-demand
+activity count, but do not classify it as ready background work or a runtime
+deadlock merely because no client is currently polling it. Shared producers
+remain visible to readiness only through the live roots which demand them.
+
+##### W6G.1h — Serialization retirement and verification
 
 After role-specific root discovery is authoritative, delete
 `session_has_running_machine` from global admission and remove only those
@@ -4875,11 +5027,15 @@ or one-machine ordering as accidental semantics.
 
 Run the forced W6G.1a matrix plus zero-/one-/many-worker client demand,
 reflection, spark, cancellation, owner-close, lost-wakeup, no-false-
-quiescence, and terminal-publication suites. Update current architecture only
-after implementation so it states that workers select background roots and
-causal descendants, while foreground and explicit drains have distinct claim
-authority. Performance attribution remains W6G.4; W6G.1 records only gross
-regressions which would make the ownership mechanism nonviable.
+quiescence, last-subscriber retirement, cross-root producer sharing, and
+terminal-publication suites. The sharing fixtures must count source polls and
+prove that all observers see one canonical result without copying the
+producer's `WhnfComputation`. Update current architecture only after
+implementation so it states that workers select background roots and causal
+descendants, clients retain their own registry records, shared producers are
+session-neutral, and explicit drains have distinct claim authority.
+Performance attribution remains W6G.4; W6G.1 records only gross regressions
+which would make the ownership mechanism nonviable.
 
 #### W6G.2 — Regional standard-effect fusion investigation
 
