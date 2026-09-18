@@ -232,11 +232,11 @@ impl SameRuntimeFixture {
 }
 
 fn poll_one_runtime_work(coordinator: &Arc<EvaluationWorkCoordinator>) -> bool {
-    match coordinator.select() {
-        coordinator::CoordinatorSelection::ClientDemand(claimed) => {
-            coordinator.poll_claimed_client_demand(claimed);
-            true
-        }
+    if let Some(claimed) = coordinator.claim_ready_client_demand_for_test() {
+        coordinator.poll_claimed_client_demand(claimed);
+        return true;
+    }
+    match coordinator.select_worker() {
         coordinator::CoordinatorSelection::Task(work) => {
             coordinator.poll_claimed_task(work);
             true
@@ -454,8 +454,8 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
 }
 
 #[test]
-fn worker_client_demand_closes_the_retirement_publication_handoff() {
-    let (coordinator, _executor) = test_execution_resources(1).expect("test executor should start");
+fn foreground_client_demand_closes_the_retirement_publication_handoff() {
+    let (coordinator, _executor) = test_execution_resources(0).expect("test runtime should start");
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     let expected = context.values().unit();
@@ -480,17 +480,6 @@ fn worker_client_demand_closes_the_retirement_publication_handoff() {
             .send(())
             .expect("result-publication observer must remain live");
     });
-    let (wait_kind_tx, wait_kind_rx) = mpsc::channel();
-    handle.set_wait_kind_probe(wait_kind_tx);
-
-    detached_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("worker must detach the demand before result publication");
-    assert!(
-        coordinator.client_demand_snapshot(work).is_none(),
-        "the forced ordering must expose the retirement-to-publication handoff"
-    );
-
     let driver = context.clone();
     let (result_tx, result_rx) = mpsc::channel();
     let driver_thread = std::thread::spawn(move || {
@@ -499,19 +488,21 @@ fn worker_client_demand_closes_the_retirement_publication_handoff() {
             .send(result)
             .expect("client-demand result observer must remain live");
     });
-    let used_retirement_handoff = wait_kind_rx
+
+    detached_rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("the client must classify its post-retirement wait");
+        .expect("foreground driver must detach the demand before result publication");
+    assert!(
+        coordinator.client_demand_snapshot(work).is_none(),
+        "the forced ordering must expose the retirement-to-publication handoff"
+    );
 
     release_tx
         .send(())
-        .expect("worker must remain paused before publication");
+        .expect("foreground driver must remain paused before publication");
     published_rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("worker must publish the client-demand result");
-    if !used_retirement_handoff {
-        coordinator.disturb_waiters_for_test();
-    }
+        .expect("foreground driver must publish the client-demand result");
     let result = result_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("the client demand must finish after result publication")
@@ -523,10 +514,6 @@ fn worker_client_demand_closes_the_retirement_publication_handoff() {
     driver_thread
         .join()
         .expect("client-demand driver must not panic");
-    assert!(
-        used_retirement_handoff,
-        "a detached client demand must wait on its result cell, not on a future coordinator change"
-    );
 }
 
 #[test]
@@ -684,7 +671,17 @@ fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
         .demand_whnf(client_lazy_root(&context, lazy.clone()))
         .expect("cycle demand should be admitted");
 
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
     fixture.runtime.pump_until_stable();
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
 
     let Some(ClientDemandResult::Failed(failure)) = handle.poll() else {
         panic!("pure lazy cycle must become the client demand's terminal failure")
@@ -719,6 +716,11 @@ fn client_demand_preserves_a_promise_inclusive_retryable_cycle() {
         .demand_whnf(client_lazy_root(&context, lazy.clone()))
         .expect("retryable cycle demand should be admitted");
 
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
     fixture.runtime.pump_until_stable();
 
     assert!(handle.poll().is_none());
@@ -2827,7 +2829,7 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
         context
             .schedule_task(move |_| Ok(Box::new(ProbePollOutcomeMachine(expected))))
             .expect("poll-outcome task should schedule");
-        let coordinator::CoordinatorSelection::Task(work) = coordinator.select() else {
+        let coordinator::CoordinatorSelection::Task(work) = coordinator.select_worker() else {
             panic!("poll-outcome task should be ready")
         };
 
@@ -5998,6 +6000,11 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         ))
         .expect("client demand should admit");
 
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
     fixture.runtime.pump_until_stable();
     let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
         panic!("strict join and unresolved client demand should deadlock")
@@ -6352,6 +6359,11 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
         ))
         .expect("client demand should admit");
 
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
     fixture.runtime.pump_until_stable();
     let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
         panic!("blocked task, join, and client demand should deadlock")
@@ -6399,6 +6411,11 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
     ));
     context.complete_wait(child.wait());
     fixture.runtime.pump_until_stable();
+    assert!(poll_one_runtime_work(
+        &context
+            .coordinator()
+            .expect("coordinator should remain live")
+    ));
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)
@@ -6857,13 +6874,10 @@ fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
 
 fn claim_next_spark(coordinator: &EvaluationWorkCoordinator) -> coordinator::ClaimedSparkWork {
     loop {
-        match coordinator.select() {
+        match coordinator.select_worker() {
             coordinator::CoordinatorSelection::Spark(claimed) => return claimed,
             coordinator::CoordinatorSelection::Task(work) => {
                 coordinator.requeue_unpolled_task(work);
-            }
-            coordinator::CoordinatorSelection::ClientDemand(claimed) => {
-                coordinator.requeue_unpolled_client_demand(claimed);
             }
             coordinator::CoordinatorSelection::None => {
                 panic!("the submitted spark should be claimable")
@@ -6903,7 +6917,7 @@ fn one_promise_completion_wakes_exact_sparks_in_multiple_sessions() {
     );
 
     for _ in 0..2 {
-        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+        let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
             panic!("both disturbed promise sparks should become runnable")
         };
         coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
@@ -6932,7 +6946,7 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
     assert_eq!(promise_b.exact_subscription_count(context.values()), 1);
 
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("promise A should wake its own spark")
     };
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
@@ -6941,7 +6955,7 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     set_promise(&context, &promise_b, context.values().unit())
         .expect("promise B should resolve once");
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("promise B should wake its own spark")
     };
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
@@ -6957,7 +6971,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
         rooted_promise_value(context.values(), "racing promise");
     context.spark_root(promise_value);
 
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the promise spark should be claimable")
     };
     let spark_context = EvalContext::for_spark(claimed.demand_session());
@@ -6974,7 +6988,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("terminal recheck should requeue the spark")
     };
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
@@ -6997,7 +7011,7 @@ fn wait_completion_wakes_only_its_exact_spark_after_unrelated_task_progress() {
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("wait B producer should schedule");
 
-    let coordinator::CoordinatorSelection::Task(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
         panic!("the unrelated reflection task should be selected first")
     };
     coordinator.requeue_unpolled_task(claimed);
@@ -7055,7 +7069,7 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
     coordinator.executor_started(1);
     context.spark(Value::error(context.values(), "spark failure"));
 
-    let coordinator::CoordinatorSelection::Spark(mut claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(mut claimed) = coordinator.select_worker() else {
         panic!("the failing spark should be claimable")
     };
     let poll_context = EvaluationPollContext::for_claim(claimed.demand());
@@ -7132,7 +7146,7 @@ fn closing_a_session_keeps_worker_owned_spark_work_busy_until_release() {
     coordinator.executor_started(1);
     let lazy = inert_lazy_for(context.values(), "worker-owned spark");
     context.spark(Value::Lazy(lazy));
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the test worker should claim the spark before session closure")
     };
     assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
@@ -7227,7 +7241,7 @@ fn all_poll_routes_use_scheduler_context() {
         .expect("test promise should accept its assignment");
     let spark_before = context.poll_context_count();
     context.spark(Value::Promised(promise));
-    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("assigned promise spark should be ready")
     };
     coordinator.poll_claimed_spark(claimed);

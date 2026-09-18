@@ -654,10 +654,6 @@ fn poison_lazy_cycle(
 impl EvaluationWorkCoordinator {
     pub(crate) fn poll_runtime_work(self: &Arc<Self>) -> bool {
         match self.select_runtime_pump() {
-            coordinator::CoordinatorSelection::ClientDemand(claimed) => {
-                self.poll_claimed_client_demand(claimed);
-                true
-            }
             coordinator::CoordinatorSelection::Task(work) => {
                 self.poll_claimed_task(work);
                 true

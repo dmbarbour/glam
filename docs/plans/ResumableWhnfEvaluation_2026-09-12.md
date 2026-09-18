@@ -4981,6 +4981,24 @@ its partial progress.
 
 ##### W6G.1e — Role-specific root selection
 
+Partition this transition so foreground ownership changes independently from
+deferred causal traversal:
+
+- **W6G.1e.1 — foreground selector exclusion — Complete (2026-09-18).**
+  Executor workers and the runtime background pump no longer select
+  `ClientDemand`. The blocking client driver always claims its exact record,
+  including when workers exist. A forced coordinator fixture proves that both
+  background selectors reject a queued foreground record while the exact
+  client claim remains live. The temporary same-session admission guard and
+  the combined client registry remain transitional.
+- **W6G.1e.2 — causal background traversal.** Replace globally ready deferred
+  selection with traversal from a selected spark or reflection root. Keep the
+  exact `claim_task` primitive and forced terminal-publication races.
+- **W6G.1e.3 — drain and admission cleanup.** Restrict session/runtime drains
+  to their declared reflection scope, then remove the unrelated same-session
+  fallback and temporary `session_has_running_machine` policy after root
+  registries express affinity directly.
+
 Replace the generic executor `select` path with role-specific selectors. A
 worker locates a ready spark or reflection root, or rediscovers the deepest
 claimable exact producer beneath a blocked spark/reflection root. It must not

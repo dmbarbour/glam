@@ -965,6 +965,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/tests.rs::retired_deferred_machine_does_not_delay_same_session_client_admission#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::terminal_publication_releases_same_session_client_admission_before_retirement#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::worker_and_runtime_pump_selectors_reject_foreground_client_demand#1|surface=compatibility-new|scope=test",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
     "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
@@ -991,6 +992,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::exit_readiness_snapshot_root_survives_after_settlement_report_drop#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::exit_wait_does_not_publish_task_status_or_failure#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::forced_deadlock_settlement_preserves_exits_and_kills_other_participants#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::foreground_client_demand_closes_the_retirement_publication_handoff#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
@@ -1005,7 +1007,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::terminal_wait_dispositions_retain_only_their_documented_runtime_roots#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::worker_client_demand_closes_the_retirement_publication_handoff#1|surface=compatibility-new|scope=test",
     "src/evaluation/whnf.rs::tests::task_owned_promise_self_observation_fails_outside_regional_access#1|surface=scoped-factory|scope=test",
     "src/evaluation/whnf.rs::tests::unassigned_resolver_promise_becomes_a_direct_dependency#1|surface=scoped-factory|scope=test",
     "src/evaluation/whnf.rs::tests::uncached_lazy_admission_occurs_after_regional_access_closes#1|surface=scoped-factory|scope=test",
@@ -1162,7 +1163,21 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
         .map(|record| (*record).to_owned())
         .collect::<Vec<_>>();
 
-    assert_eq!(actual, expected, "runtime-root publication ledger drifted");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "runtime-root publication ledger length drifted"
+    );
+    if let Some((index, (actual, expected))) = actual
+        .iter()
+        .zip(&expected)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        panic!(
+            "runtime-root publication ledger drifted at index {index}:\n  actual: {actual}\nexpected: {expected}"
+        );
+    }
 
     let reviews = occurrences
         .iter()

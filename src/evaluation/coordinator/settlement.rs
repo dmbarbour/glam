@@ -19,7 +19,12 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimePumpSnapshot {
-    pub(crate) useful_ready: bool,
+    /// Ready work which the background pump is authorized to claim.
+    ///
+    /// A queued foreground client record remains `Busy` for readiness, but is
+    /// not a reason for the background pump to spin: only its exact client
+    /// driver may advance it.
+    pub(crate) background_ready: bool,
     pub(crate) progress_owned: bool,
     pub(crate) abandonable_sparks: bool,
 }
@@ -104,11 +109,9 @@ impl EvaluationWorkCoordinator {
             .lock()
             .expect("evaluation work coordinator was poisoned");
         RuntimePumpSnapshot {
-            useful_ready: state.work.values().any(|record| {
-                matches!(
-                    record.kind,
-                    WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::ClientDemand(_)
-                ) && matches!(record.state, WorkState::Queued)
+            background_ready: state.work.values().any(|record| {
+                matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
+                    && matches!(record.state, WorkState::Queued)
             }),
             progress_owned: state.work.values().any(|record| {
                 matches!(record.state, WorkState::Running | WorkState::Terminalizing)

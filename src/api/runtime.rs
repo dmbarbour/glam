@@ -811,7 +811,7 @@ impl EvaluationRuntime {
             let running_delivery = self.state.shared_resources.has_running_delivery();
             drop(settlement);
 
-            if work.useful_ready || work.abandonable_sparks {
+            if work.background_ready || work.abandonable_sparks {
                 continue;
             }
             if work.progress_owned || running_delivery {

@@ -863,8 +863,14 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn poll_one_runtime_work_for_test(&self) -> bool {
-        self.coordinator()
-            .is_some_and(|coordinator| coordinator.poll_runtime_work())
+        self.coordinator().is_some_and(|coordinator| {
+            if let Some(claimed) = coordinator.claim_ready_client_demand_for_test() {
+                coordinator.poll_claimed_client_demand(claimed);
+                true
+            } else {
+                coordinator.poll_runtime_work()
+            }
+        })
     }
 
     #[cfg(test)]
@@ -988,26 +994,6 @@ impl EvalContext {
             if let Some(result) = handle.poll() {
                 return terminal_client_demand_result(result);
             }
-            if coordinator.has_executor_workers() {
-                let generation = coordinator.work_generation();
-                if handle.poll().is_none() && coordinator.work_generation() == generation {
-                    if coordinator.client_demand_snapshot(handle.work).is_none() {
-                        // Retirement removes the coordinator record before
-                        // publishing its result cell. No later coordinator
-                        // generation is required for that intentionally tiny
-                        // handoff, so wait on the result itself.
-                        #[cfg(test)]
-                        handle.report_retirement_handoff_for_test(true);
-                        return terminal_client_demand_result(handle.wait());
-                    }
-                    #[cfg(test)]
-                    handle.report_retirement_handoff_for_test(false);
-                    if coordinator.work_generation() == generation {
-                        coordinator.wait_for_change(generation);
-                    }
-                }
-                continue;
-            }
             if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
                 coordinator.poll_claimed_client_demand(claimed);
                 continue;
@@ -1067,7 +1053,7 @@ impl EvalContext {
                         continue;
                     }
                     let runtime = coordinator.runtime_pump_snapshot();
-                    if runtime.useful_ready || runtime.abandonable_sparks {
+                    if runtime.background_ready || runtime.abandonable_sparks {
                         continue;
                     }
                     if runtime.progress_owned {

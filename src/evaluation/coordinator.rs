@@ -34,9 +34,7 @@ pub(crate) use client_demand::{
     ClaimedClientDemand, ClientDemandHandle, ClientDemandOperation, ClientDemandPoll,
     ClientDemandResult, ClientDemandSink, ClientDemandSnapshot, ClientDemandWork,
 };
-use client_demand::{
-    ClientDemandRetirement, claim_ready_client_demand, detach_client_demand, queue_client_demand,
-};
+use client_demand::{ClientDemandRetirement, detach_client_demand, queue_client_demand};
 #[cfg(test)]
 use completion::DependencyWakeBatch;
 pub(crate) use completion::{
@@ -557,7 +555,6 @@ pub(crate) struct EvaluationWorkCoordinator {
 pub(super) enum CoordinatorSelection {
     Task(ClaimedTaskWork),
     Spark(ClaimedSparkWork),
-    ClientDemand(ClaimedClientDemand),
     None,
 }
 
@@ -1005,14 +1002,6 @@ impl EvaluationWorkCoordinator {
         })
     }
 
-    pub(super) fn has_executor_workers(&self) -> bool {
-        self.state
-            .lock()
-            .expect("evaluation work coordinator was poisoned")
-            .spark_workers
-            != 0
-    }
-
     pub(super) fn demand_session_has_running_machine(&self, session: EvaluationSessionId) -> bool {
         session_has_running_machine(
             &self
@@ -1032,7 +1021,14 @@ impl EvaluationWorkCoordinator {
             .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
     }
 
-    pub(super) fn select(&self) -> CoordinatorSelection {
+    /// Selects one executor-worker root.
+    ///
+    /// Foreground client evaluations are intentionally absent. The client
+    /// which owns that record polls it directly and workers begin only from
+    /// background spark or reflection roots. Deferred descendants remain on
+    /// the transitional global task queue until W6G.1e installs causal root
+    /// traversal.
+    pub(super) fn select_worker(&self) -> CoordinatorSelection {
         let mutation = self.admission.mutation_guard();
         let (selection, changed) = {
             let mut state = self
@@ -1042,37 +1038,28 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let had_ready_task = !state.ready_tasks.is_empty();
             let had_ready_spark = !state.ready_sparks.is_empty();
-            let had_ready_client = !state.ready_client_demands.is_empty();
-            let selection = claim_ready_client_demand(&mut state, self.runtime)
-                .map(CoordinatorSelection::ClientDemand)
-                .unwrap_or_else(|| {
-                    if state.prefer_spark {
-                        claim_ready_spark(&mut state, self.runtime)
-                            .map(CoordinatorSelection::Spark)
-                            .or_else(|| {
-                                claim_ready_task(&mut state, self.runtime, None)
-                                    .map(CoordinatorSelection::Task)
-                            })
-                            .unwrap_or(CoordinatorSelection::None)
-                    } else {
+            let selection = if state.prefer_spark {
+                claim_ready_spark(&mut state, self.runtime)
+                    .map(CoordinatorSelection::Spark)
+                    .or_else(|| {
                         claim_ready_task(&mut state, self.runtime, None)
                             .map(CoordinatorSelection::Task)
-                            .or_else(|| {
-                                claim_ready_spark(&mut state, self.runtime)
-                                    .map(CoordinatorSelection::Spark)
-                            })
-                            .unwrap_or(CoordinatorSelection::None)
-                    }
-                });
+                    })
+                    .unwrap_or(CoordinatorSelection::None)
+            } else {
+                claim_ready_task(&mut state, self.runtime, None)
+                    .map(CoordinatorSelection::Task)
+                    .or_else(|| {
+                        claim_ready_spark(&mut state, self.runtime).map(CoordinatorSelection::Spark)
+                    })
+                    .unwrap_or(CoordinatorSelection::None)
+            };
             match selection {
                 CoordinatorSelection::Task(_) => state.prefer_spark = true,
                 CoordinatorSelection::Spark(_) => state.prefer_spark = false,
-                CoordinatorSelection::ClientDemand(_) | CoordinatorSelection::None => {}
+                CoordinatorSelection::None => {}
             }
-            if !matches!(selection, CoordinatorSelection::None)
-                || had_ready_task
-                || had_ready_spark
-                || had_ready_client
+            if !matches!(selection, CoordinatorSelection::None) || had_ready_task || had_ready_spark
             {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1099,17 +1086,10 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
             let had_ready_task = !state.ready_tasks.is_empty();
-            let had_ready_client = !state.ready_client_demands.is_empty();
-            let selection = claim_ready_client_demand(&mut state, self.runtime)
-                .map(CoordinatorSelection::ClientDemand)
-                .or_else(|| {
-                    claim_ready_task(&mut state, self.runtime, None).map(CoordinatorSelection::Task)
-                })
+            let selection = claim_ready_task(&mut state, self.runtime, None)
+                .map(CoordinatorSelection::Task)
                 .unwrap_or(CoordinatorSelection::None);
-            if !matches!(selection, CoordinatorSelection::None)
-                || had_ready_task
-                || had_ready_client
-            {
+            if !matches!(selection, CoordinatorSelection::None) || had_ready_task {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
             (selection, state.work_generation != initial_generation)
@@ -1610,18 +1590,6 @@ impl EvaluationWorkCoordinator {
             .values()
             .filter(|record| matches!(record.kind, WorkKind::ClientDemand(_)))
             .count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn disturb_waiters_for_test(&self) {
-        {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            state.work_generation = state.work_generation.wrapping_add(1);
-        }
-        self.work_available.notify_all();
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {

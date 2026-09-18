@@ -138,7 +138,7 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
             return;
         };
         let observed_generation = coordinator.work_generation();
-        let work = coordinator.select();
+        let work = coordinator.select_worker();
 
         match work {
             CoordinatorSelection::Task(work) => {
@@ -154,13 +154,6 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                     return;
                 }
                 coordinator.poll_claimed_spark(claimed);
-            }
-            CoordinatorSelection::ClientDemand(claimed) => {
-                if inner.stopping.load(Ordering::Acquire) {
-                    coordinator.requeue_unpolled_client_demand(claimed);
-                    return;
-                }
-                coordinator.poll_claimed_client_demand(claimed);
             }
             CoordinatorSelection::None => {
                 if inner.stopping.load(Ordering::Acquire) {

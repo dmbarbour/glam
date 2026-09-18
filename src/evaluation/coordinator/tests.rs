@@ -355,7 +355,7 @@ fn claimed_test_spark() -> (
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
     coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
-    let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("test spark should be claimable")
     };
     (coordinator, executor, session, claimed)
@@ -506,7 +506,7 @@ fn settle_test_deferred(coordinator: &Arc<EvaluationWorkCoordinator>, work: Eval
 }
 
 fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {
-    let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("woken test spark should be claimable")
     };
     coordinator.release_spark(claimed, SparkWorkPoll::Complete);
@@ -895,7 +895,7 @@ fn stale_dependency_wake_does_not_requeue_work_blocked_elsewhere() {
     };
 
     assert!(coordinator.redeliver_test_registration(source_a.key(), registration_a));
-    let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the exact source delivery should requeue the test spark")
     };
     let Ok(registration_b) = coordinator.park_claimed_test_spark(claimed, &source_b, || {}) else {
@@ -922,7 +922,7 @@ fn repeated_dependency_uses_a_new_epoch_and_queues_only_once() {
     };
 
     assert!(coordinator.redeliver_test_registration(source.key(), first));
-    let CoordinatorSelection::Spark(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the exact source delivery should requeue the test spark")
     };
     let Ok(second) = coordinator.park_claimed_test_spark(claimed, &source, || {}) else {
@@ -1086,7 +1086,8 @@ fn coordinator_selects_exact_ready_work_without_a_session_queue() {
     assert_eq!(coordinator.registered_session_count(), 1);
     assert_eq!(coordinator.ready_task_count(), 1);
 
-    let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) = coordinator.select()
+    let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) =
+        coordinator.select_worker()
     else {
         panic!("the exact ready task should be selected")
     };
@@ -1802,16 +1803,16 @@ fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
         .expect("open test session should reserve reflection work");
     activate_test_reflection(&coordinator, work);
 
-    let CoordinatorSelection::Task(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
         panic!("task work should receive the first turn")
     };
     coordinator.requeue_unpolled_task(claimed);
 
-    let CoordinatorSelection::Spark(spark) = coordinator.select() else {
+    let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
         panic!("spark should receive the alternating turn")
     };
     coordinator.release_spark(spark, SparkWorkPoll::Complete);
-    let CoordinatorSelection::Task(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
         panic!("task work should receive the next alternating turn")
     };
     coordinator.requeue_unpolled_task(claimed);
@@ -2419,7 +2420,7 @@ fn terminal_publication_releases_same_session_client_admission_before_retirement
         .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
         .expect("same-session client demand should be admitted");
     assert!(
-        matches!(coordinator.select(), CoordinatorSelection::None),
+        matches!(coordinator.select_worker(), CoordinatorSelection::None),
         "an active semantic poll must exclude another ordinary same-session machine"
     );
 
@@ -2435,9 +2436,9 @@ fn terminal_publication_releases_same_session_client_admission_before_retirement
         Arc::new(EvaluationFailure::message("forced terminal publication")),
     );
 
-    let CoordinatorSelection::ClientDemand(claimed) = coordinator.select() else {
-        panic!("terminal publication must release semantic admission before retirement")
-    };
+    let claimed = coordinator
+        .claim_client_demand(client.work())
+        .expect("terminal publication must release semantic admission before retirement");
     assert_eq!(claimed.id, client.work());
     coordinator.poll_claimed_client_demand(claimed);
     assert!(matches!(
@@ -2499,10 +2500,47 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
     let client = context
         .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
         .expect("same-session client demand should be admitted");
-    let CoordinatorSelection::ClientDemand(claimed) = coordinator.select() else {
-        panic!("retired work must not delay client admission")
-    };
+    let claimed = coordinator
+        .claim_client_demand(client.work())
+        .expect("retired work must not delay client admission");
     assert_eq!(claimed.id, client.work());
+    coordinator.poll_claimed_client_demand(claimed);
+    assert!(matches!(
+        client.poll(),
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
+    ));
+}
+
+#[test]
+fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let context = session.context();
+    let expected = context.values().unit();
+    let client = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .expect("foreground demand should be admitted");
+
+    assert!(
+        matches!(coordinator.select_worker(), CoordinatorSelection::None),
+        "executor workers must not claim foreground client records"
+    );
+    assert!(
+        matches!(
+            coordinator.select_runtime_pump(),
+            CoordinatorSelection::None
+        ),
+        "runtime background draining must not claim foreground client records"
+    );
+    assert!(
+        !coordinator.runtime_pump_snapshot().background_ready,
+        "a queued foreground record must not keep the background pump spinning"
+    );
+
+    let claimed = coordinator
+        .claim_client_demand(client.work())
+        .expect("the exact foreground driver must retain claim authority");
     coordinator.poll_claimed_client_demand(claimed);
     assert!(matches!(
         client.poll(),
@@ -2610,7 +2648,7 @@ fn dropping_executor_does_not_discard_coordinator_session_state() {
     activate_test_reflection(&coordinator, work);
     drop(executor);
 
-    let CoordinatorSelection::Task(claimed) = coordinator.select() else {
+    let CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
         panic!("dropping the executor must preserve ready task work")
     };
     coordinator.requeue_unpolled_task(claimed);

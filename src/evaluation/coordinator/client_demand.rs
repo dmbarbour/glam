@@ -8,11 +8,13 @@ use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
+#[cfg(test)]
+use super::session_has_running_machine;
 use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
     WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
     WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
-    queue_current_registration, session_has_running_machine,
+    queue_current_registration,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -43,8 +45,6 @@ pub(crate) struct ClientDemandResultCell {
     before_publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    #[cfg(test)]
-    wait_kind_probe: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
 }
 
 impl ClientDemandResultCell {
@@ -56,8 +56,6 @@ impl ClientDemandResultCell {
             before_publish_probe: Mutex::new(None),
             #[cfg(test)]
             publish_probe: Mutex::new(None),
-            #[cfg(test)]
-            wait_kind_probe: Mutex::new(None),
         })
     }
 
@@ -107,28 +105,6 @@ impl ClientDemandResultCell {
             .before_publish_probe
             .lock()
             .expect("client demand pre-publication probe was poisoned") = Some(Box::new(probe));
-    }
-
-    #[cfg(test)]
-    fn set_wait_kind_probe(&self, probe: std::sync::mpsc::Sender<bool>) {
-        *self
-            .wait_kind_probe
-            .lock()
-            .expect("client demand wait-kind probe was poisoned") = Some(probe);
-    }
-
-    #[cfg(test)]
-    fn report_retirement_handoff(&self, retirement_handoff: bool) {
-        if let Some(probe) = self
-            .wait_kind_probe
-            .lock()
-            .expect("client demand wait-kind probe was poisoned")
-            .take()
-        {
-            probe
-                .send(retirement_handoff)
-                .expect("client demand wait-kind probe receiver must remain live");
-        }
     }
 
     fn poll(&self) -> Option<ClientDemandResult> {
@@ -267,16 +243,6 @@ impl ClientDemandHandle {
     pub(crate) fn set_before_publish_probe(&self, probe: impl FnOnce() + Send + 'static) {
         self.cell.set_before_publish_probe(probe);
     }
-
-    #[cfg(test)]
-    pub(crate) fn set_wait_kind_probe(&self, probe: std::sync::mpsc::Sender<bool>) {
-        self.cell.set_wait_kind_probe(probe);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn report_retirement_handoff_for_test(&self, retirement_handoff: bool) {
-        self.cell.report_retirement_handoff(retirement_handoff);
-    }
 }
 
 impl Drop for ClientDemandHandle {
@@ -389,36 +355,6 @@ impl EvaluationWorkCoordinator {
         Ok(id)
     }
 
-    pub(in crate::evaluation) fn requeue_unpolled_client_demand(
-        &self,
-        mut claimed: ClaimedClientDemand,
-    ) {
-        let mutation = self.admission.mutation_guard();
-        {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let record = state
-                .work
-                .get_mut(&claimed.id)
-                .expect("unpolled client demand must remain registered");
-            assert!(matches!(record.state, WorkState::Running));
-            let client = client_demand_work_mut(record);
-            assert!(
-                client.operation.is_none(),
-                "running client demand must have detached its operation"
-            );
-            client.operation = claimed.operation.take();
-            client.subscription = claimed.prior_subscription.take();
-            record.state = WorkState::Queued;
-            queue_client_demand(&mut state, claimed.id);
-            state.work_generation = state.work_generation.wrapping_add(1);
-        }
-        drop(mutation);
-        self.work_available.notify_all();
-    }
-
     pub(in crate::evaluation) fn claim_client_demand(
         &self,
         id: EvaluationWorkId,
@@ -430,6 +366,35 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_client_demand(&mut state, self.runtime, id);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    /// Test-only compatibility pump for lifecycle fixtures which are not
+    /// concerned with thread-role selection.
+    ///
+    /// Production selectors deliberately cannot perform this search after
+    /// W6G.1e. Tests which exercise ownership policy must claim an exact
+    /// client ID or call `select_worker` and assert that it is absent.
+    #[cfg(test)]
+    pub(in crate::evaluation) fn claim_ready_client_demand_for_test(
+        &self,
+    ) -> Option<ClaimedClientDemand> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_ready_client_demand(&mut state, self.runtime);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -775,7 +740,8 @@ pub(super) fn queue_client_demand(state: &mut WorkCoordinatorState, id: Evaluati
     }
 }
 
-pub(super) fn claim_ready_client_demand(
+#[cfg(test)]
+fn claim_ready_client_demand(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
 ) -> Option<ClaimedClientDemand> {
