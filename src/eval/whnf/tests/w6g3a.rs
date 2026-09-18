@@ -53,7 +53,7 @@ fn poll_with(
     computation: &mut WhnfComputation,
     budget: &mut WhnfStepBudget,
     access_entries: &mut usize,
-    reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+    reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
 ) -> WhnfPoll {
     *access_entries += 1;
     let poll = EvaluationPollContext::for_context(context);

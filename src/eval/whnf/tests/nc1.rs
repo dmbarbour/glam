@@ -375,7 +375,7 @@ fn shell_work(access: &EvaluationValueAccess<'_>) -> NetWhnfState {
 
 fn reduce_shell(
     _access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
     if work.focus == Value::Number(0.into()) {
         RegionalWhnfStep::Delegate(Value::Number(1.into()))
@@ -455,7 +455,8 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
                 ),
             )
         };
-        let advance_frame = |_access: &EvaluationValueAccess<'_>, work: &mut RegionalWhnfWork| {
+        let advance_frame = |_access: &EvaluationValueAccess<'_>,
+                             work: &mut RegionalWhnfState<'_>| {
             let WhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
                 unreachable!()
             };
@@ -497,7 +498,7 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         );
 
         let boundary_reducer = |_access: &EvaluationValueAccess<'_>,
-                                work: &mut RegionalWhnfWork| {
+                                work: &mut RegionalWhnfState<'_>| {
             let WhnfContinuation::Application { next, .. } = &mut work.frames[0] else {
                 unreachable!()
             };

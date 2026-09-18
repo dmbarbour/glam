@@ -198,22 +198,16 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
 
     let mut budget = WhnfStepBudget::new(1);
     let yielded = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut budget, |access, _work| {
-            RegionalWhnfStep::Continue(RegionalWhnfWork::from_parts(
-                access,
-                text("replacement"),
-                vec![
-                    WhnfFrame {
-                        kind: WhnfFrameKind::CollectionWalk,
-                        cursor: 3,
-                        retained: vec![text("first"), text("second")],
-                    }
-                    .into(),
-                ],
-                BTreeSet::new(),
-                None,
-                None,
-            ))
+        computation.poll_in(&access, &mut budget, |_access, work| {
+            work.frames = vec![
+                WhnfFrame {
+                    kind: WhnfFrameKind::CollectionWalk,
+                    cursor: 3,
+                    retained: vec![text("first"), text("second")],
+                }
+                .into(),
+            ];
+            RegionalWhnfStep::Delegate(text("replacement"))
         })
     });
     assert!(matches!(yielded, WhnfPoll::Yielded));
@@ -266,14 +260,11 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
             assert_eq!(access.lazy(prior).id(), prior_id);
             let replacement = LazyValue::error_in(access.values(), "replacement checkpoint");
             replacement_id = Some(access.lazy(&replacement).id());
-            RegionalWhnfStep::Continue(RegionalWhnfWork::from_parts(
-                access,
-                Value::Lazy(replacement),
-                Vec::new(),
-                BTreeSet::new(),
-                None,
-                None,
-            ))
+            work.frames.clear();
+            work.followed.clear();
+            work.source_owner = None;
+            work.cycle_promise = None;
+            RegionalWhnfStep::Delegate(Value::Lazy(replacement))
         })
     });
     assert!(matches!(yielded, WhnfPoll::Yielded));

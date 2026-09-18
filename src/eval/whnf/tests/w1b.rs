@@ -194,7 +194,7 @@ impl SyntheticAlgebra {
     fn reduce(
         &mut self,
         access: &EvaluationValueAccess<'_>,
-        work: &mut RegionalWhnfWork,
+        work: &mut RegionalWhnfState<'_>,
     ) -> RegionalWhnfStep {
         let index = instruction_index(&work.focus);
         let operation = self

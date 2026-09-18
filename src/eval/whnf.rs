@@ -156,6 +156,14 @@ pub(crate) struct WhnfState {
 /// Callback-free working state beneath one managed-access region.
 pub(crate) struct RegionalWhnfWork(WhnfState);
 
+/// Region-authorized mutable view of one canonical WHNF state.
+///
+/// Construction requires the matching evaluation access and ties this borrow
+/// to that access region. Reducers may edit canonical state in place, but
+/// cannot move the state into a durable owner or retain this view after the
+/// mutator region closes.
+pub(crate) struct RegionalWhnfState<'state>(&'state mut WhnfState);
+
 /// Complete WHNF state stored as traced edges inside a runtime net.
 ///
 /// Unlike [`DurableWhnfState`], this representation owns no registered roots.
@@ -256,6 +264,13 @@ impl RegionalWhnfWork {
         })
     }
 
+    fn state_in<'access, 'scope>(
+        &'access mut self,
+        access: &'access EvaluationValueAccess<'scope>,
+    ) -> RegionalWhnfState<'access> {
+        self.0.state_in(access)
+    }
+
     #[cfg(test)]
     pub(crate) fn container_identities_for_test(&self) -> Vec<(usize, usize, usize)> {
         self.0.container_identities_for_test()
@@ -281,6 +296,29 @@ impl RegionalWhnfWork {
                 + usize::from(self.cycle_promise.is_some()),
             continuations: self.frames.len(),
         }
+    }
+}
+
+impl WhnfState {
+    fn state_in<'access, 'scope>(
+        &'access mut self,
+        _access: &'access EvaluationValueAccess<'scope>,
+    ) -> RegionalWhnfState<'access> {
+        RegionalWhnfState(self)
+    }
+}
+
+impl std::ops::Deref for RegionalWhnfState<'_> {
+    type Target = WhnfState;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for RegionalWhnfState<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
     }
 }
 
@@ -325,7 +363,6 @@ pub(crate) enum WhnfFrameKind {
 )]
 pub(crate) enum RegionalWhnfStep {
     Delegate(Value),
-    Continue(RegionalWhnfWork),
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
     Failed(Arc<EvaluationFailure>),
@@ -385,40 +422,34 @@ pub(crate) type WhnfStepBudget = EvaluationStepBudget;
 /// loop.
 pub(crate) fn drive_regional<'scope>(
     access: &EvaluationValueAccess<'scope>,
-    work: RegionalWhnfWork,
+    mut work: RegionalWhnfWork,
     budget: &mut WhnfStepBudget,
-    reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+    reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
 ) -> RegionalWhnfDrive {
-    let mut work = Some(work);
     match drive_regional_in_place(access, &mut work, budget, reduce) {
         RegionalWhnfStatus::Ready(value) => RegionalWhnfDrive::Ready(value),
-        RegionalWhnfStatus::Boundary(request) => RegionalWhnfDrive::Boundary {
-            work: work.expect("boundary retains regional WHNF state"),
-            request,
-        },
-        RegionalWhnfStatus::Yielded => {
-            RegionalWhnfDrive::Yielded(work.expect("yield retains regional WHNF state"))
-        }
+        RegionalWhnfStatus::Boundary(request) => RegionalWhnfDrive::Boundary { work, request },
+        RegionalWhnfStatus::Yielded => RegionalWhnfDrive::Yielded(work),
         RegionalWhnfStatus::Failed(failure) => RegionalWhnfDrive::Failed(failure),
     }
 }
 
 pub(crate) fn drive_regional_in_place<'scope>(
     access: &EvaluationValueAccess<'scope>,
-    work: &mut Option<RegionalWhnfWork>,
+    work: &mut RegionalWhnfWork,
     budget: &mut WhnfStepBudget,
-    mut reduce: impl FnMut(&EvaluationValueAccess<'scope>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+    mut reduce: impl FnMut(
+        &EvaluationValueAccess<'scope>,
+        &mut RegionalWhnfState<'_>,
+    ) -> RegionalWhnfStep,
 ) -> RegionalWhnfStatus {
     loop {
         if !budget.try_consume() {
             return RegionalWhnfStatus::Yielded;
         }
-        let active = work
-            .as_mut()
-            .expect("regional WHNF state remains installed while driving");
-        match reduce(access, active) {
+        let mut active = work.state_in(access);
+        match reduce(access, &mut active) {
             RegionalWhnfStep::Delegate(focus) => active.focus = focus,
-            RegionalWhnfStep::Continue(next) => *active = next,
             RegionalWhnfStep::Ready(value) => return RegionalWhnfStatus::Ready(value),
             RegionalWhnfStep::Boundary(request) => {
                 return RegionalWhnfStatus::Boundary(request);
@@ -743,7 +774,7 @@ impl NetWhnfState {
         self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
-        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
     ) -> NetWhnfDrive {
         match drive_regional(access, self.into_regional(access), budget, reduce) {
             RegionalWhnfDrive::Ready(value) => NetWhnfDrive::Ready(value),
@@ -1082,7 +1113,7 @@ impl WhnfComputation {
         &mut self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
-        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfWork) -> RegionalWhnfStep,
+        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
     ) -> WhnfPoll {
         let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
             panic!("a lazy source must install its result before WHNF demand")
@@ -1097,13 +1128,12 @@ impl WhnfComputation {
                 metrics.projected_continuations += shape.continuations;
             });
         }
-        let mut work = Some(checkpoint.project(access));
+        let mut work = checkpoint.project(access);
         match drive_regional_in_place(access, &mut work, budget, reduce) {
             RegionalWhnfStatus::Ready(value) => {
                 WhnfPoll::Ready(access.values().root_runtime_value(value))
             }
             RegionalWhnfStatus::Boundary(request) => {
-                let work = work.expect("boundary retains regional WHNF state");
                 self.publish_checkpoint(access, work);
                 match request {
                     RegionalBoundaryRequest::Dependency(dependency) => {
@@ -1114,12 +1144,10 @@ impl WhnfComputation {
                 }
             }
             RegionalWhnfStatus::Yielded => {
-                let work = work.expect("yield retains regional WHNF state");
                 self.publish_checkpoint(access, work);
                 WhnfPoll::Yielded
             }
             RegionalWhnfStatus::Failed(failure) => {
-                let work = work.expect("failure retains terminal regional WHNF state");
                 self.publish_checkpoint(access, work);
                 WhnfPoll::Failed(access.values().root_runtime_failure(failure))
             }
@@ -1160,7 +1188,7 @@ impl WhnfComputation {
 
 pub(crate) fn reduce_semantic_shell(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
     match &work.0.focus {
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
@@ -1215,7 +1243,7 @@ enum DirectApplicationStep {
 
 fn resume_semantic_frame(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
     match work.frames.last() {
         Some(WhnfContinuation::SemanticUndefined { .. }) => {
@@ -1251,7 +1279,7 @@ fn resume_semantic_frame(
 
 fn resume_static_access(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
     let frame = work
         .frames
@@ -1279,7 +1307,7 @@ fn resume_static_access(
 
 fn advance_application(
     _access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
     value: Value,
     consumed: usize,
 ) -> RegionalWhnfStep {
@@ -1296,7 +1324,7 @@ fn advance_application(
 
 fn begin_dictionary_application(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
     dict: crate::core::Dict,
 ) -> RegionalWhnfStep {
     let diagnostic_kind = if dict.is_empty() { "Undefined" } else { "Dict" };
@@ -1326,7 +1354,7 @@ fn begin_dictionary_application(
 
 fn begin_semantic_undefined(
     _access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
     candidate: Value,
     purpose: UndefinedPurpose,
 ) -> RegionalWhnfStep {
@@ -1340,7 +1368,7 @@ fn begin_semantic_undefined(
 
 fn resume_semantic_undefined(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
     let frame = work
         .frames
@@ -1412,7 +1440,7 @@ fn resume_semantic_undefined(
 
 fn finish_semantic_undefined(
     access: &EvaluationValueAccess<'_>,
-    work: &mut RegionalWhnfWork,
+    work: &mut RegionalWhnfState<'_>,
     purpose: UndefinedPurpose,
     undefined: bool,
 ) -> RegionalWhnfStep {
@@ -1804,3 +1832,7 @@ mod nc1_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w6g3a.rs"]
 mod w6g3a_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w6g3b.rs"]
+mod w6g3b_tests;

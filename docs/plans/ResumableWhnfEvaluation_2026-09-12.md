@@ -4927,6 +4927,18 @@ produce identical results, boundary identities, and exact budget use. A
 forced multi-frame yield must preserve the same state containers and must not
 perform a durable projection or root walk.
 
+W6G.3b completion record, 2026-09-18: `RegionalWhnfState` is now the opaque,
+access-lifetime-bound mutable view of canonical `WhnfState`. The regional
+driver borrows that view while `RegionalWhnfWork` remains the ownership wrapper
+used by net claim/publication paths. The driver no longer accepts an optional
+owner slot, and the whole-state `RegionalWhnfStep::Continue` transition has
+been removed; reducers mutate retained containers in place and return only
+focus, boundary, or terminal dispositions. Forced multi-frame yield preserves
+every container address and consumes the exact budget without registering a
+root or touching durable projection/reconstruction accounting. Paired owned
+and borrowed fixtures preserve the same exact wait identity and budget split.
+Production semantics and durable ownership remain unchanged until W6G.3d.
+
 ##### W6G.3c — Managed cell, root, and access foundation
 
 Introduce `ManagedWhnfCell { state: Mutex<WhnfState> }` and a narrow

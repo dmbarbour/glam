@@ -1197,7 +1197,9 @@ impl<'claim, 'scope> CoreCheckpointClaim<'claim, 'scope> {
     ) -> crate::eval::whnf::RegionalWhnfStatus {
         crate::eval::whnf::drive_regional_in_place(
             self.access,
-            &mut self.work,
+            self.work
+                .as_mut()
+                .expect("claimed checkpoint retains its complete regional state"),
             budget,
             crate::eval::whnf::reduce_semantic_shell,
         )
