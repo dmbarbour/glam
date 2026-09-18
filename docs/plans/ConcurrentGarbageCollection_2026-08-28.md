@@ -286,6 +286,44 @@ the common state vocabulary and zero-walk net/regional ownership handoff; a
 second continuation representation is not an acceptable way to optimize the
 concurrent collector.
 
+The comparison is also a liveness gate, not merely a performance exercise.
+W6G.3 deliberately holds the managed-cell mutex for one complete bounded,
+callback-free evaluator quantum. Its reference-collector `Trace` may acquire
+that mutex only because heap-wide mutator exclusion proves that no mutator can
+own it. A concurrent marker must not inherit that assumption. In particular,
+it may not park or await a participant and then block on a representation
+mutex owned by that participant. Even when no strict deadlock is possible,
+walking hot machine cells by repeatedly contending on their mutexes can turn a
+bounded marking pass into evaluator/collector lock convoying.
+
+Before CG2 enables concurrent tracing, CG0-CG1 must select and implement one
+of these reviewed resolutions for every lock-bearing managed family:
+
+1. **Trace-immediate frame (preferred for WHNF machine state).** Replace
+   `Root<ManagedWhnfCell>` with the canonical state in a registered
+   `RootFrame<WhnfState>`. Starting an epoch closes new frame guards, waits for
+   already admitted bounded guards to leave, traces the registered frames as
+   part of the initial snapshot, establishes the epoch, and then reopens frame
+   mutation. The concurrent marker never acquires the evaluator's frame guard.
+   Initially retain the aggregate leaving-edge transition at quantum
+   publication; removing that barrier requires the stronger exact-origin
+   proof described above.
+2. **Collector-coherent managed snapshot.** Keep the managed cell only if its
+   family supplies a non-starving snapshot protocol. A bounded blocking trace
+   is admissible only when the collector holds no lock needed by the mutator,
+   no handshake can suspend the lock owner, and forced schedules prove bounded
+   completion. Versioned retry or another nonblocking snapshot is also
+   admissible if it preserves the exact trace. The current
+   quiescence-only `try_lock`/mutex trace is not such a protocol.
+
+The frame guard may cover the whole WHNF quantum because that quantum has a
+deterministic budget and cannot wait, call a host, or cross into another
+runtime. It may therefore delay the initial frame-snapshot handshake by at
+most one bounded quantum. Any path which needs to wait, coordinate, or invoke
+user/host code must first publish a complete state and release the guard, as
+already required by W6G.3e. This bound is part of the RootFrame contract, not
+an informal scheduler expectation.
+
 CG0 must revisit this concept against the post-refinement machine inventory and
 decide at least:
 
@@ -297,6 +335,13 @@ decide at least:
 - how mutator-local sources establish the no-new-white-edge proof; and
 - whether the initial root-snapshot pause is acceptably bounded in the actual
   runtime topology.
+
+The inventory includes every production `Trace` implementation which obtains
+or assumes quiescence of a representation lock, including managed lazy source
+state, managed runtime-net state, and the planned WHNF cell. Each family must
+be assigned to a trace-immediate frame, an immutable/one-write trace, or a
+reviewed collector-coherent snapshot protocol. Concurrent marking has a hard
+gate on completing this classification and its forced-order tests.
 
 ### Concurrent marking
 
@@ -396,6 +441,12 @@ or accidental under the same policy as the integration plan.
   allocation-heavy inner heap and the opposite order on another thread.
 - Inventory every way a bare managed pointer or managed reference can remain
   local across concurrent epoch initiation.
+- Inventory every managed `Trace` implementation which locks, uses
+  `try_lock`, or assumes heap-wide quiescence. Record its maximum lock-hold
+  region and whether the state is immutable/one-write, receives a
+  collector-coherent snapshot protocol, or migrates to a trace-immediate
+  frame. Treat `ManagedWhnfCell` as the motivating forced case rather than an
+  optional profiling cleanup.
 - Select the transient-root protocol: explicit local-root handles, registered
   mutator root frames as sketched above, or another exact construction. Review
   the decision against the completed Value Representation Refinement and the
@@ -407,7 +458,8 @@ or accidental under the same policy as the integration plan.
 
 Hard gate: concurrent marking may not begin until every pre-existing local
 managed reference is either discoverable or protected by a proven SATB origin
-and access-epoch rule.
+and access-epoch rule, and no managed family still depends on the reference
+collector's heap-wide-quiescence lock assumption.
 
 ### CG1 — Participant Epochs and Nonblocking Initiation
 
@@ -420,6 +472,10 @@ and access-epoch rule.
 - Prove that initiation never blocks new hierarchical heap entry and never
   waits while holding another heap's lock.
 - Integrate the CG0 transient-root protocol.
+- If WHNF state selects `RootFrame`, add frame-guard admission and retirement
+  to the start handshake. Closing admission must wait only for already
+  admitted, budget-bounded, callback-free quantums; after the frame snapshot
+  is complete, concurrent marking must not take an evaluator frame guard.
 - Make worker termination retire every inactive participant/cache record for
   that thread without scanning another thread's state. Ordinary quantum exit
   releases active pins and acknowledgement obligations but may preserve inert
@@ -427,7 +483,10 @@ and access-epoch rule.
 
 Verification forces every two-heap acquisition ordering, recursive same-heap
 entry, participant exit during initiation, thread exit, panic, and a participant
-which delays acknowledgement while unrelated heaps continue.
+which delays acknowledgement while unrelated heaps continue. It additionally
+forces mark initiation immediately before frame-guard acquisition, while a
+WHNF quantum owns the guard, and immediately after publication; panic and
+budget yield must release the guard with one complete traceable state.
 
 ### CG2 — Concurrent Mark State and Barriers
 
@@ -436,6 +495,10 @@ which delays acknowledgement while unrelated heaps continue.
 - Activate edge-replacement, root, and one-write-publication barriers.
 - Select and implement the post-snapshot allocation policy.
 - Audit every mutable managed visitor for a coherent concurrent snapshot.
+- Reject any trace path which waits on a mutex owned by a participant that the
+  collector has parked or is awaiting. For retained lock-bearing families,
+  force marker-before-mutator and mutator-before-marker schedules and prove
+  progress without collector/mutator lock inversion.
 - Run concurrent marking without sweeping; retain all allocations.
 
 Verification compares the completed mark set with an immediately following
@@ -539,6 +602,12 @@ minimum forced cases include:
 - opposing two-heap nesting orders with only the inner heap allocating;
 - collection initiation during every mutator admission/exit boundary;
 - edge and root deletion immediately around snapshot publication;
+- WHNF frame mutation immediately before, during, and after the initial root
+  snapshot, including a maximum-budget quantum delaying the handshake;
+- panic and yield while a WHNF frame guard is active, followed by exact trace
+  and successful subsequent collection;
+- retirement of a WHNF frame immediately around snapshot registration, with
+  no missed edge and no marker acquisition of an evaluator-owned guard;
 - allocation immediately around mark initiation and run sealing;
 - reservation claim immediately around frontier removal;
 - active and inactive cursor reuse across run-generation change;
@@ -585,6 +654,9 @@ review of effects on later phases before its implementation begins.
   semantic, allocator, finalization, and access-quiescence proofs.
 - Cached cursor ABA is rejected by run generation without scanning TLS.
 - General managed reads acquire no pointer-local lock.
+- Concurrent tracing never relies on the reference collector's
+  heap-wide-quiescence assumption and never blocks on an evaluator mutex whose
+  owner may be parked by the collector.
 - Concurrent and reference collectors agree on live graphs and Glam outputs.
 - Finalization remains passive, outside locks, retryable under the documented
   panic protocol, and exactly once on success.

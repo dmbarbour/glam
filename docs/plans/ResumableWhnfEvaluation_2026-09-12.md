@@ -4938,6 +4938,16 @@ collector's quiescent tracing context and delegates to the same exhaustive
 canonical visitor used by `NetWhnfState`; do not introduce another frame enum
 or edge walk.
 
+The mutex is held for the complete bounded evaluator quantum described by
+W6G.3e, not merely while loading and storing a detached state. That is safe for
+the current reference collector because collection obtains heap-wide mutator
+exclusion before invoking `Trace`: a tracer can never wait for a suspended
+mutator which owns this mutex. This is deliberately a stop-the-world
+assumption, not a claim that the same `Trace` implementation is ready for
+concurrent marking. The concurrent-GC plan owns an explicit lock-bearing
+managed-state gate and the likely migration of machine-adjacent WHNF state to
+`RootFrame<WhnfState>` before concurrent marking is enabled.
+
 Define unwind behavior rather than inheriting mutex poisoning accidentally.
 The state is always structurally installed, so tracing after an evaluator
 unwind must still be able to visit it. Ordinary repolling may report the
@@ -4979,8 +4989,10 @@ canonical state. Wrap that quantum in one
 pre-quantum state and its adding visitor sees the complete post-quantum state.
 Focus replacements and frame pushes/pops inside the quantum must not each
 trigger a full-state walk. This is compatible with the current stop-the-world
-collector and preserves the future SATB boundary without designing concurrent
-collection here.
+collector and preserves the future SATB edge boundary without designing the
+concurrent snapshot synchronization here. In particular, the aggregate
+before/after visitors do not by themselves authorize a concurrent marker to
+wait on the state mutex.
 
 Release the state lock and value access before dependency admission, waiting,
 callbacks, scheduler coordination, reflection activation, or host work.
