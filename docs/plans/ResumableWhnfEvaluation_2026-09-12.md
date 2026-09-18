@@ -2,7 +2,8 @@
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
 post-W6F review are complete by 2026-09-18. W6G is a separate performance and
-representation phase; W7-W8 remain planned. This is the
+representation phase. W6G.3 has been reviewed, partitioned, and selected as
+its first implementation section; W7-W8 remain planned. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -4736,6 +4737,14 @@ rather than as unfinished correctness work beneath the W6A-W6F conversion.
 
 ### Phase W6G — Residual Resumable-Machine Overhead
 
+The checkpoint numbers group related work; they do not impose implementation
+order. Begin with W6G.3, whose demand-checkpoint representation transition is
+independent of W6G.1 scheduler policy and W6G.2 effect-driver fusion. Then
+resolve W6G.1 and W6G.2 in either evidence-driven order and close the phase
+through W6G.4. W6G.3 must not quietly absorb scheduling-policy removal,
+standard-effect fusion, or phase-wide review work merely because those
+concerns share performance measurements.
+
 #### W6G.1 — Existing compatibility and scheduling overhead
 
 Investigate the bounded performance regression accepted by W4E. The
@@ -4819,8 +4828,8 @@ record the evidence and a narrower future optimization owner.
 
 #### W6G.3 — Aggregate durable WHNF state
 
-Replace the current root-per-retained-value `DurableWhnfState` with one rooted
-managed state cell after focused NC2.0 has established the canonical
+Replace the current root-per-retained-value **demand checkpoint** with one
+rooted managed state cell. NC2.0 has already established the canonical
 `WhnfState`/`WhnfContinuation` vocabulary:
 
 ```rust
@@ -4828,62 +4837,170 @@ struct ManagedWhnfCell {
     state: Mutex<WhnfState>,
 }
 
-struct WhnfComputation {
-    checkpoint: Root<ManagedWhnfCell>,
+struct ManagedWhnfRoot {
+    runtime: EvaluationRuntimeId,
+    root: Root<ManagedWhnfCell>,
 }
 ```
 
+This target deliberately does **not** replace the source-entry checkpoint.
+`DurableWhnfCheckpoint::Source { lazy, runtime, result }` has a distinct role:
+it owns a lazy source while its producer runs and may later receive a rooted
+result outside evaluator access. It remains unchanged until its result is
+actually demanded. Only then, beneath matching access, does that result become
+canonical managed demand state.
+
+Likewise, the common `WhnfComputation::from_root` path must not open hidden or
+nested access merely to allocate the cell. Retain a minimal initial demand
+seed containing its one `RuntimeValueRoot` and scalar entry metadata. Promote
+that seed to `ManagedWhnfRoot` on the first poll, when the caller already
+provides `EvaluationValueAccess`. Constructors which already receive matching
+access may allocate the managed cell directly. The steady-state target is one
+demand root regardless of frame count; the source checkpoint and the brief,
+publication-safe overlap between a seed root and its replacement cell are not
+violations of that target.
+
+Do not preserve access-free inspection by reaching back through a weak domain
+observer. Store scalar runtime provenance next to the managed root. Replace
+the diagnostic-only `application_frame_pending` deep inspection with a small
+edge-free poll observation recorded while state is already borrowed. Fold
+`source_owner` into seed or structured construction, or mutate it only through
+an explicitly access-qualified operation.
+
+##### W6G.3a — Baseline and boundary inventory
+
 Before changing representation, measure root registration/removal, durable
 checkpoint reconstruction, value duplication, continuation traversal, and
-managed-access traffic for repeated budget yields and dependency boundaries
-with small and large frame stacks. The target eliminates per-value durable
-roots and representation conversion; it does not justify walking the complete
-state after every focus transition.
+managed-access traffic across repeated yields and dependency boundaries with
+both small and large frame stacks. If the existing test interface cannot count
+root traffic exactly, add a test-only observation rather than inferring it
+from timing.
 
-Polling projects the single root beneath matching access, locks the cell, and
-performs one bounded callback-free quantum directly against its canonical
-state. Publish the complete pre/post edge sets through one aggregate managed
-edge-state transition for that quantum. Focus replacements and frame
-pushes/pops inside the quantum must not each trigger a full-state walk.
+Record the exact constructor, observer, and modifier inventory. Classify each
+entry as source-entry, unstructured demand seed, or access-qualified
+structured demand. In particular, account for `from_root`, source-result
+installation, application/static-access construction, runtime provenance,
+`with_source_owner`, and diagnostic application-stage inspection. Latch the
+current results, exact work-budget consumption, and root/conversion counts
+before the representation changes.
+
+##### W6G.3b — Borrowed canonical-state driver
+
+Refactor the regional driver so its production loop can operate on the
+canonical `WhnfState` through an opaque, region-authorized mutable view. Keep
+owned `RegionalWhnfWork` for net claims and other true ownership transfers,
+but do not require a by-value state handoff merely to poll a managed cell.
+Retire the production need for whole-state `RegionalWhnfStep::Continue` if the
+inventory confirms that every production transition already mutates or
+delegates in place; retain test coverage for the intended transition forms.
+
+Prove before introducing the cell that the borrowed and owned entry paths
+produce identical results, boundary identities, and exact budget use. A
+forced multi-frame yield must preserve the same state containers and must not
+perform a durable projection or root walk.
+
+##### W6G.3c — Managed cell, root, and access foundation
+
+Introduce `ManagedWhnfCell { state: Mutex<WhnfState> }` and a narrow
+`ManagedWhnfRoot`/access wrapper. The wrapper owns scalar runtime provenance,
+projects the root only beneath matching access, centralizes same-runtime
+checks, and keeps raw collector operations out of evaluator code. The managed
+family has passive destruction. Its `Trace` implementation locks only in the
+collector's quiescent tracing context and delegates to the same exhaustive
+canonical visitor used by `NetWhnfState`; do not introduce another frame enum
+or edge walk.
+
+Define unwind behavior rather than inheriting mutex poisoning accidentally.
+The state is always structurally installed, so tracing after an evaluator
+unwind must still be able to visit it. Ordinary repolling may report the
+existing internal-failure policy, but collection must not lose edges merely
+because the mutex carries a poison marker. Add focused construction,
+same-runtime rejection, edge-transition-probe, forced-collection, and
+poison/unwind traceability tests before changing production ownership.
+
+##### W6G.3d — Construction and source promotion
+
+Migrate durable demand construction in two separately committed checkpoints.
+
+###### W6G.3d.1 — Seed and source promotion
+
+Keep the common access-free `from_root` path as one minimal seed and promote
+it exactly once on first poll. Keep source-entry ownership unchanged and
+promote an installed source result only when its demand is first polled.
+Publication installs the managed cell before retiring the seed root.
+
+###### W6G.3d.2 — Access-qualified structured construction
+
+Allocate the cell directly from application, static-access, and other
+constructors which already hold matching access. Carry entry metadata into
+canonical state at construction. Replace access-free deep observations with
+the scalar poll observation selected by W6G.3a.
+
+The checkpoint must prove that no constructor opens hidden/nested value
+access, no source result is prematurely converted, no steady-state demand
+retains both representations, and every promotion remains safe under forced
+collection. Update the constructor inventory after each step rather than
+combining the whole migration into one unreviewable edit.
+
+##### W6G.3e — Aggregate poll transition
+
+Polling projects the single managed root beneath matching access, locks its
+cell, and performs one bounded callback-free quantum directly against the
+canonical state. Wrap that quantum in one
+`with_managed_edge_state_transition`: its leaving visitor sees the complete
+pre-quantum state and its adding visitor sees the complete post-quantum state.
+Focus replacements and frame pushes/pops inside the quantum must not each
+trigger a full-state walk. This is compatible with the current stop-the-world
+collector and preserves the future SATB boundary without designing concurrent
+collection here.
+
 Release the state lock and value access before dependency admission, waiting,
 callbacks, scheduler coordination, reflection activation, or host work.
+Deterministic fixtures must force ready, yield, dependency, external boundary,
+failure, cancellation, and unwind exits; cross-worker resumption; and
+collection at publication boundaries. Every nonterminal exit retains one
+complete traceable state, exact dependency identity, and exact remaining work
+budget. No exit may expose an unlocked empty cell or replay completed work.
 
-Prefer `Mutex<WhnfState>` if the regional driver can operate through a mutable
-borrow. Use `Mutex<Option<WhnfState>>` only if a by-value handoff remains
-necessary; in that case retain the mutex guard and an unwind guard until the
-state is restored, and never expose an unlocked empty cell. The cell's edge
-visitor delegates to the same exhaustive canonical visitor used by
-`NetWhnfState`. Do not introduce a second frame enum or conversion walk.
+##### W6G.3f — Compatibility retirement and accounting
 
-Verify with deterministic fixtures that:
+Delete `DurableWhnfState`, its durable continuation/frame mirrors, regional
+projection, and root-per-field reconstruction once all demand paths use the
+cell. Update the root-publication, durable-owner, managed-access, raw-value,
+and WHNF inventories wherever the representation changed. Run focused suites
+in ordinary and `aggressive-gc-verification` modes, including forced
+suspension after a representative child demand.
 
-- one computation registers one durable root regardless of retained frame
-  count;
-- uninterrupted work within one quantum performs no intermediate root traffic
-  or whole-state transition walk;
-- yield, dependency, completion, failure, cancellation, and unwind leave one
-  complete traceable state or terminal result, never an empty cell;
-- another worker can resume the same computation after a handoff without
-  replay or worker-local state;
-- forced collection sees every value-bearing focus/frame position and promise
-  breadcrumb; and
-- results and exact budget accounting match the fine-grained-root baseline.
+Record before/after root and conversion cost for both small and large frame
+fixtures. The completion evidence must distinguish the expected temporary
+seed-to-cell publication overlap from steady-state ownership and demonstrate
+one steady-state demand root independent of retained frame count. The
+concurrent-GC plan continues to own comparison with a trace-immediate
+`RootFrame`; W6G.3 neither requires nor approximates that later facility.
 
-Record before/after cost for the small and large state fixtures. The current
-non-concurrent collector may optimize the mutation barrier internally, while
-the future concurrent collector may need one SATB leaving-edge walk per
-published quantum. The concurrent-GC plan owns comparison with a
-trace-immediate `RootFrame`; W6G.3 does not require that facility and must not
-block aggregate-root correctness on it.
+#### W6G.4 — Phase closure and post-W6G review
 
-Each W6G checkpoint updates the exact W0B and parent D.2c manifests where its
-representation changes touch them, runs its focused suites in ordinary and
-`aggressive-gc-verification` modes, and adds a forced suspension after at
-least one representative child demand.
+##### W6G.4a — Integrated verification and accounting
 
-Mandatory post-W6G review: audit measured scheduler/access/root traffic, the
-selected standard-effect driver shape, aggregate checkpoint ownership, and
-the final disposition of the temporary same-session admission rule before W7.
+Reconcile W6G.1-W6G.3 measurements and update the exact W0B and parent D.2c
+manifests for every representation or driver change. Run the affected focused
+suites in ordinary and `aggressive-gc-verification` modes plus the routine
+repository gates. Force suspension after representative pure and standard-
+effect child demands and force both sides of every scheduler ordering changed
+by W6G.1. Confirm that the three sections did not quietly exchange ownership:
+scheduler policy remains in W6G.1, standard-effect fusion in W6G.2, and
+aggregate pure-WHNF ownership in W6G.3.
+
+##### W6G.4b — Mandatory post-W6G review
+
+Audit the implemented phase before W7. Account for measured scheduler,
+managed-access, root-publication, checkpoint-conversion, and request-dispatch
+traffic; the selected standard-effect driver shape; aggregate checkpoint
+ownership and tracing; and the final disposition of the temporary same-
+session admission rule. Review W7-W8 against the resulting implementation for
+drift, checkpoint size, and newly obsolete compatibility work. Record any
+accepted residual performance gap with a concrete later owner rather than
+leaving it implicit in W6G.
 
 ### Phase W7 — Stack and Budget Closure
 
