@@ -51,11 +51,12 @@ pub(crate) struct EvaluatorStepContext<'step> {
 
 enum EvaluatorStepAdmission<'step> {
     Poll(&'step EvaluationPollContext),
-    /// Temporary direct entry for I3B.1c builtin seams and the
-    /// source-inventoried I3D/I3E callers.
+    /// Temporary direct entry retained by the W8 compatibility facade and
+    /// legacy test helpers.
     ///
-    /// This route does not keep a mutator active. It exists only until those
-    /// callers receive their scheduler- or runtime-service-owned authority.
+    /// Runtime builtin dispatch and scheduled machines no longer use this
+    /// route. It opens no ambient mutator; each operation still receives only
+    /// a bounded access region. W8 removes the remaining compatibility entry.
     DirectCompatibility,
 }
 

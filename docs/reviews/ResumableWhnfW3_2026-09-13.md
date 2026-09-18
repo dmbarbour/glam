@@ -197,11 +197,12 @@ is regression coverage, not the proof of the races above.
 
 The coordinator currently admits at most one ordinary machine per demand
 session through global ready selection. Exact dependency claims bypass this,
-and sparks are separate. This contains concurrent entry into remaining
-recursive builtin compatibility evaluation, but costs parallelism and makes
+and sparks are separate. This contained concurrent entry into the former
+recursive builtin compatibility evaluator, but costs parallelism and makes
 ready selection scan session work for each candidate. It is not part of Glam
-semantics. W6 closure must revisit and preferably remove it once generic
-builtin source work is resumable.
+semantics. The post-W6F review confirmed that the rule remains live after
+generic builtin source work became resumable and assigned its measured
+removal to W6G.1.
 
 ## Findings
 
@@ -243,11 +244,11 @@ recheck.
 
 **Severity:** medium performance and architecture
 
-**Status:** open, assigned to post-W6 closure
+**Status:** open, assigned to W6G.1 by the post-W6F review
 
-The rule is conservative and currently necessary to contain legacy builtin
-evaluation, but it is broader than the eventual machine model and makes ready
-selection more expensive. W6 must either remove it or document a narrower
+The rule was conservative containment for legacy builtin evaluation. W6A-W6F
+removed that evaluator but deliberately did not change scheduler policy in
+the same checkpoint. W6G.1 must measure and remove it, or document a narrower
 remaining owner with forced evidence. It must not silently become a semantic
 ordering guarantee.
 

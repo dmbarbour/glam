@@ -286,16 +286,23 @@ separate narrow exception: its bracketed local claim and acyclic handoff prove
 that another evaluator is completing the same callback-free net work, so it
 does not establish a general permission to wait with managed access.
 
-Builtin application has a matching two-level boundary. `apply_builtin_in`
-retains the evaluator-step carrier for migrated callback-free families;
-`apply_builtin` is the one temporary direct-compatibility wrapper. Numeric
-arithmetic, comparison, dictionaries, lists, objects, patterns, assertions,
-pure conditional/list-effect construction, and pure annotation work use the
-scoped route. The source-latched dispatch-time downgrade set is effects,
-strategies, nets, and provenance. Reflection and metadata-reflection
-annotations perform scoped recognition and input validation, then cross named
-durable handoffs; `seq` and `spark` cross the existing strategy seam. No
-ordinary builtin can accidentally inherit an active managed-access region.
+Builtin application has a matching regional/durable boundary. Saturation
+calls `apply_builtin_in` with the caller's existing `EvaluationValueAccess`;
+the dispatcher does not open nested access or receive an evaluator-step
+carrier. It either constructs a partial builtin, installs a lazy saturated
+source, or performs one immediate callback-free constructor such as append or
+list-effect recipe construction. The lazy-source owner routes every
+demand-capable saturated family through `BuiltinTaskMachine`, which roots its
+operands once and retains explicit resumable child work. An immediate result
+is rooted by that owner before regional access closes.
+
+The direct `apply_builtin` wrapper is test-only. The broader direct evaluator
+compatibility facade remains for W8 and legacy library/test helpers, but no
+runtime builtin dispatch, callback, wait, scheduler handoff, reflection
+activation, or host operation enters through it. Reflection and
+metadata-reflection annotations perform regional recognition and input
+validation before crossing their named durable handoffs; `seq` and `spark`
+likewise publish scheduler work only after managed access closes.
 
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection

@@ -1,8 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W5 and their mandatory reviews plus W6.0-W6D are complete by
-2026-09-17. W6A's remaining cross-family closures depend on W6E/W6F; W6E-W8
-remain planned. This is the
+Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
+post-W6F review are complete by 2026-09-18. W6G is a separate performance and
+representation phase; W7-W8 remain planned. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -4720,9 +4720,23 @@ census replaces the synchronous `eval_value_in` port demand with the explicit
 user-sized search/WHNF phase. Exact opaque-family, root-publication, access,
 raw-value, and WHNF inventories account for the new boundary.
 
-#### W6G — Residual resumable-machine overhead
+#### Post-W6F review — Complete (2026-09-18)
 
-##### W6G.1 — Existing compatibility and scheduling overhead
+The mandatory converted-call-graph review is recorded in
+[`ResumableWhnfW6F_2026-09-18.md`](../reviews/ResumableWhnfW6F_2026-09-18.md).
+W6A-W6F close without an open correctness defect. Exact raw-value, access,
+WHNF, durable-owner, and root-publication inventories account for the final
+dispatcher and net-construction boundaries. Current architecture docs now
+describe the durable builtin owner rather than the superseded I3 dispatcher.
+
+The temporary one-ordinary-machine-per-demand-session admission rule remains
+an implementation policy, not a Glam semantic. Its removal and measurement
+belong explicitly to W6G.1. W6G is therefore treated as its own major phase
+rather than as unfinished correctness work beneath the W6A-W6F conversion.
+
+### Phase W6G — Residual Resumable-Machine Overhead
+
+#### W6G.1 — Existing compatibility and scheduling overhead
 
 Investigate the bounded performance regression accepted by W4E. The
 duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
@@ -4740,6 +4754,17 @@ improvement. Close W6G.1 by restoring comparable fixture cost or by recording a
 measured, justified residual with ownership assigned to a later performance
 phase.
 
+This checkpoint also owns `WHNFW3R-004`, the temporary
+one-ordinary-machine-per-demand-session admission rule introduced to contain
+recursive compatibility evaluation. Global ready selection and client-demand
+selection still exclude a second ordinary same-session machine, while an
+exact dependency claim may bypass the rule. Measure its selection cost and
+remove it now that W6A-W6F builtin work is resumable, unless a forced schedule
+demonstrates a narrower surviving owner. Removal must force both sides of the
+claimed/ready ordering and preserve terminal publication, no-false-quiescence,
+and lost-wakeup coverage; uncontrolled repetition is not evidence. Do not
+retain the rule as a semantic FIFO or same-session ordering guarantee.
+
 NC6 measurement, 2026-09-16: callable-WHNF spill did not enlarge this debt.
 Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
 13.11s before and 13.16s after; the successful repeated-split ELF fixture was
@@ -4747,7 +4772,7 @@ Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
 remains unchanged. Treat the timings only as corroboration, but do not assign
 the preexisting `7fed99e` gap to callable checkpoints.
 
-##### W6G.2 — Regional standard-effect fusion investigation
+#### W6G.2 — Regional standard-effect fusion investigation
 
 Investigate extending the regional-WHNF principle to consecutive standard
 effect steps. A bounded sequence of callback-free effect reductions should be
@@ -4792,7 +4817,7 @@ small-stack verification exercises the selected effect-driver shape. If the
 measurements do not justify implementation, retain the bounded W5 path and
 record the evidence and a narrower future optimization owner.
 
-##### W6G.3 — Aggregate durable WHNF state
+#### W6G.3 — Aggregate durable WHNF state
 
 Replace the current root-per-retained-value `DurableWhnfState` with one rooted
 managed state cell after focused NC2.0 has established the canonical
@@ -4851,18 +4876,14 @@ published quantum. The concurrent-GC plan owns comparison with a
 trace-immediate `RootFrame`; W6G.3 does not require that facility and must not
 block aggregate-root correctness on it.
 
-W6 closure also revisits `WHNFW3R-004`, the temporary
-one-ordinary-machine-per-demand-session admission rule introduced to contain
-recursive compatibility evaluation.
-Remove it once converted builtin work no longer needs that containment, or
-record a narrower surviving owner and forced justification.
+Each W6G checkpoint updates the exact W0B and parent D.2c manifests where its
+representation changes touch them, runs its focused suites in ordinary and
+`aggressive-gc-verification` modes, and adds a forced suspension after at
+least one representative child demand.
 
-Each W6 checkpoint updates the exact W0B and parent D.2c manifests, runs its
-focused suites in ordinary and `aggressive-gc-verification` modes, and adds a
-forced suspension after at least one representative child demand.
-
-Mandatory post-W6 review: audit the complete converted call graph before
-retiring compatibility entry points.
+Mandatory post-W6G review: audit measured scheduler/access/root traffic, the
+selected standard-effect driver shape, aggregate checkpoint ownership, and
+the final disposition of the temporary same-session admission rule before W7.
 
 ### Phase W7 — Stack and Budget Closure
 
