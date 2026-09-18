@@ -4968,6 +4968,29 @@ because the mutex carries a poison marker. Add focused construction,
 same-runtime rejection, edge-transition-probe, forced-collection, and
 poison/unwind traceability tests before changing production ownership.
 
+W6G.3c completion record, 2026-09-18: `ManagedWhnfCell` now owns one canonical
+`WhnfState` behind its representation mutex, while `ManagedWhnfRoot` carries
+only the registered root and scalar runtime provenance. Projection requires
+matching `EvaluationValueAccess`, checks both the scalar runtime and collector
+root provenance, and returns a thread-bound access wrapper. Its only mutation
+surface holds the mutex and routes the complete pre/post canonical edge walks
+through `with_managed_edge_state_transition`; no raw collector operation or
+mutex escapes evaluator code. The family has an explicit passive-destruction
+record and uses the shared managed-slot policy. The collector admission trait,
+drop record, and slot policy are now crate-visible—not public—so this
+evaluator-owned managed family does not have to reverse the `core`/`eval`
+dependency.
+
+The reference-collector `Trace` uses the canonical edge visitor, rejects an
+unexpected busy mutex under stop-the-world quiescence, and recovers a poisoned
+guard solely for tracing. Ordinary state inspection or repolling reports that
+poison instead of silently resuming partially unwound evaluator work. Focused
+tests cover construction, foreign-runtime rejection, exact leaving/adding
+edge probes, forced collection and retirement, and evaluator unwind followed
+by successful poisoned-state tracing. The managed root remains foundation-only
+under a named dead-code allowance until W6G.3d selects production promotion and
+construction sites.
+
 ##### W6G.3d — Construction and source promotion
 
 Migrate durable demand construction in two separately committed checkpoints.

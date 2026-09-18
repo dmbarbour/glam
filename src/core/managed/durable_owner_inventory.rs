@@ -478,6 +478,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         CompatibilityPayload,
         "NC2.0 delegates the NetWhnfState wrapper to one complete canonical WhnfState edge walk and collects independently allocated sentinels through one rooted state fixture"
     ),
+    exact_managed!(
+        "src/eval/whnf/managed_state.rs",
+        "managed resumable-WHNF state cell and edge",
+        "one canonical WhnfState behind a representation mutex plus its access-scoped interior Gc edge",
+        "one registered ManagedWhnfRoot and its bounded matching-runtime access projection",
+        CompatibilityPayload,
+        "W6G.3c traces the canonical state through forced collection, rejects foreign-runtime projection, and retires the graph after the registered root drops"
+    ),
     closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
@@ -914,10 +922,10 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 228;
+const DECLARATION_BASELINE_COUNT: usize = 229;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([131, 276, 5, 16, 6, 3, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 16_991_516_429_424_243_610;
+    DeclarationSignals::new([131, 276, 5, 16, 6, 4, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_162_960_753_699_618_421;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1012,6 +1020,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "production managed core value node"
     } else if declaration.starts_with("src/core/managed/recursive_cells.rs::") {
         "production recursive identity cells and edges"
+    } else if declaration == "src/eval/whnf/managed_state.rs::ManagedWhnfEdge" {
+        "managed resumable-WHNF state cell and edge"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"

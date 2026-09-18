@@ -20,6 +20,12 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 #[cfg(test)]
 use std::cell::Cell;
 
+#[allow(
+    dead_code,
+    reason = "W6G.3c establishes managed WHNF ownership before W6G.3d migrates production constructors"
+)]
+mod managed_state;
+
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
 ///
 /// The checkpoint is intentionally neither cloneable nor publicly exposed.
@@ -268,7 +274,7 @@ impl RegionalWhnfWork {
         &'access mut self,
         access: &'access EvaluationValueAccess<'scope>,
     ) -> RegionalWhnfState<'access> {
-        self.0.state_in(access)
+        self.0.regional_in(access)
     }
 
     #[cfg(test)]
@@ -300,7 +306,7 @@ impl RegionalWhnfWork {
 }
 
 impl WhnfState {
-    fn state_in<'access, 'scope>(
+    fn regional_in<'access, 'scope>(
         &'access mut self,
         _access: &'access EvaluationValueAccess<'scope>,
     ) -> RegionalWhnfState<'access> {
@@ -1836,3 +1842,7 @@ mod w6g3a_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w6g3b.rs"]
 mod w6g3b_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w6g3c.rs"]
+mod w6g3c_tests;
