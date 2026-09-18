@@ -33,6 +33,8 @@ mod builtins;
 mod comparison_machine;
 mod dict_machine;
 mod effect_machine;
+#[cfg(test)]
+mod lazy_producer_inventory;
 mod list_effect_machine;
 mod list_machine;
 mod list_observation_machine;

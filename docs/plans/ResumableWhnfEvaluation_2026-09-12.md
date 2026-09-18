@@ -4834,6 +4834,13 @@ index, not an execution lane.
 
 ##### W6G.1a — Baseline ownership and sharing matrix
 
+**Inventory complete (2026-09-18).** The selector, owner, provenance, and
+producer-family census is recorded in
+[`ResumableWhnfW6G1Baseline_2026-09-18.md`](../reviews/ResumableWhnfW6G1Baseline_2026-09-18.md).
+The existing forced-order tests cover the current publication and subscription
+protocols; target-policy fixtures remain latched to the mechanism checkpoints
+below so they change one behavior at a time.
+
 Inventory every production selector and caller: executor selection,
 synchronous client demand, exact dependency pumping, session draining, runtime
 draining, spark polling, deferred producer admission, completion subscription,
@@ -5060,6 +5067,12 @@ narrower migration sequence avoids maintaining two authoritative producer
 states.
 
 ###### W6G.1f.0 — Producer-state and external-boundary inventory
+
+**Complete (2026-09-18).** The baseline review inventories all ten
+`LazyTaskWork` families, registered roots, external boundaries, and replay
+constraints. `lazy_producer_inventory` makes the family and one-shot-boundary
+census source-backed. The inventory confirms that W6G.1f must migrate the
+complete producer family rather than installing a `Whnf`-only checkpoint.
 
 Enumerate every `LazyTaskWork` variant, all roots and semantic edges it retains,
 its callback or task activation boundaries, and whether its current state can
