@@ -4035,7 +4035,7 @@ until W6G.3 aggregates it.
 | Checkpoint | Live declarations and current shape | Target and delta |
 |---|---:|---|
 | **W6C.1a — Complete (2026-09-16): Generic arity extraction** | 1 F | Remove raw-value ownership from exact-arity extraction by making it a generic container operation. `-1`. |
-| **W6C.1b — Final builtin dispatcher closure (after W6F.7)** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
+| **W6C.1b — Complete (2026-09-18): Final builtin dispatcher closure** | 1 S | After every semantic family owns suspendable work, thread the caller's regional leaf through the now callback-free dispatcher. `-1` at closure. |
 | **W6C.2a — Complete (2026-09-16): Builtin assertions and conditionals** | 2 S | Separate builtin operand demand from unit/kind validation, preserve structured assertion context, and move conditional list-front demand into owned work contributing to W6A.0d. `-2`. |
 | **W6C.2b — Annotation assertion closure (with W6E.1)** | 1 S | Remove the remaining synchronous `assert_unit_in` compatibility helper when annotation dispatch moves into its owned machine. `-1` at closure. |
 | **W6C.3a — Complete (2026-09-16): Shared tagged payload** | prerequisite | Introduce the first shared tagged-payload owner and its iterative semantic-undefined stack; retain the compatibility helpers until W6A.0c closes. |
@@ -4066,6 +4066,19 @@ value. Existing callers retain identical arity diagnostics and array
 conversion behavior. The D.2c manifest falls from 148 to 147 declarations;
 `DispatchScalarAndStrategy` falls from 25 to 24 and W6C.1 retains only the
 final dispatcher declaration.
+
+W6C.1b completion record, 2026-09-18: saturated builtin dispatch now accepts
+the caller's bounded `EvaluationValueAccess` rather than opening access from
+an evaluator-step context. Demand-capable families continue to install their
+durable builtin machines; the remaining immediate append and list-effect
+constructors execute regionally, and the lazy-source owner publishes their
+result as a runtime root before closing that region. The test-only durable
+wrapper remains explicit until W8, but production dispatch contains no nested
+access, callback, wait, scheduler handoff, or unrooted regional result. The
+raw-value inventory reclassifies the final dispatcher from violation to
+regional access: violations fall from 263 to 262, the D.2c
+`DispatchScalarAndStrategy` family and W6C.1 checkpoint reach zero, and exact
+context/root-publication inventories record the immediate-result handoff.
 
 W6C.2 is split at the annotation boundary. Saturated builtin assertion and
 conditional sources can own their demand immediately, while annotation

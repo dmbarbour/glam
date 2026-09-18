@@ -146,8 +146,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins.rs",
-        [1, 1],
-        "I3D/I3E dispatcher and test compatibility"
+        [0, 1],
+        "W6C.1b regional dispatcher and test-only durable compatibility wrapper"
     ),
     context_entry!(
         "src/eval/effect_machine.rs",
@@ -512,16 +512,18 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         "builtin dispatch must not downgrade evaluator-step authority"
     );
     assert!(
-        dispatcher.contains("| Builtin::Seq\n        | Builtin::Spark => Ok(Value::Lazy("),
-        "strategy builtins must install durable lazy owners"
+        dispatcher.contains("access: &EvaluationValueAccess<'_>")
+            && dispatcher.contains("LazyValue::from_builtin_in(\n            access.values()")
+            && !dispatcher.contains("context.construct_lazy"),
+        "saturated builtin dispatch must use only the caller's bounded regional access"
     );
+
+    let source = fs::read_to_string(manifest.join("src/eval/value.rs"))
+        .expect("lazy-source owner should be readable");
     assert!(
-        dispatcher.contains("Builtin::Anno => Ok(Value::Lazy("),
-        "annotation dispatch must install its durable lazy owner"
-    );
-    assert!(
-        dispatcher.contains("Builtin::InteractionNet | Builtin::NetArity => {\n            Ok(Value::Lazy(context.construct_lazy("),
-        "interaction-net dispatch must install its durable lazy owner"
+        source.contains("apply_builtin_in(&access, call.builtin, arguments, argument)")
+            && source.contains("|value| access.values().root_runtime_value(value)"),
+        "the lazy-source owner must publish an immediate builtin result before regional access closes"
     );
 
     let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))

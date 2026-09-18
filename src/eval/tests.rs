@@ -1740,15 +1740,17 @@ fn deferred_computation_preserves_context_annotation_frames() {
         &crate::core::test_value_factory(),
         "context-annotated deferred failure",
         move |context| {
-            apply_builtin_in(
-                context,
-                Builtin::Anno,
-                vec![annotation.clone()],
-                Value::error(
-                    &crate::core::test_value_factory(),
-                    "annotated deferred failure",
-                ),
-            )
+            context.with_value_access(|access| {
+                apply_builtin_in(
+                    &access,
+                    Builtin::Anno,
+                    vec![annotation.clone()],
+                    Value::error(
+                        &crate::core::test_value_factory(),
+                        "annotated deferred failure",
+                    ),
+                )
+            })
         },
     );
 

@@ -597,6 +597,23 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             arguments,
                         )))
                     }
+                    LazySource::Builtin(call) => {
+                        let result = context.with_value_access(|access| {
+                            let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+                            let argument = arguments
+                                .pop()
+                                .expect("saturated builtin source must contain an argument");
+                            apply_builtin_in(&access, call.builtin, arguments, argument).map(
+                                |value| access.values().root_runtime_value(value),
+                            )
+                        });
+                        match result {
+                            Ok(value) => LazyTaskWork::Whnf(
+                                super::whnf::WhnfComputation::from_root(value),
+                            ),
+                            Err(error) => return self.fail(context, error),
+                        }
+                    }
                     _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
                         self.lazy.clone(),
                         durable_context.values().runtime_id(),
@@ -1056,7 +1073,7 @@ fn deferred_task_failure(
 }
 
 fn produce_lazy_source_in(
-    context: &EvaluatorStepContext<'_>,
+    _context: &EvaluatorStepContext<'_>,
     source: &LazySource,
 ) -> Result<Value, EvaluationHalt> {
     match source {
@@ -1072,12 +1089,12 @@ fn produce_lazy_source_in(
             }
         },
         #[cfg(test)]
-        LazySource::SemanticComputation(computation) => computation.evaluate(context),
+        LazySource::SemanticComputation(computation) => computation.evaluate(_context),
         LazySource::ListEffectComputation(_) => {
             unreachable!("list effects retain one pollable source owner")
         }
         #[cfg(test)]
-        LazySource::SemanticThunk(thunk) => thunk(context),
+        LazySource::SemanticThunk(thunk) => thunk(_context),
         LazySource::HostCall(_) => {
             unreachable!("a host call must execute outside the evaluator step")
         }
@@ -1090,12 +1107,8 @@ fn produce_lazy_source_in(
         LazySource::Application(_) => {
             unreachable!("applications retain typed WHNF application work")
         }
-        LazySource::Builtin(call) => {
-            let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
-            let argument = arguments
-                .pop()
-                .expect("saturated builtin thunk must contain an argument");
-            apply_builtin_in(context, call.builtin, arguments, argument)
+        LazySource::Builtin(_) => {
+            unreachable!("builtin sources retain a regional machine or immediate rooted result")
         }
         LazySource::NetConstruction(_) => {
             unreachable!("net construction must retain its pollable effect machine")
