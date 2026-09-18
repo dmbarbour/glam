@@ -1,9 +1,9 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
-post-W6F review are complete by 2026-09-18. W6G is a separate performance and
-representation phase. W6G.3a is complete; W6G.3b is the next implementation
-checkpoint. W7-W8 remain planned. This is the
+post-W6F review are complete by 2026-09-18. W6G is a separate scheduling,
+performance, and representation phase. W6G.3 is complete; W6G.1 is the next
+implementation family. W7-W8 remain planned. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -4731,55 +4731,155 @@ dispatcher and net-construction boundaries. Current architecture docs now
 describe the durable builtin owner rather than the superseded I3 dispatcher.
 
 The temporary one-ordinary-machine-per-demand-session admission rule remains
-an implementation policy, not a Glam semantic. Its removal and measurement
-belong explicitly to W6G.1. W6G is therefore treated as its own major phase
-rather than as unfinished correctness work beneath the W6A-W6F conversion.
+an implementation policy, not a Glam semantic. Its replacement by explicit
+pump-role policy belongs to W6G.1; measurement of the remaining performance
+gap belongs separately to W6G.4. W6G is therefore treated as its own major
+phase rather than as unfinished correctness work beneath the W6A-W6F
+conversion.
 
-### Phase W6G — Residual Resumable-Machine Overhead
+### Phase W6G — Pump Ownership and Residual Resumable-Machine Overhead
 
 The checkpoint numbers group related work; they do not impose implementation
-order. Begin with W6G.3, whose demand-checkpoint representation transition is
-independent of W6G.1 scheduler policy and W6G.2 effect-driver fusion. Then
-resolve W6G.1 and W6G.2 in either evidence-driven order and close the phase
-through W6G.4. W6G.3 must not quietly absorb scheduling-policy removal,
-standard-effect fusion, or phase-wide review work merely because those
-concerns share performance measurements.
+order. W6G.3 completed first because its aggregate demand-checkpoint transition
+was independent of scheduling and effect-driver policy. Next establish the
+W6G.1 pump-ownership model; resolve W6G.2 afterward or alongside it only where
+their explicit boundaries remain intact. W6G.4 measures residual overhead
+after those semantic and representation choices, and W6G.5 closes the phase.
+Neither performance measurements nor effect fusion may quietly decide which
+thread role is authorized to claim a machine.
 
-#### W6G.1 — Existing compatibility and scheduling overhead
+#### W6G.1 — Role-specific pumping and causal work ownership
 
-Investigate the bounded performance regression accepted by W4E. The
-duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
-seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
-though net-driver work is comparable (159,322 versus 159,994 work items).
+Replace the current shared work-stealing policy with an explicit distinction
+between durable machine ownership and temporary poll authority. The runtime
+coordinator continues to own every queued or blocked machine, and a demand
+session continues to own lifecycle, reporting, and cancellation. A thread
+owns only one detached poll claim for one bounded quantum. Thread role decides
+which root work that thread may locate; it does not permanently affinitize a
+machine to a thread.
 
-Measure the cost after each relevant W6 compatibility or admission boundary is
-removed. If the gap remains, add static profiling for machine claim, poll,
-release, managed-access entry, and requeue activity before changing policy.
-Determine whether the overhead comes from scheduling several thousand
-`NetWhnfMachine` polls, managed-access traffic, or another measured source.
-Do not reintroduce the rejected per-session running-machine index: retired work
-does not remain in `work_by_session`, and the measured experiment produced no
-improvement. Close W6G.1 by restoring comparable fixture cost or by recording a
-measured, justified residual with ownership assigned to a later performance
-phase.
+The target pump policy is:
 
-This checkpoint also owns `WHNFW3R-004`, the temporary
-one-ordinary-machine-per-demand-session admission rule introduced to contain
-recursive compatibility evaluation. Global ready selection and client-demand
-selection still exclude a second ordinary same-session machine, while an
-exact dependency claim may bypass the rule. Measure its selection cost and
-remove it now that W6A-W6F builtin work is resumable, unless a forced schedule
-demonstrates a narrower surviving owner. Removal must force both sides of the
-claimed/ready ordering and preserve terminal publication, no-false-quiescence,
-and lost-wakeup coverage; uncontrolled repetition is not evidence. Do not
-retain the rule as a semantic FIFO or same-session ordering guarantee.
+| Pump role | Claimable root work |
+| --- | --- |
+| foreground library-client thread | its exact `ClientDemand` and the transitive exact dependency chain required to complete it |
+| executor worker | ready sparks, ready reflection tasks, and the transitive exact dependency chains required by those background roots |
+| explicit session/runtime background drain | reflection tasks in its selected scope and their transitive exact dependency chains, but never sparks |
+| observational readiness/quiescence query | no work merely by observing |
 
-NC6 measurement, 2026-09-16: callable-WHNF spill did not enlarge this debt.
-Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
-13.11s before and 13.16s after; the successful repeated-split ELF fixture was
-53.01s before and 52.12s after. The minimized semantic/driver signature also
-remains unchanged. Treat the timings only as corroboration, but do not assign
-the preexisting `7fed99e` gap to callable checkpoints.
+`Deferred` is not itself a background root. A worker reaches a deferred lazy
+or promise producer only by beginning at a spark or reflection task and
+following the coordinator's existing exact dependency edges. Likewise, a
+foreground caller reaches it from its exact client demand. If foreground and
+background roots demand the same canonical producer, either role may win its
+exclusive claim and the other waits on the same result. Do not add a sticky
+foreground/background field to the deferred record merely to implement this
+policy. Begin with causal traversal from the selected root; optimize root or
+dependency indexes later only with evidence, while preserving the same
+meaning.
+
+Small callback-free builtins execute within the quantum which already owns
+their enclosing computation. They are not globally selectable scheduler
+roots. If a later builtin genuinely needs independent worker eligibility,
+introduce an explicit root-work category with its own reviewed contract rather
+than inspecting opaque machine types or treating every deferred producer as
+background work.
+
+This family owns `WHNFW3R-004`. The present global selectors admit client
+demands, reflection tasks, deferred producers, and sparks to executor workers;
+the synchronous client driver delegates all work whenever workers exist; and
+foreground fallback may claim unrelated same-session tasks. The temporary
+one-ordinary-machine-per-demand-session scan constrains that shared stealing,
+but does not establish ownership. Removing only the scan would therefore move
+away from the target policy. Replace the selectors first, then remove the scan
+and its compensating waits. `work_by_session` remains a lifecycle/reporting
+index, not an execution lane.
+
+##### W6G.1a — Baseline ownership matrix and forced schedules
+
+Inventory every production selector and caller: executor selection,
+synchronous client demand, exact dependency pumping, session draining, runtime
+draining, spark polling, and quiescence observation. Record which work kind it
+can claim today and which target pump role it implements. Add deterministic
+fixtures before changing policy which force, at minimum:
+
+- a queued foreground client demand while an executor worker is available;
+- an unclaimed foreground-only deferred dependency while a worker searches;
+- a reflection task blocked through one or more exact deferred producers;
+- a spark blocked through the same kind of producer chain;
+- one canonical lazy demanded concurrently by foreground and background roots;
+- explicit background draining with both client demand and spark work present;
+- terminal publication racing an exact claimant; and
+- independent work in one demand session while another machine is running.
+
+The fixtures must latch both disputed orders with barriers or channels.
+Repeated parallel runs are stress evidence only. Preserve a red or explicitly
+current-behavior assertion for each mismatch so the transition demonstrates
+which policy changed.
+
+##### W6G.1b — Role-specific root selection
+
+Replace the generic executor `select` path with role-specific selectors. A
+worker locates a ready spark or reflection root, or rediscovers the deepest
+claimable exact producer beneath a blocked spark/reflection root. It must not
+select `ClientDemand` or an unrelated entry from the generic deferred-ready
+queue. The explicit background drain uses the same causal traversal beginning
+only from reflection roots and excludes sparks. Preserve fairness between
+background roots without converting dependency descendants into permanent
+background records.
+
+Keep exact claim and release authoritative. A dependency already owned by
+another thread yields `Busy`/wait rather than a second evaluation. Budget
+yield from a causal descendant must remain discoverable from its blocked
+background root on a later selector pass; do not depend on a stack-local chain
+surviving worker return. If the straightforward traversal is too expensive,
+add a coordinator index of background *roots or causal routes*, not a semantic
+eligibility bit on each descendant.
+
+##### W6G.1c — Foreground client ownership
+
+Make synchronous client demand claim and poll its exact `ClientDemand`
+regardless of configured worker count. Follow only its transitive exact
+dependency chain. Remove the unrelated same-session fallback from ordinary
+foreground demand pumping; explicit `run_until_quiescent` or runtime draining
+is the opt-in path for helping background work. A foreground thread may race a
+worker for a shared canonical dependency but never claims or polls the spark
+record itself.
+
+Do not leave worker count as an execution-policy switch for client calls.
+Zero-, one-, and many-worker configurations must differ only in available
+background progress and performance, not in which thread role is responsible
+for the foreground root.
+
+##### W6G.1d — Drain and quiescence separation
+
+Narrow session and runtime drains to their documented background scopes.
+Runtime-wide draining may traverse newly created reflection roots across
+sessions and wait for worker-owned progress, but it must not steal another
+thread's client demand. It never polls a spark; stable quiescence may abandon
+unclaimed best-effort sparks under the existing lifecycle policy. Readiness
+and snapshot APIs remain observational.
+
+Separate “help execute background reflection work” from “classify stable
+runtime state” in names and tests even if the public `pump_until_stable`
+convenience operation performs both in sequence.
+
+##### W6G.1e — Serialization retirement and verification
+
+After role-specific root discovery is authoritative, delete
+`session_has_running_machine` from global admission and remove only those
+`Busy`/wait checks which existed to compensate for that temporary scan. Exact
+machine claims, canonical deferred producers, subscriptions, and terminal
+publication remain the concurrency authority. Do not retain same-session FIFO
+or one-machine ordering as accidental semantics.
+
+Run the forced W6G.1a matrix plus zero-/one-/many-worker client demand,
+reflection, spark, cancellation, owner-close, lost-wakeup, no-false-
+quiescence, and terminal-publication suites. Update current architecture only
+after implementation so it states that workers select background roots and
+causal descendants, while foreground and explicit drains have distinct claim
+authority. Performance attribution remains W6G.4; W6G.1 records only gross
+regressions which would make the ownership mechanism nonviable.
 
 #### W6G.2 — Regional standard-effect fusion investigation
 
@@ -5138,20 +5238,52 @@ frames, source promotion, structured child frames, exact suspension,
 collection, unwind poisoning, and cross-worker resumption. Comparison with a
 trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
-#### W6G.4 — Phase closure and post-W6G review
+#### W6G.4 — Measured residual compatibility and scheduling overhead
 
-##### W6G.4a — Integrated verification and accounting
+Investigate the bounded performance regression accepted by W4E after W6G.1
+has established role-specific pumping, W6G.2 has selected its effect-driver
+shape, and completed W6G.3 has removed root-per-field WHNF checkpoints. The
+duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
+seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
+though net-driver work is comparable (159,322 versus 159,994 work items).
 
-Reconcile W6G.1-W6G.3 measurements and update the exact W0B and parent D.2c
+Measure the cost after each relevant compatibility or admission boundary is
+removed. Attribute the W6G.1 selector transition separately from the temporary
+same-session scan it retires; do not restore shared worker/client work stealing
+merely because one timing is favorable. If the gap remains, add static
+profiling for machine selection, causal dependency traversal, claim, poll,
+release, managed-access entry, requeue, root publication, and request dispatch
+before changing implementation policy. Determine whether the overhead comes
+from scheduling several thousand `NetWhnfMachine` polls, managed-access
+traffic, causal-chain rediscovery, or another measured source.
+
+Do not reintroduce the rejected per-session running-machine index: retired work
+does not remain in `work_by_session`, and the measured experiment produced no
+improvement. Close W6G.4 by restoring comparable fixture cost or by recording
+a measured, justified residual with ownership assigned to a later performance
+phase.
+
+NC6 measurement, 2026-09-16: callable-WHNF spill did not enlarge this debt.
+Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
+13.11s before and 13.16s after; the successful repeated-split ELF fixture was
+53.01s before and 52.12s after. The minimized semantic/driver signature also
+remains unchanged. Treat the timings only as corroboration, but do not assign
+the preexisting `7fed99e` gap to callable checkpoints.
+
+#### W6G.5 — Phase closure and post-W6G review
+
+##### W6G.5a — Integrated verification and accounting
+
+Reconcile W6G.1-W6G.4 measurements and update the exact W0B and parent D.2c
 manifests for every representation or driver change. Run the affected focused
 suites in ordinary and `aggressive-gc-verification` modes plus the routine
 repository gates. Force suspension after representative pure and standard-
 effect child demands and force both sides of every scheduler ordering changed
-by W6G.1. Confirm that the three sections did not quietly exchange ownership:
-scheduler policy remains in W6G.1, standard-effect fusion in W6G.2, and
-aggregate pure-WHNF ownership in W6G.3.
+by W6G.1. Confirm that the four sections did not quietly exchange ownership:
+pump-role policy remains in W6G.1, standard-effect fusion in W6G.2, aggregate
+pure-WHNF ownership in W6G.3, and performance attribution in W6G.4.
 
-##### W6G.4b — Mandatory post-W6G review
+##### W6G.5b — Mandatory post-W6G review
 
 Audit the implemented phase before W7. Account for measured scheduler,
 managed-access, root-publication, checkpoint-conversion, and request-dispatch

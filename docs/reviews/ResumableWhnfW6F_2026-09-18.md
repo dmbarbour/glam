@@ -150,11 +150,12 @@ dependency claims bypass the rule. This is the W3 containment policy, not a
 Glam semantic, and the recursive builtin evaluator which motivated it is now
 gone.
 
-W6G.1 must measure and remove the rule unless a forced schedule demonstrates
-a narrower remaining owner. The repair must preserve terminal-publication,
-lost-wakeup, no-false-quiescence, and exact-dependency behavior. It must not
-replace the scan with the previously rejected running-session index without
-new measured evidence.
+W6G.1 must replace the rule with explicit foreground, worker-background, and
+background-drain claim authority. The repair must preserve terminal-
+publication, lost-wakeup, no-false-quiescence, and exact-dependency behavior.
+It must not replace the scan with the previously rejected running-session
+index or a sticky execution-lane field on each deferred producer. Residual
+performance measurement belongs separately to W6G.4.
 
 ### WHNFW6FR-003 — Resolved: W6G and the converted-call-graph review shared an ambiguous boundary
 
