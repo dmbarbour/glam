@@ -4496,7 +4496,7 @@ raw-value, access, and WHNF inventories account for the new source phase.
 | **W6F.4d.3 — Complete (2026-09-17): Application compatibility retirement** | 4 S closure | Migrate direct evaluator tests onto ordinary lazy application demand and delete the four remaining synchronous application helpers. `-4`. |
 | **W6F.4d.4 — Complete (2026-09-17): Tagged-dictionary closure** | 2 S closure | Close W6A.0c by moving the remaining test coverage onto the durable tagged-payload/semantic-undefined machines and deleting the recursive synchronous compatibility pair. `-2`. |
 | **W6F.5 — Complete (2026-09-17): Net dispatch** | 2 S | Convert interaction-net dispatch and `net_arity`. `-2`. |
-| **W6F.6 — Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
+| **W6F.6 — Complete (2026-09-18): Net-construction lifecycle** | 2 S, 1 D | Convert machine construction, polling, and replay while retaining its durable journal owner. `-3`. |
 | **W6F.7 — Net-construction values** | 1 S, 2 F | Convert port lookup and access-qualify port/context value construction. `-3`. |
 
 Object-fixpoint C3 traversal, referential identity validation, the mixin fold,
@@ -4673,6 +4673,23 @@ falls from eight to six declarations, the complete raw-value inventory from
 from 189 to 188 occurrences. Exact root-publication, durable-owner, access,
 raw-value, and WHNF inventories account for the new owner and bounded result
 publication; focused tests pass in ordinary and aggressive-GC modes.
+
+W6F.6 completion record, 2026-09-18: net construction now accepts a rooted
+effect handoff, reports ready, dependency, yield, and rooted-failure outcomes
+explicitly, and publishes its replayed net as a runtime root. Construction
+data operations retain public rooted values in the persistent journal rather
+than raw core values; replay projects them only inside one admitted value
+region, constructs the managed net there, and publishes the containing net
+before that region closes. Retryable waits surfaced through either the
+isolated search or exposed-port demand remain scheduler dependencies rather
+than becoming cached construction failures. The three lifecycle declarations
+leave the raw-value inventory, reducing `NetBuiltins` from six declarations to
+three, the complete raw-value inventory from 446 to 443 declarations and from
+269 to 266 violations, and the retryable-WHNF census by the retired blocked-
+halt signature. Existing forced dependency, valid replay, backtracking, local
+effect-state, memoization, malformed-result, and port-family fixtures pass in
+ordinary and aggressive-GC modes; exact root-publication, durable-owner,
+access, raw-value, and WHNF inventories account for the rooted handoffs.
 
 #### W6G — Residual resumable-machine overhead
 

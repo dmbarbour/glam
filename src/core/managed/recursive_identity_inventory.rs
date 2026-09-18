@@ -588,10 +588,10 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     ),
     owner!(
         "src/evaluation/access.rs::PendingManagedPublication",
-        [1, 1, 1],
+        [1, 1, 0],
         DurableRoot,
         None,
-        "evaluator-step nursery retains only fresh family roots until containing publication"
+        "evaluator-step nursery retains fresh lazy and promise roots until containing publication; net replay now publishes directly from its regional access"
     ),
     owner!(
         "src/evaluation/coordinator.rs::TaskOwnedPromiseObligation",

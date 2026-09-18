@@ -7,12 +7,16 @@
 //! context; I3B-I3D partition the opaque evaluator operations which may safely
 //! open it.
 
+#[cfg(test)]
+use crate::core::ManagedCoreNetRoot;
 use crate::core::{
-    EvaluationFailure, LazyValue, ManagedCoreNetRoot, ManagedLazyAccess, ManagedLazyRoot,
-    ManagedPromiseAccess, ManagedPromiseRoot, PromisedValue, RuntimeValueAccess, Value,
+    EvaluationFailure, LazyValue, ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess,
+    ManagedPromiseRoot, PromisedValue, RuntimeValueAccess, Value,
 };
+#[cfg(test)]
 use crate::core_net::CoreSpecialization;
 use crate::core_net::{CoreRuntimeNet, CoreRuntimeNetAccess};
+#[cfg(test)]
 use crate::interaction_net::RuntimeNet;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use std::cell::RefCell;
@@ -68,6 +72,7 @@ enum EvaluatorStepAdmission<'step> {
 enum PendingManagedPublication {
     Lazy(ManagedLazyRoot),
     Promise(ManagedPromiseRoot),
+    #[cfg(test)]
     CoreNet(ManagedCoreNetRoot),
 }
 
@@ -233,6 +238,7 @@ impl EvaluatorStepContext<'_> {
         value
     }
 
+    #[cfg(test)]
     pub(crate) fn construct_core_net(
         &self,
         runtime: RuntimeNet<CoreSpecialization>,

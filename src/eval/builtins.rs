@@ -4,9 +4,9 @@ mod net;
 
 use super::sequence::append_values;
 use super::*;
-pub(super) use net::NetConstructionMachine;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
+pub(super) use net::{NetConstructionMachine, NetConstructionPoll};
 
 #[cfg(test)]
 pub(super) fn apply_builtin(

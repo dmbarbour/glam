@@ -20,7 +20,7 @@ use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessMachinePoll};
 use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
-use super::builtins::{NetConstructionMachine, apply_builtin_in};
+use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
 use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
@@ -447,9 +447,14 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 };
                 self.work = match source {
                     LazySource::NetConstruction(effect) => {
+                        let effect = context.with_value_access(|access| {
+                            access.values().root_runtime_value(
+                                access.values().duplicate_value(effect.as_ref()),
+                            )
+                        });
                         let machine = match NetConstructionMachine::new(
                             durable_context.clone(),
-                            effect.as_ref().clone(),
+                            effect,
                         ) {
                             Ok(machine) => machine,
                             Err(error) => return self.fail(context, error),
@@ -643,14 +648,18 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(context, step_budget) {
-                    Ok(Some(value)) => self.complete(
-                        context,
-                        EvaluatedValue::try_from(value).expect(
-                            "net-construction completion must eliminate the outer deferred variant",
-                        ),
-                    ),
-                    Ok(None) => EvaluationMachinePoll::Yielded,
-                    Err(error) => self.fail(context, error),
+                    NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
+                    NetConstructionPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    NetConstructionPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    NetConstructionPoll::Failed(failure) => {
+                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+                    }
                 };
             }
 

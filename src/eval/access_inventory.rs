@@ -156,8 +156,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtins/net/construction.rs",
-        [3, 0],
-        "I3D.4 scoped result decoding; isolated-search construction takes owned durable context"
+        [4, 0],
+        "I3D.4/W6F.6 scoped result decoding and replay; isolated-search construction takes owned durable context"
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",

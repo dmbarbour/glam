@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value};
-use crate::core_net::{CoreSpecialization, CoreWaitToken};
-use crate::evaluation::{EvalContext, EvaluatorStepContext};
+use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
+use crate::evaluation::{EvalContext, EvaluatorStepContext, WorkDependency};
 use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
     RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
     SpecializationRequestWork, TaskHalt, TaskSpecialization, task_eval_error,
 };
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::super::{EvaluationHalt, eval_value_in};
 
@@ -69,7 +70,7 @@ enum ConstructionOp {
     },
     Data {
         port: ConstructionPortId,
-        value: Value,
+        value: PublicValue,
     },
     Wire {
         left: ConstructionPortId,
@@ -374,17 +375,24 @@ pub(in crate::eval) struct NetConstructionMachine {
     search: IsolatedEffectSearch<InteractionNetEffects>,
 }
 
+pub(in crate::eval) enum NetConstructionPoll {
+    Ready(RuntimeValueRoot),
+    Pending(WorkDependency),
+    Yielded,
+    Failed(RuntimeFailureRoot),
+}
+
 impl NetConstructionMachine {
     pub(in crate::eval) fn new(
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
     ) -> Result<Self, EvaluationHalt> {
         let brand = Arc::new(ConstructionBrand);
         let specialization = InteractionNetEffects {
             brand: brand.clone(),
         };
         let values = Values::from_core_factory(context.values().clone());
-        let effect = values.wrap(effect);
+        let effect = PublicValue::from_runtime_root(effect);
         let search = IsolatedEffectSearch::new_in_context(
             &effect,
             specialization,
@@ -400,62 +408,91 @@ impl NetConstructionMachine {
     }
 
     /// Advances construction without losing the freer machine or its journal.
-    /// `Ok(None)` is a cooperative yield; dependencies are returned through
-    /// `EvaluationHalt::Blocked` and recorded by the owning lazy task.
+    /// Dependencies and failures remain explicit durable scheduler outcomes;
+    /// only a completed replay publishes a rooted net value.
     pub(in crate::eval) fn poll(
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> Result<Option<Value>, EvaluationHalt> {
+    ) -> NetConstructionPoll {
         match self.search.poll_with_budget(step_budget) {
-            IsolatedSearchPoll::Yielded => Ok(None),
+            IsolatedSearchPoll::Yielded => NetConstructionPoll::Yielded,
             IsolatedSearchPoll::Blocked(blocked) => {
                 if let Some(dependency) = blocked.dependency().cloned() {
-                    return Err(EvaluationHalt::blocked(CoreWaitToken(dependency)));
+                    return NetConstructionPoll::Pending(WorkDependency::Wait(dependency));
                 }
-                match blocked.error() {
+                let error = match blocked.error() {
                     Some(halt) => {
                         let values = Values::from_core_factory(context.context().values().clone());
-                        Err(halt
-                            .clone()
+                        halt.clone()
                             .with_context(&values, values.wrap(net_construction_context()))
-                            .into_evaluation_halt())
+                            .into_evaluation_halt()
                     }
-                    None => Err(EvaluationHalt::new(
+                    None => EvaluationHalt::new(
                         "interaction-net construction became blocked without a dependency or mutable host observation",
-                    )),
-                }
+                    ),
+                };
+                net_construction_halt(context, error)
             }
             IsolatedSearchPoll::Complete(branches) => {
                 let mut successes = branches.iter().filter(|branch| branch.value().is_some());
                 let Some(branch) = successes.next() else {
-                    return Err(EvaluationHalt::new(
-                        "interaction-net construction produced no successful result",
-                    ));
+                    return NetConstructionPoll::Failed(
+                        context.root_failure(
+                            EvaluationHalt::new(
+                                "interaction-net construction produced no successful result",
+                            )
+                            .into_permanent_failure(),
+                        ),
+                    );
                 };
                 if successes.next().is_some() {
-                    return Err(EvaluationHalt::new(
-                        "interaction-net construction produced multiple results; use `.cut` to select one",
+                    return NetConstructionPoll::Failed(context.root_failure(
+                        EvaluationHalt::new(
+                            "interaction-net construction produced multiple results; use `.cut` to select one",
+                        )
+                        .into_permanent_failure(),
                     ));
                 }
                 let values = Values::from_core_factory(context.context().values().clone());
-                let exposed = values
+                let result = values
                     .clone_core(branch.value().expect("successful branch checked above"))
-                    .map_err(|error| EvaluationHalt::new(error.to_string()))?;
-                let exposed = construction_port_in(context, &exposed, &self.brand)?;
-                replay(context, branch.journal(), exposed).map(Some)
+                    .map_err(|error| EvaluationHalt::new(error.to_string()))
+                    .and_then(|exposed| construction_port_in(context, &exposed, &self.brand))
+                    .and_then(|exposed| replay(context, branch.journal(), exposed));
+                match result {
+                    Ok(value) => NetConstructionPoll::Ready(value),
+                    Err(error) => net_construction_halt(context, error),
+                }
             }
             IsolatedSearchPoll::Failed(halt) => {
                 let values = Values::from_core_factory(context.context().values().clone());
-                Err(halt
+                let error = halt
                     .with_context(&values, values.wrap(net_construction_context()))
-                    .into_evaluation_halt())
+                    .into_evaluation_halt();
+                net_construction_halt(context, error)
             }
-            IsolatedSearchPoll::Cancelled => Err(EvaluationHalt::new(
-                "interaction-net construction was cancelled",
-            )),
+            IsolatedSearchPoll::Cancelled => NetConstructionPoll::Failed(
+                context.root_failure(
+                    EvaluationHalt::new("interaction-net construction was cancelled")
+                        .into_permanent_failure(),
+                ),
+            ),
         }
     }
+}
+
+fn net_construction_halt(
+    context: &EvaluatorStepContext<'_>,
+    error: EvaluationHalt,
+) -> NetConstructionPoll {
+    if let Some(wait) = error.blocked_on() {
+        return NetConstructionPoll::Pending(WorkDependency::Wait(wait.0));
+    }
+    if let Some(promise) = error.unassigned_promise_root() {
+        return NetConstructionPoll::Pending(WorkDependency::Promise(promise.clone()));
+    }
+    NetConstructionPoll::Failed(context.root_failure(error.into_permanent_failure()))
 }
 
 fn net_construction_context() -> Value {
@@ -488,10 +525,6 @@ fn construct_data(
     brand: &Arc<ConstructionBrand>,
 ) -> Result<RequestResult, TaskHalt> {
     let [value] = exact(arguments, "`.data`")?;
-    let values = context.values();
-    let value = values
-        .clone_core(&value)
-        .map_err(|error| TaskHalt::new(error.to_string()))?;
     let mut transaction = construction_transaction(context)?;
     let (_, journal) = transaction.parts();
     let [port]: [ConstructionPortId; 1] = journal
@@ -580,46 +613,54 @@ fn replay(
     context: &EvaluatorStepContext<'_>,
     journal: &ConstructionJournal,
     exposed: ConstructionPortId,
-) -> Result<Value, EvaluationHalt> {
-    let capacity = usize::try_from(journal.next_port - 1)
-        .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
-    let mut mapped = Vec::new();
-    mapped
-        .try_reserve_exact(capacity)
-        .map_err(|_| EvaluationHalt::new("interaction-net replay allocation is too large"))?;
-    let mut builder = NetBuilder::<CoreSpecialization>::new();
+) -> Result<RuntimeValueRoot, EvaluationHalt> {
+    context.with_value_access(|access| {
+        let capacity = usize::try_from(journal.next_port - 1)
+            .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
+        let mut mapped = Vec::new();
+        mapped
+            .try_reserve_exact(capacity)
+            .map_err(|_| EvaluationHalt::new("interaction-net replay allocation is too large"))?;
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
 
-    for operation in journal.operations() {
-        match operation {
-            ConstructionOp::Bind { ports } => {
-                append_ports(&mut mapped, ports.iter().copied(), builder.bind())?;
-            }
-            ConstructionOp::Copy { ports } => {
-                let copy = builder.copy(ports.len() - 1);
-                append_ports(
-                    &mut mapped,
-                    ports.iter().copied(),
-                    std::iter::once(copy.input).chain(copy.outputs),
-                )?;
-            }
-            ConstructionOp::Data { port, value } => {
-                append_ports(&mut mapped, [*port], [builder.data(value.clone())])?;
-            }
-            ConstructionOp::Wire { left, right } => {
-                builder
-                    .try_wire(mapped_port(&mapped, *left)?, mapped_port(&mapped, *right)?)
-                    .map_err(|error| EvaluationHalt::new(error.to_string()))?;
+        for operation in journal.operations() {
+            match operation {
+                ConstructionOp::Bind { ports } => {
+                    append_ports(&mut mapped, ports.iter().copied(), builder.bind())?;
+                }
+                ConstructionOp::Copy { ports } => {
+                    let copy = builder.copy(ports.len() - 1);
+                    append_ports(
+                        &mut mapped,
+                        ports.iter().copied(),
+                        std::iter::once(copy.input).chain(copy.outputs),
+                    )?;
+                }
+                ConstructionOp::Data { port, value } => {
+                    let value = access.clone_root(&value.clone().into_runtime_root());
+                    append_ports(&mut mapped, [*port], [builder.data(value)])?;
+                }
+                ConstructionOp::Wire { left, right } => {
+                    builder
+                        .try_wire(mapped_port(&mapped, *left)?, mapped_port(&mapped, *right)?)
+                        .map_err(|error| EvaluationHalt::new(error.to_string()))?;
+                }
             }
         }
-    }
 
-    let exposed = mapped_port(&mapped, exposed)?;
-    let template = builder
-        .try_finish(exposed)
-        .map_err(|error| EvaluationHalt::new(error.to_string()))?;
-    Ok(Value::Net(NetValue::new(
-        context.construct_core_net(template.instantiate()),
-    )))
+        let exposed = mapped_port(&mapped, exposed)?;
+        let template = builder
+            .try_finish(exposed)
+            .map_err(|error| EvaluationHalt::new(error.to_string()))?;
+        let net_root = access
+            .values()
+            .construct_rooted_managed_core_net(template.instantiate())
+            .expect("managed core-net representation must fit one collector run");
+        let net = CoreRuntimeNet::from_root(&net_root, access.values());
+        Ok(access
+            .values()
+            .root_runtime_value(Value::Net(NetValue::new(net))))
+    })
 }
 
 fn append_ports(
