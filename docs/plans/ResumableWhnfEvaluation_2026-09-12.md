@@ -5076,6 +5076,25 @@ collection at publication boundaries. Every nonterminal exit retains one
 complete traceable state, exact dependency identity, and exact remaining work
 budget. No exit may expose an unlocked empty cell or replay completed work.
 
+W6G.3e completion record, 2026-09-18: every managed computation poll now
+projects its one root, holds the cell mutex across one bounded callback-free
+driver quantum, and publishes the complete before/after edge sets through one
+`with_managed_edge_state_transition`. A deterministic three-step fixture
+performs multiple focus and frame edits before returning an exact wait; it
+observes one aggregate transition record, exact edge counts, three spent
+steps, and one unspent step. No internal focus or frame edit invokes another
+collector transition.
+
+The W1C exit fixtures force ready, yield, external, permanent-failure,
+owner-retirement/cancellation, and unwind paths; the seed fixture forces an
+exact dependency. A new worker-migration fixture suspends one canonical cell,
+forces collection, moves the computation to another thread, and resumes its
+exact focus/frame state and budget. Post-region orchestration assertions in
+`evaluation::whnf` remain the sole dependency-admission boundary. The cell is
+structurally `Mutex<WhnfState>`, never an optional take/replace slot, so no
+exit can expose an unlocked empty representation. Focused ordinary and
+aggressive-GC suites cover the added transition and migration fixtures.
+
 ##### W6G.3f — Compatibility retirement and accounting
 
 Delete `DurableWhnfState`, its durable continuation/frame mirrors, regional

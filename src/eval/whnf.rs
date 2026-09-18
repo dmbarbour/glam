@@ -1964,3 +1964,7 @@ mod w6g3b_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w6g3c.rs"]
 mod w6g3c_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w6g3e.rs"]
+mod w6g3e_tests;
