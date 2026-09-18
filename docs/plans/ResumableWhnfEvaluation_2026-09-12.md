@@ -2,8 +2,8 @@
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
 post-W6F review are complete by 2026-09-18. W6G is a separate performance and
-representation phase. W6G.3 has been reviewed, partitioned, and selected as
-its first implementation section; W7-W8 remain planned. This is the
+representation phase. W6G.3a is complete; W6G.3b is the next implementation
+checkpoint. W7-W8 remain planned. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -4883,6 +4883,34 @@ installation, application/static-access construction, runtime provenance,
 `with_source_owner`, and diagnostic application-stage inspection. Latch the
 current results, exact work-budget consumption, and root/conversion counts
 before the representation changes.
+
+W6G.3a completion record, 2026-09-18: a source-backed AST inventory now latches
+118 production boundary occurrences and their exact declaration fingerprint.
+The current boundary comprises 91 direct `from_root` seed calls (including the
+internal promise-root delegation), two promise-root adapters, six
+access-qualified application constructors, one access-qualified static-access
+constructor, twelve `with_source_owner` modifiers, one scalar runtime
+observer, and one diagnostic deep observer. The separate source-entry path has
+one constructor, pending-source probe, result installation, and result
+projection. Its result still returns to the synchronous source evaluator; it
+does not participate in durable demand conversion today. W6G.3d.1 owns that
+deliberate transition rather than W6G.3b or W6G.3c acquiring it accidentally.
+
+Test-only computation accounting measures the representation work that the
+collector's existing monotonic root-registration counter cannot see. For a
+checkpoint with `F` two-value frames and `V = 1 + 2F` rooted value positions,
+an initial dependency publication, zero-budget yield, and unchanged dependency
+publication perform three reconstructions and register `3V` replacement roots.
+A following terminal poll projects the state but publishes no fourth
+checkpoint. The one-frame fixture therefore visits ten projected and nine
+rooted value positions; the 32-frame fixture visits 196 projected and 195
+rooted positions. Both visit each retained continuation three times in each
+direction, consume exact budgets, preserve the exact wait and result, open one
+managed-access region per direct poll, and return to the original live-root
+count after the computation is dropped and collection runs. The source-entry
+fixture confirms that source ownership and result installation leave all
+demand-conversion counters untouched. No production representation or
+semantics changed in this checkpoint.
 
 ##### W6G.3b — Borrowed canonical-state driver
 

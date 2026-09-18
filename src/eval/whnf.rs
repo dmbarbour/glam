@@ -17,6 +17,8 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+#[cfg(test)]
+use std::cell::Cell;
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
 ///
@@ -25,6 +27,55 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 /// responsible for the eventual result destination.
 pub(crate) struct WhnfComputation {
     checkpoint: DurableWhnfCheckpoint,
+}
+
+/// Test-only accounting for the fine-grained durable representation which
+/// W6G.3 replaces.
+///
+/// Collector root registrations measure actual root traffic. These counters
+/// record the conversion work which remains invisible to the collector: each
+/// durable-to-regional projection, regional-to-durable reconstruction, and
+/// semantic position visited by those walks.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DurableWhnfBaselineMetrics {
+    pub(crate) demand_polls: usize,
+    pub(crate) durable_projections: usize,
+    pub(crate) durable_reconstructions: usize,
+    pub(crate) projected_value_positions: usize,
+    pub(crate) rooted_value_positions: usize,
+    pub(crate) projected_continuations: usize,
+    pub(crate) rooted_continuations: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DurableWhnfShape {
+    value_positions: usize,
+    continuations: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DURABLE_WHNF_BASELINE_METRICS: Cell<DurableWhnfBaselineMetrics> =
+        const { Cell::new(DurableWhnfBaselineMetrics {
+            demand_polls: 0,
+            durable_projections: 0,
+            durable_reconstructions: 0,
+            projected_value_positions: 0,
+            rooted_value_positions: 0,
+            projected_continuations: 0,
+            rooted_continuations: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn update_baseline_metrics(update: impl FnOnce(&mut DurableWhnfBaselineMetrics)) {
+    DURABLE_WHNF_BASELINE_METRICS.with(|metrics| {
+        let mut current = metrics.get();
+        update(&mut current);
+        metrics.set(current);
+    });
 }
 
 /// Durable entry mode for one WHNF request.
@@ -216,6 +267,20 @@ impl RegionalWhnfWork {
         access: &RuntimeValueAccess<'_>,
     ) -> NetWhnfObservation {
         self.0.observation_for_test(access)
+    }
+
+    #[cfg(test)]
+    fn baseline_shape(&self) -> DurableWhnfShape {
+        DurableWhnfShape {
+            value_positions: 1
+                + self
+                    .frames
+                    .iter()
+                    .map(WhnfContinuation::value_positions_for_test)
+                    .sum::<usize>()
+                + usize::from(self.cycle_promise.is_some()),
+            continuations: self.frames.len(),
+        }
     }
 }
 
@@ -456,6 +521,20 @@ impl DurableWhnfState {
                 .map(|promise| promise.root_in(access.values())),
         }
     }
+
+    #[cfg(test)]
+    fn baseline_shape(&self) -> DurableWhnfShape {
+        DurableWhnfShape {
+            value_positions: 1
+                + self
+                    .frames
+                    .iter()
+                    .map(DurableWhnfContinuation::value_positions_for_test)
+                    .sum::<usize>()
+                + usize::from(self.cycle_promise.is_some()),
+            continuations: self.frames.len(),
+        }
+    }
 }
 
 impl DurableWhnfFrame {
@@ -581,6 +660,24 @@ impl DurableWhnfContinuation {
                 phase,
             },
             WhnfContinuation::StaticAccess { keys, next } => Self::StaticAccess { keys, next },
+        }
+    }
+
+    #[cfg(test)]
+    fn value_positions_for_test(&self) -> usize {
+        match self {
+            Self::Generic(frame) => frame.retained.len(),
+            Self::Application { arguments, .. } => arguments.len(),
+            Self::DictionaryApplication {
+                remaining_effect_values,
+                apply_member,
+                ..
+            } => 1 + remaining_effect_values.len() + usize::from(apply_member.is_some()),
+            Self::SemanticUndefined { ancestors, .. } => ancestors
+                .iter()
+                .map(|ancestor| ancestor.members.len())
+                .sum(),
+            Self::StaticAccess { .. } => 0,
         }
     }
 }
@@ -745,6 +842,24 @@ impl WhnfState {
 }
 
 impl WhnfContinuation {
+    #[cfg(test)]
+    fn value_positions_for_test(&self) -> usize {
+        match self {
+            Self::Generic(frame) => frame.retained.len(),
+            Self::Application { arguments, .. } => arguments.len(),
+            Self::DictionaryApplication {
+                remaining_effect_values,
+                apply_member,
+                ..
+            } => 1 + remaining_effect_values.len() + usize::from(apply_member.is_some()),
+            Self::SemanticUndefined { ancestors, .. } => ancestors
+                .iter()
+                .map(|ancestor| ancestor.members.len())
+                .sum(),
+            Self::StaticAccess { .. } => 0,
+        }
+    }
+
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
             Self::Generic(frame) => trace_whnf_values(&frame.retained, visitor),
@@ -946,6 +1061,16 @@ impl WhnfComputation {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_baseline_metrics_for_test() {
+        DURABLE_WHNF_BASELINE_METRICS.with(|metrics| metrics.set(Default::default()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn baseline_metrics_for_test() -> DurableWhnfBaselineMetrics {
+        DURABLE_WHNF_BASELINE_METRICS.with(Cell::get)
+    }
+
     /// Polls one bounded callback-free quantum beneath matching value access.
     ///
     /// The prior checkpoint remains installed while its regional projection
@@ -962,6 +1087,16 @@ impl WhnfComputation {
         let DurableWhnfCheckpoint::Demand(checkpoint) = &self.checkpoint else {
             panic!("a lazy source must install its result before WHNF demand")
         };
+        #[cfg(test)]
+        {
+            let shape = checkpoint.baseline_shape();
+            update_baseline_metrics(|metrics| {
+                metrics.demand_polls += 1;
+                metrics.durable_projections += 1;
+                metrics.projected_value_positions += shape.value_positions;
+                metrics.projected_continuations += shape.continuations;
+            });
+        }
         let mut work = Some(checkpoint.project(access));
         match drive_regional_in_place(access, &mut work, budget, reduce) {
             RegionalWhnfStatus::Ready(value) => {
@@ -992,6 +1127,15 @@ impl WhnfComputation {
     }
 
     fn publish_checkpoint(&mut self, access: &EvaluationValueAccess<'_>, work: RegionalWhnfWork) {
+        #[cfg(test)]
+        {
+            let shape = work.baseline_shape();
+            update_baseline_metrics(|metrics| {
+                metrics.durable_reconstructions += 1;
+                metrics.rooted_value_positions += shape.value_positions;
+                metrics.rooted_continuations += shape.continuations;
+            });
+        }
         let replacement = DurableWhnfState::from_regional(access, work);
         let prior = std::mem::replace(
             &mut self.checkpoint,
@@ -1656,3 +1800,7 @@ mod w3c_access_tests;
 #[cfg(test)]
 #[path = "whnf/tests/nc1.rs"]
 mod nc1_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w6g3a.rs"]
+mod w6g3a_tests;

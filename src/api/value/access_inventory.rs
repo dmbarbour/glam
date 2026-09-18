@@ -962,6 +962,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf/tests/w1c.rs::root#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w2a.rs::lazy_computation#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w2b.rs::promise_computation#1|surface=scoped-factory|scope=test",
+    "src/eval/whnf/tests/w6g3a.rs::root#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
     "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=test",

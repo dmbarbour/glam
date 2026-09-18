@@ -518,6 +518,12 @@ fn is_in_scope(relative: &Path) -> bool {
     {
         return false;
     }
+    if relative
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with("_inventory.rs"))
+    {
+        return false;
+    }
     if relative.starts_with("src/eval") {
         return !matches!(
             relative.to_str(),
