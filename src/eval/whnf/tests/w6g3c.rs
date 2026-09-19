@@ -178,9 +178,9 @@ fn poisoned_state_remains_traceable_but_repolling_observes_poison() {
 #[test]
 fn managed_cell_uses_the_canonical_trace_and_slot_policy() {
     assert_eq!(
-        <managed_state::ManagedWhnfCell as Trace>::REQUESTED_SLOT_SIZE,
+        <managed_state::ManagedLazyCheckpointCell as Trace>::REQUESTED_SLOT_SIZE,
         Some(crate::core::managed_slot_extent::<
-            managed_state::ManagedWhnfCell,
+            managed_state::ManagedLazyCheckpointCell,
         >())
     );
 }

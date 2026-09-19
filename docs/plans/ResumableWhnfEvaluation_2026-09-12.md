@@ -227,7 +227,7 @@ if unwind ultimately terminalizes the owning machine.
 
 The implemented correctness scaffold uses one registered root per value live
 across a real suspension. W6G.3 replaces it with one
-`Root<ManagedWhnfCell>` whose mutex protects the complete canonical
+`Root<ManagedLazyCheckpointCell>` whose mutex protects the complete canonical
 `WhnfState`. One callback-free quantum mutates the state beneath matching
 access and reports its complete before/after edge sets through the existing
 managed transition gateway; waits, callbacks, and orchestration remain outside
@@ -5187,25 +5187,23 @@ cannot silently remain coordinator-owned.
 
 ###### W6G.1f.1 — Managed lazy checkpoint state
 
-**Implementation design checkpoint (2026-09-19).** `ManagedLazyCell` is a
-core-managed identity, while `WhnfState` and the remaining producer-family
-states are evaluator-owned. Do not resolve this by importing evaluator
-machine types into `core::managed`, and do not expand `glam-gc`'s public unsafe
-surface merely to expose an erased pointer. The recommended boundary is one
-core-owned, separately allocated managed checkpoint cell containing a boxed
-private checkpoint payload behind its representation mutex. An internal
-unsafe payload contract supplies the compile-exhaustive edge visitor and
-passive-destruction guarantee; evaluator code supplies and type-checks the
-concrete payload. The lazy stores only the traced `Gc` edge to that cell.
+**Implementation design checkpoint (settled 2026-09-19).** `ManagedLazyCell`
+is a core-managed identity, while `WhnfState` and the remaining producer-family
+states are evaluator-owned. Use one evaluator-owned concrete
+`ManagedLazyCheckpointCell` and expose only its narrow, field-opaque
+`ManagedLazyCheckpointEdge` to `core`. The lazy stores that typed `Gc` edge;
+its trace and mutation visitors report the edge, then the collector dispatches
+the checkpoint's evaluator-owned trace through the allocation run metadata.
 
-This adds one managed allocation and one Rust box only while a lazy has a
-partial checkpoint, avoids a core-to-evaluator dependency inversion, and can
-host all ten producer families without changing the lazy layout again. Typed
-payload access must occur only under matching `RuntimeValueAccess`, use the
-checkpoint cell as the collector mutation owner, and fail closed on a payload
-kind/downcast mismatch. Revisit representation fusion only after the complete
-producer-family migration and profiling; the transition must not expose a
-general public type-erased GC pointer.
+Rust needs no C-style forward declaration within one crate: the nominal module
+references may be cyclic because the representation cycle is broken by the
+pointer-sized `Gc`. `core` may report, duplicate under matching access,
+install, and remove the opaque edge, but it must not inspect or match on the
+checkpoint state. `eval` owns allocation, typed state access, mutation, and the
+compile-exhaustive visitor. This incurs one managed allocation only while a
+lazy has partial work; it adds no `Box`, vtable, second trace contract, or
+general public erased-GC API. Revisit representation fusion only after the
+complete producer-family migration and profiling.
 
 Generalize the lazy's source/result protocol to source/checkpoint/result.
 Introduce an edge-owned managed WHNF checkpoint over the existing canonical
@@ -5218,6 +5216,23 @@ Add focused tests proving that a checkpoint which points back to its owning
 lazy is collected when the complete graph is unreachable, remains intact when
 the lazy is reachable without active demand, and resumes without redoing
 completed WHNF transitions.
+
+**Complete (2026-09-19).** The managed lazy producer slot now distinguishes
+its original source from one field-opaque `ManagedLazyCheckpointEdge`. The
+evaluator-owned `ManagedLazyCheckpointCell` reuses the canonical `WhnfState`
+visitor and transition gateway; `core` can only retain, trace, install, or
+duplicate that typed edge beneath matching runtime access. The representation
+adds one managed allocation only after partial work is published and adds no
+box, vtable, erased-GC API, or registered root inside the managed graph.
+
+Focused collection fixtures install a self-referential lazy/checkpoint graph.
+They prove that the complete unreachable cycle is reclaimed, a rooted lazy
+retains both cells across collection, and mutation of the installed canonical
+state remains visible after a later collection without reconstructing the
+checkpoint. Source-backed durable-owner and persistent-edge inventories now
+classify the new exact traced edge. Production demand still uses the source
+route; narrowly scoped dead-code allowances identify the staged methods and
+are removed by W6G.1f.2 when that route begins polling the installed state.
 
 ###### W6G.1f.2 — Demand-backed producer routes
 
@@ -5361,13 +5376,13 @@ rooted managed state cell. NC2.0 has already established the canonical
 `WhnfState`/`WhnfContinuation` vocabulary:
 
 ```rust
-struct ManagedWhnfCell {
+struct ManagedLazyCheckpointCell {
     state: Mutex<WhnfState>,
 }
 
 struct ManagedWhnfRoot {
     runtime: EvaluationRuntimeId,
-    root: Root<ManagedWhnfCell>,
+    root: Root<ManagedLazyCheckpointCell>,
 }
 ```
 
@@ -5469,7 +5484,7 @@ Production semantics and durable ownership remain unchanged until W6G.3d.
 
 ##### W6G.3c — Managed cell, root, and access foundation
 
-Introduce `ManagedWhnfCell { state: Mutex<WhnfState> }` and a narrow
+Introduce `ManagedLazyCheckpointCell { state: Mutex<WhnfState> }` and a narrow
 `ManagedWhnfRoot`/access wrapper. The wrapper owns scalar runtime provenance,
 projects the root only beneath matching access, centralizes same-runtime
 checks, and keeps raw collector operations out of evaluator code. The managed
@@ -5496,7 +5511,7 @@ because the mutex carries a poison marker. Add focused construction,
 same-runtime rejection, edge-transition-probe, forced-collection, and
 poison/unwind traceability tests before changing production ownership.
 
-W6G.3c completion record, 2026-09-18: `ManagedWhnfCell` now owns one canonical
+W6G.3c completion record, 2026-09-18: `ManagedLazyCheckpointCell` now owns one canonical
 `WhnfState` behind its representation mutex, while `ManagedWhnfRoot` carries
 only the registered root and scalar runtime provenance. Projection requires
 matching `EvaluationValueAccess`, checks both the scalar runtime and collector

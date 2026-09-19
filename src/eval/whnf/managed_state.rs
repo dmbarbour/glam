@@ -1,4 +1,4 @@
-//! One rooted managed owner for complete resumable-WHNF demand state.
+//! One managed cell for rooted and lazy-owned resumable-WHNF demand state.
 //!
 //! W6G.3c establishes this family before production ownership migrates in
 //! W6G.3d. The state mutex is a stop-the-world collector baseline: evaluation
@@ -17,12 +17,15 @@ use crate::runtime::EvaluationRuntimeId;
 
 use super::{RegionalWhnfState, RegionalWhnfWork, WhnfState};
 
-pub(super) struct ManagedWhnfCell {
+pub(crate) struct ManagedLazyCheckpointCell {
     state: Mutex<WhnfState>,
 }
 
-/// Interior identity projected from a registered WHNF root beneath access.
-struct ManagedWhnfEdge(Gc<ManagedWhnfCell>);
+/// Field-opaque checkpoint edge stored by the core-owned managed lazy.
+///
+/// Core may retain, duplicate, and trace this identity, but evaluator-owned
+/// code remains the sole authority for accessing or mutating its state.
+pub(crate) struct ManagedLazyCheckpointEdge(Gc<ManagedLazyCheckpointCell>);
 
 /// Durable owner of one complete canonical WHNF demand state.
 ///
@@ -31,13 +34,13 @@ struct ManagedWhnfEdge(Gc<ManagedWhnfCell>);
 /// state is projected.
 pub(crate) struct ManagedWhnfRoot {
     runtime: EvaluationRuntimeId,
-    root: Root<ManagedWhnfCell>,
+    root: Root<ManagedLazyCheckpointCell>,
 }
 
 /// Non-escaping view of one rooted WHNF cell under matching evaluator access.
 pub(crate) struct ManagedWhnfAccess<'access, 'scope> {
-    owner: ManagedWhnfEdge,
-    cell: &'access ManagedWhnfCell,
+    owner: ManagedLazyCheckpointEdge,
+    cell: &'access ManagedLazyCheckpointCell,
     authority: &'access EvaluationValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -48,7 +51,7 @@ pub(crate) enum ManagedWhnfAccessError {
     Poisoned,
 }
 
-impl ManagedWhnfCell {
+impl ManagedLazyCheckpointCell {
     fn from_state(state: WhnfState) -> Self {
         Self {
             state: Mutex::new(state),
@@ -66,11 +69,10 @@ impl ManagedWhnfRoot {
         access: &EvaluationValueAccess<'_>,
         work: RegionalWhnfWork,
     ) -> Result<Self, UnsupportedLayout> {
-        let allocator = access.values().allocator::<ManagedWhnfCell>()?;
-        let cell = allocator.alloc(ManagedWhnfCell::from_state(work.0));
+        let edge = ManagedLazyCheckpointEdge::allocate_regional_in(access, work)?;
         Ok(Self {
             runtime: access.values().runtime_id(),
-            root: access.values().root(cell),
+            root: access.values().root(edge.0),
         })
     }
 
@@ -88,11 +90,57 @@ impl ManagedWhnfRoot {
             return Err(ManagedWhnfAccessError::RuntimeMismatch);
         }
         Ok(ManagedWhnfAccess {
-            owner: ManagedWhnfEdge(authority.values().project_root(&self.root)),
+            owner: ManagedLazyCheckpointEdge(authority.values().project_root(&self.root)),
             cell: authority.values().get(&self.root),
             authority,
             _thread_bound: PhantomData,
         })
+    }
+}
+
+impl ManagedLazyCheckpointEdge {
+    pub(crate) fn allocate_regional_in(
+        access: &EvaluationValueAccess<'_>,
+        work: RegionalWhnfWork,
+    ) -> Result<Self, UnsupportedLayout> {
+        let allocator = access.values().allocator::<ManagedLazyCheckpointCell>()?;
+        Ok(Self(
+            allocator.alloc(ManagedLazyCheckpointCell::from_state(work.0)),
+        ))
+    }
+
+    pub(crate) fn trace(&self, visitor: &mut Visitor<'_>) {
+        visitor.visit(&self.0);
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "W6G.1f.1 stages lazy-owned checkpoints before W6G.1f.2 routes production demand through them"
+        )
+    )]
+    pub(crate) fn duplicate_in(&self, authority: &crate::core::RuntimeValueAccess<'_>) -> Self {
+        Self(authority.duplicate_edge(&self.0))
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "W6G.1f.1 stages lazy-owned checkpoints before W6G.1f.2 routes production demand through them"
+        )
+    )]
+    pub(crate) fn access<'access, 'scope>(
+        &'access self,
+        authority: &'access EvaluationValueAccess<'scope>,
+    ) -> ManagedWhnfAccess<'access, 'scope> {
+        ManagedWhnfAccess {
+            owner: Self(authority.values().duplicate_edge(&self.0)),
+            cell: authority.values().get_edge(&self.0),
+            authority,
+            _thread_bound: PhantomData,
+        }
     }
 }
 
@@ -146,7 +194,7 @@ impl ManagedWhnfAccess<'_, '_> {
 // failure rather than ordinary contention. Poison recovery is observational:
 // unwind never removes the structurally installed state, and collection must
 // continue to retain every edge even when evaluator repolling rejects it.
-unsafe impl Trace for ManagedWhnfCell {
+unsafe impl Trace for ManagedLazyCheckpointCell {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
 
     fn trace(&self, visitor: &mut Visitor<'_>) {
@@ -165,7 +213,7 @@ unsafe impl Trace for ManagedWhnfCell {
 // canonical WHNF state release only passive compatibility values, inert
 // managed edges, scalar identities, and ordinary collections. Destruction
 // invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
-unsafe impl ManagedFamily for ManagedWhnfCell {
+unsafe impl ManagedFamily for ManagedLazyCheckpointCell {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
         "managed resumable-WHNF state cell",
         "src/eval/whnf/managed_state.rs",

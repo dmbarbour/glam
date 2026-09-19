@@ -817,13 +817,17 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        746,
+        749,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
+    // W6G.1f.1 adds one traced typed edge from a managed lazy to its
+    // evaluator-owned checkpoint, plus access-qualified construction and
+    // observation. The edge has no ordinary Clone/Eq surface: persistence,
+    // tracing, and working duplication remain explicit beneath access.
     assert_eq!(
         occurrence_fingerprint(actual),
-        16_932_390_228_648_473_624,
+        18_173_150_599_410_335_665,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -868,7 +872,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 158),
+            ((SourceScope::Production, EdgeSurface::Typed), 161),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 538),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

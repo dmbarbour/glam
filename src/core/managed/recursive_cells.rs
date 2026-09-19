@@ -18,6 +18,7 @@ use crate::core::{
     RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
+use crate::eval::whnf::managed_state::ManagedLazyCheckpointEdge;
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
     EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,
@@ -49,8 +50,20 @@ type ManagedPromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 pub(crate) struct ManagedLazyCell {
     id: LazyId,
     label: Arc<str>,
-    source: Mutex<Option<LazySource>>,
+    producer: Mutex<Option<ManagedLazyProducerState>>,
     result: OnceLock<LazyResult>,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
+    )
+)]
+enum ManagedLazyProducerState {
+    Source(LazySource),
+    Checkpoint(ManagedLazyCheckpointEdge),
 }
 
 /// Synchronization-owning managed promise identity.
@@ -213,7 +226,7 @@ impl ManagedLazyCell {
         Self {
             id: LazyId(values.deferred_value_id()),
             label: label.into(),
-            source: Mutex::new(Some(source)),
+            producer: Mutex::new(Some(ManagedLazyProducerState::Source(source))),
             result: OnceLock::new(),
         }
     }
@@ -734,20 +747,116 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         if self.cell.result.get().is_some() {
             return None;
         }
-        let source = self
+        let producer = self
             .cell
-            .source
+            .producer
             .lock()
-            .expect("managed lazy source cell was poisoned");
+            .expect("managed lazy producer cell was poisoned");
         if self.cell.result.get().is_some() {
             return None;
         }
-        Some(
-            source
-                .as_ref()
-                .expect("an unresolved managed lazy must retain its source")
-                .clone(),
+        match producer
+            .as_ref()
+            .expect("an unresolved managed lazy must retain producer state")
+        {
+            ManagedLazyProducerState::Source(source) => Some(source.clone()),
+            ManagedLazyProducerState::Checkpoint(_) => None,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
         )
+    )]
+    pub(crate) fn checkpoint_snapshot(&self) -> Option<ManagedLazyCheckpointEdge> {
+        let _ = self.authority.runtime_id();
+        if self.cell.result.get().is_some() {
+            return None;
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some() {
+            return None;
+        }
+        match producer
+            .as_ref()
+            .expect("an unresolved managed lazy must retain producer state")
+        {
+            ManagedLazyProducerState::Source(_) => None,
+            ManagedLazyProducerState::Checkpoint(checkpoint) => {
+                Some(checkpoint.duplicate_in(self.authority))
+            }
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
+        )
+    )]
+    pub(crate) fn install_checkpoint(
+        &self,
+        checkpoint: ManagedLazyCheckpointEdge,
+    ) -> Result<(), ManagedLazyCheckpointEdge> {
+        if self.cell.result.get().is_some() {
+            return Err(checkpoint);
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some()
+            || !matches!(producer.as_ref(), Some(ManagedLazyProducerState::Source(_)))
+        {
+            return Err(checkpoint);
+        }
+        let producer = RefCell::new(producer);
+        let proposed = RefCell::new(Some(checkpoint));
+        // SAFETY: the lazy cell and checkpoint belong to this exact access
+        // region. The producer mutex excludes another source/checkpoint
+        // transition, and both visitors report the complete leaving or adding
+        // identity before the closure atomically replaces the state.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                &self.owner.0,
+                |visitor| {
+                    trace_lazy_producer_state(
+                        producer
+                            .borrow()
+                            .as_ref()
+                            .expect("unresolved lazy must retain producer state"),
+                        visitor,
+                    );
+                },
+                |visitor| {
+                    proposed
+                        .borrow()
+                        .as_ref()
+                        .expect("checkpoint transition must retain its proposed edge")
+                        .trace(visitor);
+                },
+                || {
+                    let checkpoint = proposed
+                        .borrow_mut()
+                        .take()
+                        .expect("checkpoint transition must consume its edge once");
+                    let prior = producer
+                        .borrow_mut()
+                        .replace(ManagedLazyProducerState::Checkpoint(checkpoint));
+                    drop(prior);
+                },
+            )
+        }
+        Ok(())
     }
 
     pub(crate) fn cached(&self) -> Option<LazyResult> {
@@ -757,14 +866,14 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     fn cache(&self, result: LazyResult) -> LazyResult {
         let proposed = RefCell::new(Some(result));
         // SAFETY: `self.owner` is the exact live lazy cell authorized by this
-        // access. The leaving visitor snapshots its pre-transition source
-        // under the source mutex, while the adding visitor reports the
+        // access. The leaving visitor snapshots its pre-transition producer
+        // under the producer mutex, while the adding visitor reports the
         // proposed terminal result without consuming it. The closure publishes
         // exactly one terminal winner before removing the old source graph.
         unsafe {
             self.authority.with_managed_edge_transition(
                 &self.owner.0,
-                |visitor| trace_lazy_source_cell(self.cell, visitor),
+                |visitor| trace_lazy_producer_cell(self.cell, visitor),
                 |visitor| {
                     trace_lazy_result(
                         proposed
@@ -786,13 +895,13 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
                         .get()
                         .expect("managed lazy cache must contain a value after set")
                         .clone();
-                    let source = self
+                    let producer = self
                         .cell
-                        .source
+                        .producer
                         .lock()
-                        .expect("managed lazy source cell was poisoned")
+                        .expect("managed lazy producer cell was poisoned")
                         .take();
-                    drop(source);
+                    drop(producer);
                     result
                 },
             )
@@ -996,13 +1105,20 @@ fn trace_lazy_source(source: &LazySource, visitor: &mut Visitor<'_>) {
     trace_lazy_source_managed_net_edges(source, visitor);
 }
 
-fn trace_lazy_source_cell(cell: &ManagedLazyCell, visitor: &mut Visitor<'_>) {
-    let source = cell
-        .source
+fn trace_lazy_producer_state(state: &ManagedLazyProducerState, visitor: &mut Visitor<'_>) {
+    match state {
+        ManagedLazyProducerState::Source(source) => trace_lazy_source(source, visitor),
+        ManagedLazyProducerState::Checkpoint(checkpoint) => checkpoint.trace(visitor),
+    }
+}
+
+fn trace_lazy_producer_cell(cell: &ManagedLazyCell, visitor: &mut Visitor<'_>) {
+    let producer = cell
+        .producer
         .lock()
-        .expect("managed lazy source cell was poisoned");
-    if let Some(source) = source.as_ref() {
-        trace_lazy_source(source, visitor);
+        .expect("managed lazy producer cell was poisoned");
+    if let Some(producer) = producer.as_ref() {
+        trace_lazy_producer_state(producer, visitor);
     }
 }
 
@@ -1013,10 +1129,9 @@ fn trace_promise_assignment(assignment: &ManagedPromiseAssignment, visitor: &mut
     }
 }
 
-// SAFETY: result publication precedes source removal. Tracing first prefers a
-// terminal result, otherwise clones one source while mutation is excluded and
-// reports all managed identities reached by the compile-exhaustive payload
-// walk. The cloned snapshot is visited after releasing the source mutex.
+// SAFETY: result publication precedes producer removal. Tracing first prefers
+// a terminal result, otherwise observes the source or checkpoint while the
+// producer mutex is held and reports its exact managed edges.
 unsafe impl Trace for ManagedLazyCell {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(super::managed_slot_extent::<Self>());
 
@@ -1025,22 +1140,21 @@ unsafe impl Trace for ManagedLazyCell {
             trace_lazy_result(&result, visitor);
             return;
         }
-        let source = {
-            let source = self
-                .source
-                .try_lock()
-                .expect("managed lazy must be quiescent during tracing");
-            if let Some(result) = self.result.get().cloned() {
-                drop(source);
-                trace_lazy_result(&result, visitor);
-                return;
-            }
-            source
+        let producer = self
+            .producer
+            .try_lock()
+            .expect("managed lazy must be quiescent during tracing");
+        if let Some(result) = self.result.get().cloned() {
+            drop(producer);
+            trace_lazy_result(&result, visitor);
+            return;
+        }
+        trace_lazy_producer_state(
+            producer
                 .as_ref()
-                .expect("an unresolved managed lazy must retain its source")
-                .clone()
-        };
-        trace_lazy_source(&source, visitor);
+                .expect("an unresolved managed lazy must retain producer state"),
+            visitor,
+        );
     }
 }
 
@@ -1195,15 +1309,18 @@ mod tests {
         unsafe {
             let cell = access.scope.get_traced_edge(&owner.0);
             let mut stored = cell
-                .source
+                .producer
                 .lock()
-                .expect("managed lazy source cell should not be poisoned");
-            assert!(matches!(stored.as_ref(), Some(LazySource::Error)));
+                .expect("managed lazy producer cell should not be poisoned");
+            assert!(matches!(
+                stored.as_ref(),
+                Some(ManagedLazyProducerState::Source(LazySource::Error))
+            ));
             access
                 .scope
                 .mutator
                 .with_edge_replacement(&owner.0, None, Some(target), || {
-                    *stored = Some(source);
+                    *stored = Some(ManagedLazyProducerState::Source(source));
                 });
         }
     }
@@ -2480,15 +2597,18 @@ mod tests {
             unsafe {
                 let cell = access.scope.get_traced_edge(&edge.0);
                 let mut stored = cell
-                    .source
+                    .producer
                     .lock()
-                    .expect("managed lazy source cell should not be poisoned");
-                assert!(matches!(stored.as_ref(), Some(LazySource::Error)));
+                    .expect("managed lazy producer cell should not be poisoned");
+                assert!(matches!(
+                    stored.as_ref(),
+                    Some(ManagedLazyProducerState::Source(LazySource::Error))
+                ));
                 access
                     .scope
                     .mutator
                     .with_edge_replacement(&edge.0, None, Some(&edge.0), || {
-                        *stored = Some(source);
+                        *stored = Some(ManagedLazyProducerState::Source(source));
                     });
             }
 

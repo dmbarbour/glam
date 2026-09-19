@@ -18,7 +18,7 @@ use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-mod managed_state;
+pub(crate) mod managed_state;
 use managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
@@ -1556,3 +1556,7 @@ mod w6g3c_tests;
 #[cfg(test)]
 #[path = "whnf/tests/w6g3e.rs"]
 mod w6g3e_tests;
+
+#[cfg(test)]
+#[path = "whnf/tests/w6g1f1.rs"]
+mod w6g1f1_tests;

@@ -480,11 +480,11 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     exact_managed!(
         "src/eval/whnf/managed_state.rs",
-        "managed resumable-WHNF state cell and edge",
-        "one canonical WhnfState behind a representation mutex plus its access-scoped interior Gc edge",
-        "one registered ManagedWhnfRoot and its bounded matching-runtime access projection",
+        "managed lazy checkpoint cell and edge",
+        "one canonical WhnfState behind a representation mutex plus its field-opaque typed Gc edge",
+        "one registered ManagedWhnfRoot or one managed lazy producer edge, projected only under bounded matching-runtime access",
         CompatibilityPayload,
-        "W6G.3c traces the canonical state through forced collection, rejects foreign-runtime projection, and retires the graph after the registered root drops"
+        "W6G.3c and W6G.1f.1 trace the same canonical state through registered roots or lazy-owned edges and collect unreachable lazy/checkpoint cycles"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -925,7 +925,7 @@ fn is_production_source(relative: &Path) -> bool {
 const DECLARATION_BASELINE_COUNT: usize = 225;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
     DeclarationSignals::new([131, 270, 5, 16, 6, 4, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_661_914_265_478_027_353;
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_540_160_986_189_583_308;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1020,8 +1020,12 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "production managed core value node"
     } else if declaration.starts_with("src/core/managed/recursive_cells.rs::") {
         "production recursive identity cells and edges"
-    } else if declaration == "src/eval/whnf/managed_state.rs::ManagedWhnfEdge" {
-        "managed resumable-WHNF state cell and edge"
+    } else if matches!(
+        declaration,
+        "src/eval/whnf/managed_state.rs::ManagedLazyCheckpointCell"
+            | "src/eval/whnf/managed_state.rs::ManagedLazyCheckpointEdge"
+    ) {
+        "managed lazy checkpoint cell and edge"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"
