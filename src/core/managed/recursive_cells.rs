@@ -18,7 +18,7 @@ use crate::core::{
     RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
-use crate::eval::whnf::managed_state::ManagedLazyCheckpointEdge;
+use crate::eval::lazy_checkpoint::ManagedLazyCheckpointEdge;
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
     EvaluationWorkCoordinator, PromiseProducerObligation, PromiseProducerPublication,

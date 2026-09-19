@@ -5253,6 +5253,16 @@ This is staging, not a weakened target: after W6G.1f.2a the WHNF family has
 one lazy-owned authoritative state, and after W6G.1f.2b no producer family has
 a durable machine in its coordinator record.
 
+The first full-suite run after W6G.1f.3a.0 reproduced the same open route
+ownership defect through `command_line_workers_override_glam_workers`:
+`asm.result = seq 1 (spark 2 "ok")` remained blocked on the first
+session-owned deferred wait and settlement killed that route. The checkpoint
+carrier change is representation-only and the focused test passes, so neither
+fact is accepted as race evidence. Keep this concrete schedule as W6G.1f.2b
+verification: lazy-owned state alone does not make the coordinator route
+session-neutral, and the complete suite is not a green gate until the forced
+subscriber/close ordering and this configured CLI path both pass.
+
 For W6G.1f.2a, reuse the already-managed cell owned by `WhnfComputation`
 rather than walking or reallocating its state. Under one matching access,
 project its typed edge while the registered root remains live, install that
@@ -5306,6 +5316,67 @@ edge-free lease/identity and its trace must still account for every semantic
 edge. The sidecar must not retain a root back to the owning lazy or another
 rooted checkpoint which reaches it. Treat any exception as a separate design
 review rather than hiding it behind the external-owner registry.
+
+Execute the migration as an exhaustive typed sum, not one erased checkpoint
+payload:
+
+1. **W6G.1f.3a.0 — typed checkpoint carrier.** Move the field-opaque edge into
+   an evaluator-owned discriminated carrier whose variants are concrete typed
+   `Gc` edges. Begin with the existing WHNF variant and preserve its exact
+   behavior. `core` may trace and retain the carrier but cannot inspect a
+   variant. This representation-only checkpoint must add no allocation,
+   vtable, box, or second trace contract.
+
+   **Complete (2026-09-19).** `ManagedLazyCheckpointEdge` is now a
+   field-opaque wrapper around the private evaluator-owned
+   `ManagedLazyCheckpointKind` sum. Its initial `Whnf` arm carries the same
+   typed `Gc<ManagedLazyCheckpointCell>` as before. Core sees only trace and
+   access-qualified duplication; WHNF code receives the concrete edge through
+   narrow evaluator-only projection methods. The change adds no runtime
+   allocation or indirection. Durable-owner and persistent-edge inventories
+   classify both the stored carrier and mutator-local concrete projection.
+2. **W6G.1f.3a.1 — host-call checkpoint.** Publish `Invoking` before entering
+   the opaque callback, retain callback captures through the lazy's traced
+   source until invocation completes, and publish the rooted callback outcome
+   back as traced checkpoint edges before yielding. A panic must leave a
+   non-replayable checkpoint, never the original callable source state.
+3. **W6G.1f.3b — reflection checkpoint.** Preserve one stable reservation and
+   activation disposition across route loss. The managed state retains only
+   traced effect/target edges and edge-free task observation; any temporary
+   activation root remains in the reviewed activation permit and must be
+   consumed before the checkpoint can become inactive.
+4. **W6G.1f.3c — net-WHNF checkpoint.** Replace registered net roots in the
+   normalization request/worklist with traced managed-net edges and retain
+   scalar ports, frontier observations, and driver state in one concrete
+   checkpoint.
+5. **W6G.1f.3d — access checkpoint.** Convert path arguments, current values,
+   pending key/list conversion state, and child WHNF owners to traced edges.
+   Preserve exact conversion position and source-owner diagnostics.
+6. **W6G.1f.3e — object-fixpoint checkpoint.** Convert linearization and mix
+   stacks after their shared key/list/WHNF child forms have an edge-owned
+   representation. Do not duplicate object traversal state in a sidecar.
+7. **W6G.1f.3f — list-effect checkpoint.** Preserve sequence/cut/fix progress
+   and convert the fix promise root to a managed promise edge. Prove that
+   route loss cannot manufacture another promise or repeat an assignment.
+8. **W6G.1f.3g — builtin checkpoint.** Migrate the compile-exhaustive builtin
+   task sum after its shared access, object, list, and WHNF child forms are
+   available. Retain spark publication as post-access orchestration rather
+   than managed checkpoint state.
+9. **W6G.1f.3h — net-construction checkpoint and decision audit.** Separate
+   traced search/journal state from task-host orchestration. If the existing
+   isolated search cannot be represented without a rooted backedge, stop for
+   a focused lifecycle design review rather than storing the search behind an
+   opaque external sidecar.
+10. **W6G.1f.3i — family closure.** Remove every state-bearing coordinator
+    variant, make route markers compile-exhaustive over the typed checkpoint
+    carrier, and close the source-backed producer, registered-root,
+    persistent-edge, and no-replay inventories before W6G.1f.2b.
+
+Each family checkpoint must force budget yield or exact dependency suspension,
+loss of its active route, collection while the lazy remains reachable, and
+resumption from a later authorized route. The host, reflection, list-fix, and
+net-construction checkpoints additionally count their one-shot actions. Do
+not defer a family merely because terminal equality hides replay.
 
 ###### W6G.1f.4 — Retention and collection verification
 

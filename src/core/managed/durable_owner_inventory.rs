@@ -922,10 +922,13 @@ fn is_production_source(relative: &Path) -> bool {
 // aggregate makes category drift legible, while the deterministic fingerprint
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
-const DECLARATION_BASELINE_COUNT: usize = 225;
+// W6G.1f.3a.0 replaces the single-field WHNF edge wrapper with one concrete
+// typed checkpoint sum. The new kind declaration contributes one additional
+// `Gc` carrier while preserving the same one-edge runtime representation.
+const DECLARATION_BASELINE_COUNT: usize = 226;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([131, 270, 5, 16, 6, 4, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_540_160_986_189_583_308;
+    DeclarationSignals::new([131, 270, 5, 16, 6, 5, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_593_214_601_845_554_375;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1023,7 +1026,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if matches!(
         declaration,
         "src/eval/whnf/managed_state.rs::ManagedLazyCheckpointCell"
-            | "src/eval/whnf/managed_state.rs::ManagedLazyCheckpointEdge"
+            | "src/eval/whnf/managed_state.rs::ManagedWhnfAccess"
+            | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointEdge"
+            | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointKind"
     ) {
         "managed lazy checkpoint cell and edge"
     } else if matches!(

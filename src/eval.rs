@@ -33,6 +33,7 @@ mod builtins;
 mod comparison_machine;
 mod dict_machine;
 mod effect_machine;
+pub(crate) mod lazy_checkpoint;
 #[cfg(test)]
 mod lazy_producer_inventory;
 mod list_effect_machine;

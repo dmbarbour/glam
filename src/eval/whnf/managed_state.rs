@@ -12,20 +12,15 @@ use std::sync::{Mutex, TryLockError};
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{ManagedDropRecord, ManagedFamily, managed_slot_extent};
+pub(crate) use crate::eval::lazy_checkpoint::ManagedLazyCheckpointEdge;
 use crate::evaluation::EvaluationValueAccess;
 use crate::runtime::EvaluationRuntimeId;
 
 use super::{RegionalWhnfState, RegionalWhnfWork, WhnfState};
 
-pub(crate) struct ManagedLazyCheckpointCell {
+pub(in crate::eval) struct ManagedLazyCheckpointCell {
     state: Mutex<WhnfState>,
 }
-
-/// Field-opaque checkpoint edge stored by the core-owned managed lazy.
-///
-/// Core may retain, duplicate, and trace this identity, but evaluator-owned
-/// code remains the sole authority for accessing or mutating its state.
-pub(crate) struct ManagedLazyCheckpointEdge(Gc<ManagedLazyCheckpointCell>);
 
 /// Durable owner of one complete canonical WHNF demand state.
 ///
@@ -39,7 +34,7 @@ pub(crate) struct ManagedWhnfRoot {
 
 /// Non-escaping view of one rooted WHNF cell under matching evaluator access.
 pub(crate) struct ManagedWhnfAccess<'access, 'scope> {
-    owner: ManagedLazyCheckpointEdge,
+    owner: Gc<ManagedLazyCheckpointCell>,
     cell: &'access ManagedLazyCheckpointCell,
     authority: &'access EvaluationValueAccess<'scope>,
     _thread_bound: PhantomData<Rc<()>>,
@@ -72,7 +67,7 @@ impl ManagedWhnfRoot {
         let edge = ManagedLazyCheckpointEdge::allocate_regional_in(access, work)?;
         Ok(Self {
             runtime: access.values().runtime_id(),
-            root: access.values().root(edge.0),
+            root: access.values().root(edge.into_whnf()),
         })
     }
 
@@ -84,9 +79,13 @@ impl ManagedWhnfRoot {
         &'access self,
         authority: &'access EvaluationValueAccess<'scope>,
     ) -> Result<ManagedWhnfAccess<'access, 'scope>, ManagedWhnfAccessError> {
-        let owner = self.checkpoint_edge_in(authority)?;
+        if self.runtime != authority.values().runtime_id()
+            || !authority.values().admits_root(&self.root)
+        {
+            return Err(ManagedWhnfAccessError::RuntimeMismatch);
+        }
         Ok(ManagedWhnfAccess {
-            owner,
+            owner: authority.values().project_root(&self.root),
             cell: authority.values().get(&self.root),
             authority,
             _thread_bound: PhantomData,
@@ -104,7 +103,7 @@ impl ManagedWhnfRoot {
         {
             return Err(ManagedWhnfAccessError::RuntimeMismatch);
         }
-        Ok(ManagedLazyCheckpointEdge(
+        Ok(ManagedLazyCheckpointEdge::from_whnf(
             authority.values().project_root(&self.root),
         ))
     }
@@ -116,26 +115,21 @@ impl ManagedLazyCheckpointEdge {
         work: RegionalWhnfWork,
     ) -> Result<Self, UnsupportedLayout> {
         let allocator = access.values().allocator::<ManagedLazyCheckpointCell>()?;
-        Ok(Self(
+        Ok(Self::from_whnf(
             allocator.alloc(ManagedLazyCheckpointCell::from_state(work.0)),
         ))
-    }
-
-    pub(crate) fn trace(&self, visitor: &mut Visitor<'_>) {
-        visitor.visit(&self.0);
-    }
-
-    pub(crate) fn duplicate_in(&self, authority: &crate::core::RuntimeValueAccess<'_>) -> Self {
-        Self(authority.duplicate_edge(&self.0))
     }
 
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access EvaluationValueAccess<'scope>,
     ) -> ManagedWhnfAccess<'access, 'scope> {
+        let owner = self
+            .duplicate_whnf_in(authority.values())
+            .expect("WHNF polling requires a WHNF lazy checkpoint variant");
         ManagedWhnfAccess {
-            owner: Self(authority.values().duplicate_edge(&self.0)),
-            cell: authority.values().get_edge(&self.0),
+            cell: authority.values().get_edge(&owner),
+            owner,
             authority,
             _thread_bound: PhantomData,
         }
@@ -173,7 +167,7 @@ impl ManagedWhnfAccess<'_, '_> {
         // access-bound regional view.
         Ok(unsafe {
             self.authority.values().with_managed_edge_state_transition(
-                &self.owner.0,
+                &self.owner,
                 &mut *state,
                 WhnfState::trace_managed_edges,
                 WhnfState::trace_managed_edges,
