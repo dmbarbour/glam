@@ -84,17 +84,29 @@ impl ManagedWhnfRoot {
         &'access self,
         authority: &'access EvaluationValueAccess<'scope>,
     ) -> Result<ManagedWhnfAccess<'access, 'scope>, ManagedWhnfAccessError> {
+        let owner = self.checkpoint_edge_in(authority)?;
+        Ok(ManagedWhnfAccess {
+            owner,
+            cell: authority.values().get(&self.root),
+            authority,
+            _thread_bound: PhantomData,
+        })
+    }
+
+    /// Projects this registered owner as the exact typed edge accepted by a
+    /// managed lazy while the root still protects the allocation.
+    pub(crate) fn checkpoint_edge_in(
+        &self,
+        authority: &EvaluationValueAccess<'_>,
+    ) -> Result<ManagedLazyCheckpointEdge, ManagedWhnfAccessError> {
         if self.runtime != authority.values().runtime_id()
             || !authority.values().admits_root(&self.root)
         {
             return Err(ManagedWhnfAccessError::RuntimeMismatch);
         }
-        Ok(ManagedWhnfAccess {
-            owner: ManagedLazyCheckpointEdge(authority.values().project_root(&self.root)),
-            cell: authority.values().get(&self.root),
-            authority,
-            _thread_bound: PhantomData,
-        })
+        Ok(ManagedLazyCheckpointEdge(
+            authority.values().project_root(&self.root),
+        ))
     }
 }
 
@@ -113,24 +125,10 @@ impl ManagedLazyCheckpointEdge {
         visitor.visit(&self.0);
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "W6G.1f.1 stages lazy-owned checkpoints before W6G.1f.2 routes production demand through them"
-        )
-    )]
     pub(crate) fn duplicate_in(&self, authority: &crate::core::RuntimeValueAccess<'_>) -> Self {
         Self(authority.duplicate_edge(&self.0))
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "W6G.1f.1 stages lazy-owned checkpoints before W6G.1f.2 routes production demand through them"
-        )
-    )]
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access EvaluationValueAccess<'scope>,

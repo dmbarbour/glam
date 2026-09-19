@@ -685,13 +685,6 @@ impl RuntimeValueAccess<'_> {
     /// root or enclosing traced owner keeps the edge live. The concrete `T`
     /// preserves the allocation metadata/type contract; this does not expose
     /// a type-erased pointer or a durable observation capability.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "W6G.1f.1 stages typed lazy checkpoint access before W6G.1f.2 routes production demand through it"
-        )
-    )]
     pub(crate) fn get_edge<'access, T: ManagedFamily>(&'access self, value: &Gc<T>) -> &'access T {
         // SAFETY: callers can obtain `Gc<T>` only through private managed
         // representations and must reach it from a live owner under this

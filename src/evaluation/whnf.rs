@@ -4,9 +4,9 @@
 //! which knows both its dependency vocabulary and coordinator work.
 
 use super::{EvalContext, EvaluationPollContext, WorkDependency};
-use crate::core::EvaluationFailure;
 #[cfg(test)]
 use crate::core::thread_has_runtime_value_access_for_test;
+use crate::core::{EvaluationFailure, ManagedLazyRoot};
 use crate::eval::whnf::{
     WhnfComputation, WhnfDeferredRequest, WhnfDependency, WhnfExternalBoundary, WhnfPoll,
 };
@@ -43,6 +43,36 @@ pub(crate) fn poll_computation(
         !thread_has_runtime_value_access_for_test(),
         "WHNF orchestration must begin only after managed access closes"
     );
+    interpret_poll(poll, context)
+}
+
+/// Polls the canonical WHNF checkpoint retained by one managed lazy.
+///
+/// The lazy root is the liveness authority. Its checkpoint edge is duplicated
+/// and consumed only inside this matching access region, then orchestration is
+/// interpreted after the region closes just like an ordinary computation.
+pub(crate) fn poll_lazy_checkpoint(
+    lazy: &ManagedLazyRoot,
+    poll_context: &EvaluationPollContext,
+    context: &EvalContext,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> WhnfOwnerPoll {
+    let poll = poll_context.with_value_access(context, |access| {
+        let checkpoint = access
+            .lazy_root(lazy)
+            .checkpoint_snapshot()
+            .expect("checkpoint-backed lazy work must retain its managed checkpoint");
+        checkpoint.poll_semantic_in(&access, step_budget)
+    });
+    #[cfg(test)]
+    assert!(
+        !thread_has_runtime_value_access_for_test(),
+        "lazy-checkpoint orchestration must begin only after managed access closes"
+    );
+    interpret_poll(poll, context)
+}
+
+fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {
     match poll {
         WhnfPoll::Ready(value) => WhnfOwnerPoll::Ready(value),
         WhnfPoll::Pending(dependency) => WhnfOwnerPoll::Pending(work_dependency(dependency)),

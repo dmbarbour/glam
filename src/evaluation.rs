@@ -49,7 +49,9 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
-pub(crate) use whnf::{WhnfOwnerPoll, poll_computation as poll_whnf_computation};
+pub(crate) use whnf::{
+    WhnfOwnerPoll, poll_computation as poll_whnf_computation, poll_lazy_checkpoint,
+};
 
 /// Stack-owned allowance for one bounded evaluation poll.
 ///

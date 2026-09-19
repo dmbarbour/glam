@@ -327,14 +327,14 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::FromApplicationCheckpoint, 6),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
     (CheckpointApi::FromPromiseRoot, 2),
-    (CheckpointApi::SourceRoot, 1),
+    (CheckpointApi::SourceRoot, 2),
     (CheckpointApi::InstallSourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
     (CheckpointApi::WithSourceOwner, 10),
 ];
-const EXPECTED_OCCURRENCES: usize = 115;
-const EXPECTED_FINGERPRINT: u64 = 9_762_867_938_261_099_370;
+const EXPECTED_OCCURRENCES: usize = 116;
+const EXPECTED_FINGERPRINT: u64 = 17_076_171_859_349_825_413;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

@@ -847,7 +847,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // compare managed-net identity under matching access.
         // D.2b.2's structured deferred-failure fixture constructs its halt
         // payload in one explicit access region.
-        ("src/eval/tests.rs", GatewayCounts::new(8, 1)),
+        // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
+        // inspect their exact lazy-owned checkpoint under two bounded regions.
+        ("src/eval/tests.rs", GatewayCounts::new(10, 1)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         ("src/eval/value.rs", GatewayCounts::new(1, 0)),
@@ -882,7 +884,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // under matching access before detached wakes.
         // W6C.6's aggressive-collection spark fixtures construct and publish
         // their recursive values under three additional bounded regions.
-        ("src/evaluation/tests.rs", GatewayCounts::new(12, 0)),
+        // W6G.1f.2a forces cross-session resumption through the exact
+        // lazy-owned checkpoint under one additional bounded test region.
+        ("src/evaluation/tests.rs", GatewayCounts::new(13, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),

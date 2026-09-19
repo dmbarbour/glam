@@ -12,7 +12,7 @@ use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
     EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    poll_whnf_computation,
+    poll_lazy_checkpoint, poll_whnf_computation,
 };
 #[cfg(test)]
 use crate::list::ListItem;
@@ -194,6 +194,7 @@ pub(crate) fn eval_value_in(
 enum LazyTaskWork {
     Produce,
     Whnf(super::whnf::WhnfComputation),
+    WhnfCheckpoint,
     NetWhnf {
         machine: Box<NetWhnfMachine>,
         failure_context: Option<&'static str>,
@@ -410,6 +411,76 @@ impl LazyTaskMachine {
         self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_root(value));
         EvaluationMachinePoll::Yielded
     }
+
+    /// Moves an ordinary rooted WHNF computation into the exact checkpoint
+    /// edge retained by this lazy. The old registered root remains live until
+    /// the managed producer transition has published the same allocation.
+    fn publish_whnf_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+    ) -> Option<EvaluationMachinePoll> {
+        let ready = matches!(
+            &self.work,
+            LazyTaskWork::Whnf(computation) if computation.source_root().is_none()
+        );
+        if !ready {
+            return None;
+        }
+        let LazyTaskWork::Whnf(mut computation) =
+            std::mem::replace(&mut self.work, LazyTaskWork::Produce)
+        else {
+            unreachable!("a ready WHNF producer must retain its computation")
+        };
+        let installed = context.with_value_access(|access| {
+            let checkpoint = computation
+                .checkpoint_edge_in(&access)
+                .expect("a ready WHNF computation must expose its managed checkpoint");
+            let lazy = access.lazy_root(&self.lazy);
+            match lazy.install_checkpoint(checkpoint) {
+                Ok(()) => true,
+                Err(_checkpoint) => {
+                    if lazy.checkpoint_snapshot().is_some() {
+                        true
+                    } else {
+                        assert!(
+                            lazy.cached().is_some(),
+                            "a rejected checkpoint must find another checkpoint or a terminal cache"
+                        );
+                        false
+                    }
+                }
+            }
+        });
+        drop(computation);
+        self.work = LazyTaskWork::WhnfCheckpoint;
+        (!installed).then(|| self.cached_poll(context))
+    }
+
+    fn poll_whnf_checkpoint(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        durable_context: &EvalContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        match poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget) {
+            WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
+            WhnfOwnerPoll::Pending(dependency) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(dependency),
+                    observed_epoch: None,
+                    error: None,
+                })
+            }
+            WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => {
+                self.fail(context, EvaluationHalt::failure(failure.into_failure()))
+            }
+            WhnfOwnerPoll::External(_) => {
+                unreachable!("W4 external sources retain explicit lazy-task modes")
+            }
+        }
+    }
 }
 
 impl EvaluationTaskMachine for LazyTaskMachine {
@@ -443,7 +514,23 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 let source = context
                     .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
                 let Some(source) = source else {
-                    return self.cached_poll(context);
+                    let has_checkpoint = context.with_value_access(|access| {
+                        access
+                            .lazy_root(&self.lazy)
+                            .checkpoint_snapshot()
+                            .is_some()
+                    });
+                    if has_checkpoint {
+                        self.work = LazyTaskWork::WhnfCheckpoint;
+                    } else {
+                        return self.cached_poll(context);
+                    }
+                    return self.poll_whnf_checkpoint(
+                        context,
+                        poll_context,
+                        &durable_context,
+                        step_budget,
+                    );
                 };
                 self.work = match source {
                     LazySource::NetConstruction(effect) => {
@@ -629,6 +716,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 ) {
                     return EvaluationMachinePoll::Yielded;
                 }
+                if let Some(poll) = self.publish_whnf_checkpoint(context) {
+                    return poll;
+                }
             }
 
             if let LazyTaskWork::HostCall(machine) = &mut self.work {
@@ -803,28 +893,23 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     }
                     Err(error) => return self.fail(context, error),
                 }
+                if let Some(poll) = self.publish_whnf_checkpoint(context) {
+                    return poll;
+                }
             }
 
-            let LazyTaskWork::Whnf(computation) = &mut self.work else {
+            if let Some(poll) = self.publish_whnf_checkpoint(context) {
+                return poll;
+            }
+            let LazyTaskWork::WhnfCheckpoint = self.work else {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };
-            match poll_whnf_computation(computation, poll_context, &durable_context, step_budget) {
-                WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
-                WhnfOwnerPoll::Pending(dependency) => {
-                    EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                        dependency: Some(dependency),
-                        observed_epoch: None,
-                        error: None,
-                    })
-                }
-                WhnfOwnerPoll::External(_) => {
-                    unreachable!("W4 external sources retain explicit lazy-task modes")
-                }
-                WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => {
-                    self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                }
-            }
+            self.poll_whnf_checkpoint(
+                context,
+                poll_context,
+                &durable_context,
+                step_budget,
+            )
         })
     }
 }
@@ -1274,6 +1359,7 @@ mod ownership_tests {
             LazyTaskWork::Whnf(computation) => {
                 let _: &crate::eval::whnf::WhnfComputation = computation;
             }
+            LazyTaskWork::WhnfCheckpoint => {}
             LazyTaskWork::NetWhnf { machine, .. } => {
                 let _: &NetWhnfMachine = machine;
             }

@@ -9,8 +9,8 @@ use crate::core::{
 };
 use crate::core_net::CoreRuntimeNet;
 use crate::evaluation::{
-    EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskMachine, EvaluationWaitPoll,
-    ReflectionTaskLauncher, ReflectionTaskResultPolicy,
+    EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock, EvaluationTaskMachine,
+    EvaluationWaitPoll, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 
@@ -2448,6 +2448,61 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
     assert_eq!(cached_value(&leaf), n(42));
     assert_eq!(cached_value(&middle), n(42));
     assert_eq!(cached_value(&root), n(42));
+}
+
+#[test]
+fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
+    let context = test_context();
+    let promise = PromisedValue::new(context.values(), "lazy checkpoint dependency");
+    let lazy = LazyValue::from_application(
+        context.values(),
+        closed_function_value(1, TestExpr::Local(0)),
+        Arc::from([Value::Promised(promise.clone())]),
+    );
+    let root = lazy.root(context.values());
+    let wait = lazy_root_wait(&context, &root).expect("lazy producer should be admitted");
+
+    assert_eq!(
+        context.pump_wait(&wait, 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "one bounded transition should publish resumable progress"
+    );
+    assert!(lazy.source_snapshot(context.values()).is_none());
+    assert!(lazy.cached(context.values()).is_none());
+    assert!(context.values().with_runtime_value_access(|access| {
+        root.access(&access)
+            .expect("lazy root and access should share one runtime")
+            .checkpoint_snapshot()
+            .is_some()
+    }));
+
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the lazy-owned checkpoint should survive collection while blocked");
+    set_promise(&context, &promise, n(42)).expect("the dependency should accept its assignment");
+    for _ in 0..32 {
+        if !matches!(context.poll_wait(&wait), EvaluationWaitPoll::Pending(_)) {
+            break;
+        }
+        assert_ne!(
+            context.pump_wait(&wait, 64),
+            EvaluationPumpOutcome::NoProgress,
+            "assigned dependency should resume the exact checkpoint"
+        );
+    }
+
+    assert!(matches!(
+        context.poll_wait(&wait),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert_eq!(cached_value(&lazy), n(42));
+    assert!(context.values().with_runtime_value_access(|access| {
+        root.access(&access)
+            .expect("lazy root and access should share one runtime")
+            .checkpoint_snapshot()
+            .is_none()
+    }));
 }
 
 #[test]

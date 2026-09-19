@@ -577,6 +577,18 @@ producer's demand owner closes, another session may reclaim the reusable lazy
 without poisoning its result cell. Task-owned reflection fixpoints retain
 their direct owner check. Assignment-style `PromisedValue` cells hold a raw
 one-write assignment rather than a computed result cache.
+
+An ordinary partially evaluated WHNF source is retained by the managed lazy,
+not by the session which first demanded it. Its producer slot changes from the
+original source to one field-opaque typed edge to the evaluator-owned managed
+WHNF cell. A coordinator machine for this family is only a route adapter: it
+holds no duplicate focus or continuation state, and a later same-runtime
+session polls the exact checkpoint through the lazy. Terminal cache
+publication removes the checkpoint after installing the result. The other
+specialized lazy producer families are still coordinator-owned during the
+current staged migration; they must move behind the same managed checkpoint
+protocol before producer routes can become entirely machine-free.
+
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and
 stays uncached, so later assignment can satisfy a new demand. Assigned promises

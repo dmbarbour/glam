@@ -5236,6 +5236,50 @@ are removed by W6G.1f.2 when that route begins polling the installed state.
 
 ###### W6G.1f.2 — Demand-backed producer routes
 
+Implementation is deliberately reordered around the representation boundary:
+
+1. **W6G.1f.2a** moves the ordinary WHNF producer family from its
+   coordinator-owned `WhnfComputation` into the lazy's exact managed
+   checkpoint. The coordinator retains a stateless route adapter temporarily;
+   no second WHNF state may remain in that adapter.
+2. **W6G.1f.3** migrates the remaining producer families. This must precede
+   removal of the coordinator machine because those families do not yet have
+   a managed checkpoint representation.
+3. **W6G.1f.2b** performs the coordinator cutover below once every route can
+   poll state owned by its lazy. It removes the temporary adapters and owns
+   the final subscriber/claim race matrix.
+
+This is staging, not a weakened target: after W6G.1f.2a the WHNF family has
+one lazy-owned authoritative state, and after W6G.1f.2b no producer family has
+a durable machine in its coordinator record.
+
+For W6G.1f.2a, reuse the already-managed cell owned by `WhnfComputation`
+rather than walking or reallocating its state. Under one matching access,
+project its typed edge while the registered root remains live, install that
+edge into the lazy, then retire the superseded root. Later polls project the
+same cell through the lazy. Force budget yield and dependency suspension on
+both sides of this handoff, and prove terminal cache publication removes the
+checkpoint while retaining the existing result-before-producer-release rule.
+
+**W6G.1f.2a complete (2026-09-19).** Ordinary WHNF production now promotes
+its seed once, projects the exact existing managed-state allocation while its
+registered root remains live, publishes that typed edge into the owning lazy,
+and drops the superseded root only after publication. The coordinator retains
+only a state-free `WhnfCheckpoint` route marker for this family. Every later
+poll reaches the same cell through the lazy; terminal success or failure uses
+the existing cache-first publication path, which removes the producer
+checkpoint before the route reports completion.
+
+Forced budget-yield and promise-dependency fixtures prove that collection
+between polls retains the exact focus and continuation state. A forced
+cross-session fixture closes the first producer session, observes its old
+wait as abandoned, then resumes the lazy-owned checkpoint from a later
+same-runtime session without rerunning the source callback. Source-backed
+root-publication, managed-access, persistent-edge, producer-family, and WHNF
+checkpoint inventories classify the new handoff. The remaining nine producer
+families still retain coordinator-owned state and therefore remain assigned
+to W6G.1f.3 before the route-machine cutover in W6G.1f.2b.
+
 Reduce the coordinator's lazy-producer record to transient claim, blocker,
 subscriber, generation, and wake state. The record owns no durable producer
 machine. Admission receives a temporary root from causal demand, atomically

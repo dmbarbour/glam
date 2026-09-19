@@ -54,13 +54,6 @@ pub(crate) struct ManagedLazyCell {
     result: OnceLock<LazyResult>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
-    )
-)]
 enum ManagedLazyProducerState {
     Source(LazySource),
     Checkpoint(ManagedLazyCheckpointEdge),
@@ -764,13 +757,6 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
-        )
-    )]
     pub(crate) fn checkpoint_snapshot(&self) -> Option<ManagedLazyCheckpointEdge> {
         let _ = self.authority.runtime_id();
         if self.cell.result.get().is_some() {
@@ -795,13 +781,6 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "W6G.1f.1 stages checkpoint ownership before W6G.1f.2 routes production demand through it"
-        )
-    )]
     pub(crate) fn install_checkpoint(
         &self,
         checkpoint: ManagedLazyCheckpointEdge,

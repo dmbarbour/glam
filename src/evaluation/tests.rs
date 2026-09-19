@@ -3794,6 +3794,69 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
 }
 
 #[test]
+fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
+    let fixture = SameRuntimeFixture::new();
+    let forced = Arc::new(AtomicUsize::new(0));
+    let (lazy, promise, abandoned_wait) = {
+        let owner = fixture.context();
+        let promise = PromisedValue::new(owner.values(), "checkpointed session handoff");
+        let lazy = LazyValue::semantic_thunk(owner.values(), "checkpointed producer", {
+            let forced = forced.clone();
+            let promise = promise.clone();
+            move |_| {
+                forced.fetch_add(1, Ordering::AcqRel);
+                Ok(Value::Promised(promise.clone()))
+            }
+        });
+        let root = lazy.root(owner.values());
+        let wait = crate::eval::lazy_root_wait(&owner, &root)
+            .expect("the first session should admit the lazy producer");
+        let mut blocked = false;
+        for _ in 0..8 {
+            match owner.pump_wait(&wait, 64) {
+                EvaluationPumpOutcome::BudgetExhausted => {}
+                EvaluationPumpOutcome::NoProgress => {
+                    blocked = true;
+                    break;
+                }
+                other => panic!("unassigned promise should block the producer, got {other:?}"),
+            }
+        }
+        assert!(
+            blocked,
+            "producer did not reach its deterministic dependency"
+        );
+        assert_eq!(forced.load(Ordering::Acquire), 1);
+        assert!(lazy.source_snapshot(owner.values()).is_none());
+        assert!(owner.values().with_runtime_value_access(|access| {
+            root.access(&access)
+                .expect("lazy root and access should share one runtime")
+                .checkpoint_snapshot()
+                .is_some()
+        }));
+        (lazy, promise, wait)
+    };
+    let observer = fixture.context();
+
+    assert_eq!(
+        observer.poll_wait(&abandoned_wait),
+        EvaluationWaitPoll::Abandoned
+    );
+    set_promise(&observer, &promise, Value::Number(53.into()))
+        .expect("the shared dependency should accept its assignment");
+    assert_eq!(
+        crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
+            .expect("a later session should resume the lazy-owned checkpoint"),
+        Value::Number(53.into())
+    );
+    assert_eq!(
+        forced.load(Ordering::Acquire),
+        1,
+        "session handoff must not replay the source callback"
+    );
+}
+
+#[test]
 fn owner_session_drop_fails_task_promises_but_not_host_promises() {
     let fixture = SameRuntimeFixture::new();
     let (task_promise, task_wait) = {

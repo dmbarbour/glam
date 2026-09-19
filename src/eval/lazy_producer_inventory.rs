@@ -18,6 +18,9 @@ const EXPECTED_VARIANTS: &[&str] = &[
     "Produce",
     "Reflection",
     "Whnf",
+    // W6G.1f.2a carries no producer state: it marks that the canonical WHNF
+    // state has moved into the owning managed lazy.
+    "WhnfCheckpoint",
 ];
 
 #[test]

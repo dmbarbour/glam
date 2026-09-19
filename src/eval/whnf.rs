@@ -19,7 +19,9 @@ use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 pub(crate) mod managed_state;
-use managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
+use managed_state::{
+    ManagedLazyCheckpointEdge, ManagedWhnfAccess, ManagedWhnfAccessError, ManagedWhnfRoot,
+};
 
 /// One resumable request to reduce a value's outer deferred shells to WHNF.
 ///
@@ -721,6 +723,24 @@ impl WhnfComputation {
         }
     }
 
+    /// Projects the computation's canonical state for installation beneath
+    /// its owning managed lazy. The computation's registered root remains live
+    /// until the caller finishes the source-to-checkpoint transition.
+    pub(crate) fn checkpoint_edge_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+    ) -> Option<managed_state::ManagedLazyCheckpointEdge> {
+        self.promote_seed_in(access);
+        let DurableWhnfCheckpoint::ManagedDemand { state, .. } = &self.checkpoint else {
+            return None;
+        };
+        Some(
+            state
+                .checkpoint_edge_in(access)
+                .expect("WHNF checkpoint and producer access must share one runtime"),
+        )
+    }
+
     pub(crate) fn from_application_checkpoint_in(
         access: &EvaluationValueAccess<'_>,
         function: Value,
@@ -869,37 +889,13 @@ impl WhnfComputation {
                 panic!("poison must be reported while locking managed WHNF state")
             }
         });
-        let transition = managed.with_state_transition(|work| {
-            let status = drive_regional_state_in_place(access, work, budget, &mut reduce);
-            (status, work.poll_observation())
-        });
-        let (status, observed) = match transition {
+        let (status, observed) = match drive_managed_state_in(&managed, access, budget, &mut reduce)
+        {
             Ok(result) => result,
-            Err(ManagedWhnfAccessError::RuntimeMismatch) => {
-                unreachable!("managed WHNF access was already provenance-checked")
-            }
-            Err(ManagedWhnfAccessError::Poisoned) => {
-                let failure = Arc::new(EvaluationFailure::message(
-                    "managed WHNF evaluation state was poisoned by an earlier unwind",
-                ));
-                return WhnfPoll::Failed(access.values().root_runtime_failure(failure));
-            }
+            Err(error) => return managed_state_error_poll(access, error),
         };
         *observation = observed;
-        match status {
-            RegionalWhnfStatus::Ready(value) => {
-                WhnfPoll::Ready(access.values().root_runtime_value(value))
-            }
-            RegionalWhnfStatus::Boundary(request) => match request {
-                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-            },
-            RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
-            RegionalWhnfStatus::Failed(failure) => {
-                WhnfPoll::Failed(access.values().root_runtime_failure(failure))
-            }
-        }
+        regional_status_poll(access, status)
     }
 
     /// Polls the production outer-shell reducer beneath one managed region.
@@ -913,6 +909,73 @@ impl WhnfComputation {
         budget: &mut WhnfStepBudget,
     ) -> WhnfPoll {
         self.poll_in(access, budget, reduce_semantic_shell)
+    }
+}
+
+impl ManagedLazyCheckpointEdge {
+    /// Polls the exact state installed beneath a managed lazy without creating
+    /// another registered root or rebuilding its continuation containers.
+    pub(crate) fn poll_semantic_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        budget: &mut WhnfStepBudget,
+    ) -> WhnfPoll {
+        let managed = self.access(access);
+        let mut reduce = reduce_semantic_shell;
+        let (status, _) = match drive_managed_state_in(&managed, access, budget, &mut reduce) {
+            Ok(result) => result,
+            Err(error) => return managed_state_error_poll(access, error),
+        };
+        regional_status_poll(access, status)
+    }
+}
+
+fn drive_managed_state_in(
+    managed: &ManagedWhnfAccess<'_, '_>,
+    access: &EvaluationValueAccess<'_>,
+    budget: &mut WhnfStepBudget,
+    reduce: &mut impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
+) -> Result<(RegionalWhnfStatus, WhnfPollObservation), ManagedWhnfAccessError> {
+    managed.with_state_transition(|work| {
+        let status = drive_regional_state_in_place(access, work, budget, reduce);
+        (status, work.poll_observation())
+    })
+}
+
+fn managed_state_error_poll(
+    access: &EvaluationValueAccess<'_>,
+    error: ManagedWhnfAccessError,
+) -> WhnfPoll {
+    match error {
+        ManagedWhnfAccessError::RuntimeMismatch => {
+            unreachable!("managed WHNF access was already provenance-checked")
+        }
+        ManagedWhnfAccessError::Poisoned => {
+            let failure = Arc::new(EvaluationFailure::message(
+                "managed WHNF evaluation state was poisoned by an earlier unwind",
+            ));
+            WhnfPoll::Failed(access.values().root_runtime_failure(failure))
+        }
+    }
+}
+
+fn regional_status_poll(
+    access: &EvaluationValueAccess<'_>,
+    status: RegionalWhnfStatus,
+) -> WhnfPoll {
+    match status {
+        RegionalWhnfStatus::Ready(value) => {
+            WhnfPoll::Ready(access.values().root_runtime_value(value))
+        }
+        RegionalWhnfStatus::Boundary(request) => match request {
+            RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
+            RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
+            RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+        },
+        RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
+        RegionalWhnfStatus::Failed(failure) => {
+            WhnfPoll::Failed(access.values().root_runtime_failure(failure))
+        }
     }
 }
 

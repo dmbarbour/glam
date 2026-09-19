@@ -451,13 +451,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
-        "managed lazy owner plus one typed source owner or source-oriented WhnfComputation; host work retains one rooted callback result after invocation, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
+        "managed lazy owner plus one specialized producer machine; ordinary WHNF uses only a state-free route marker after publishing its exact managed checkpoint beneath the lazy, host work retains one rooted callback result after invocation, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
         "yielded or dependency-blocked evaluator task",
         "root publication within the producing evaluator step or existing promise-root ownership",
         "lazy/promise completion, failure, cancellation, or machine retirement",
         ManagedRootSurface,
         RootSurface,
-        "GCI11R-002B / W2B.2"
+        "GCI11R-002B / W2B.2 / W6G.1f.2a"
     ),
     closed_durable!(
         "src/eval/whnf.rs",
