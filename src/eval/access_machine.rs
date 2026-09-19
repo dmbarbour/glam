@@ -6,20 +6,27 @@
 //! scheduler adapter.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, TryLockError};
+
+use glam_gc::{Root, Trace, Visitor};
 
 use crate::core::{
-    Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, List, RuntimeValueAccess, Value,
+    Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, List, ManagedDropRecord, ManagedFamily,
+    RuntimeValueAccess, Value, managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
+    interpret_whnf_poll, poll_whnf_computation,
 };
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation, WhnfPoll,
+    drive_regional_in_place, reduce_semantic_shell,
+};
 
 pub(super) enum AccessMachinePoll {
     Ready(RuntimeValueRoot),
@@ -53,38 +60,90 @@ pub(crate) enum ConversionPoll<T> {
 }
 
 pub(crate) struct KeyConversionMachine {
-    state: KeyConversionState,
-    source_owner: Option<LazyId>,
-}
-
-enum KeyConversionState {
-    Demand(WhnfComputation),
-    Dict(DictConversion),
-    List(Box<KeyListMachine>),
-}
-
-enum ClassifiedKeyValue {
-    Ready(Key),
-    Dict(Vec<(Key, RuntimeValueRoot)>),
-    List(RuntimeValueRoot),
-    Invalid,
-}
-
-struct DictConversion {
-    members: Vec<(Key, RuntimeValueRoot)>,
-    next: usize,
-    converted: Vec<(Key, Key)>,
-    child: Option<Box<KeyConversionMachine>>,
+    checkpoint: DurableKeyConversionCheckpoint,
 }
 
 pub(crate) struct KeyListMachine {
-    source: Option<WhnfComputation>,
-    lists: Vec<RuntimeValueRoot>,
-    chunk: Option<WhnfComputation>,
-    chunk_suffix: Option<RuntimeValueRoot>,
-    child: Option<Box<KeyConversionMachine>>,
+    checkpoint: DurableKeyListCheckpoint,
+}
+
+enum DurableKeyConversionCheckpoint {
+    Seed {
+        value: RuntimeValueRoot,
+        source_owner: Option<LazyId>,
+    },
+    Managed(ManagedKeyConversionRoot),
+}
+
+enum DurableKeyListCheckpoint {
+    Seed {
+        value: RuntimeValueRoot,
+        ready: bool,
+        source_owner: Option<LazyId>,
+    },
+    Managed(ManagedKeyConversionRoot),
+}
+
+struct ManagedKeyConversionRoot {
+    root: Root<ManagedKeyConversionCell>,
+}
+
+struct ManagedKeyConversionCell {
+    state: Mutex<ManagedKeyConversionState>,
+}
+
+enum ManagedKeyConversionState {
+    Key(RegionalKeyConversion),
+    List(Box<RegionalKeyList>),
+}
+
+struct RegionalKeyConversion {
+    state: RegionalKeyConversionState,
+    source_owner: Option<LazyId>,
+}
+
+enum RegionalKeyConversionState {
+    Demand(RegionalWhnfWork),
+    Dict(RegionalDictConversion),
+    List(Box<RegionalKeyList>),
+}
+
+enum RegionalClassifiedKeyValue {
+    Ready(Key),
+    Dict(Vec<(Key, Value)>),
+    List(Value),
+    Invalid,
+}
+
+struct RegionalDictConversion {
+    members: Vec<(Key, Value)>,
+    next: usize,
+    converted: Vec<(Key, Key)>,
+    child: Option<Box<RegionalKeyConversion>>,
+}
+
+struct RegionalKeyList {
+    source: Option<RegionalWhnfWork>,
+    lists: Vec<Value>,
+    chunk: Option<RegionalWhnfWork>,
+    chunk_suffix: Option<Value>,
+    child: Option<Box<RegionalKeyConversion>>,
     converted: Vec<Key>,
     source_owner: Option<LazyId>,
+}
+
+enum RegionalConversionPoll<T> {
+    Ready(T),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
+enum DurableConversionPoll<T> {
+    Ready(T),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(RuntimeFailureRoot),
 }
 
 impl AccessMachine {
@@ -240,8 +299,10 @@ impl AccessMachine {
 impl KeyConversionMachine {
     pub(crate) fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
-            state: KeyConversionState::Demand(owned_whnf(value, source_owner)),
-            source_owner,
+            checkpoint: DurableKeyConversionCheckpoint::Seed {
+                value,
+                source_owner,
+            },
         }
     }
 
@@ -267,121 +328,57 @@ impl KeyConversionMachine {
     pub(crate) fn poll_optional(
         &mut self,
         poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
+        _context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Option<Key>> {
-        match &mut self.state {
-            KeyConversionState::Demand(computation) => {
-                let value = match poll_whnf_computation(
-                    computation,
-                    poll_context,
-                    durable_context,
-                    step_budget,
-                ) {
-                    WhnfOwnerPoll::Ready(value) => value,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return ConversionPoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return ConversionPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => {
-                        return ConversionPoll::Failed(failure);
-                    }
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("key conversion produced an external {boundary:?} boundary")
-                    }
-                };
-                match classify_key_value(context, &value) {
-                    ClassifiedKeyValue::Ready(key) => ConversionPoll::Ready(Some(key)),
-                    ClassifiedKeyValue::List(value) => {
-                        self.state = KeyConversionState::List(Box::new(
-                            KeyListMachine::from_ready(value, self.source_owner),
-                        ));
-                        ConversionPoll::Yielded
-                    }
-                    ClassifiedKeyValue::Dict(members) => {
-                        self.state = KeyConversionState::Dict(DictConversion {
-                            members,
-                            next: 0,
-                            converted: Vec::new(),
-                            child: None,
-                        });
-                        ConversionPoll::Yielded
-                    }
-                    ClassifiedKeyValue::Invalid => ConversionPoll::Ready(None),
-                }
-            }
-            KeyConversionState::Dict(dict) => {
-                if let Some(child) = &mut dict.child {
-                    return match child.poll_optional(
-                        poll_context,
-                        context,
-                        durable_context,
-                        step_budget,
-                    ) {
-                        ConversionPoll::Ready(Some(value)) => {
-                            let (key, _) = &dict.members[dict.next - 1];
-                            if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                                dict.converted.push((key.clone(), value));
-                            }
-                            dict.child = None;
-                            ConversionPoll::Yielded
-                        }
-                        ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
-                        ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-                        ConversionPoll::Yielded => ConversionPoll::Yielded,
-                        ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
-                    };
-                }
-                let Some((_, value)) = dict.members.get(dict.next) else {
-                    return ConversionPoll::Ready(Some(Key::Dict(Arc::from(std::mem::take(
-                        &mut dict.converted,
-                    )))));
-                };
-                dict.next += 1;
-                dict.child = Some(Box::new(KeyConversionMachine::new(
-                    value.clone(),
-                    self.source_owner,
-                )));
-                ConversionPoll::Yielded
-            }
-            KeyConversionState::List(list) => {
-                match list.poll_optional(poll_context, context, durable_context, step_budget) {
-                    ConversionPoll::Ready(Some(items)) => {
-                        ConversionPoll::Ready(Some(Key::List(Arc::from(items))))
-                    }
-                    ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
-                    ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-                    ConversionPoll::Yielded => ConversionPoll::Yielded,
-                    ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
-                }
-            }
-        }
+        let result = poll_context.with_value_access(durable_context, |access| {
+            self.promote_in(&access);
+            let DurableKeyConversionCheckpoint::Managed(root) = &self.checkpoint else {
+                unreachable!("key conversion seed must promote under access")
+            };
+            root.poll_key_in(&access, step_budget)
+        });
+        interpret_durable_conversion(result, durable_context)
+    }
+
+    fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
+        let DurableKeyConversionCheckpoint::Seed {
+            value,
+            source_owner,
+        } = &self.checkpoint
+        else {
+            return;
+        };
+        let state = ManagedKeyConversionState::Key(RegionalKeyConversion::new(
+            access,
+            access.clone_root(value),
+            *source_owner,
+        ));
+        self.checkpoint = DurableKeyConversionCheckpoint::Managed(
+            ManagedKeyConversionRoot::new_in(access, state),
+        );
     }
 }
 
 impl KeyListMachine {
     fn new(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
-            source: Some(owned_whnf(value, source_owner)),
-            lists: Vec::new(),
-            chunk: None,
-            chunk_suffix: None,
-            child: None,
-            converted: Vec::new(),
-            source_owner,
+            checkpoint: DurableKeyListCheckpoint::Seed {
+                value,
+                ready: false,
+                source_owner,
+            },
         }
     }
 
     fn from_ready(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
         Self {
-            source: None,
-            lists: vec![value],
-            chunk: None,
-            chunk_suffix: None,
-            child: None,
-            converted: Vec::new(),
-            source_owner,
+            checkpoint: DurableKeyListCheckpoint::Seed {
+                value,
+                ready: true,
+                source_owner,
+            },
         }
     }
 
@@ -415,123 +412,532 @@ impl KeyListMachine {
     pub(crate) fn poll_optional(
         &mut self,
         poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
+        _context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Option<Vec<Key>>> {
+        let result = poll_context.with_value_access(durable_context, |access| {
+            self.promote_in(&access);
+            let DurableKeyListCheckpoint::Managed(root) = &self.checkpoint else {
+                unreachable!("key-list seed must promote under access")
+            };
+            root.poll_list_in(&access, step_budget)
+        });
+        interpret_durable_conversion(result, durable_context)
+    }
+
+    fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
+        let DurableKeyListCheckpoint::Seed {
+            value,
+            ready,
+            source_owner,
+        } = &self.checkpoint
+        else {
+            return;
+        };
+        let value = access.clone_root(value);
+        let state = if *ready {
+            RegionalKeyList::from_ready(access, value, *source_owner)
+        } else {
+            RegionalKeyList::new(access, value, *source_owner)
+        };
+        self.checkpoint = DurableKeyListCheckpoint::Managed(ManagedKeyConversionRoot::new_in(
+            access,
+            ManagedKeyConversionState::List(Box::new(state)),
+        ));
+    }
+}
+
+impl ManagedKeyConversionRoot {
+    fn new_in(access: &EvaluationValueAccess<'_>, state: ManagedKeyConversionState) -> Self {
+        let edge = access
+            .values()
+            .allocator::<ManagedKeyConversionCell>()
+            .expect("managed key conversion representation must fit one collector run")
+            .alloc(ManagedKeyConversionCell {
+                state: Mutex::new(state),
+            });
+        Self {
+            root: access.values().root(edge),
+        }
+    }
+
+    fn poll_key_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> DurableConversionPoll<Option<Key>> {
+        self.with_state_transition(access, |state| {
+            let ManagedKeyConversionState::Key(state) = state else {
+                panic!("key conversion wrapper retained list conversion state")
+            };
+            state.poll_optional_in(access, step_budget)
+        })
+    }
+
+    fn poll_list_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> DurableConversionPoll<Option<Vec<Key>>> {
+        self.with_state_transition(access, |state| {
+            let ManagedKeyConversionState::List(state) = state else {
+                panic!("key-list wrapper retained scalar conversion state")
+            };
+            state.poll_optional_in(access, step_budget)
+        })
+    }
+
+    fn with_state_transition<T>(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        transition: impl FnOnce(&mut ManagedKeyConversionState) -> RegionalConversionPoll<T>,
+    ) -> DurableConversionPoll<T> {
+        assert!(
+            access.values().admits_root(&self.root),
+            "key conversion checkpoint must share the evaluator value domain"
+        );
+        let owner = access.values().project_root(&self.root);
+        let cell = access.values().get(&self.root);
+        let mut state = match cell.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return DurableConversionPoll::Failed(access.values().root_runtime_failure(
+                    Arc::new(EvaluationFailure::message(
+                        "managed key conversion state was poisoned by an earlier unwind",
+                    )),
+                ));
+            }
+        };
+        // SAFETY: the registered wrapper root keeps `owner` live in this
+        // exact access region. The cell mutex excludes another transition,
+        // and both visitors exhaustively report every raw value and nested
+        // regional-WHNF edge before and after the mutation.
+        let result = unsafe {
+            access.values().with_managed_edge_state_transition(
+                &owner,
+                &mut *state,
+                ManagedKeyConversionState::trace_managed_edges,
+                ManagedKeyConversionState::trace_managed_edges,
+                transition,
+            )
+        };
+        match result {
+            RegionalConversionPoll::Ready(value) => DurableConversionPoll::Ready(value),
+            RegionalConversionPoll::Boundary(request) => DurableConversionPoll::Boundary(request),
+            RegionalConversionPoll::Yielded => DurableConversionPoll::Yielded,
+            RegionalConversionPoll::Failed(failure) => {
+                DurableConversionPoll::Failed(access.values().root_runtime_failure(failure))
+            }
+        }
+    }
+}
+
+impl RegionalKeyConversion {
+    fn new(access: &EvaluationValueAccess<'_>, value: Value, source_owner: Option<LazyId>) -> Self {
+        Self {
+            state: RegionalKeyConversionState::Demand(regional_whnf(access, value, source_owner)),
+            source_owner,
+        }
+    }
+
+    fn poll_optional_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalConversionPoll<Option<Key>> {
+        match &mut self.state {
+            RegionalKeyConversionState::Demand(computation) => {
+                let value = match poll_regional_whnf(computation, access, step_budget) {
+                    RegionalConversionPoll::Ready(value) => value,
+                    RegionalConversionPoll::Boundary(request) => {
+                        return RegionalConversionPoll::Boundary(request);
+                    }
+                    RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
+                    RegionalConversionPoll::Failed(failure) => {
+                        return RegionalConversionPoll::Failed(failure);
+                    }
+                };
+                match classify_regional_key_value(access, value) {
+                    RegionalClassifiedKeyValue::Ready(key) => {
+                        RegionalConversionPoll::Ready(Some(key))
+                    }
+                    RegionalClassifiedKeyValue::List(value) => {
+                        self.state = RegionalKeyConversionState::List(Box::new(
+                            RegionalKeyList::from_ready(access, value, self.source_owner),
+                        ));
+                        RegionalConversionPoll::Yielded
+                    }
+                    RegionalClassifiedKeyValue::Dict(members) => {
+                        self.state = RegionalKeyConversionState::Dict(RegionalDictConversion {
+                            members,
+                            next: 0,
+                            converted: Vec::new(),
+                            child: None,
+                        });
+                        RegionalConversionPoll::Yielded
+                    }
+                    RegionalClassifiedKeyValue::Invalid => RegionalConversionPoll::Ready(None),
+                }
+            }
+            RegionalKeyConversionState::Dict(dict) => {
+                if let Some(child) = &mut dict.child {
+                    return match child.poll_optional_in(access, step_budget) {
+                        RegionalConversionPoll::Ready(Some(value)) => {
+                            let (key, _) = &dict.members[dict.next - 1];
+                            if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
+                                dict.converted.push((key.clone(), value));
+                            }
+                            dict.child = None;
+                            RegionalConversionPoll::Yielded
+                        }
+                        RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
+                        RegionalConversionPoll::Boundary(request) => {
+                            RegionalConversionPoll::Boundary(request)
+                        }
+                        RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+                        RegionalConversionPoll::Failed(failure) => {
+                            RegionalConversionPoll::Failed(failure)
+                        }
+                    };
+                }
+                let Some((_, value)) = dict.members.get(dict.next) else {
+                    return RegionalConversionPoll::Ready(Some(Key::Dict(Arc::from(
+                        std::mem::take(&mut dict.converted),
+                    ))));
+                };
+                dict.next += 1;
+                dict.child = Some(Box::new(Self::new(
+                    access,
+                    access.values().duplicate_value(value),
+                    self.source_owner,
+                )));
+                RegionalConversionPoll::Yielded
+            }
+            RegionalKeyConversionState::List(list) => {
+                match list.poll_optional_in(access, step_budget) {
+                    RegionalConversionPoll::Ready(Some(items)) => {
+                        RegionalConversionPoll::Ready(Some(Key::List(Arc::from(items))))
+                    }
+                    RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
+                    RegionalConversionPoll::Boundary(request) => {
+                        RegionalConversionPoll::Boundary(request)
+                    }
+                    RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+                    RegionalConversionPoll::Failed(failure) => {
+                        RegionalConversionPoll::Failed(failure)
+                    }
+                }
+            }
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match &self.state {
+            RegionalKeyConversionState::Demand(work) => work.trace_managed_edges(visitor),
+            RegionalKeyConversionState::Dict(dict) => dict.trace_managed_edges(visitor),
+            RegionalKeyConversionState::List(list) => list.trace_managed_edges(visitor),
+        }
+    }
+}
+
+impl RegionalDictConversion {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for (_, value) in &self.members {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(child) = &self.child {
+            child.trace_managed_edges(visitor);
+        }
+    }
+}
+
+impl RegionalKeyList {
+    fn new(access: &EvaluationValueAccess<'_>, value: Value, source_owner: Option<LazyId>) -> Self {
+        Self {
+            source: Some(regional_whnf(access, value, source_owner)),
+            lists: Vec::new(),
+            chunk: None,
+            chunk_suffix: None,
+            child: None,
+            converted: Vec::new(),
+            source_owner,
+        }
+    }
+
+    fn from_ready(
+        _access: &EvaluationValueAccess<'_>,
+        value: Value,
+        source_owner: Option<LazyId>,
+    ) -> Self {
+        Self {
+            source: None,
+            lists: vec![value],
+            chunk: None,
+            chunk_suffix: None,
+            child: None,
+            converted: Vec::new(),
+            source_owner,
+        }
+    }
+
+    fn poll_optional_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalConversionPoll<Option<Vec<Key>>> {
         if let Some(child) = &mut self.child {
-            return match child.poll_optional(poll_context, context, durable_context, step_budget) {
-                ConversionPoll::Ready(Some(key)) => {
+            return match child.poll_optional_in(access, step_budget) {
+                RegionalConversionPoll::Ready(Some(key)) => {
                     self.converted.push(key);
                     self.child = None;
-                    ConversionPoll::Yielded
+                    RegionalConversionPoll::Yielded
                 }
-                ConversionPoll::Ready(None) => ConversionPoll::Ready(None),
-                ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-                ConversionPoll::Yielded => ConversionPoll::Yielded,
-                ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
+                RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
+                RegionalConversionPoll::Boundary(request) => {
+                    RegionalConversionPoll::Boundary(request)
+                }
+                RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
             };
         }
 
         if let Some(computation) = &mut self.source {
-            let value = match poll_whnf_computation(
-                computation,
-                poll_context,
-                durable_context,
-                step_budget,
-            ) {
-                WhnfOwnerPoll::Ready(value) => value,
-                WhnfOwnerPoll::Pending(dependency) => {
-                    return ConversionPoll::Pending(dependency);
+            let value = match poll_regional_whnf(computation, access, step_budget) {
+                RegionalConversionPoll::Ready(value) => value,
+                RegionalConversionPoll::Boundary(request) => {
+                    return RegionalConversionPoll::Boundary(request);
                 }
-                WhnfOwnerPoll::Yielded => return ConversionPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => return ConversionPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("path-list source produced an external {boundary:?} boundary")
+                RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => {
+                    return RegionalConversionPoll::Failed(failure);
                 }
             };
-            let list = match value_as_list_root(context, value, "path-list operand", false) {
+            let list = match value_as_regional_list(access, value, "path-list operand", false) {
                 Ok(list) => list,
-                Err(error) => return ConversionPoll::Failed(root_halt(context, error)),
+                Err(error) => {
+                    return RegionalConversionPoll::Failed(error.into_permanent_failure());
+                }
             };
             self.source = None;
             self.lists.push(list);
-            return ConversionPoll::Yielded;
+            return RegionalConversionPoll::Yielded;
         }
 
         if let Some(computation) = &mut self.chunk {
-            let value = match poll_whnf_computation(
-                computation,
-                poll_context,
-                durable_context,
-                step_budget,
-            ) {
-                WhnfOwnerPoll::Ready(value) => value,
-                WhnfOwnerPoll::Pending(dependency) => {
-                    return ConversionPoll::Pending(dependency);
+            let value = match poll_regional_whnf(computation, access, step_budget) {
+                RegionalConversionPoll::Ready(value) => value,
+                RegionalConversionPoll::Boundary(request) => {
+                    return RegionalConversionPoll::Boundary(request);
                 }
-                WhnfOwnerPoll::Yielded => return ConversionPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => return ConversionPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("lazy list chunk produced an external {boundary:?} boundary")
+                RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => {
+                    return RegionalConversionPoll::Failed(failure);
                 }
             };
-            let list = match value_as_list_root(context, value, "lazy list chunk", true) {
+            let list = match value_as_regional_list(access, value, "lazy list chunk", true) {
                 Ok(list) => list,
-                Err(error) => return ConversionPoll::Failed(root_halt(context, error)),
+                Err(error) => {
+                    return RegionalConversionPoll::Failed(error.into_permanent_failure());
+                }
             };
             self.chunk = None;
             if let Some(suffix) = self.chunk_suffix.take() {
                 self.lists.push(suffix);
             }
             self.lists.push(list);
-            return ConversionPoll::Yielded;
+            return RegionalConversionPoll::Yielded;
         }
 
         let Some(list) = self.lists.pop() else {
-            return ConversionPoll::Ready(Some(std::mem::take(&mut self.converted)));
+            return RegionalConversionPoll::Ready(Some(std::mem::take(&mut self.converted)));
         };
-        let step = context.with_value_access(|access| {
-            let Value::List(list) = access.clone_root(&list) else {
-                unreachable!("key-list work must retain list roots")
-            };
-            list.pop_front_step_by(
-                &mut |value| access.values().duplicate_value(value),
-                &mut |thunk| thunk.duplicate_as_value_in(access.values()),
-            )
-        });
+        let Value::List(list) = list else {
+            unreachable!("regional key-list work must retain list values")
+        };
+        let step = list.pop_front_step_by(
+            &mut |value| access.values().duplicate_value(value),
+            &mut |thunk| thunk.duplicate_as_value_in(access.values()),
+        );
         match step {
-            ListFrontStep::Empty => ConversionPoll::Yielded,
+            ListFrontStep::Empty => RegionalConversionPoll::Yielded,
             ListFrontStep::Item { item, tail } => {
-                self.lists.push(context.root_value(Value::List(tail)));
+                self.lists.push(Value::List(tail));
                 match item {
                     ListItem::Byte(byte) => {
                         self.converted.push(Key::Number(Number::from_u8(byte)));
                     }
                     ListItem::Value(value) => {
-                        self.child = Some(Box::new(KeyConversionMachine::new(
-                            context.root_value(value),
+                        self.child = Some(Box::new(RegionalKeyConversion::new(
+                            access,
+                            value,
                             self.source_owner,
                         )));
                     }
                 }
-                ConversionPoll::Yielded
+                RegionalConversionPoll::Yielded
             }
             ListFrontStep::Deferred { deferred, suffix } => {
-                self.chunk = Some(owned_whnf(context.root_value(deferred), self.source_owner));
-                self.chunk_suffix = Some(context.root_value(Value::List(suffix)));
-                ConversionPoll::Yielded
+                self.chunk = Some(regional_whnf(access, deferred, self.source_owner));
+                self.chunk_suffix = Some(Value::List(suffix));
+                RegionalConversionPoll::Yielded
             }
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(source) = &self.source {
+            source.trace_managed_edges(visitor);
+        }
+        for list in &self.lists {
+            trace_compatibility_value_managed_edges(list, visitor);
+        }
+        if let Some(chunk) = &self.chunk {
+            chunk.trace_managed_edges(visitor);
+        }
+        if let Some(suffix) = &self.chunk_suffix {
+            trace_compatibility_value_managed_edges(suffix, visitor);
+        }
+        if let Some(child) = &self.child {
+            child.trace_managed_edges(visitor);
         }
     }
 }
 
-fn owned_whnf(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> WhnfComputation {
-    let computation = WhnfComputation::from_root(value);
-    match source_owner {
-        Some(source_owner) => computation.with_source_owner(source_owner),
-        None => computation,
+impl ManagedKeyConversionState {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Key(state) => state.trace_managed_edges(visitor),
+            Self::List(state) => state.trace_managed_edges(visitor),
+        }
     }
+}
+
+fn regional_whnf(
+    access: &EvaluationValueAccess<'_>,
+    value: Value,
+    source_owner: Option<LazyId>,
+) -> RegionalWhnfWork {
+    let work = RegionalWhnfWork::from_focus(access, value);
+    match source_owner {
+        Some(source_owner) => work.with_source_owner(source_owner),
+        None => work,
+    }
+}
+
+fn poll_regional_whnf(
+    work: &mut RegionalWhnfWork,
+    access: &EvaluationValueAccess<'_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> RegionalConversionPoll<Value> {
+    match drive_regional_in_place(access, work, step_budget, reduce_semantic_shell) {
+        RegionalWhnfStatus::Ready(value) => RegionalConversionPoll::Ready(value),
+        RegionalWhnfStatus::Boundary(request) => RegionalConversionPoll::Boundary(request),
+        RegionalWhnfStatus::Yielded => RegionalConversionPoll::Yielded,
+        RegionalWhnfStatus::Failed(failure) => RegionalConversionPoll::Failed(failure),
+    }
+}
+
+fn interpret_durable_conversion<T>(
+    result: DurableConversionPoll<T>,
+    context: &EvalContext,
+) -> ConversionPoll<T> {
+    match result {
+        DurableConversionPoll::Ready(value) => ConversionPoll::Ready(value),
+        DurableConversionPoll::Boundary(request) => {
+            let poll = match request {
+                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
+                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
+                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+            };
+            match interpret_whnf_poll(poll, context) {
+                WhnfOwnerPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
+                WhnfOwnerPoll::Yielded => ConversionPoll::Yielded,
+                WhnfOwnerPoll::Failed(failure) => ConversionPoll::Failed(failure),
+                WhnfOwnerPoll::External(boundary) => {
+                    unreachable!("key conversion produced an external {boundary:?} boundary")
+                }
+                WhnfOwnerPoll::Ready(_) => {
+                    unreachable!("a semantic boundary cannot produce an immediate value")
+                }
+            }
+        }
+        DurableConversionPoll::Yielded => ConversionPoll::Yielded,
+        DurableConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
+    }
+}
+
+fn classify_regional_key_value(
+    access: &EvaluationValueAccess<'_>,
+    value: Value,
+) -> RegionalClassifiedKeyValue {
+    match value {
+        Value::Atom(atom) => RegionalClassifiedKeyValue::Ready(Key::Atom(atom)),
+        Value::Number(number) => RegionalClassifiedKeyValue::Ready(Key::Number(number)),
+        Value::Binary(bytes) => RegionalClassifiedKeyValue::Ready(Key::Binary(bytes)),
+        value @ Value::List(_) => RegionalClassifiedKeyValue::List(value),
+        Value::Dict(dict) => RegionalClassifiedKeyValue::Dict(
+            dict.iter()
+                .map(|(key, value)| (key.clone(), access.values().duplicate_value(value)))
+                .collect(),
+        ),
+        Value::Builtin(_)
+        | Value::PartialBuiltin(_)
+        | Value::Function(_)
+        | Value::Net(_)
+        | Value::Lazy(_)
+        | Value::Promised(_)
+        | Value::Metadata(_)
+        | Value::Opaque(_) => RegionalClassifiedKeyValue::Invalid,
+    }
+}
+
+fn value_as_regional_list(
+    _access: &EvaluationValueAccess<'_>,
+    value: Value,
+    subject: &str,
+    allow_binary: bool,
+) -> Result<Value, EvaluationHalt> {
+    match value {
+        Value::Binary(bytes) if allow_binary => Ok(Value::List(List::from_bytes(bytes))),
+        value @ Value::List(_) => Ok(value),
+        _other if subject == "path-list operand" => Err(EvaluationHalt::new(
+            "path-list operand must evaluate to a list value",
+        )),
+        other => Err(EvaluationHalt::new(format!(
+            "lazy list chunk must evaluate to a list or binary value, got {other:?}"
+        ))),
+    }
+}
+
+// SAFETY: the state visitor is compile-exhaustive over every raw `Value`,
+// regional WHNF child, and recursive converter. Collection runs only after
+// mutator quiescence, so an unpoisoned busy mutex is an invariant failure.
+unsafe impl Trace for ManagedKeyConversionCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed key conversion state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional WHNF state, scalar keys, and ordinary collections. It invokes no
+// runtime, evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedKeyConversionCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "temporary managed key conversion checkpoint",
+        "src/eval/access_machine.rs",
+        "no direct Drop implementation",
+        "regional conversion and WHNF state destroy passively",
+    );
 }
 
 fn select_dict_member(
@@ -549,58 +955,6 @@ fn select_dict_member(
     ))
 }
 
-fn classify_key_value(
-    context: &EvaluatorStepContext<'_>,
-    value: &RuntimeValueRoot,
-) -> ClassifiedKeyValue {
-    context.with_value_access(|access| match access.clone_root(value) {
-        Value::Atom(atom) => ClassifiedKeyValue::Ready(Key::Atom(atom)),
-        Value::Number(number) => ClassifiedKeyValue::Ready(Key::Number(number)),
-        Value::Binary(bytes) => ClassifiedKeyValue::Ready(Key::Binary(bytes)),
-        Value::List(_) => ClassifiedKeyValue::List(value.clone()),
-        Value::Dict(dict) => ClassifiedKeyValue::Dict(
-            dict.iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        access
-                            .values()
-                            .root_runtime_value(access.values().duplicate_value(value)),
-                    )
-                })
-                .collect(),
-        ),
-        Value::Builtin(_)
-        | Value::PartialBuiltin(_)
-        | Value::Function(_)
-        | Value::Net(_)
-        | Value::Lazy(_)
-        | Value::Promised(_)
-        | Value::Metadata(_)
-        | Value::Opaque(_) => ClassifiedKeyValue::Invalid,
-    })
-}
-
-fn value_as_list_root(
-    context: &EvaluatorStepContext<'_>,
-    value: RuntimeValueRoot,
-    subject: &str,
-    allow_binary: bool,
-) -> Result<RuntimeValueRoot, EvaluationHalt> {
-    context.with_value_access(|access| match access.clone_root(&value) {
-        Value::Binary(bytes) if allow_binary => Ok(access
-            .values()
-            .root_runtime_value(Value::List(List::from_bytes(bytes)))),
-        Value::List(_) => Ok(value),
-        _other if subject == "path-list operand" => Err(EvaluationHalt::new(
-            "path-list operand must evaluate to a list value",
-        )),
-        other => Err(EvaluationHalt::new(format!(
-            "lazy list chunk must evaluate to a list or binary value, got {other:?}"
-        ))),
-    })
-}
-
 fn root_halt(context: &EvaluatorStepContext<'_>, halt: EvaluationHalt) -> RuntimeFailureRoot {
     context.root_failure(halt.into_permanent_failure())
 }
@@ -613,6 +967,7 @@ fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFai
 mod tests {
     use super::*;
     use crate::core::{CoreValueFactory, LazyValue, ListThunk, PromisedValue};
+    use crate::evaluation::EvaluationStepBudget;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn context() -> crate::evaluation::OwnedEvalContext {
@@ -632,6 +987,68 @@ mod tests {
             path.into(),
             Arc::from(arguments),
         ))
+    }
+
+    fn poll_key(
+        machine: &mut KeyConversionMachine,
+        context: &EvalContext,
+        allowance: usize,
+    ) -> ConversionPoll<Key> {
+        let poll = EvaluationPollContext::for_context(context);
+        poll.evaluate(context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                context,
+                &mut EvaluationStepBudget::new(allowance),
+            )
+        })
+    }
+
+    #[test]
+    fn shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state() {
+        let context = context();
+        let member = Key::atom_from_text("member");
+        let nested = Value::List(List::from_values(vec![
+            Value::Number(1.into()),
+            Value::Number(2.into()),
+        ]));
+        let input = context.values().construct_runtime_value_root(|_| {
+            Value::Dict(Dict::new_sync().insert(member.clone(), nested))
+        });
+        let registrations = context.values().managed_root_registrations_for_test();
+        let mut machine = KeyConversionMachine::new(input, None);
+
+        let result = loop {
+            match poll_key(&mut machine, &context, 1) {
+                ConversionPoll::Ready(key) => break key,
+                ConversionPoll::Yielded => {
+                    context
+                        .values()
+                        .collect_managed_for_test()
+                        .expect("the regional key state should remain traced by its wrapper");
+                }
+                ConversionPoll::Pending(_) => {
+                    panic!("strict nested key conversion must not block")
+                }
+                ConversionPoll::Failed(failure) => {
+                    panic!("strict nested key conversion failed: {failure:?}")
+                }
+            }
+        };
+
+        assert_eq!(
+            result,
+            Key::Dict(Arc::from([(
+                member,
+                Key::List(Arc::from([Key::Number(1.into()), Key::Number(2.into())]))
+            )]))
+        );
+        assert_eq!(
+            context.values().managed_root_registrations_for_test(),
+            registrations + 1,
+            "recursive scalar/list conversion must share one temporary managed cell"
+        );
     }
 
     #[test]

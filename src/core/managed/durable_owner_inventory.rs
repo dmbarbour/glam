@@ -944,11 +944,13 @@ fn is_production_source(relative: &Path) -> bool {
 // computation. The declaration count is unchanged while that reviewed handoff
 // moves one signal from `RuntimeValueRoot` to `Value`. W6G.1f.3c adds the
 // concrete net checkpoint and edge-owned driver/action declarations while
-// removing durable registered net roots from the driver.
-const DECLARATION_BASELINE_COUNT: usize = 231;
+// removing durable registered net roots from the driver. W6G.1f.3d.1 adds the
+// regional key/list conversion state and temporary managed wrapper while
+// retiring the corresponding per-value runtime-root fields.
+const DECLARATION_BASELINE_COUNT: usize = 234;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([133, 269, 5, 17, 13, 7, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 217_632_320_203_533_268;
+    DeclarationSignals::new([138, 266, 5, 18, 13, 7, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 17_303_654_308_851_427_169;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

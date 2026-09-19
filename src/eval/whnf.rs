@@ -170,6 +170,11 @@ impl RegionalWhnfWork {
         Self::from_parts(access, focus, Vec::new(), BTreeSet::new(), None, None)
     }
 
+    pub(crate) fn with_source_owner(mut self, source_owner: LazyId) -> Self {
+        self.0.source_owner = Some(source_owner);
+        self
+    }
+
     fn from_parts(
         _access: &EvaluationValueAccess<'_>,
         focus: Value,
@@ -205,6 +210,14 @@ impl RegionalWhnfWork {
         access: &RuntimeValueAccess<'_>,
     ) -> NetWhnfObservation {
         self.0.observation_for_test(access)
+    }
+
+    /// Reports every managed semantic edge retained by this regional state.
+    ///
+    /// Composite managed checkpoints use this same canonical walk rather than
+    /// projecting child WHNF work into another rooted representation.
+    pub(crate) fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.0.trace_managed_edges(visitor);
     }
 }
 

@@ -663,8 +663,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // evaluator work.
 // W6F.4b moves default and dictionary definition operands into the durable
 // object owner while preserving base-before-dictionary demand.
-const EXPECTED_OCCURRENCES: usize = 188;
-const EXPECTED_FINGERPRINT: u64 = 16_326_448_865_501_119_907;
+// W6G.1f.3d.1 makes the two regional key/list trace walks explicit access-path
+// loops inside one managed converter checkpoint.
+const EXPECTED_OCCURRENCES: usize = 190;
+const EXPECTED_FINGERPRINT: u64 = 12_175_031_537_244_014_388;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -678,7 +680,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 73),
-    (Signal::UserSizedLoop, 48),
+    (Signal::UserSizedLoop, 50),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
@@ -686,7 +688,7 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 11),
     (WorkShape::KeyConversion, 2),
-    (WorkShape::AccessPath, 5),
+    (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),
     (WorkShape::OrchestrationHandoff, 51),
 ];

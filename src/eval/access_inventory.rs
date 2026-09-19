@@ -131,8 +131,8 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/access_machine.rs",
-        [9, 6],
-        "W3C.2-W3C.3 scoped projection and durable access/key/list source owner"
+        [7, 8],
+        "W3C.2-W3C.3 access source owner plus W6G.1f.3d.1 managed regional key/list wrapper and boundary adapter"
     ),
     context_entry!(
         "src/eval/annotation_machine.rs",

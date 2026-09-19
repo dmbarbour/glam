@@ -5654,7 +5654,7 @@ for it:
      temporary durable wrappers and, later, the access checkpoint translate
      those results into registered roots and scheduler dependencies after the
      managed access closes.
-   - **W6G.1f.3d.1 — canonical regional key/list state.** Under the recommended
+   - **W6G.1f.3d.1 — canonical regional key/list state.** **Complete.** Under the recommended
      bridge, split the existing converters into traced regional state holding
      ordinary `Value` edges plus `RegionalWhnfWork`, and a temporary durable
      wrapper for parents not yet migrated. That wrapper owns one managed cell
@@ -5662,6 +5662,17 @@ for it:
      and delegates to the same regional reducer. It is transitional ownership,
      not a second converter implementation; W6G.1f.3e/.3g/.3i must remove its
      remaining parent uses.
+
+     Completion record: scalar and list conversion now share one regional
+     reducer made from raw `Value` edges and `RegionalWhnfWork`. The existing
+     dictionary, object, effect, and pattern parents delegate through a
+     temporary managed cell carrying exactly one registered root, while all
+     recursive dictionary/list children remain traced inside that cell. A
+     forced one-step fixture collects between every strict nested conversion
+     transition and latches the single-root ownership bound. Failure values
+     are rooted before managed access closes; deferred-shell admission and
+     dependency translation occur afterward through the canonical WHNF
+     boundary adapter.
    - **W6G.1f.3d.2 — edge-owned access representation.** Convert arguments,
      current selection, pending dictionary members, list stacks/suffixes, and
      all nested converter/WHNF state to the regional forms. Add one exhaustive

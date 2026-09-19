@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        775,
+        778,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -832,9 +832,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // inherits seven reviewed CoreRuntimeNet Clone/Debug interlocks owned by
     // the later parent-carrier trait cutover. Exact checkpoint replacement
     // adds one test-only typed observation for its forced stale-route latch.
+    // W6G.1f.3d.1 adds one fresh regional-converter allocation and its exact
+    // root creation/projection pair; recursive child state remains traced
+    // inside that single allocation.
     assert_eq!(
         occurrence_fingerprint(actual),
-        3_872_170_652_459_387_004,
+        13_238_914_585_686_791_382,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -879,7 +882,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 182),
+            ((SourceScope::Production, EdgeSurface::Typed), 185),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 543),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

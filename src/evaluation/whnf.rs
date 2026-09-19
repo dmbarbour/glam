@@ -69,7 +69,7 @@ pub(crate) fn poll_lazy_checkpoint(
     poll.map(|poll| interpret_poll(poll, context))
 }
 
-fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {
+pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {
     match poll {
         WhnfPoll::Ready(value) => WhnfOwnerPoll::Ready(value),
         WhnfPoll::Pending(dependency) => WhnfOwnerPoll::Pending(work_dependency(dependency)),

@@ -121,10 +121,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/eval/access_machine.rs",
         0,
-        0,
-        3,
-        "computed-access dictionary selection, recursive key members, and deferred binary-list normalization",
-        "W3C.2-W3C.3 rooted source progress"
+        1,
+        1,
+        "computed-access dictionary selection; shared key/list conversion now retains one managed regional checkpoint instead of per-value runtime roots",
+        "W3C.2-W3C.3 rooted source progress; W6G.1f.3d.1 regional converter bridge"
     ),
     entry!(
         "src/eval/annotation_machine.rs",
@@ -523,9 +523,7 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl CoreValues::new"
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
-                | "src/eval/access_machine.rs::classify_key_value"
                 | "src/eval/access_machine.rs::select_dict_member"
-                | "src/eval/access_machine.rs::value_as_list_root"
                 | "src/eval/annotation_machine.rs::annotation_error_root"
                 | "src/eval/annotation_machine.rs::finish_metadata_update"
                 | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized"
@@ -828,9 +826,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
-    "src/eval/access_machine.rs::classify_key_value#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
-    "src/eval/access_machine.rs::value_as_list_root#1|surface=access-publication|scope=production",
+    "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/annotation_machine.rs::annotation_error_root#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::finish_metadata_update#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized#1|surface=access-publication|scope=production",
