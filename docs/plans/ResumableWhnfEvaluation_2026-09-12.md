@@ -4930,6 +4930,15 @@ sites which must account for the foreground map. The temporary shared
 `EvaluationWorkId` domain avoids tagging completion registrations while IDs
 remain runtime-global and unique.
 
+The first complete-suite run after the split also reproduced the already
+planned first-observer ownership defect in
+`configured_bare_cli_rewrites_and_executes_in_the_prepared_session`: both
+`conf.log` and `asm.result` remained blocked and settlement killed their
+deferred producer. The exact test passes in isolation, so repetition is not
+accepted as a repair. W6G.1f.2 must add a forced first-session-close schedule
+for this path, and W6G.1f/W6G.1c must remove the producer's session affinity
+before this phase can claim a green complete-suite boundary.
+
 Refactor the coordinator topology so role-specific root records and shared
 producer records are distinct even if they initially remain beneath one state
 mutex and one mutation-admission boundary. The target logical shape is:
@@ -5177,6 +5186,26 @@ outside managed memory. Record source-backed counts so a later producer family
 cannot silently remain coordinator-owned.
 
 ###### W6G.1f.1 — Managed lazy checkpoint state
+
+**Implementation design checkpoint (2026-09-19).** `ManagedLazyCell` is a
+core-managed identity, while `WhnfState` and the remaining producer-family
+states are evaluator-owned. Do not resolve this by importing evaluator
+machine types into `core::managed`, and do not expand `glam-gc`'s public unsafe
+surface merely to expose an erased pointer. The recommended boundary is one
+core-owned, separately allocated managed checkpoint cell containing a boxed
+private checkpoint payload behind its representation mutex. An internal
+unsafe payload contract supplies the compile-exhaustive edge visitor and
+passive-destruction guarantee; evaluator code supplies and type-checks the
+concrete payload. The lazy stores only the traced `Gc` edge to that cell.
+
+This adds one managed allocation and one Rust box only while a lazy has a
+partial checkpoint, avoids a core-to-evaluator dependency inversion, and can
+host all ten producer families without changing the lazy layout again. Typed
+payload access must occur only under matching `RuntimeValueAccess`, use the
+checkpoint cell as the collector mutation owner, and fail closed on a payload
+kind/downcast mismatch. Revisit representation fusion only after the complete
+producer-family migration and profiling; the transition must not expose a
+general public type-erased GC pointer.
 
 Generalize the lazy's source/result protocol to source/checkpoint/result.
 Introduce an edge-owned managed WHNF checkpoint over the existing canonical
