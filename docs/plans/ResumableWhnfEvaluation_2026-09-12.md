@@ -5509,6 +5509,37 @@ for it:
      drain completes it. Force a reflection task which depends back on its own
      result lazy so exact dependency/cycle reporting does not regress when the
      promise replaces the route-owned reservation.
+
+   **Complete (2026-09-19).** `ReflectionComputation` now traces one ordinary
+   managed completion promise instead of retaining a reflection-task sidecar.
+   The source winner roots its inputs, reserves the task in the runtime-owned
+   background demand, registers a compile-exhaustive terminal mapper,
+   publishes the ordinary WHNF checkpoint focused on that promise, and only
+   then activates. The selected reflection profile remains the source's
+   profile; only lifecycle ownership is session-neutral. Dropping an
+   unactivated permit terminalizes the promise, while closing the first
+   observing session retires only that route and a later session resumes the
+   same autonomous task through a new exact wait.
+
+   The terminal matrix covers return-value and gate success plus failure,
+   cancellation, abandonment, killing, and exit. Ordinary promised-failure
+   propagation now acknowledges the producing task only when an evaluator
+   actually propagates the failure, so an unobserved autonomous failure
+   remains reportable without producing a duplicate after observation. Result
+   and gate backedges remain collectible, task-root retirement is counted
+   across pending and terminal activation, and runtime teardown releases the
+   background demand rather than retaining the value domain. Reflection-task
+   edges also participate in direct compatibility tracing; this closed a
+   collection hole exposed by descendant-failure fixtures.
+
+   Transaction tests no longer manufacture an unsealed reflection wait: they
+   use the public resolver-promise suspension boundary. Batch compiler drain
+   alternates the macro session and runtime background demand so detached
+   reflection work can complete without assigning ownership to the discovering
+   session. The finer distinction between session-local and runtime-wide
+   public drain policy remains the dedicated W6G.1g boundary; its tests should
+   reuse this managed completion source rather than adding another
+   reflection-specific lifecycle.
 4. **W6G.1f.3c — net-WHNF checkpoint.** Replace registered net roots in the
    normalization request/worklist with traced managed-net edges and retain
    scalar ports, frontier observations, and driver state in one concrete

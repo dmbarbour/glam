@@ -5,7 +5,7 @@
 //! `RuntimeValueAccess`. Authority-free bare-core conversions are not a
 //! migration allowance: the second latch rejects them anywhere in production.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -90,9 +90,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/core.rs",
         3,
         1,
-        3,
-        "post-domain canonical-root initialization, test mutation-root publication, and I10A one-shot HostCall capture bundles",
-        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment"
+        5,
+        "post-domain canonical-root initialization, test mutation-root publication, I10A one-shot HostCall capture bundles, and transient reflection handoff roots",
+        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment; W6G.1f.3b autonomous reflection handoff"
     ),
     entry!(
         "src/core_net.rs",
@@ -313,9 +313,9 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/session.rs",
         1,
-        4,
+        3,
         0,
-        "session demand, reserved reflection activation, effect entry, and patient completion",
+        "session demand, effect entry, and patient completion; reflection completion activation now roots through explicit access publication",
         "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
     ),
     entry!(
@@ -530,6 +530,7 @@ impl RootPublicationOccurrence {
                 | "src/compiler.rs::impl CompileContext::with_compilation_trace"
                 | "src/core.rs::impl CoreValues::new"
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
+                | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::claim_call_rooted"
                 | "src/core_net.rs::impl CoreRuntimeNetAccess < '_ , '_ >::reclaim_blocked_call"
                 | "src/eval/access_machine.rs::classify_key_value"
@@ -826,6 +827,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=access-publication|scope=production",
     "src/core.rs::impl CoreValues::new#1|surface=access-publication|scope=production",
     "src/core.rs::impl HostCallRootBundle::from_captures#1|surface=access-publication|scope=production",
+    "src/core.rs::impl ReflectionComputation::handoff_roots_in#1|surface=access-publication|scope=production",
+    "src/core.rs::impl ReflectionComputation::handoff_roots_in#2|surface=access-publication|scope=production",
     "src/core.rs::tests::losing_complete_cache_candidate_retires_after_the_atomic_winner_race#1|surface=compatibility-new|scope=test",
     "src/core.rs::tests::runtime_cache_rejects_a_root_from_another_runtime_before_publication#1|surface=compatibility-new|scope=test",
     "src/core.rs::tests::runtime_cache_retires_an_admitted_owner_with_the_value_domain#1|surface=compatibility-new|scope=test",
@@ -931,9 +934,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#2|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
-    "src/eval/tests.rs::impl RootingBlockingReflectionLauncher::build#1|surface=compatibility-new|scope=test",
-    "src/eval/tests.rs::reflection_handoff_transfers_effect_root_after_source_owner_retirement#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
@@ -965,6 +968,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#2|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::permanent_exit_wait_retains_only_its_summary_and_obligations#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#2|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_deferred_machine_does_not_delay_same_session_client_admission#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::terminal_publication_releases_same_session_client_admission_before_retirement#1|surface=compatibility-new|scope=test",
@@ -973,7 +978,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
     "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
     "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=production",
-    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_activation#1|surface=scoped-factory|scope=production",
     "src/evaluation/session.rs::impl EvalContext::reserve_reflection_task#1|surface=scoped-factory|scope=production",
     "src/evaluation/tests.rs::abandoning_one_client_demand_preserves_another_exact_consumer#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::all_poll_routes_use_scheduler_context#1|surface=compatibility-new|scope=test",
@@ -998,6 +1002,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::foreground_client_demand_closes_the_retirement_publication_handoff#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
+    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::ready_settlement_publishes_exited_once_and_retains_exit_errors#1|surface=compatibility-new|scope=test",
@@ -1166,11 +1171,21 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
         .map(|record| (*record).to_owned())
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "runtime-root publication ledger length drifted"
-    );
+    if actual.len() != expected.len() {
+        let actual_set = actual.iter().collect::<BTreeSet<_>>();
+        let expected_set = expected.iter().collect::<BTreeSet<_>>();
+        let missing = expected_set
+            .difference(&actual_set)
+            .copied()
+            .collect::<Vec<_>>();
+        let unexpected = actual_set
+            .difference(&expected_set)
+            .copied()
+            .collect::<Vec<_>>();
+        panic!(
+            "runtime-root publication ledger length drifted: missing {missing:?}; unexpected {unexpected:?}"
+        );
+    }
     if let Some((index, (actual, expected))) = actual
         .iter()
         .zip(&expected)

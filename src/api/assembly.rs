@@ -125,52 +125,70 @@ impl CompilationExecution {
 
     fn drain(&self) -> bool {
         let values = self.macros.values();
-        let run = self.macros.run_until_quiescent();
-        let (kind, report) = match run {
-            EvaluationSessionRun::Complete(report) => (None, report),
-            EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
-            EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
-        };
-        for (task, error) in report.failures.iter() {
-            self.macro_diagnostics
-                .publish_local(Diagnostic::new_with_factory(
-                    values,
-                    Severity::Error,
-                    format!(
-                        "macro reflection task {} failed: {}",
-                        task.get(),
-                        error.as_failure()
-                    ),
-                ));
-        }
-        if let Some(kind) = kind {
-            let mut details = Vec::new();
-            for task in report.unfinished {
-                let dependency = task
-                    .dependency
-                    .map(|dependency| format!(" waiting on task {}", dependency.get()))
-                    .unwrap_or_default();
-                details.push(format!(
-                    "task {} is {:?}{dependency}",
-                    task.task.get(),
-                    task.state
-                ));
+        let background = self
+            .macros
+            .for_runtime_background()
+            .expect("a compilation runtime must retain its background demand domain");
+        let (background_run, macro_run) = loop {
+            let runs = (
+                background.run_until_quiescent(),
+                self.macros.run_until_quiescent(),
+            );
+            let stable = (
+                background.run_until_quiescent(),
+                self.macros.run_until_quiescent(),
+            );
+            if stable == runs {
+                break stable;
             }
-            self.macro_diagnostics
-                .publish_local(Diagnostic::new_with_factory(
-                    values,
-                    Severity::Error,
-                    format!(
-                        "macro reflection scheduler {kind} with {} unfinished task{}{}",
-                        details.len(),
-                        if details.len() == 1 { "" } else { "s" },
-                        if details.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", details.join("; "))
-                        }
-                    ),
-                ));
+        };
+        for (scope, run) in [("background", background_run), ("session", macro_run)] {
+            let (kind, report) = match run {
+                EvaluationSessionRun::Complete(report) => (None, report),
+                EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
+                EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
+            };
+            for (task, error) in report.failures.iter() {
+                self.macro_diagnostics
+                    .publish_local(Diagnostic::new_with_factory(
+                        values,
+                        Severity::Error,
+                        format!(
+                            "macro reflection {scope} task {} failed: {}",
+                            task.get(),
+                            error.as_failure()
+                        ),
+                    ));
+            }
+            if let Some(kind) = kind {
+                let mut details = Vec::new();
+                for task in report.unfinished {
+                    let dependency = task
+                        .dependency
+                        .map(|dependency| format!(" waiting on task {}", dependency.get()))
+                        .unwrap_or_default();
+                    details.push(format!(
+                        "task {} is {:?}{dependency}",
+                        task.task.get(),
+                        task.state
+                    ));
+                }
+                self.macro_diagnostics
+                    .publish_local(Diagnostic::new_with_factory(
+                        values,
+                        Severity::Error,
+                        format!(
+                            "macro reflection {scope} scheduler {kind} with {} unfinished task{}{}",
+                            details.len(),
+                            if details.len() == 1 { "" } else { "s" },
+                            if details.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", details.join("; "))
+                            }
+                        ),
+                    ));
+            }
         }
         self.macro_diagnostics.counts().errors() != 0
     }

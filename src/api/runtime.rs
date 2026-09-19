@@ -53,6 +53,14 @@ pub(super) struct RuntimeState {
     pub(super) diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
 }
 
+impl Drop for RuntimeState {
+    fn drop(&mut self) {
+        // The runtime, rather than an asynchronously stopping idle worker, is
+        // the lifetime owner of the autonomous background demand domain.
+        self.work.release_background_demand();
+    }
+}
+
 /// Acyclic runtime infrastructure needed by evaluation and reflection work.
 ///
 /// The coordinator route is deliberately weak: retaining these resources must
@@ -506,6 +514,13 @@ impl EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
         });
+        let default_reflection_profile = Arc::new(ReflectionTaskProfile::unsealed());
+        EvaluationSession::install_runtime_background(
+            &work,
+            shared_resources.values.core().clone(),
+            default_reflection_profile.clone(),
+            true,
+        );
         let runtime = Self {
             state: Arc::new(RuntimeState {
                 executor,
@@ -513,7 +528,7 @@ impl EvaluationRuntime {
                 shared_resources,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
             }),
-            default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
+            default_reflection_profile,
         };
         #[cfg(feature = "aggressive-gc-verification")]
         runtime

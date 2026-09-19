@@ -147,12 +147,16 @@ impl CompatibilityValueEdges for ListEffectComputation {
 impl CompatibilityValueEdges for ReflectionComputation {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         // The managed lazy owns these immutable semantic edges directly. The
-        // external handle reaches only lifecycle/cancellation authority and
-        // must never substitute registered roots for this trace.
+        // transient task handoff must never substitute registered roots for
+        // this trace.
         visit(&self.effect);
         if let Some(target) = &self.target {
             visit(target);
         }
+    }
+
+    fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.completion_promise.trace_managed_edge(visitor);
     }
 }
 
@@ -196,6 +200,12 @@ impl CompatibilityValueEdges for LazySource {
             } => {
                 visit_values(arguments, visit);
             }
+        }
+    }
+
+    fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        if let Self::ReflectionTask(computation) = self {
+            computation.trace_direct_compatibility_managed_edges(visitor);
         }
     }
 }

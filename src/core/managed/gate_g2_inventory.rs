@@ -109,7 +109,7 @@ const SOURCE_EVIDENCE: &[GateEvidence] = &[
     GateEvidence {
         concern: "reflection activation boundaries",
         path: "src/eval/tests.rs",
-        verification: "reflection_gate_reserves_inside_and_activates_outside_scope",
+        verification: "reflection_source_reserves_inside_and_activates_after_evaluator_access_closes",
     },
     GateEvidence {
         concern: "event callback boundaries",

@@ -29,6 +29,80 @@ impl TestDemand {
 }
 
 #[test]
+fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
+    let values = CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    );
+    let completed = RuntimeValueRoot::new(&values, crate::core::Value::Number(42.into()));
+    let gate_target = RuntimeValueRoot::new(&values, crate::core::Value::Number(7.into()));
+    let failure = Arc::new(EvaluationFailure::message("reflection task failed"));
+    let failure_root = crate::runtime::RuntimeFailureRoot::new(&values, failure.clone());
+    let killed = Arc::new(EvaluationFailure::message("reflection task was killed"));
+    let killed_root = crate::runtime::RuntimeFailureRoot::new(&values, killed.clone());
+    let unresolved = Arc::new(EvaluationFailure::message("unresolved task promise"));
+
+    values.with_runtime_value_access(|access| {
+        let returned = TaskPromiseTerminalMapper::ReflectionReturnValue.assignment(
+            &access,
+            &EvaluationWaitTerminal::Complete(completed.clone()),
+            &unresolved,
+        );
+        assert_eq!(returned, Ok(crate::core::Value::Number(42.into())));
+
+        let gated = TaskPromiseTerminalMapper::ReflectionGate {
+            target: gate_target.clone(),
+        }
+        .assignment(
+            &access,
+            &EvaluationWaitTerminal::Complete(completed.clone()),
+            &unresolved,
+        );
+        assert_eq!(gated, Ok(crate::core::Value::Number(7.into())));
+
+        let cases = [
+            (
+                EvaluationWaitTerminal::Failed(failure_root),
+                "reflection task failed",
+            ),
+            (
+                EvaluationWaitTerminal::Killed(killed_root),
+                "reflection task was killed",
+            ),
+            (
+                EvaluationWaitTerminal::Cancelled,
+                "reflection result task was cancelled",
+            ),
+            (
+                EvaluationWaitTerminal::Abandoned,
+                "reflection task was abandoned when its evaluation session closed",
+            ),
+            (
+                EvaluationWaitTerminal::Exited,
+                "reflection task exited without producing a result",
+            ),
+        ];
+        for (terminal, expected) in cases {
+            let error = TaskPromiseTerminalMapper::ReflectionReturnValue
+                .assignment(&access, &terminal, &unresolved)
+                .expect_err("every non-success terminal must fail the completion promise");
+            assert_eq!(error.to_string(), expected);
+        }
+
+        assert!(Arc::ptr_eq(
+            &TaskPromiseTerminalMapper::UnresolvedFailure
+                .assignment(
+                    &access,
+                    &EvaluationWaitTerminal::Complete(completed),
+                    &unresolved,
+                )
+                .expect_err("the generic unresolved mapper never synthesizes success"),
+            &unresolved,
+        ));
+    });
+}
+
+#[test]
 fn task_block_dependency_identity_includes_the_runtime() {
     let id = NonZeroU64::new(17).expect("test dependency identity must be nonzero");
     let dependency = WorkDependency::Test(TestWorkDependency {
@@ -755,7 +829,7 @@ fn session_close_does_not_steal_an_already_terminalizing_claims_settlement() {
     ));
 
     settle_test_reflection(&coordinator, work);
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
 }
 
 #[test]
@@ -882,7 +956,7 @@ fn session_close_preserves_an_earlier_running_task_cancellation() {
     assert!(!release.abandoned);
 
     settle_test_reflection(&coordinator, work);
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
 }
 
 #[test]
@@ -1083,7 +1157,7 @@ fn coordinator_selects_exact_ready_work_without_a_session_queue() {
         .expect("open test session should reserve reflection work");
     activate_test_reflection(&coordinator, work);
 
-    assert_eq!(coordinator.registered_session_count(), 1);
+    assert_eq!(coordinator.registered_session_count(), 2);
     assert_eq!(coordinator.ready_task_count(), 1);
 
     let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) =
@@ -1097,7 +1171,7 @@ fn coordinator_selects_exact_ready_work_without_a_session_queue() {
     assert!(coordinator.terminalize_reflection(work));
     settle_test_reflection(&coordinator, work);
     drop(session);
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
 }
 
 #[test]
@@ -2745,7 +2819,7 @@ fn dropping_executor_does_not_discard_coordinator_session_state() {
         panic!("dropping the executor must preserve ready task work")
     };
     coordinator.requeue_unpolled_task(claimed);
-    assert_eq!(coordinator.registered_session_count(), 1);
+    assert_eq!(coordinator.registered_session_count(), 2);
     assert!(coordinator.terminalize_reflection(work));
     settle_test_reflection(&coordinator, work);
 }

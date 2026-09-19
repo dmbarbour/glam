@@ -9,19 +9,18 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use crate::core::LazyValue;
 #[cfg(test)]
 use crate::core::PromisedValue;
-use crate::core::{CoreValueFactory, ManagedPromiseRoot, PromiseId};
-#[cfg(test)]
-use crate::runtime::RuntimeValueRoot;
+use crate::core::{
+    CoreValueFactory, EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId,
+    RuntimeValueAccess,
+};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
-    RuntimeMutationGuard,
+    RuntimeMutationGuard, RuntimeValueRoot,
 };
 
 #[cfg(test)]
 use super::EvaluationSession;
-use super::{
-    EvaluationDemandState, EvaluationFailure, RuntimeObservationEpoch, RuntimeObservationState,
-};
+use super::{EvaluationDemandState, RuntimeObservationEpoch, RuntimeObservationState};
 
 mod client_demand;
 mod completion;
@@ -74,8 +73,8 @@ use spark::{SparkRetirement, claim_ready_spark, detach_spark, queue_spark};
 pub(crate) use task::{
     EvaluationExitBlock, EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock,
     EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskObserver, EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitTerminal,
-    EvaluationWaitToken, ExitIntent, InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy,
+    EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken,
+    ExitIntent, InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy,
     PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
     ReflectionTaskResultPolicy, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
     TaskStatusWake,
@@ -137,22 +136,93 @@ struct TaskOwnedPromiseObligation {
     root: ManagedPromiseRoot,
     producer: Arc<PromiseProducerObligation>,
     wait: EvaluationWaitToken,
+    terminal: TaskPromiseTerminalMapper,
+}
+
+#[derive(Clone)]
+pub(crate) enum TaskPromiseTerminalMapper {
+    UnresolvedFailure,
+    ReflectionReturnValue,
+    ReflectionGate { target: RuntimeValueRoot },
+}
+
+impl TaskPromiseTerminalMapper {
+    fn assignment(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        terminal: &EvaluationWaitTerminal,
+        unresolved_failure: &Arc<EvaluationFailure>,
+    ) -> PromiseAssignment {
+        let operation = match self {
+            Self::UnresolvedFailure => return Err(unresolved_failure.clone()),
+            Self::ReflectionReturnValue => "reflection_task",
+            Self::ReflectionGate { .. } => "reflection_annotation",
+        };
+
+        match terminal {
+            EvaluationWaitTerminal::Complete(value) => match self {
+                Self::ReflectionReturnValue => Ok(value.clone_core_with(access)),
+                Self::ReflectionGate { target } => Ok(target.clone_core_with(access)),
+                Self::UnresolvedFailure => unreachable!("handled above"),
+            },
+            EvaluationWaitTerminal::Failed(failure) | EvaluationWaitTerminal::Killed(failure) => {
+                Err(Arc::new(failure.as_failure().with_context_in(
+                    access,
+                    crate::diagnostic::evaluation_context_frame(operation),
+                )))
+            }
+            EvaluationWaitTerminal::Cancelled => Err(reflection_terminal_failure(
+                access,
+                operation,
+                match self {
+                    Self::ReflectionReturnValue => "reflection result task was cancelled",
+                    Self::ReflectionGate { .. } => "reflection annotation task was cancelled",
+                    Self::UnresolvedFailure => unreachable!("handled above"),
+                },
+            )),
+            EvaluationWaitTerminal::Abandoned => Err(reflection_terminal_failure(
+                access,
+                operation,
+                "reflection task was abandoned when its evaluation session closed",
+            )),
+            EvaluationWaitTerminal::Exited => Err(reflection_terminal_failure(
+                access,
+                operation,
+                "reflection task exited without producing a result",
+            )),
+        }
+    }
+}
+
+fn reflection_terminal_failure(
+    access: &RuntimeValueAccess<'_>,
+    operation: &str,
+    message: &str,
+) -> Arc<EvaluationFailure> {
+    Arc::new(EvaluationFailure::message(message).with_context_in(
+        access,
+        crate::diagnostic::evaluation_context_frame(operation),
+    ))
 }
 
 impl TaskOwnedPromiseObligation {
-    fn publish_failure_guarded(
+    fn publish_terminal_guarded(
         self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
-        failure: Arc<crate::core::EvaluationFailure>,
+        terminal: &EvaluationWaitTerminal,
+        unresolved_failure: &Arc<EvaluationFailure>,
     ) -> (PromiseProducerPublication, CompletionWake) {
         let values = coordinator
             .value_observer()
             .upgrade()
             .expect("a registered promise root must retain a live value domain owner");
         let (publication, wake) = values.with_runtime_value_access(|access| {
+            let assignment = self
+                .terminal
+                .assignment(&access, terminal, unresolved_failure);
             self.root
-                .publish_guarded(&access, coordinator, mutation, Err(failure), |assignment| {
+                .publish_guarded(&access, coordinator, mutation, assignment, |assignment| {
                     self.producer
                         .publish_assignment_guarded(coordinator, mutation, assignment)
                 })
@@ -532,6 +602,7 @@ pub(crate) struct EvaluationWorkCoordinator {
     ids: Arc<RuntimeIds>,
     admission: Arc<RuntimeMutationAdmission>,
     observations: Arc<RuntimeObservationState>,
+    background_demand: Mutex<Option<Arc<EvaluationDemandState>>>,
     state: Mutex<WorkCoordinatorState>,
     work_available: Condvar,
     #[cfg(test)]
@@ -580,6 +651,7 @@ impl EvaluationWorkCoordinator {
             ids: values.ids().clone(),
             admission,
             observations,
+            background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
             #[cfg(test)]
@@ -589,6 +661,45 @@ impl EvaluationWorkCoordinator {
             #[cfg(test)]
             reflection_release_status_probe: Mutex::new(None),
         })
+    }
+
+    pub(super) fn background_demand_or_init(
+        &self,
+        initialize: impl FnOnce() -> Arc<EvaluationDemandState>,
+    ) -> Arc<EvaluationDemandState> {
+        let mut background = self
+            .background_demand
+            .lock()
+            .expect("evaluation background demand mutex was poisoned");
+        if let Some(demand) = background.as_ref() {
+            return demand.clone();
+        }
+        let demand = initialize();
+        self.register_demand(&demand);
+        *background = Some(demand.clone());
+        demand
+    }
+
+    pub(super) fn background_demand(&self) -> Option<Arc<EvaluationDemandState>> {
+        self.background_demand
+            .lock()
+            .expect("evaluation background demand mutex was poisoned")
+            .clone()
+    }
+
+    /// Releases the runtime-owned background demand at runtime teardown.
+    ///
+    /// Workers retain only a coordinator route while idle. Keeping this
+    /// value-domain owner inside that coordinator after the public runtime is
+    /// gone would otherwise delay value-domain retirement until an idle
+    /// worker observes shutdown.
+    pub(crate) fn release_background_demand(&self) {
+        let demand = self
+            .background_demand
+            .lock()
+            .expect("evaluation background demand mutex was poisoned")
+            .take();
+        drop(demand);
     }
 
     #[cfg(test)]
@@ -602,6 +713,7 @@ impl EvaluationWorkCoordinator {
             ids: values.ids().clone(),
             admission,
             observations: RuntimeObservationState::new(),
+            background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
             test_values: Some(values.clone()),
@@ -1262,6 +1374,21 @@ impl EvaluationWorkCoordinator {
         wait: EvaluationWaitToken,
         root: ManagedPromiseRoot,
     ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
+        self.register_task_promise_with_terminal(
+            task,
+            wait,
+            root,
+            TaskPromiseTerminalMapper::UnresolvedFailure,
+        )
+    }
+
+    pub(super) fn register_task_promise_with_terminal(
+        self: &Arc<Self>,
+        task: EvaluationTaskId,
+        wait: EvaluationWaitToken,
+        root: ManagedPromiseRoot,
+        terminal: TaskPromiseTerminalMapper,
+    ) -> Result<Arc<PromiseProducerObligation>, Arc<str>> {
         debug_assert_eq!(wait.runtime_id(), self.runtime);
         let promise = root.id();
         let mutation = self.admission.mutation_guard();
@@ -1289,7 +1416,10 @@ impl EvaluationWorkCoordinator {
             if record.control.close_reason.is_some() {
                 return Err(Arc::from("evaluation demand session is closed"));
             }
-            if !matches!(record.state, WorkState::Reserved | WorkState::Running) {
+            if !matches!(
+                record.state,
+                WorkState::Dormant | WorkState::Reserved | WorkState::Running
+            ) {
                 return Err(Arc::from(
                     "a promise cannot be added after its producer stopped running",
                 ));
@@ -1304,6 +1434,7 @@ impl EvaluationWorkCoordinator {
                     root,
                     producer: producer.clone(),
                     wait: wait.clone(),
+                    terminal,
                 });
             assert!(
                 state.promise_by_wait.insert(wait, work).is_none(),
@@ -1420,7 +1551,7 @@ impl EvaluationWorkCoordinator {
         let mut promise_publications = Vec::with_capacity(promises.len());
         for obligation in promises {
             let (producer, completion) =
-                obligation.publish_failure_guarded(self, &mutation, promise_failure.clone());
+                obligation.publish_terminal_guarded(self, &mutation, &terminal, &promise_failure);
             promise_publications.push(producer);
             completion_wakes.push(completion);
         }
@@ -1725,12 +1856,15 @@ impl EvaluationWorkCoordinator {
         &self,
         wait: &EvaluationWaitToken,
     ) -> Option<EvaluationWorkId> {
-        self.state
+        let state = self
+            .state
             .lock()
-            .expect("evaluation work coordinator was poisoned")
+            .expect("evaluation work coordinator was poisoned");
+        state
             .reflection
             .by_wait
             .get(wait)
+            .or_else(|| state.promise_by_wait.get(wait))
             .copied()
     }
 

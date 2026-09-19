@@ -1304,11 +1304,11 @@ fn owned_context_retains_its_direct_client_lease() {
     drop(owner);
     assert!(owner_weak.upgrade().is_some());
     assert!(!context.session.is_closed());
-    assert_eq!(coordinator.registered_session_count(), 1);
+    assert_eq!(coordinator.registered_session_count(), 2);
 
     drop(context);
     assert!(owner_weak.upgrade().is_none());
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
 }
 
 #[test]
@@ -1373,7 +1373,7 @@ fn blocked_machine_context_does_not_retain_its_owner_lease() {
         panic!("a closed demand must report completion without recovering its owner");
     };
     assert!(report.unfinished.is_empty());
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
 }
 
 #[test]
@@ -1555,12 +1555,12 @@ fn running_machine_finishes_its_quantum_after_owner_drop_without_retaining_the_o
     started_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should claim the task");
-    assert_eq!(coordinator.registered_session_count(), 1);
+    assert_eq!(coordinator.registered_session_count(), 2);
 
     drop(owner);
     assert!(owner_weak.upgrade().is_none());
     assert!(context.session.is_closed());
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
     assert!(
         context
             .schedule_task(|_| Ok(Box::new(Complete)))
@@ -1624,7 +1624,7 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
     drop(owner);
     assert!(owner_weak.upgrade().is_none());
     assert!(context.session.is_closed());
-    assert_eq!(coordinator.registered_session_count(), 0);
+    assert_eq!(coordinator.registered_session_count(), 1);
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Pending(_)
@@ -6775,7 +6775,7 @@ fn spark_root_survives_queued_claimed_and_blocked_ownership() {
 }
 
 #[test]
-fn pending_session_activation_roots_retire_with_their_reservations() {
+fn pending_reflection_activation_roots_retire_with_their_reservations() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let baseline = context
@@ -6799,9 +6799,22 @@ fn pending_session_activation_roots_retire_with_their_reservations() {
     assert_eq!(pending_reclaimed.root_entries(), baseline.root_entries());
     assert_eq!(pending_reclaimed.finalized_slots(), 1);
 
-    let activation = context
-        .reserve_reflection_activation(
-            Value::binary_from_text("pending annotation effect"),
+    let background = context
+        .for_runtime_background()
+        .expect("the runtime should retain its background reflection demand");
+    let (completion, effect) = context.values().with_runtime_value_access(|access| {
+        let completion = access
+            .construct_rooted_managed_promise("pending reflection activation")
+            .expect("the reflection completion promise should fit its reviewed slot");
+        let effect =
+            access.root_runtime_value(Value::binary_from_text("pending annotation effect"));
+        (completion, effect)
+    });
+    let activation = background
+        .reserve_reflection_completion_activation(
+            effect,
+            None,
+            completion,
             ReflectionTaskResultPolicy::ReturnValue,
         )
         .expect("a sealed session profile should permit activation reservation");
@@ -6809,10 +6822,14 @@ fn pending_session_activation_roots_retire_with_their_reservations() {
         .values()
         .collect_managed_for_test()
         .expect("the pending activation should retain its effect root");
-    assert_eq!(activation_live.root_entries(), baseline.root_entries() + 1);
+    assert_eq!(
+        activation_live.root_entries(),
+        baseline.root_entries() + 2,
+        "the activation retains one temporary effect root and one managed completion root"
+    );
     activation.activate();
     assert!(matches!(
-        context.run_until_quiescent(),
+        background.run_until_quiescent(),
         crate::evaluation::EvaluationSessionRun::Complete(_)
     ));
     let activation_reclaimed = context

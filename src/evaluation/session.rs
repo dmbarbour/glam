@@ -4,8 +4,10 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Mutex;
 #[cfg(test)]
+use std::sync::atomic::AtomicU8;
+#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{
@@ -18,11 +20,11 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use super::coordinator::{
     ClientDemandHandle, ClientDemandOperation, ClientDemandResult, ClientDemandSink,
     ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation, EvaluationSessionId,
-    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskObserver,
-    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
-    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
-    TaskFailureLedger, TaskStatusPublisher, WorkDependency,
+    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
+    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, InitialTaskDisposition,
+    LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation,
+    ReflectionCancellation, ReflectionTaskResultPolicy, TaskFailureLedger,
+    TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -92,21 +94,7 @@ pub(crate) struct PendingReflectionTask {
 /// carrying the first observer's one-use activation permit.
 #[derive(Clone)]
 pub(crate) struct ReflectionTaskReservation {
-    observation: ReflectionTaskObservation,
-    handle: EvaluationTaskHandle,
     activation: Option<Arc<ReflectionTaskActivationPermit>>,
-}
-
-/// Edge-free task identity retained by a reflection computation's external
-/// owner after its first observation.
-#[derive(Clone)]
-pub(crate) struct ReflectionTaskObservation {
-    inner: Arc<ReflectionTaskObservationInner>,
-}
-
-struct ReflectionTaskObservationInner {
-    task: EvaluationTaskObserver,
-    disposition: AtomicU8,
 }
 
 struct ReflectionTaskActivation {
@@ -117,42 +105,20 @@ struct ReflectionTaskActivation {
 }
 
 pub(crate) struct ReflectionTaskActivationPermit {
-    observation: ReflectionTaskObservation,
+    handle: EvaluationTaskHandle,
     activation: Mutex<Option<ReflectionTaskActivation>>,
 }
-
-const REFLECTION_RESERVED: u8 = 0;
-const REFLECTION_ACTIVATED: u8 = 1;
-const REFLECTION_CANCELLED: u8 = 2;
 
 #[cfg(test)]
 #[test]
 fn reflection_reservation_storage_separates_stable_observation_from_activation_payload() {
     fn reservation_fields(reservation: &ReflectionTaskReservation) {
-        let ReflectionTaskReservation {
-            observation,
-            handle,
-            activation,
-        } = reservation;
-        let _: &ReflectionTaskObservation = observation;
-        let _: &EvaluationTaskHandle = handle;
+        let ReflectionTaskReservation { activation } = reservation;
         let _: &Option<Arc<ReflectionTaskActivationPermit>> = activation;
     }
-    fn observation_fields(observation: &ReflectionTaskObservation) {
-        let ReflectionTaskObservation { inner } = observation;
-        let _: &Arc<ReflectionTaskObservationInner> = inner;
-    }
-    fn observation_inner_fields(observation: &ReflectionTaskObservationInner) {
-        let ReflectionTaskObservationInner { task, disposition } = observation;
-        let _: &EvaluationTaskObserver = task;
-        let _: &AtomicU8 = disposition;
-    }
     fn permit_fields(permit: &ReflectionTaskActivationPermit) {
-        let ReflectionTaskActivationPermit {
-            observation,
-            activation,
-        } = permit;
-        let _: &ReflectionTaskObservation = observation;
+        let ReflectionTaskActivationPermit { handle, activation } = permit;
+        let _: &EvaluationTaskHandle = handle;
         let _: &Mutex<Option<ReflectionTaskActivation>> = activation;
     }
     fn activation_fields(activation: &ReflectionTaskActivation) {
@@ -170,115 +136,17 @@ fn reflection_reservation_storage_separates_stable_observation_from_activation_p
 
     let _ = (
         reservation_fields as fn(&ReflectionTaskReservation),
-        observation_fields as fn(&ReflectionTaskObservation),
-        observation_inner_fields as fn(&ReflectionTaskObservationInner),
         permit_fields as fn(&ReflectionTaskActivationPermit),
         activation_fields as fn(&ReflectionTaskActivation),
     );
 }
 
 impl ReflectionTaskReservation {
-    pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
-        &self.handle
-    }
-
-    pub(crate) fn into_cache_parts(
-        self,
-    ) -> (
-        ReflectionTaskObservation,
-        EvaluationTaskHandle,
-        Option<Arc<ReflectionTaskActivationPermit>>,
-    ) {
-        (self.observation, self.handle, self.activation)
-    }
-
-    pub(crate) fn from_cache_parts(
-        observation: ReflectionTaskObservation,
-        handle: EvaluationTaskHandle,
-        activation: Option<Arc<ReflectionTaskActivationPermit>>,
-    ) -> Self {
-        Self {
-            observation,
-            handle,
-            activation,
-        }
-    }
-
     pub(crate) fn activate(self) {
         let Some(permit) = self.activation else {
             return;
         };
         permit.activate();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_activation_permit(&self) -> bool {
-        self.activation.is_some()
-    }
-}
-
-impl ReflectionTaskObservation {
-    fn reserved(handle: EvaluationTaskHandle) -> Self {
-        Self {
-            inner: Arc::new(ReflectionTaskObservationInner {
-                task: handle.observer(),
-                disposition: AtomicU8::new(REFLECTION_RESERVED),
-            }),
-        }
-    }
-
-    fn already_active(handle: EvaluationTaskHandle) -> Self {
-        Self {
-            inner: Arc::new(ReflectionTaskObservationInner {
-                task: handle.observer(),
-                disposition: AtomicU8::new(REFLECTION_ACTIVATED),
-            }),
-        }
-    }
-
-    pub(crate) fn handle(&self) -> Option<EvaluationTaskHandle> {
-        self.inner.task.upgrade()
-    }
-
-    fn begin_activation(&self) -> bool {
-        self.inner
-            .disposition
-            .compare_exchange(
-                REFLECTION_RESERVED,
-                REFLECTION_ACTIVATED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    fn cancel_if_reserved(&self) {
-        if self
-            .inner
-            .disposition
-            .compare_exchange(
-                REFLECTION_RESERVED,
-                REFLECTION_CANCELLED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            self.inner.task.discard_reservation();
-        }
-    }
-}
-
-impl Drop for ReflectionTaskObservationInner {
-    fn drop(&mut self) {
-        if *self.disposition.get_mut() == REFLECTION_RESERVED {
-            *self.disposition.get_mut() = REFLECTION_CANCELLED;
-            // Managed finalization drops only the scalar external-owner
-            // lease. The registry detaches and unlocks before it destroys
-            // this observation, so coordinator mutation cannot nest beneath
-            // either collector or registry locking.
-            self.task.discard_reservation();
-        }
     }
 }
 
@@ -294,17 +162,11 @@ impl ReflectionTaskActivationPermit {
         let Some(activation) = activation else {
             return;
         };
-        if !self.observation.begin_activation() {
-            return;
-        }
-        let Some(handle) = self.observation.handle() else {
-            return;
-        };
-        if handle.wait.terminal_poll().is_some() {
+        if self.handle.wait.terminal_poll().is_some() {
             return;
         }
         activation.context.activate_reflection_task(
-            &handle,
+            &self.handle,
             &activation.effect,
             activation.result_policy,
             activation.task_profile.clone(),
@@ -321,12 +183,13 @@ impl Drop for ReflectionTaskActivationPermit {
             .get_mut()
             .expect("reflection activation permit was poisoned")
             .take();
-        if abandoned.is_some() {
+        if let Some(abandoned) = abandoned {
             // Release the value root and demand context before coordinator
             // cancellation. No payload destruction occurs under scheduler
             // mutation admission or coordinator locking.
+            let context = abandoned.context.clone();
             drop(abandoned);
-            self.observation.cancel_if_reserved();
+            context.cancel_pending_reflection_completion(&self.handle);
         }
     }
 }
@@ -465,6 +328,12 @@ impl EvaluationSession {
         default_reflection_profile: Arc<ReflectionTaskProfile>,
         require_default_reflection_profile: bool,
     ) -> Arc<Self> {
+        Self::install_runtime_background(
+            &coordinator,
+            values.clone(),
+            default_reflection_profile.clone(),
+            require_default_reflection_profile,
+        );
         let demand = Arc::new(EvaluationDemandState {
             id: EvaluationSessionId::from_nonzero(values.ids().evaluation_session()),
             values: values.clone(),
@@ -478,6 +347,26 @@ impl EvaluationSession {
         Arc::new(Self {
             demand,
             coordinator,
+        })
+    }
+
+    pub(crate) fn install_runtime_background(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        values: CoreValueFactory,
+        default_reflection_profile: Arc<ReflectionTaskProfile>,
+        require_default_reflection_profile: bool,
+    ) -> Arc<EvaluationDemandState> {
+        coordinator.background_demand_or_init(|| {
+            Arc::new(EvaluationDemandState {
+                id: EvaluationSessionId::from_nonzero(values.ids().evaluation_session()),
+                values,
+                default_reflection_profile,
+                require_default_reflection_profile,
+                closed: Arc::new(AtomicBool::new(false)),
+                coordinator: Arc::downgrade(coordinator),
+                #[cfg(test)]
+                poll_contexts: AtomicUsize::new(0),
+            })
         })
     }
 
@@ -641,6 +530,34 @@ impl EvalContext {
             #[cfg(test)]
             observed_progress_wait_barrier: None,
         }
+    }
+
+    pub(crate) fn for_runtime_background(&self) -> Result<Self, Arc<str>> {
+        let coordinator = self.coordinator_for_admission()?;
+        // Ordinary production sessions carry the runtime's selected default
+        // profile; role-specific contexts such as macro execution carry their
+        // explicitly selected profile. Preserve that semantic capability
+        // while replacing only the lifecycle identity with the runtime-owned
+        // background domain.
+        let task_profile = self.task_profile.clone();
+        let session = coordinator
+            .background_demand()
+            .ok_or_else(|| Arc::from("evaluation runtime has no background demand domain"))?;
+        Ok(Self {
+            task_profile,
+            session,
+            task: Arc::new(OnceLock::new()),
+            local_promise_owner: None,
+            scheduled_task: false,
+            waits_for_claimed_tasks: false,
+            originating_task: None,
+            #[cfg(test)]
+            claimed_task_wait_probe: None,
+            #[cfg(test)]
+            deferred_pump_pause: None,
+            #[cfg(test)]
+            observed_progress_wait_barrier: None,
+        })
     }
 
     pub(super) fn for_spark(session: Arc<EvaluationDemandState>) -> Self {
@@ -1670,6 +1587,20 @@ impl EvalContext {
         drop(coordinator.retire_reflection(handle.work));
     }
 
+    fn cancel_pending_reflection_completion(&self, handle: &EvaluationTaskHandle) {
+        let Some(coordinator) = self.coordinator() else {
+            return;
+        };
+        if coordinator.terminalize_reserved_reflection(handle.work) {
+            coordinator.settle_terminal_work(
+                handle.work,
+                EvaluationWaitTerminal::Cancelled,
+                evaluation_failure("reflection task was cancelled before activation"),
+            );
+            drop(coordinator.retire_reflection(handle.work));
+        }
+    }
+
     pub(crate) fn reserve_reflection_task(
         &self,
         effect: Value,
@@ -1690,49 +1621,93 @@ impl EvalContext {
         })
     }
 
-    pub(crate) fn reserve_reflection_activation(
+    /// Reserves one autonomous reflection task and makes its terminal result
+    /// the producer of `completion` before returning an activation permit.
+    ///
+    /// The caller must publish the promised value into its managed graph and
+    /// only then defer activation. Dropping the returned permit before that
+    /// point terminalizes both the task and its registered promise.
+    pub(crate) fn reserve_reflection_completion_activation(
         &self,
-        effect: Value,
+        effect: RuntimeValueRoot,
+        target: Option<RuntimeValueRoot>,
+        completion: ManagedPromiseRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<ReflectionTaskReservation, Arc<str>> {
         let coordinator = self.coordinator_for_admission()?;
-        let default_profile = self.session.default_reflection_profile.clone();
-        if default_profile.is_sealed() {
-            let handle = self.reserve_task()?;
-            let observation = ReflectionTaskObservation::reserved(handle.clone());
-            return Ok(ReflectionTaskReservation {
-                observation: observation.clone(),
-                handle,
-                activation: Some(Arc::new(ReflectionTaskActivationPermit {
-                    observation,
-                    activation: Mutex::new(Some(ReflectionTaskActivation {
-                        context: self.clone(),
-                        effect: self.values().construct_runtime_value_root(|_| effect),
-                        result_policy,
-                        task_profile: default_profile,
-                    })),
-                })),
-            });
-        }
-
-        if self.session.require_default_reflection_profile {
+        let task_profile = self.task_profile.clone();
+        if !task_profile.is_sealed() && self.session.require_default_reflection_profile {
             return Err(Arc::from(
                 "evaluation runtime default reflection task profile is not sealed",
             ));
         }
+        debug_assert_eq!(effect.runtime_id(), self.values().runtime_id());
+        debug_assert_eq!(completion.runtime_id(), self.values().runtime_id());
+        if let Some(target) = &target {
+            debug_assert_eq!(target.runtime_id(), self.values().runtime_id());
+        }
 
-        // Focused evaluator tests and internal clients may intentionally use a
-        // bare session. Preserve an inspectable wait record for them; ordinary
-        // Assembler sessions always install a launcher.
-        let id = allocate_task_id(self.values())?;
-        let wait = allocate_wait_token(&self.session, id)?;
-        let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
-        let handle = EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait);
-        Ok(ReflectionTaskReservation {
-            observation: ReflectionTaskObservation::already_active(handle.clone()),
-            handle,
-            activation: None,
-        })
+        let handle = if task_profile.is_sealed() {
+            self.reserve_task()?
+        } else {
+            // Focused evaluator fixtures may intentionally omit a launcher
+            // and terminalize the dormant task directly. Production runtime
+            // sessions require a sealed default profile above.
+            let id = allocate_task_id(self.values())?;
+            let wait = allocate_wait_token(&self.session, id)?;
+            let work = coordinator.register_dormant_reflection(&self.session, id, wait.clone())?;
+            EvaluationTaskHandle::new(&coordinator, self.session.id, id, work, wait)
+        };
+        let terminal = match result_policy {
+            ReflectionTaskResultPolicy::ReturnValue => {
+                debug_assert!(target.is_none());
+                TaskPromiseTerminalMapper::ReflectionReturnValue
+            }
+            ReflectionTaskResultPolicy::RequireUnit => TaskPromiseTerminalMapper::ReflectionGate {
+                target: target.expect("a reflection gate must retain its target"),
+            },
+        };
+        let promise_wait = match allocate_wait_token(&self.session, handle.id()) {
+            Ok(wait) => wait,
+            Err(error) => {
+                self.cancel_pending_reflection_completion(&handle);
+                return Err(error);
+            }
+        };
+        let producer = match coordinator.register_task_promise_with_terminal(
+            handle.id(),
+            promise_wait,
+            completion.clone(),
+            terminal,
+        ) {
+            Ok(producer) => producer,
+            Err(error) => {
+                self.cancel_pending_reflection_completion(&handle);
+                return Err(error);
+            }
+        };
+        let installed = self
+            .values()
+            .with_runtime_value_access(|access| completion.install_producer(&access, &producer));
+        if installed.is_err() {
+            self.cancel_pending_reflection_completion(&handle);
+            return Err(Arc::from(
+                "reflection completion promise already has a producer",
+            ));
+        }
+
+        let activation = task_profile.is_sealed().then(|| {
+            Arc::new(ReflectionTaskActivationPermit {
+                handle: handle.clone(),
+                activation: Mutex::new(Some(ReflectionTaskActivation {
+                    context: self.clone(),
+                    effect,
+                    result_policy,
+                    task_profile,
+                })),
+            })
+        });
+        Ok(ReflectionTaskReservation { activation })
     }
 
     pub(crate) fn poll_reflection_task(&self, task: &EvaluationTaskHandle) -> EvaluationWaitPoll {
@@ -1829,6 +1804,18 @@ impl EvalContext {
     /// leaves every unfinished task unchanged.
     pub(crate) fn run_until_quiescent(&self) -> EvaluationSessionRun {
         self.session.run_until_quiescent()
+    }
+
+    /// Polls one runtime-scoped reflection or deferred task without claiming
+    /// foreground client demand or best-effort spark work.
+    ///
+    /// Batch supervisors use this after their own foreground work has become
+    /// quiet so autonomous children which no longer have a live demand route
+    /// still reach a terminal disposition.
+    #[cfg(test)]
+    pub(crate) fn poll_runtime_background(&self) -> bool {
+        self.coordinator()
+            .is_some_and(|coordinator| coordinator.poll_runtime_work())
     }
 
     #[cfg(test)]

@@ -14,11 +14,10 @@ use rpds::RedBlackTreeMapSync;
 
 use crate::core_net::{CoreDataKey, CoreRuntimeNet};
 #[cfg(test)]
+use crate::evaluation::EvaluatorStepContext;
+#[cfg(test)]
 use crate::evaluation::PromiseProducerObligation;
-use crate::evaluation::{
-    EvalContext, EvaluationWorkCoordinator, EvaluatorStepContext, ReflectionTaskObservation,
-    ReflectionTaskReservation, ReflectionTaskResultPolicy,
-};
+use crate::evaluation::{EvalContext, EvaluationWorkCoordinator, ReflectionTaskResultPolicy};
 use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
 
@@ -1828,20 +1827,15 @@ impl CoreValueFactory {
 /// A lazy reflection task which either gates a target or returns its result.
 ///
 /// The payload is boxed so adding reflection does not enlarge every
-/// `LazySource`. This managed-reachable payload owns the immutable effect and
-/// optional gate target as exact semantic edges. Its external-owner handle
-/// reaches only an edge-free stable task observation; the first observer's
-/// temporary activation permit roots the effect until ownership transfers to
-/// the runtime work coordinator's task machine.
+/// `LazySource`. This managed-reachable payload owns the immutable effect,
+/// optional gate target, and exact managed promise which receives the
+/// autonomous task's terminal result. Task reservation and activation remain
+/// transient orchestration and are never stored in the value graph.
 pub(crate) struct ReflectionComputation {
     effect: Value,
     target: Option<Value>,
-    handle: ExternalOwnerHandle,
+    completion_promise: PromisedValue,
     completion: ReflectionCompletionKind,
-}
-
-struct ReflectionComputationOwner {
-    task: OnceLock<Result<ReflectionTaskObservation, Arc<str>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1851,84 +1845,52 @@ pub(crate) enum ReflectionCompletionKind {
 }
 
 impl ReflectionComputation {
-    fn gate(values: &CoreValueFactory, effect: Value, target: Value) -> Self {
-        Self::new(values, effect, Some(target), ReflectionCompletionKind::Gate)
+    fn gate(access: &RuntimeValueAccess<'_>, effect: Value, target: Value) -> Self {
+        Self::new(access, effect, Some(target), ReflectionCompletionKind::Gate)
     }
 
-    fn return_value(values: &CoreValueFactory, effect: Value) -> Self {
-        Self::new(values, effect, None, ReflectionCompletionKind::ReturnValue)
+    fn return_value(access: &RuntimeValueAccess<'_>, effect: Value) -> Self {
+        Self::new(access, effect, None, ReflectionCompletionKind::ReturnValue)
     }
 
     fn new(
-        values: &CoreValueFactory,
+        access: &RuntimeValueAccess<'_>,
         effect: Value,
         target: Option<Value>,
         completion: ReflectionCompletionKind,
     ) -> Self {
-        let owner = Arc::new(ReflectionComputationOwner {
-            task: OnceLock::new(),
-        });
+        let completion_promise = access
+            .construct_managed_promise(match completion {
+                ReflectionCompletionKind::Gate => "reflection annotation completion",
+                ReflectionCompletionKind::ReturnValue => "reflection task result completion",
+            })
+            .expect("managed reflection completion promise must fit one collector run");
         Self {
             effect,
             target,
-            handle: values.domain.external_owners.insert(owner),
+            completion_promise,
             completion,
         }
     }
 
-    fn owner(&self, values: &CoreValueFactory) -> Arc<ReflectionComputationOwner> {
-        values
-            .domain
-            .external_owners
-            .get::<ReflectionComputationOwner>(&self.handle)
-    }
-
-    pub(crate) fn task(
+    pub(crate) fn handoff_roots_in(
         &self,
-        context: &EvalContext,
-    ) -> Result<ReflectionTaskReservation, Arc<EvaluationFailure>> {
-        // `owner` is an independent `Arc`: the registry lock used to find it
-        // is gone before the `OnceLock` initializer admits coordinator work.
-        let owner = self.owner(context.values());
-        let mut handle = None;
-        let mut activation = None;
-        let observation = owner
-            .task
-            .get_or_init(|| {
-                context
-                    .reserve_reflection_activation(self.effect.clone(), self.result_policy())
-                    .map(|reservation| {
-                        let (observation, reserved_handle, permit) = reservation.into_cache_parts();
-                        handle = Some(reserved_handle);
-                        activation = permit;
-                        observation
-                    })
-            })
-            .clone()
-            .map_err(|error| Arc::new(EvaluationFailure::message(error)))?;
-        let handle = handle.or_else(|| observation.handle()).ok_or_else(|| {
-            Arc::new(EvaluationFailure::message(
-                "reflection task observation is no longer available",
-            ))
-        })?;
-        Ok(ReflectionTaskReservation::from_cache_parts(
-            observation,
-            handle,
-            activation,
-        ))
+        access: &RuntimeValueAccess<'_>,
+    ) -> (
+        RuntimeValueRoot,
+        Option<RuntimeValueRoot>,
+        ManagedPromiseRoot,
+    ) {
+        let effect = access.root_runtime_value(access.duplicate_value(&self.effect));
+        let target = self
+            .target
+            .as_ref()
+            .map(|target| access.root_runtime_value(access.duplicate_value(target)));
+        let completion = self.completion_promise.root_in(access);
+        (effect, target, completion)
     }
 
-    pub(crate) fn completion(&self) -> ReflectionCompletionKind {
-        self.completion
-    }
-
-    pub(crate) fn target(&self, context: &EvaluatorStepContext<'_>) -> Option<Value> {
-        // The target is the direct traced field. Reopen matching evaluator
-        // access only for its projection; no external owner caches a copy.
-        context.with_value_access(|_| self.target.clone())
-    }
-
-    fn result_policy(&self) -> ReflectionTaskResultPolicy {
+    pub(crate) fn result_policy(&self) -> ReflectionTaskResultPolicy {
         match self.completion {
             ReflectionCompletionKind::Gate => ReflectionTaskResultPolicy::RequireUnit,
             ReflectionCompletionKind::ReturnValue => ReflectionTaskResultPolicy::ReturnValue,
@@ -2034,9 +1996,7 @@ impl LazyValue {
             access,
             "reflection annotation",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation::gate(
-                access.values(),
-                effect,
-                target,
+                access, effect, target,
             ))),
         )
     }
@@ -2370,8 +2330,7 @@ impl Value {
             access,
             "reflection task result",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation::return_value(
-                access.values(),
-                effect,
+                access, effect,
             ))),
         ))
     }

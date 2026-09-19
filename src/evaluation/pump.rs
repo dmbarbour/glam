@@ -364,7 +364,7 @@ pub(super) fn pump_demand(
     if target.terminal_poll().is_some() {
         return EvaluationPumpOutcome::TargetReady;
     }
-    if !target.belongs_to(&context.session) {
+    if target.runtime_id() != context.values().runtime_id() {
         return EvaluationPumpOutcome::NoProgress;
     }
     let mut yielded_exact = None;

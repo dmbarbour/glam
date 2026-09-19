@@ -1,16 +1,16 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
 use crate::core::{
-    ClosedCompatibilityValue, Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key,
-    LazyValue, ListThunk, Value, keys,
+    Dict, EvaluatedValue, EvaluationFailure, FixpointComputation, Key, LazyValue, ListThunk, Value,
+    keys,
 };
 use crate::core_net::CoreRuntimeNet;
 use crate::evaluation::{
-    EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock, EvaluationTaskMachine,
-    EvaluationWaitPoll, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
+    EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskMachine, EvaluationWaitPoll,
+    ReflectionTaskLauncher, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 
@@ -698,72 +698,6 @@ struct FixtureTaskLauncher {
 struct ScopedReflectionLauncher {
     values: crate::core::CoreValueFactory,
     builds: Arc<AtomicUsize>,
-}
-
-struct BlockingReflectionLauncher {
-    entered: std::sync::mpsc::Sender<()>,
-    release: Arc<Barrier>,
-    builds: Arc<AtomicUsize>,
-}
-
-struct RootingBlockingReflectionLauncher {
-    entered: std::sync::mpsc::Sender<()>,
-    release: Arc<Barrier>,
-}
-
-struct RootedBlockingReflectionMachine {
-    _effect: crate::runtime::RuntimeValueRoot,
-    observed_epoch: crate::evaluation::RuntimeObservationEpoch,
-}
-
-impl ReflectionTaskLauncher for RootingBlockingReflectionLauncher {
-    fn build(
-        &self,
-        context: EvalContext,
-        effect: Value,
-        _result_policy: ReflectionTaskResultPolicy,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        self.entered
-            .send(())
-            .expect("handoff fixture must retain its entry receiver");
-        self.release.wait();
-        Ok(Box::new(RootedBlockingReflectionMachine {
-            _effect: crate::runtime::RuntimeValueRoot::new(context.values(), effect),
-            observed_epoch: context.current_observation_epoch(),
-        }))
-    }
-}
-
-impl EvaluationTaskMachine for RootedBlockingReflectionMachine {
-    fn poll(
-        &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            dependency: None,
-            observed_epoch: Some(self.observed_epoch),
-            error: None,
-        })
-    }
-}
-
-impl ReflectionTaskLauncher for BlockingReflectionLauncher {
-    fn build(
-        &self,
-        _context: EvalContext,
-        _effect: Value,
-        _result_policy: ReflectionTaskResultPolicy,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        self.builds.fetch_add(1, Ordering::SeqCst);
-        self.entered
-            .send(())
-            .expect("activation test must retain its entry receiver");
-        self.release.wait();
-        Ok(Box::new(FixtureTaskMachine {
-            terminal: Some(FixtureTaskTerminal::Complete(unit_value())),
-        }))
-    }
 }
 
 impl ReflectionTaskLauncher for ScopedReflectionLauncher {
@@ -6668,22 +6602,8 @@ fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) ->
         .expect("reflection annotation should construct a lazy gate")
 }
 
-fn reflection_computation(
-    values: &crate::core::CoreValueFactory,
-    value: &Value,
-) -> Arc<crate::core::ReflectionComputation> {
-    let Value::Lazy(lazy) = value else {
-        panic!("reflection computation must be represented by a lazy value")
-    };
-    let Some(crate::core::LazySource::ReflectionTask(computation)) = lazy.source_snapshot(values)
-    else {
-        panic!("reflection lazy value must retain its unobserved computation")
-    };
-    computation
-}
-
 #[test]
-fn reflection_gate_reserves_inside_and_activates_outside_scope() {
+fn reflection_source_reserves_inside_and_activates_after_evaluator_access_closes() {
     let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -6694,257 +6614,64 @@ fn reflection_gate_reserves_inside_and_activates_outside_scope() {
             values: context.values().clone(),
             builds: builds.clone(),
         }))
-        .expect("fresh test session should accept its reflection launcher");
-    let computation = reflection_computation(
-        context.values(),
-        &Value::reflection_task_result(context.values(), n(0)),
-    );
-    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+        .expect("fresh test runtime should accept its reflection launcher");
 
-    let task = poll.evaluate(&context, |evaluator| {
-        let task = computation
-            .task(&context)
-            .expect("reflection observation should reserve its task")
-            .clone();
-        evaluator.defer_reflection_activation(task.clone());
-        assert_eq!(
-            builds.load(Ordering::SeqCst),
-            0,
-            "reservation must not construct the launcher inside evaluator scope"
-        );
-        assert!(matches!(
-            context.poll_reflection_task(task.handle()),
-            EvaluationWaitPoll::Pending(_)
-        ));
-        task
-    });
-
-    assert_eq!(builds.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        context.run_until_quiescent(),
-        crate::evaluation::EvaluationSessionRun::Complete(_)
-    ));
-    assert!(matches!(
-        context.poll_reflection_task(task.handle()),
-        EvaluationWaitPoll::Complete(_)
-    ));
-}
-
-#[test]
-fn reflection_reservation_admission_failure_is_scalar_and_retires_with_its_source() {
-    let (coordinator, _executor) = crate::evaluation::test_execution_resources(0)
-        .expect("reflection admission fixture should build");
-    let owner = crate::evaluation::EvaluationSession::shared(&coordinator);
-    let (context, owner) = OwnedEvalContext::new(owner).into_parts();
-    let values = context.values().clone();
-    let baseline = values
-        .collect_managed_for_test()
-        .expect("reflection admission fixture should start collectible");
-    let baseline_owners = values.external_owner_count_for_test();
-
-    let value = Value::reflection_task_result(&values, n(0));
-    let computation = reflection_computation(&values, &value);
-    drop(owner);
-
-    for _ in 0..2 {
-        let error = match computation.task(&context) {
-            Ok(_) => panic!("a closed demand must reject reflection task admission"),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "evaluation demand session is closed");
-    }
+    let value = Value::reflection_task_result(context.values(), n(0));
     assert_eq!(
-        context.task_registry_counts().reflection_active,
-        0,
-        "a cached admission failure must not retain a partial task reservation"
+        eval_value(&context, &value).expect("reflection result should complete"),
+        unit_value()
     );
-
-    drop(computation);
-    drop(value);
-    let reclaimed = values
-        .collect_managed_for_test()
-        .expect("the failed reflection source should remain collectible");
-    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
-    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
-    assert_eq!(reclaimed.finalized_slots(), 1);
-    assert_eq!(values.external_owner_count_for_test(), baseline_owners + 1);
-    assert_eq!(values.drain_external_owners_for_test(), 1);
-    assert_eq!(values.external_owner_count_for_test(), baseline_owners);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the source-to-promise handoff must activate exactly one task"
+    );
 }
 
 #[test]
-fn abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain() {
-    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
-        crate::runtime::allocate_evaluation_runtime_id(),
-        crate::runtime::RuntimeIds::new(),
-    ));
+fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise() {
+    let context = test_context();
+    let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
-            terminal: FixtureTaskTerminal::Cancelled,
-            builds: Arc::new(AtomicUsize::new(0)),
+            terminal: FixtureTaskTerminal::Complete(n(42)),
+            builds: builds.clone(),
             result_policies: Arc::new(Mutex::new(Vec::new())),
         }))
-        .expect("fresh test session should accept its reflection launcher");
-    let value = Value::reflection_task_result(context.values(), n(0));
-    let computation = reflection_computation(context.values(), &value);
-    let reservation = computation
-        .task(&context)
-        .expect("reflection observation should reserve its task");
-    let handle = reservation.handle().clone();
-    let managed_drops = Arc::new(AtomicUsize::new(0));
-    let root = context.values().with_managed_values(|scope| {
-        let allocator = scope
-            .allocator::<ClosedCompatibilityValue>()
-            .expect("the closed reflection value should fit a managed run");
-        scope.root(allocator.alloc(ClosedCompatibilityValue::new(value, &managed_drops)))
+        .expect("fresh permit-drop fixture should accept its reflection launcher");
+    let background = context
+        .for_runtime_background()
+        .expect("the test runtime should retain its background demand");
+    let (promise, completion, effect) = context.values().with_runtime_value_access(|access| {
+        let completion = access
+            .construct_rooted_managed_promise("dropped reflection activation")
+            .expect("the managed completion promise must fit its reviewed slot");
+        let promise = PromisedValue::from_root(&completion, &access);
+        let effect = access.root_runtime_value(n(0));
+        (promise, completion, effect)
     });
-    let abandoned_poll = context.poll_reflection_task(&handle);
-    assert!(
-        matches!(abandoned_poll, EvaluationWaitPoll::Pending(_)),
-        "discarding an unpublished reservation returned {abandoned_poll:?}"
-    );
 
+    let reservation = background
+        .reserve_reflection_completion_activation(
+            effect,
+            None,
+            completion,
+            ReflectionTaskResultPolicy::ReturnValue,
+        )
+        .expect("the autonomous reflection task should reserve");
     drop(reservation);
-    assert_eq!(context.task_registry_counts().reflection_active, 0);
-    drop(computation);
-    drop(root);
-    let report = context
-        .values()
-        .collect_managed_for_test()
-        .expect("unrooted reflection wrapper should collect passively");
-    assert_eq!(
-        report.finalized_slots(),
-        2,
-        "collection retires both the closed wrapper and its managed reflection lazy"
-    );
-    assert_eq!(managed_drops.load(Ordering::Relaxed), 1);
-    assert_eq!(context.values().drain_external_owners_for_test(), 1);
-    assert_eq!(context.task_registry_counts().reflection_active, 0);
+
+    let failure = promise
+        .assignment(context.values())
+        .expect("dropping the permit must settle the promise")
+        .expect_err("an unactivated task must fail its promise");
+    assert_eq!(failure.to_string(), "reflection result task was cancelled");
+    assert_eq!(builds.load(Ordering::SeqCst), 0);
+    assert_eq!(background.task_registry_counts().reflection_active, 0);
 }
 
 #[test]
-fn reflection_handoff_transfers_effect_root_after_source_owner_retirement() {
-    let values = crate::core::CoreValueFactory::new(
-        crate::runtime::allocate_evaluation_runtime_id(),
-        crate::runtime::RuntimeIds::new(),
-    );
-    let context = EvalContext::isolated(values.clone());
-    let release = Arc::new(Barrier::new(2));
-    let (entered, entry) = std::sync::mpsc::channel();
-    context
-        .install_reflection_launcher(Arc::new(RootingBlockingReflectionLauncher {
-            entered,
-            release: release.clone(),
-        }))
-        .expect("fresh handoff fixture should accept its reflection launcher");
-    let baseline = values
-        .collect_managed_for_test()
-        .expect("reflection handoff fixture should start collectible");
-    let baseline_owners = values.external_owner_count_for_test();
-
-    let promise = PromisedValue::new(&values, "reflection handoff effect");
-    let value = Value::reflection_task_result(&values, Value::Promised(promise.clone()));
-    let computation = reflection_computation(&values, &value);
-    let publication = crate::runtime::RuntimeValueRoot::new(&values, value.clone());
-    drop(value);
-
-    let published = values
-        .collect_managed_for_test()
-        .expect("the publication root should retain the complete reflection source");
-    assert_eq!(published.root_entries(), baseline.root_entries() + 1);
-    assert_eq!(
-        published.marked_slots(),
-        baseline.marked_slots() + 3,
-        "the publication root's compatibility shell traces the reflection lazy and promise"
-    );
-    assert_eq!(published.finalized_slots(), 0);
-
-    let reservation = computation
-        .task(&context)
-        .expect("the first observer should reserve the reflection task");
-    assert!(reservation.has_activation_permit());
-    let registrations_after_reservation = values.managed_root_registrations_for_test();
-    let handle = reservation.handle().clone();
-    drop(computation);
-    drop(publication);
-
-    let reserved = values
-        .collect_managed_for_test()
-        .expect("the activation permit should retain only the effect");
-    assert_eq!(reserved.root_entries(), baseline.root_entries() + 1);
-    assert_eq!(
-        reserved.marked_slots(),
-        baseline.marked_slots() + 2,
-        "the activation root's compatibility shell traces only the promise effect"
-    );
-    assert_eq!(reserved.finalized_slots(), 2);
-    assert_eq!(values.external_owner_count_for_test(), baseline_owners + 1);
-    assert_eq!(values.drain_external_owners_for_test(), 1);
-    assert_eq!(values.external_owner_count_for_test(), baseline_owners);
-    assert_eq!(context.task_registry_counts().reflection_active, 1);
-
-    let activation_context = (*context).clone();
-    let activation = std::thread::spawn(move || {
-        let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
-        poll.evaluate(&activation_context, |evaluator| {
-            evaluator.defer_reflection_activation(reservation);
-        });
-    });
-    entry
-        .recv()
-        .expect("activation must expose its pre-launcher-root handoff boundary");
-
-    let during_handoff = values
-        .collect_managed_for_test()
-        .expect("the activation permit must retain the effect during handoff");
-    assert_eq!(during_handoff.root_entries(), baseline.root_entries() + 1);
-    assert_eq!(during_handoff.marked_slots(), baseline.marked_slots() + 2);
-    release.wait();
-    activation
-        .join()
-        .expect("reflection activation must complete without panicking");
-
-    let queued = values
-        .collect_managed_for_test()
-        .expect("the installed task machine must own the transferred effect");
-    // The launcher still receives a projected raw value and must register a
-    // replacement root. GCI11R-002D.2f converts this seam to rooted transport;
-    // this assertion then deliberately changes from `+ 1` to no increase.
-    assert_eq!(
-        values.managed_root_registrations_for_test(),
-        registrations_after_reservation + 1,
-        "the current raw launcher handoff should register exactly one replacement effect root"
-    );
-    assert_eq!(queued.root_entries(), baseline.root_entries() + 1);
-    assert_eq!(queued.marked_slots(), baseline.marked_slots() + 2);
-    assert_eq!(
-        context.pump_wait(handle.wait(), 256),
-        crate::evaluation::EvaluationPumpOutcome::NoProgress
-    );
-    let blocked = values
-        .collect_managed_for_test()
-        .expect("the blocked task machine must retain its effect root");
-    assert_eq!(blocked.root_entries(), baseline.root_entries() + 1);
-    assert_eq!(blocked.marked_slots(), baseline.marked_slots() + 2);
-
-    assert_eq!(
-        handle.cancel(),
-        crate::evaluation::EvaluationTaskCancellation::Requested
-    );
-    assert_eq!(
-        context.poll_reflection_task(&handle),
-        EvaluationWaitPoll::Cancelled
-    );
-    let reclaimed = values
-        .collect_managed_for_test()
-        .expect("cancellation must retire the task machine's effect root");
-    assert_eq!(reclaimed.root_entries(), baseline.root_entries());
-    assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
-    assert_eq!(reclaimed.finalized_slots(), 2);
-}
-
-#[test]
-fn completed_reflection_owner_does_not_retain_its_value_domain() {
+fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle() {
     let values = crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -6963,203 +6690,16 @@ fn completed_reflection_owner_does_not_retain_its_value_domain() {
         assert_eq!(eval_value(&context, &value).unwrap(), n(42));
         assert_eq!(
             values.external_owner_count_for_test(),
-            1,
-            "the completed source owner should remain available for the runtime-drop probe"
+            0,
+            "reflection sources no longer allocate external-owner sidecars"
         );
     }
     drop(values);
     assert!(
         domain.upgrade().is_none(),
-        "an undrained owner with a completed observation must not close an Arc cycle through its value domain"
+        "a completed autonomous reflection task must not retain its value domain"
     );
 }
-
-#[derive(Clone, Copy, Debug)]
-enum ReflectionParticipant {
-    Owner,
-    Observer,
-}
-
-fn assert_reflection_gate_order(
-    first_observer: ReflectionParticipant,
-    first_activator: ReflectionParticipant,
-) {
-    let (owner, observer, _executor) = same_runtime_contexts();
-    let builds = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(Barrier::new(2));
-    let (entered, entry) = std::sync::mpsc::channel();
-    let launcher = Arc::new(BlockingReflectionLauncher {
-        entered,
-        release: release.clone(),
-        builds: builds.clone(),
-    });
-    // These focused bare sessions intentionally own separate unsealed default
-    // profiles. Seal both with the same launcher so this fixture isolates the
-    // first-observer and activation protocols from bare-session fallback.
-    owner
-        .install_reflection_launcher(launcher.clone())
-        .expect("fresh owner session should accept its reflection launcher");
-    observer
-        .install_reflection_launcher(launcher)
-        .expect("fresh observer session should accept the same reflection launcher");
-    let computation = reflection_computation(
-        owner.values(),
-        &Value::reflection_task_result(owner.values(), n(0)),
-    );
-
-    let (first, second) = match first_observer {
-        ReflectionParticipant::Owner => (&*owner, &*observer),
-        ReflectionParticipant::Observer => (&*observer, &*owner),
-    };
-    let first_task = computation
-        .task(first)
-        .expect("designated first observer should reserve the reflection task")
-        .clone();
-    assert!(first_task.has_activation_permit());
-    assert_eq!(first_task.handle().session_id(), first.session_id());
-    let second_task = computation
-        .task(second)
-        .expect("later observer should share the reflection reservation")
-        .clone();
-    assert!(!second_task.has_activation_permit());
-    assert_eq!(second_task.handle().id(), first_task.handle().id());
-    assert_eq!(second_task.handle().session_id(), first.session_id());
-    assert_eq!(first.task_registry_counts().reflection_active, 1);
-    assert_eq!(second.task_registry_counts().reflection_active, 0);
-
-    // Only the first observation carries the one-use activation permit. The
-    // permit is intentionally transferable to either same-runtime evaluator
-    // step, while the later observation carries only the stable task handle.
-    let (activation_context, overlapping_context) = match first_activator {
-        ReflectionParticipant::Owner => ((*owner).clone(), &*observer),
-        ReflectionParticipant::Observer => ((*observer).clone(), &*owner),
-    };
-    let activation = std::thread::spawn(move || {
-        let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
-        poll.evaluate(&activation_context, |evaluator| {
-            evaluator.defer_reflection_activation(first_task);
-        });
-    });
-    entry
-        .recv()
-        .expect("designated activation must enter launcher construction");
-    assert_eq!(builds.load(Ordering::SeqCst), 1);
-
-    let second_poll = crate::evaluation::EvaluationPollContext::for_context(overlapping_context);
-    second_poll.evaluate(overlapping_context, |evaluator| {
-        evaluator.defer_reflection_activation(second_task);
-    });
-    assert_eq!(
-        builds.load(Ordering::SeqCst),
-        1,
-        "the overlapping activation must observe the existing owner"
-    );
-
-    release.wait();
-    activation
-        .join()
-        .expect("designated reflection activation must not panic");
-    assert_eq!(builds.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        first.run_until_quiescent(),
-        crate::evaluation::EvaluationSessionRun::Complete(_)
-    ));
-}
-
-#[test]
-fn reflection_gate_observer_and_activation_orderings_are_forced() {
-    for first_observer in [
-        ReflectionParticipant::Owner,
-        ReflectionParticipant::Observer,
-    ] {
-        for first_activator in [
-            ReflectionParticipant::Owner,
-            ReflectionParticipant::Observer,
-        ] {
-            assert_reflection_gate_order(first_observer, first_activator);
-        }
-    }
-}
-
-#[test]
-fn reflection_gate_cancellation_before_and_during_activation_is_terminal() {
-    let before = test_context();
-    let before_builds = Arc::new(AtomicUsize::new(0));
-    before
-        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
-            terminal: FixtureTaskTerminal::Complete(unit_value()),
-            builds: before_builds.clone(),
-            result_policies: Arc::new(Mutex::new(Vec::new())),
-        }))
-        .expect("fresh test session should accept its reflection launcher");
-    let before_computation = reflection_computation(
-        before.values(),
-        &Value::reflection_task_result(before.values(), n(0)),
-    );
-    let before_task = before_computation
-        .task(&before)
-        .expect("reflection observation should reserve its task")
-        .clone();
-    assert_eq!(
-        before_task.handle().cancel(),
-        crate::evaluation::EvaluationTaskCancellation::Requested
-    );
-    let before_poll = crate::evaluation::EvaluationPollContext::for_context(&before);
-    before_poll.evaluate(&before, |evaluator| {
-        evaluator.defer_reflection_activation(before_task.clone());
-    });
-    assert_eq!(before_builds.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        before.poll_reflection_task(before_task.handle()),
-        EvaluationWaitPoll::Cancelled
-    ));
-
-    let during = test_context();
-    let during_builds = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(Barrier::new(2));
-    let (entered, entry) = std::sync::mpsc::channel();
-    during
-        .install_reflection_launcher(Arc::new(BlockingReflectionLauncher {
-            entered,
-            release: release.clone(),
-            builds: during_builds.clone(),
-        }))
-        .expect("fresh test session should accept its reflection launcher");
-    let during_computation = reflection_computation(
-        during.values(),
-        &Value::reflection_task_result(during.values(), n(0)),
-    );
-    let during_task = during_computation
-        .task(&during)
-        .expect("reflection observation should reserve its task")
-        .clone();
-    let activation_context = (*during).clone();
-    let activation_task = during_task.clone();
-    let activation = std::thread::spawn(move || {
-        let poll = crate::evaluation::EvaluationPollContext::for_context(&activation_context);
-        poll.evaluate(&activation_context, |evaluator| {
-            evaluator.defer_reflection_activation(activation_task);
-        });
-    });
-    entry
-        .recv()
-        .expect("launcher must expose its in-progress activation");
-    assert_eq!(
-        during_task.handle().cancel(),
-        crate::evaluation::EvaluationTaskCancellation::Requested
-    );
-    release.wait();
-    activation
-        .join()
-        .expect("cancelled activation must not panic");
-
-    assert_eq!(during_builds.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        during.poll_reflection_task(during_task.handle()),
-        EvaluationWaitPoll::Cancelled
-    ));
-}
-
 #[test]
 fn reflection_task_result_returns_arbitrary_lazy_value_once() {
     let context = test_context();
@@ -7198,22 +6738,97 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
 }
 
 #[test]
-fn reflection_task_result_blocks_across_sessions_and_returns_completion_value() {
+fn reflection_task_result_survives_first_session_close_and_returns_completion_value() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let computation = Value::reflection_task_result(owner.values(), n(0));
     let blocked = eval_value(&owner, &computation)
         .expect_err("an unlaunched reflection result task should block");
-    let wait = blocked
+    let owner_wait = blocked
         .blocked_on()
         .expect("the result computation should expose its stable wait");
 
     let cross_session = eval_value(&observer, &computation)
         .expect_err("a cross-session observer should follow the owner task");
     assert!(cross_session.blocked_on().is_some());
+    assert_eq!(
+        observer
+            .for_runtime_background()
+            .expect("the runtime should retain its background demand")
+            .task_registry_counts()
+            .reflection_active,
+        1,
+        "both observer sessions must share one autonomous task"
+    );
 
-    owner.complete_wait_with_value(&wait.0, n(43));
+    drop(owner);
+    let resumed = eval_value(&observer, &computation)
+        .expect_err("the later session should resume the lazy-owned promise checkpoint");
+    let resumed_wait = resumed
+        .blocked_on()
+        .expect("the resumed checkpoint should expose its autonomous task dependency");
+    assert_ne!(
+        resumed_wait, owner_wait,
+        "closing the first demand session retires its route without changing the autonomous task"
+    );
+    observer.complete_wait_with_value(&resumed_wait.0, n(43));
     assert_eq!(eval_value(&observer, &computation).unwrap(), n(43));
-    assert_eq!(eval_value(&owner, &computation).unwrap(), n(43));
+}
+
+#[test]
+fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let failure = Arc::new(EvaluationFailure::message(
+        "unobserved autonomous reflection failure",
+    ));
+    owner
+        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+            terminal: FixtureTaskTerminal::Failed(failure),
+            builds: Arc::new(AtomicUsize::new(0)),
+            result_policies: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .expect("fresh runtime should accept its reflection launcher");
+    let background = owner
+        .for_runtime_background()
+        .expect("the runtime should retain its background demand");
+    let (promise, completion, effect) = owner.values().with_runtime_value_access(|access| {
+        let completion = access
+            .construct_rooted_managed_promise("unobserved reflection failure")
+            .expect("the completion promise must fit its reviewed slot");
+        let promise = PromisedValue::from_root(&completion, &access);
+        let effect = access.root_runtime_value(n(0));
+        (promise, completion, effect)
+    });
+    background
+        .reserve_reflection_completion_activation(
+            effect,
+            None,
+            completion,
+            ReflectionTaskResultPolicy::ReturnValue,
+        )
+        .expect("the autonomous reflection task should reserve")
+        .activate();
+
+    assert!(matches!(
+        background.run_until_quiescent(),
+        crate::evaluation::EvaluationSessionRun::Complete(_)
+    ));
+    assert_eq!(
+        background.task_registry_counts().unacknowledged_failures,
+        1,
+        "an unobserved autonomous failure remains reportable"
+    );
+
+    let propagated = eval_value(&observer, &Value::Promised(promise))
+        .expect_err("observing the completion promise should propagate the task failure");
+    assert_eq!(
+        propagated.to_string(),
+        "unobserved autonomous reflection failure"
+    );
+    assert_eq!(
+        background.task_registry_counts().unacknowledged_failures,
+        0,
+        "promise propagation transfers reporting responsibility exactly once"
+    );
 }
 
 #[test]
@@ -7292,7 +6907,11 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     let second = eval_value(&context, &gate).expect_err("queued reflection task should block");
 
     assert_eq!(second.blocked_on(), Some(wait.clone()));
-    assert_eq!(context.reflection_task_count(), 1);
+    assert_eq!(
+        context.reflection_task_count(),
+        0,
+        "autonomous reflection work belongs to the runtime background domain"
+    );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     context.complete_wait(&wait.0);

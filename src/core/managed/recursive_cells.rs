@@ -1763,6 +1763,7 @@ mod tests {
                     "src/core.rs::LazyValue::error_in",
                     "src/core.rs::LazyValue::failure_in",
                     "src/core.rs::LazyValue::with_source_in",
+                    "src/core.rs::ReflectionComputation::new",
                     "src/core.rs::Value::builtin_call_in",
                     "src/eval/builtins.rs::apply_builtin_in",
                     "src/eval/dict_machine.rs::builtin_apply3_value_in",

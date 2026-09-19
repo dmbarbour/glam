@@ -817,18 +817,19 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        761,
+        758,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
     // W6G.1f.1 adds one traced typed edge from a managed lazy to its
     // evaluator-owned checkpoint. W6G.1f.3a.1 adds the concrete host-call arm,
-    // its fresh allocation and trace visit, plus two forced route-loss roots.
-    // Neither edge has an ordinary Clone/Eq surface: persistence, tracing, and
-    // working duplication remain explicit beneath access.
+    // its fresh allocation and trace visit. W6G.1f.3b removes the obsolete
+    // reflection observation carrier and its two test projections; the
+    // managed completion promise is already represented by Value's existing
+    // traced promise edge. None has an ordinary Clone/Eq surface.
     assert_eq!(
         occurrence_fingerprint(actual),
-        16_112_655_967_076_228_380,
+        4_463_723_765_720_724_129,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -873,9 +874,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 169),
+            ((SourceScope::Production, EdgeSurface::Typed), 168),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 542),
+            ((SourceScope::Test, EdgeSurface::Typed), 540),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

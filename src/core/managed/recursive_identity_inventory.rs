@@ -370,6 +370,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "semantic promise identity handle"
     ),
     owner!(
+        "src/core.rs::ReflectionComputation",
+        [0, 1, 0],
+        ExactManagedEdge,
+        None,
+        "autonomous reflection source traces its managed completion promise together with effect and target values"
+    ),
+    owner!(
         "src/core.rs::Value",
         [1, 1, 0],
         ExactManagedEdge,
@@ -694,7 +701,7 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for ReflectionComputation {",
-        reason: "immutable effect and optional gate-target paths owned by a managed lazy; its external handle reaches only edge-free lifecycle authority",
+        reason: "immutable effect, optional gate target, and managed completion promise owned by a managed lazy",
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
@@ -791,7 +798,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [14, 22, 9],
+        [15, 22, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

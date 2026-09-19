@@ -931,12 +931,14 @@ fn is_production_source(relative: &Path) -> bool {
 // detects a declaration being exchanged for another with the same counts.
 // `owner_for_declaration` is the reviewed semantic assignment for every entry.
 // W6G.1f.3a.0 replaces the single-field WHNF edge wrapper with one concrete
-// typed checkpoint sum. The new kind declaration contributes one additional
-// `Gc` carrier while preserving the same one-edge runtime representation.
+// typed checkpoint sum. W6G.1f.3b then replaces the registered reflection
+// observation root with a semantic managed promise edge held directly by the
+// computation. The declaration count is unchanged while that reviewed handoff
+// moves one signal from `RuntimeValueRoot` to `Value`.
 const DECLARATION_BASELINE_COUNT: usize = 227;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([133, 269, 5, 17, 6, 6, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_177_492_236_484_791_859;
+    DeclarationSignals::new([132, 270, 5, 17, 6, 6, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_036_773_009_167_588_772;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1270,18 +1272,18 @@ const LIFECYCLE_DELTA: &[LifecycleDeltaEntry] = &[
     LifecycleDeltaEntry {
         phase: "I6",
         subsystem: "reflection store and protocol state",
-        owner: "reflection computation semantic edges and one-use activation owner",
-        change: "reflection effect and target returned to the managed trace while the external reservation retained only edge-free observation and one-use rooted activation",
+        owner: "reflection computation semantic edges, managed completion promise, and one-use activation owner",
+        change: "reflection effect, target, and completion source belong to the managed trace while only one-use rooted activation remains external",
         disposition: LifecycleDeltaDisposition::ReconciledOwner,
-        behavior: "reflection_gate_observer_and_activation_orderings_are_forced",
-        owner_drop: "abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain",
+        behavior: "reflection_source_reserves_inside_and_activates_after_evaluator_access_closes",
+        owner_drop: "dropped_reflection_completion_activation_permit_terminalizes_managed_promise",
         isolated_reclamation: Some(
             "production_reflection_gate_target_backedge_reclaims_without_an_external_root",
         ),
         latches: &[
             LifecycleSourceLatch {
                 path: "src/eval/tests.rs",
-                needle: "fn reflection_gate_observer_and_activation_orderings_are_forced()",
+                needle: "fn reflection_source_reserves_inside_and_activates_after_evaluator_access_closes()",
             },
             LifecycleSourceLatch {
                 path: "src/core/managed/active_owner_inventory.rs",

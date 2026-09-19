@@ -7,7 +7,7 @@
 //! the concurrent collector plan reuses this inventory when these bounded
 //! regions become participant epochs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -622,7 +622,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tagged_machine.rs::tests::recognize#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tagged_machine.rs::tests::tagged_payload_resumes_nested_undefined_work_at_the_exact_member#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain#1|surface=construction|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -630,7 +630,9 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::promised_list_chunks_remain_assignable_after_early_observation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::zero_arity_apply_operator_is_data_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -650,19 +652,21 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#2|surface=runtime-access|scope=test|nested=1|carrier=none",
-    "src/evaluation/coordinator.rs::impl TaskOwnedPromiseObligation::publish_failure_guarded#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/evaluation/coordinator.rs::impl TaskOwnedPromiseObligation::publish_terminal_guarded#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/coordinator/task.rs::impl LocalPromiseOwner::fail_all#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/executor.rs::tests::worker_termination_releases_inactive_collector_caches#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_completion_activation#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseAfterRelease::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseThenYield::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl CacheLazyFailure::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::root_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -858,7 +862,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // payload in one explicit access region.
         // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
         // inspect their exact lazy-owned checkpoint under two bounded regions.
-        ("src/eval/tests.rs", GatewayCounts::new(10, 1)),
+        ("src/eval/tests.rs", GatewayCounts::new(12, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
         ("src/eval/value/tests/w4.rs", GatewayCounts::new(7, 0)),
@@ -882,6 +886,12 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/evaluation/coordinator/task.rs",
             GatewayCounts::new(1, 0),
         ),
+        // W6G.1f.3b's terminal-disposition matrix constructs the completion
+        // and failure roots beneath one explicit test-only access region.
+        (
+            "src/evaluation/coordinator/tests.rs",
+            GatewayCounts::new(1, 0),
+        ),
         // Promise terminalization projects a managed assignment through the
         // producer root while the coordinator mutation remains admitted.
         ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
@@ -891,7 +901,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/evaluation/pump.rs", GatewayCounts::new(1, 0)),
         // GCI5R-003D roots lazy and promise producers before coordinator
         // admission instead of letting either semantic façade reopen access.
-        ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
+        ("src/evaluation/session.rs", GatewayCounts::new(4, 0)),
         // Production-shaped task fixtures retain lazy/promise roots and use
         // explicit matching-domain access rather than facade mutation.
         // D.2b.2's production-shaped promise publishers install assignments
@@ -900,7 +910,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // their recursive values under three additional bounded regions.
         // W6G.1f.2a forces cross-session resumption through the exact
         // lazy-owned checkpoint under one additional bounded test region.
-        ("src/evaluation/tests.rs", GatewayCounts::new(13, 0)),
+        ("src/evaluation/tests.rs", GatewayCounts::new(14, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
@@ -975,15 +985,27 @@ fn every_mutator_introduction_has_an_exact_disposition() {
         .iter()
         .map(AdmissionOccurrence::record)
         .collect::<Vec<_>>();
-    let expected = EXPECTED_ADMISSION_OCCURRENCES
+    let mut expected = EXPECTED_ADMISSION_OCCURRENCES
         .iter()
         .map(|record| (*record).to_owned())
         .collect::<Vec<_>>();
+    expected.sort();
 
-    assert_eq!(
-        actual, expected,
-        "managed mutator-introduction ledger drifted"
-    );
+    if actual != expected {
+        let actual_set = actual.iter().collect::<BTreeSet<_>>();
+        let expected_set = expected.iter().collect::<BTreeSet<_>>();
+        let missing = expected_set
+            .difference(&actual_set)
+            .copied()
+            .collect::<Vec<_>>();
+        let unexpected = actual_set
+            .difference(&expected_set)
+            .copied()
+            .collect::<Vec<_>>();
+        panic!(
+            "managed mutator-introduction ledger drifted: missing {missing:?}; unexpected {unexpected:?}"
+        );
+    }
 
     let reviews = occurrences
         .iter()
@@ -1066,7 +1088,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        23
+        24
     );
 }
 

@@ -288,7 +288,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
 }
 
 #[test]
-fn reflection_source_reserves_then_waits_from_one_typed_owner() {
+fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
     let context = EvalContext::standalone();
     let value = Value::reflection_task_result(context.values(), number(0));
     let Value::Lazy(lazy) = value else {
@@ -297,42 +297,42 @@ fn reflection_source_reserves_then_waits_from_one_typed_owner() {
     let mut machine = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
-    assert!(matches!(
-        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
-        EvaluationMachinePoll::Yielded
-    ));
-    assert!(matches!(machine.work, LazyTaskWork::Reflection(_)));
+    let first = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1));
+    assert!(matches!(machine.work, LazyTaskWork::WhnfCheckpoint));
     collect_between_handoffs(&context);
 
-    assert!(matches!(
-        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
-        EvaluationMachinePoll::Yielded
-    ));
-    let wait = {
-        let LazyTaskWork::Reflection(reflection) = &machine.work else {
-            panic!("the reflection source must retain its typed owner")
-        };
-        reflection
-            .reservation
-            .as_ref()
-            .expect("the source owner must retain its reservation")
-            .handle()
-            .wait()
-            .clone()
+    let blocked = match first {
+        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Promise(blocked)),
+            ..
+        }) => blocked,
+        EvaluationMachinePoll::Yielded => {
+            let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Promise(blocked)),
+                ..
+            }) = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+            else {
+                panic!("the reserved reflection source must expose its stable wait")
+            };
+            blocked
+        }
+        EvaluationMachinePoll::Complete(_) => panic!("reflection handoff completed early"),
+        EvaluationMachinePoll::Failed(failure) => panic!("reflection handoff failed: {failure}"),
+        EvaluationMachinePoll::ScheduleSpark(_) => {
+            panic!("reflection handoff unexpectedly scheduled a spark")
+        }
+        EvaluationMachinePoll::Exit(_) => panic!("reflection handoff requested exit"),
+        EvaluationMachinePoll::Cancelled => panic!("reflection handoff was cancelled"),
+        EvaluationMachinePoll::Blocked(_) => {
+            panic!("reflection handoff blocked without its promise dependency")
+        }
     };
     collect_between_handoffs(&context);
 
-    let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-        dependency: Some(WorkDependency::Wait(blocked)),
-        ..
-    }) = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
-    else {
-        panic!("the reserved reflection source must expose its stable wait")
-    };
-    assert_eq!(blocked, wait);
-    collect_between_handoffs(&context);
-
-    context.complete_wait_with_value(&wait, number(43));
+    let producer = blocked
+        .producer()
+        .expect("the reflection completion promise must retain its task producer");
+    context.complete_wait_with_value(&producer.wait(), number(43));
     collect_between_handoffs(&context);
     assert!(matches!(
         machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),

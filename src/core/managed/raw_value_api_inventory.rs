@@ -1359,13 +1359,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        442,
+        441,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        2_827_598_967_443_584_443,
+        13_234_136_077_325_586_641,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1376,9 +1376,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 141),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 145),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 29),
-        ((ApiKind::Function, ApiDisposition::Violation), 262),
+        ((ApiKind::Function, ApiDisposition::Violation), 257),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1446,7 +1446,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2bCoreCompatibility,
                 ReplacementShape::CoreStructuralOperation,
             ),
-            39,
+            35,
         ),
         (
             (
@@ -1460,7 +1460,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2dOrchestration,
                 ReplacementShape::RootedOrchestration,
             ),
-            12,
+            11,
         ),
         (
             (
@@ -1547,10 +1547,6 @@ fn d2b_core_compatibility_declarations_are_exact() {
         "src/core.rs::LazyApplication::function",
         "src/core.rs::MetadataCarrier::associated_metadata",
         "src/core.rs::MetadataCarrier::new",
-        "src/core.rs::ReflectionComputation::gate",
-        "src/core.rs::ReflectionComputation::new",
-        "src/core.rs::ReflectionComputation::return_value",
-        "src/core.rs::ReflectionComputation::target",
         "src/core.rs::Value::associated_metadata",
         "src/core.rs::Value::diagnostic_kind_name",
         "src/core.rs::Value::fmt",

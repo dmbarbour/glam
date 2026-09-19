@@ -5,13 +5,14 @@
 //! storage, scheduler identities, or ordinary Rust resources. I4F.2b.1-.3
 //! moved the three active frontiers into a runtime registry: host-call closure
 //! environments, reflection reservation cancellation, and opaque payloads.
-//! GCI5R-005 then restored reflection effect/target values to the managed
-//! computation's exact trace and left only an edge-free stable observation in
-//! that registry. The one-use activation permit is a transient external root,
-//! not registry state. Managed-reachable values therefore retain only passive
-//! handles, while arbitrary host callback environments remain deferred to
-//! I10A. The source latches below keep both sides of that boundary explicit;
-//! arbitrary external callback environments remain conservative host owners.
+//! GCI5R-005 restored reflection effect/target values to the managed
+//! computation's exact trace; W6G.1f.3b then removed its stable observation
+//! sidecar entirely. The one-use activation permit is a transient external
+//! root, not managed or registry state. Managed-reachable values therefore
+//! retain only passive handles, while arbitrary host callback environments
+//! remain deferred to I10A. The source latches below keep both sides of that
+//! boundary explicit; arbitrary external callback environments remain
+//! conservative host owners.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,7 +26,7 @@ use syn::{Attribute, Item, Type};
 use crate::core::{
     Builtin, ClosedCompatibilityValue, Dict, FunctionValue, HostCallProducer, HostCallRecord,
     LazySource, LazyValue, List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
-    PromisedValue, ReflectionComputation, ReflectionComputationOwner, Value, set_test_promise,
+    PromisedValue, ReflectionComputation, Value, set_test_promise,
 };
 use crate::core_net::CoreSpecialization;
 use crate::interaction_net::NetBuilder;
@@ -34,14 +35,12 @@ use crate::runtime::RuntimeValueRoot;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveDestructionKind {
     HostCallback,
-    ReflectionReservation,
     OpaquePayload,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecursiveBackedgePolicy {
     ConservativeExternalOwner,
-    ClosedByI6D1,
     ForbiddenByAdmission,
 }
 
@@ -62,14 +61,6 @@ const ACTIVE_DESTRUCTION_FRONTIERS: &[ActiveDestructionFrontier] = &[
         active_action: "arbitrary host-capture destruction is externally drained",
         extraction: "I4F.2b.1 external host-call registry",
         recursive_backedge: RecursiveBackedgePolicy::ConservativeExternalOwner,
-    },
-    ActiveDestructionFrontier {
-        kind: ActiveDestructionKind::ReflectionReservation,
-        path: "Value::Lazy -> LazyCell::source -> LazySource::ReflectionTask -> ReflectionComputation::handle -> runtime external-owner registry",
-        owner: "runtime-owned edge-free reflection task observation",
-        active_action: "unactivated reservation cancellation is externally drained",
-        extraction: "I4F.2b.2 registry with I6D.1 semantic-edge closure",
-        recursive_backedge: RecursiveBackedgePolicy::ClosedByI6D1,
     },
     ActiveDestructionFrontier {
         kind: ActiveDestructionKind::OpaquePayload,
@@ -111,48 +102,6 @@ const SOURCE_LATCHES: &[SourceLatch] = &[
         needle: "owner: Box<dyn Any + Send + Sync>",
         expected: 1,
         frontier: ActiveDestructionKind::HostCallback,
-    },
-    SourceLatch {
-        path: "src/core.rs",
-        needle: "pub(crate) struct ReflectionComputation {",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/core.rs",
-        needle: "task: OnceLock<Result<ReflectionTaskObservation, Arc<str>>>",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/evaluation/session.rs",
-        needle: "struct ReflectionTaskObservationInner {",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/evaluation/session.rs",
-        needle: "pub(crate) struct ReflectionTaskActivationPermit {",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/evaluation/session.rs",
-        needle: "fn reflection_reservation_storage_separates_stable_observation_from_activation_payload()",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/evaluation/coordinator/task.rs",
-        needle: "fn evaluation_task_handle_retains_only_identity_wait_and_weak_coordinator_authority()",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
-    },
-    SourceLatch {
-        path: "src/evaluation/coordinator/task.rs",
-        needle: "pub(crate) fn discard_reservation(&self)",
-        expected: 1,
-        frontier: ActiveDestructionKind::ReflectionReservation,
     },
     SourceLatch {
         path: "src/core.rs",
@@ -271,6 +220,13 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
         verification: "client_demand_retirement_publishes_after_runtime_unlock",
     },
     ActiveRaiiEntry {
+        path: "src/api/runtime.rs",
+        owner: "RuntimeState",
+        disposition: ActiveRaiiDisposition::RuntimeInfrastructure,
+        retirement: "release the runtime-owned background demand before asynchronously stopping workers can retain its coordinator",
+        verification: "collection_interleaves_with_worker_quantum_without_lost_work",
+    },
+    ActiveRaiiEntry {
         path: "src/evaluation/executor.rs",
         owner: "EvaluationExecutor",
         disposition: ActiveRaiiDisposition::RuntimeInfrastructure,
@@ -286,24 +242,17 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
     },
     ActiveRaiiEntry {
         path: "src/evaluation/session.rs",
-        owner: "ReflectionTaskObservationInner",
-        disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,
-        retirement: "discard an unactivated edge-free reflection reservation",
-        verification: "reflection_gate_observer_and_activation_orderings_are_forced",
-    },
-    ActiveRaiiEntry {
-        path: "src/evaluation/session.rs",
         owner: "ReflectionTaskActivationPermit",
         disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,
-        retirement: "drop its one-use effect root before cancelling the reservation",
-        verification: "abandoned_reflection_activation_permit_discards_reserved_work_before_owner_drain",
+        retirement: "drop its one-use effect root before terminalizing the reserved task and its managed completion promise",
+        verification: "dropped_reflection_completion_activation_permit_terminalizes_managed_promise",
     },
     ActiveRaiiEntry {
         path: "src/evaluation/session.rs",
         owner: "PendingReflectionTaskInner",
         disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,
         retirement: "cancel a reserved task which was never committed",
-        verification: "pending_session_activation_roots_retire_with_their_reservations",
+        verification: "pending_reflection_activation_roots_retire_with_their_reservations",
     },
     ActiveRaiiEntry {
         path: "src/evaluation/session.rs",
@@ -419,13 +368,13 @@ const EXTERNAL_OWNER_FAMILIES: &[ExternalOwnerFamily] = &[
     },
     ExternalOwnerFamily {
         owner: "reflection reservation",
-        strong_capability: "edge-free task observation plus one-use activation context",
+        strong_capability: "one-use activation context for a runtime-background task",
         registered_roots: "effect root exists only in ReflectionTaskActivationPermit",
-        explicit_retirement: "begin activation or cancel/discard reservation",
-        drop_fallback: "observation, activation permit, and pending task cancel only while reserved",
-        terminal_semantics: "activation or cancellation wins exactly once",
-        lock_boundary: "activation payload drops before coordinator cancellation; no managed finalizer acts",
-        verification: "reflection_gate_observer_and_activation_orderings_are_forced",
+        explicit_retirement: "activate after managed promise/checkpoint publication or terminalize the reservation",
+        drop_fallback: "the activation permit terminalizes its task-owned managed completion promise",
+        terminal_semantics: "activation or terminal promise assignment wins exactly once",
+        lock_boundary: "activation payload drops before coordinator terminalization; no managed finalizer acts",
+        verification: "reflection_source_reserves_inside_and_activates_after_evaluator_access_closes",
         changed_after_i5: true,
     },
 ];
@@ -491,18 +440,13 @@ fn assert_reflection_fields(computation: &ReflectionComputation) {
     let ReflectionComputation {
         effect,
         target,
-        handle,
+        completion_promise,
         completion,
     } = computation;
     let _: &Value = effect;
     let _: &Option<Value> = target;
-    let _ = (handle, completion);
-}
-
-fn assert_reflection_owner_fields(owner: &ReflectionComputationOwner) {
-    let ReflectionComputationOwner { task } = owner;
-    let _: &std::sync::OnceLock<Result<crate::evaluation::ReflectionTaskObservation, Arc<str>>> =
-        task;
+    let _: &PromisedValue = completion_promise;
+    let _ = completion;
 }
 
 fn assert_opaque_fields(opaque: &OpaqueValue) {
@@ -927,7 +871,7 @@ fn opaque_external_lifecycle_matches_active_raii_inventory() {
 
 #[test]
 fn active_value_destruction_frontiers_are_source_latched() {
-    assert_eq!(ACTIVE_DESTRUCTION_FRONTIERS.len(), 3);
+    assert_eq!(ACTIVE_DESTRUCTION_FRONTIERS.len(), 2);
     for frontier in ACTIVE_DESTRUCTION_FRONTIERS {
         for (label, value) in [
             ("path", frontier.path),
@@ -976,12 +920,6 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
         [ActiveDestructionKind::HostCallback],
         "only arbitrary host-callback environments use conservative external ownership"
     );
-    let closed = ACTIVE_DESTRUCTION_FRONTIERS
-        .iter()
-        .filter(|frontier| frontier.recursive_backedge == RecursiveBackedgePolicy::ClosedByI6D1)
-        .map(|frontier| frontier.kind)
-        .collect::<Vec<_>>();
-    assert_eq!(closed, [ActiveDestructionKind::ReflectionReservation]);
     let forbidden = ACTIVE_DESTRUCTION_FRONTIERS
         .iter()
         .filter(|frontier| {
@@ -994,7 +932,7 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
     let core = include_str!("../../core.rs");
     assert_eq!(
         core.matches(".external_owners.insert(").count(),
-        2,
+        1,
         "inline external-owner insertions require a recursive-backedge classification"
     );
     assert_eq!(
@@ -1004,9 +942,9 @@ fn external_owner_recursive_backedges_are_explicitly_classified() {
         "the formatted host-call insertion requires a recursive-backedge classification"
     );
     assert!(core.contains("dyn Fn(HostCallRootBundle) -> Result<RuntimeValueRoot"));
-    let _: fn(&ReflectionComputationOwner) = assert_reflection_owner_fields;
     assert!(core.contains("effect: Value"));
     assert!(core.contains("target: Option<Value>"));
+    assert!(core.contains("completion_promise: PromisedValue"));
     assert!(!core.contains("effect: RuntimeValueRoot"));
     assert!(!core.contains("target: Option<RuntimeValueRoot>"));
     assert_eq!(
@@ -1073,8 +1011,16 @@ fn arbitrary_host_callback_root_backedge_is_conservative_external_ownership() {
         .collect_managed_for_test()
         .expect("removing the explicit external root should make the lazy collectible");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
-    assert_eq!(reclaimed.finalized_slots(), 2);
-    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(
+        reclaimed.finalized_slots(),
+        2,
+        "the host source cycle contains only its managed lazy and callback payload"
+    );
+    assert_eq!(
+        values.drain_external_owners_for_test(),
+        1,
+        "the collection makes the conservative host owner drainable; it does not eagerly run host cleanup"
+    );
     assert_eq!(values.external_owner_count_for_test(), 0);
 }
 
@@ -1100,8 +1046,12 @@ fn production_reflection_result_edges_do_not_need_an_external_root() {
         .expect("direct reflection edges should be traced without registered roots");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
     assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
-    assert_eq!(reclaimed.finalized_slots(), 2);
-    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(
+        reclaimed.finalized_slots(),
+        3,
+        "the result cycle now includes its managed completion promise"
+    );
+    assert_eq!(values.drain_external_owners_for_test(), 0);
     assert_eq!(values.external_owner_count_for_test(), 0);
 }
 
@@ -1132,8 +1082,12 @@ fn production_reflection_gate_target_backedge_reclaims_without_an_external_root(
         .expect("the direct reflection target edge should close its managed cycle");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
     assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
-    assert_eq!(reclaimed.finalized_slots(), 2);
-    assert_eq!(values.drain_external_owners_for_test(), 1);
+    assert_eq!(
+        reclaimed.finalized_slots(),
+        3,
+        "the gate cycle now includes its managed completion promise"
+    );
+    assert_eq!(values.drain_external_owners_for_test(), 0);
     assert_eq!(values.external_owner_count_for_test(), 0);
 }
 

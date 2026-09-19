@@ -45,7 +45,7 @@ pub(crate) use observation::{RuntimeObservationEpoch, RuntimeObservationState};
 pub(crate) use pump::EvaluationPumpOutcome;
 pub(crate) use session::{
     EvalContext, EvaluationSession, EvaluationSessionReport, EvaluationSessionRun,
-    PendingReflectionTask, ReflectionTaskObservation, ReflectionTaskReservation,
+    PendingReflectionTask, ReflectionTaskReservation,
 };
 #[cfg(test)]
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};

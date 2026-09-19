@@ -1016,7 +1016,12 @@ pub(crate) fn reduce_semantic_shell(
                     ))
                 }
             }
-            Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
+            Some(Err(failure)) => {
+                if let Some(producer) = access.promise(promise).producer() {
+                    producer.acknowledge_propagated_failure();
+                }
+                RegionalWhnfStep::Failed(failure)
+            }
             None => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
                 WhnfDeferredRequest::Promise(promise.root_in(access.values())),
             )),

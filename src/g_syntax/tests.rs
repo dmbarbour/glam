@@ -99,8 +99,29 @@ fn fully_evaluated_value_with_context(
     mut value: Value,
 ) -> Value {
     while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        value = crate::eval::eval_value(context, &value)
-            .expect("reflection-enabled value should fully evaluate");
+        match crate::eval::eval_value(context, &value) {
+            Ok(evaluated) => value = evaluated,
+            Err(blocked) if blocked.blocked_on().is_some() => {
+                let wait = blocked
+                    .blocked_on()
+                    .expect("checked reflection dependency should remain available");
+                loop {
+                    match context.pump_wait(&wait.0, 16_384) {
+                        crate::evaluation::EvaluationPumpOutcome::TargetReady => break,
+                        crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => continue,
+                        crate::evaluation::EvaluationPumpOutcome::Busy => {
+                            std::thread::yield_now();
+                        }
+                        crate::evaluation::EvaluationPumpOutcome::NoProgress => {
+                            if !context.poll_runtime_background() {
+                                panic!("reflection-enabled value made no progress: {blocked}")
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => panic!("reflection-enabled value should fully evaluate: {error}"),
+        }
     }
     value
 }

@@ -8,12 +8,11 @@ use super::*;
 use crate::Severity;
 use crate::api::{
     Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, EvaluationRuntime,
-    TestValueFacade, Values,
+    PromiseResolver, TestValueFacade, Values,
 };
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
-    EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher,
-    TaskStatusWake,
+    ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
 };
 use crate::reflection::lifecycle::{run_composed_effect_task, task_launcher};
 use crate::reflection::{
@@ -2434,10 +2433,10 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
             EffectTaskPoll::Exit(_) => panic!("reset fixture voted to exit"),
         }
     };
-    assert!(matches!(
-        blocked.dependency,
-        Some(WorkDependency::Promise(_))
-    ));
+    assert!(
+        blocked.dependency.is_some(),
+        "lazy suspension should retain its dependency"
+    );
     assert_eq!(task.next_continuation, 1);
     assert_eq!(task.next_control_order, 1);
     assert!(task.continuations.is_empty());
@@ -4085,14 +4084,7 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
             &assembler.evaluation_runtime(),
             "\\x -> .heap.get ['observed] >>= (\\seen -> .r x >>= (\\value -> (value == \"ready\") =>> .r seen))",
         );
-        let gate = public_value(
-            &assembler.core_values(),
-            Value::Lazy(LazyValue::from_reflection_gate(
-                &assembler.core_values(),
-                Value::Number(Number::from_u64(0)),
-                Value::binary_from_text("ready"),
-            )),
-        );
+        let (gate, resolver) = assembler.promise("standalone heap snapshot gate");
         let effect = assembler
             .apply(&build_effect, [gate])
             .expect("standalone-read fixture should apply");
@@ -4121,9 +4113,10 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
             }
         };
-        let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
-            panic!("{label} fixture should retain its exact lazy dependency")
-        };
+        assert!(
+            blocked.dependency.is_some(),
+            "{label} fixture should retain its exact lazy dependency"
+        );
         assert!(
             blocked.observed_generation.is_none(),
             "a successful standalone read must not retain a retry generation"
@@ -4136,7 +4129,9 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 .iter()
                 .map(|(key, value)| (*key, assembler.values().text(*value))),
         ));
-        task.eval_context.complete_wait(&wait);
+        resolver
+            .resolve(assembler.values().text("ready"))
+            .expect("the standalone heap gate should accept its value");
 
         let value = loop {
             match task.poll(512) {
@@ -4179,14 +4174,7 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
     let run = assembler
         .get(module.value(), "run")
         .expect("standalone-volume fixture should define run");
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("ready"),
-        )),
-    );
+    let (gate, resolver) = assembler.promise("standalone volume snapshot gate");
     let effect = assembler
         .apply(
             &run,
@@ -4215,14 +4203,17 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
             }
         }
     };
-    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
-        panic!("standalone-volume fixture should retain its exact lazy dependency")
-    };
+    assert!(
+        blocked.dependency.is_some(),
+        "standalone-volume fixture should retain its exact lazy dependency"
+    );
     assert!(blocked.observed_generation.is_none());
     assert_eq!(host.callback_probe_count(CallbackProbeKind::Snapshot), 1);
 
     host.replace_volume(volume, assembler.values().text("new"));
-    task.eval_context.complete_wait(&wait);
+    resolver
+        .resolve(assembler.values().text("ready"))
+        .expect("the standalone volume gate should accept its value");
 
     let value = loop {
         match task.poll(512) {
@@ -6223,8 +6214,8 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
     assert_eq!(builds.load(Ordering::Acquire), 1);
     assert_eq!(
         context.reflection_task_count(),
-        2,
-        "the blocked boundary must retain exactly the parent and nested reflection reservations"
+        1,
+        "only the parent belongs to this session; the nested reflection task is runtime background work"
     );
     assert_eq!(probe.application_starts(), 4);
     assert_eq!(probe.parsed_requests(), 4);
@@ -7064,7 +7055,7 @@ fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
     );
 
     let (_, spawn_non_owner) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.r ())");
+        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.read_log)");
     let (source_context, source_task) =
         schedule_composed_test_task(&assembler, &spawn_non_owner, host.clone());
     let EvaluationWaitPoll::Complete(non_owner_handle) =
@@ -7084,10 +7075,11 @@ fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
         .expect("non-owner cancellation should apply");
     let (non_owner_context, non_owner_task) =
         schedule_composed_test_task(&assembler, &cancel_non_owner, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&non_owner_context, &non_owner_task),
-        EvaluationWaitPoll::Complete(_)
-    ));
+    let non_owner_poll = pump_composed_test_task(&non_owner_context, &non_owner_task);
+    assert!(
+        matches!(non_owner_poll, EvaluationWaitPoll::Complete(_)),
+        "non-owner cancellation should complete, received {non_owner_poll:?}"
+    );
 
     let (_, late) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
@@ -7694,14 +7686,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> (.write_stderr \"once\") =>> .cut (.alt (.r x >>= (\\value -> (value == \"done\") =>> .r value)) ((.write_stderr \"wrong\") =>> .r \"wrong\"))",
     );
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("done"),
-        )),
-    );
+    let (gate, resolver) = assembler.promise("cut suspension fixture");
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut task = EffectTask::new(
@@ -7725,12 +7710,15 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
             EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
         }
     };
-    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
-        panic!("lazy suspension should retain its wait token")
-    };
+    assert!(
+        blocked.dependency.is_some(),
+        "the cut should retain its lazy dependency"
+    );
     assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
 
-    task.eval_context.complete_wait(&wait);
+    resolver
+        .resolve(assembler.values().text("done"))
+        .expect("the host promise should accept its value");
     let value = loop {
         match task.poll(512) {
             EffectTaskPoll::Yielded => {}
@@ -7750,14 +7738,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
     );
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("unused"),
-        )),
-    );
+    let (gate, _resolver) = assembler.promise("cut observation fixture");
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
     let mut task = EffectTask::new(
@@ -7775,7 +7756,10 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
             _ => panic!("right alternative should retain the failed queue observation"),
         }
     };
-    assert!(blocked.dependency.is_some());
+    assert!(
+        blocked.dependency.is_some(),
+        "the cut should retain its lazy dependency"
+    );
     assert!(blocked.observed_generation.is_some());
     let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
     let validations = host.callback_probe_count(CallbackProbeKind::Validation);
@@ -7814,7 +7798,7 @@ struct SuspendedHeapTransaction {
     assembler: Assembler,
     host: Arc<TestHost>,
     task: EffectTask<TestEffects>,
-    wait: EvaluationWaitToken,
+    resolver: PromiseResolver,
 }
 
 fn suspend_heap_transaction(
@@ -7823,14 +7807,7 @@ fn suspend_heap_transaction(
     let (assembler, build_effect) = compile_effect(
         "\\x -> .cut (.heap.get ['watched] >>= (\\_observed -> .r x >>= (\\value -> (value == \"done\") =>> .r value)))",
     );
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("done"),
-        )),
-    );
+    let (gate, resolver) = assembler.promise("suspended heap transaction gate");
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
     let host = Arc::new(TestHost::with_strategy_and_callback_probe(
         assembler.core_values(),
@@ -7853,26 +7830,27 @@ fn suspend_heap_transaction(
         host.clone(),
     )
     .unwrap();
-    let wait = loop {
+    loop {
         match task.poll(512) {
             EffectTaskPoll::Yielded => {}
             EffectTaskPoll::Blocked(blocked) => {
-                let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
-                    panic!("transaction gate should expose its exact wait")
-                };
-                break wait;
+                assert!(
+                    blocked.dependency.is_some(),
+                    "transaction gate should expose its exact dependency"
+                );
+                break;
             }
             EffectTaskPoll::Complete(_) => panic!("transaction gate completed early"),
             EffectTaskPoll::Failed(error) => panic!("transaction gate failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("transaction gate was cancelled"),
             EffectTaskPoll::Exit(_) => panic!("transaction gate unexpectedly voted to exit"),
         }
-    };
+    }
     SuspendedHeapTransaction {
         assembler,
         host,
         task,
-        wait,
+        resolver,
     }
 }
 
@@ -7939,7 +7917,10 @@ fn suspended_transaction_revalidation_uses_the_configured_store_policy() {
             "{policy} selected the wrong conflict outcome for a disjoint write"
         );
 
-        fixture.task.eval_context.complete_wait(&fixture.wait);
+        fixture
+            .resolver
+            .resolve(fixture.assembler.values().text("done"))
+            .expect("the transaction gate should accept its value");
         let value = loop {
             match fixture.task.poll(512) {
                 EffectTaskPoll::Yielded => {}
@@ -8003,14 +7984,7 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> .cut (.alt (.read_log >>= (\\message -> .r message.msg.text)) (.r x >>= (\\value -> (value == \"unused\") =>> .r value)))",
     );
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
-            Value::Number(Number::from_u64(0)),
-            Value::binary_from_text("unused"),
-        )),
-    );
+    let (gate, resolver) = assembler.promise("specialization dependency gate");
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
     let mut task = EffectTask::new(
@@ -8021,9 +7995,10 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
     )
     .unwrap();
     let blocked = poll_suspended_transaction(&mut task);
-    let Some(WorkDependency::Wait(wait)) = blocked.dependency else {
-        panic!("right alternative should retain its exact gate dependency")
-    };
+    assert!(
+        blocked.dependency.is_some(),
+        "right alternative should retain its exact gate dependency"
+    );
     let snapshots = host.callback_probe_count(CallbackProbeKind::Snapshot);
     let validations = host.callback_probe_count(CallbackProbeKind::Validation);
 
@@ -8040,7 +8015,9 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
         "an unrelated store publication must not restart the specialization observation"
     );
 
-    task.eval_context.complete_wait(&wait);
+    resolver
+        .resolve(assembler.values().text("unused"))
+        .expect("the specialization gate should accept its value");
     let value = loop {
         match task.poll(512) {
             EffectTaskPoll::Yielded => {}

@@ -19,7 +19,6 @@ const EXPECTED_VARIANTS: &[&str] = &[
     "NetWhnf",
     "ObjectFixpoint",
     "Produce",
-    "Reflection",
     "Whnf",
     // W6G.1f.2a carries no producer state: it marks that the canonical WHNF
     // state has moved into the owning managed lazy.
@@ -63,7 +62,7 @@ fn lazy_task_work_external_boundaries_remain_visible() {
 
     for boundary in [
         "ManagedHostCallCheckpointState::Invoking",
-        "ReflectionTaskReservation",
+        "reserve_reflection_completion_activation",
         "NetConstructionMachine",
         "ManagedPromiseRoot",
     ] {

@@ -210,120 +210,7 @@ enum LazyTaskWork {
     /// `Invoking` host-call checkpoint.
     HostCallInvoke,
     HostCallCheckpoint,
-    Reflection(ReflectionSourceMachine),
     NetConstruction(Box<NetConstructionMachine>),
-}
-
-struct ReflectionSourceMachine {
-    computation: Arc<crate::core::ReflectionComputation>,
-    reservation: Option<crate::evaluation::ReflectionTaskReservation>,
-}
-
-enum ReflectionSourcePoll {
-    Ready(Value),
-    Pending(WorkDependency),
-    Yielded,
-    Failed(EvaluationHalt),
-}
-
-impl ReflectionSourceMachine {
-    fn new(computation: Arc<crate::core::ReflectionComputation>) -> Self {
-        Self {
-            computation,
-            reservation: None,
-        }
-    }
-
-    fn poll(&mut self, context: &EvaluatorStepContext<'_>) -> ReflectionSourcePoll {
-        let (context_name, cancellation_message) = match self.computation.completion() {
-            crate::core::ReflectionCompletionKind::Gate => (
-                "reflection_annotation",
-                "reflection annotation task was cancelled",
-            ),
-            crate::core::ReflectionCompletionKind::ReturnValue => {
-                ("reflection_task", "reflection result task was cancelled")
-            }
-        };
-
-        if self.reservation.is_none() {
-            let task = match self.computation.task(context.context()) {
-                Ok(task) => task,
-                Err(error) => {
-                    return ReflectionSourcePoll::Failed(context.with_value_access(|access| {
-                        EvaluationHalt::failure(error).with_context(
-                            access.values(),
-                            evaluation_context_frame_in(access.values(), context_name),
-                        )
-                    }));
-                }
-            };
-            context.defer_reflection_activation(task.clone());
-            self.reservation = Some(task);
-            // Activation occurs only after this evaluator region closes. A
-            // later poll observes either the stable wait or its completion.
-            return ReflectionSourcePoll::Yielded;
-        }
-
-        let task = self
-            .reservation
-            .as_ref()
-            .expect("reflection source must retain its reservation");
-        match context.context().poll_reflection_task(task.handle()) {
-            EvaluationWaitPoll::Pending(wait) => {
-                ReflectionSourcePoll::Pending(WorkDependency::Wait(wait))
-            }
-            EvaluationWaitPoll::Complete(value) => match self.computation.completion() {
-                crate::core::ReflectionCompletionKind::Gate => ReflectionSourcePoll::Ready(
-                    self.computation
-                        .target(context)
-                        .expect("a reflection gate must retain its rooted target"),
-                ),
-                crate::core::ReflectionCompletionKind::ReturnValue => {
-                    ReflectionSourcePoll::Ready(context.project_root(&value))
-                }
-            },
-            EvaluationWaitPoll::Failed(error) => {
-                task.handle().acknowledge_propagated_failure();
-                ReflectionSourcePoll::Failed(context.with_value_access(|access| {
-                    EvaluationHalt::failure(error.into_failure()).with_context(
-                        access.values(),
-                        evaluation_context_frame_in(access.values(), context_name),
-                    )
-                }))
-            }
-            EvaluationWaitPoll::Cancelled => {
-                ReflectionSourcePoll::Failed(EvaluationHalt::new(cancellation_message))
-            }
-            EvaluationWaitPoll::Abandoned => {
-                ReflectionSourcePoll::Failed(context.with_value_access(|access| {
-                    EvaluationHalt::new(
-                        "reflection task was abandoned when its evaluation session closed",
-                    )
-                    .with_context(
-                        access.values(),
-                        evaluation_context_frame_in(access.values(), context_name),
-                    )
-                }))
-            }
-            EvaluationWaitPoll::Exited => {
-                ReflectionSourcePoll::Failed(context.with_value_access(|access| {
-                    EvaluationHalt::new("reflection task exited without producing a result")
-                        .with_context(
-                            access.values(),
-                            evaluation_context_frame_in(access.values(), context_name),
-                        )
-                }))
-            }
-            EvaluationWaitPoll::Killed(error) => {
-                ReflectionSourcePoll::Failed(context.with_value_access(|access| {
-                    EvaluationHalt::failure(error.into_failure()).with_context(
-                        access.values(),
-                        evaluation_context_frame_in(access.values(), context_name),
-                    )
-                }))
-            }
-        }
-    }
 }
 
 struct LazyTaskMachine {
@@ -626,7 +513,74 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             }
                         }
                         LazySource::ReflectionTask(computation) => {
-                            LazyTaskWork::Reflection(ReflectionSourceMachine::new(computation))
+                            let (effect, target, completion) = context
+                                .with_value_access(|access| {
+                                    computation.handoff_roots_in(access.values())
+                                });
+                            let already_started =
+                                completion.producer().is_some() || completion.is_terminal();
+                            let reservation = if already_started {
+                                None
+                            } else {
+                                let background = match durable_context.for_runtime_background() {
+                                    Ok(background) => background,
+                                    Err(error) => {
+                                        return self.fail(
+                                            context,
+                                            EvaluationHalt::new(error.to_string()),
+                                        );
+                                    }
+                                };
+                                match background.reserve_reflection_completion_activation(
+                                    effect,
+                                    target,
+                                    completion.clone(),
+                                    computation.result_policy(),
+                                ) {
+                                    Ok(reservation) => Some(reservation),
+                                    Err(error) => {
+                                        return self.fail(
+                                            context,
+                                            EvaluationHalt::new(error.to_string()),
+                                        );
+                                    }
+                                }
+                            };
+                            let installed = context.with_value_access(|access| {
+                                let focus = Value::Promised(PromisedValue::from_root(
+                                    &completion,
+                                    access.values(),
+                                ));
+                                let work = super::whnf::RegionalWhnfWork::from_focus(&access, focus);
+                                let checkpoint =
+                                    ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
+                                        .expect(
+                                            "canonical reflection WHNF state must fit its reviewed managed slot",
+                                        );
+                                let lazy = access.lazy_root(&self.lazy);
+                                match lazy.install_checkpoint(checkpoint) {
+                                    Ok(()) => true,
+                                    Err(_checkpoint) => {
+                                        if lazy.checkpoint_snapshot().is_some() {
+                                            true
+                                        } else {
+                                            assert!(
+                                                lazy.cached().is_some(),
+                                                "a rejected reflection checkpoint must find another checkpoint or a terminal cache"
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                            });
+                            if !installed {
+                                drop(reservation);
+                                return self.cached_poll(context);
+                            }
+                            if let Some(reservation) = reservation {
+                                context.defer_reflection_activation(reservation);
+                            }
+                            LazyTaskWork::WhnfCheckpoint
                         }
                         LazySource::Application(application) => {
                             let computation = context.with_value_access(|access| {
@@ -786,9 +740,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
                 if matches!(
                     self.work,
-                    LazyTaskWork::NetConstruction(_)
-                        | LazyTaskWork::HostCallInvoke
-                        | LazyTaskWork::Reflection(_)
+                    LazyTaskWork::NetConstruction(_) | LazyTaskWork::HostCallInvoke
                 ) {
                     return EvaluationMachinePoll::Yielded;
                 }
@@ -799,23 +751,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if matches!(self.work, LazyTaskWork::HostCallCheckpoint) {
                 return self.poll_host_call_checkpoint(context);
-            }
-
-            if let LazyTaskWork::Reflection(machine) = &mut self.work {
-                return match machine.poll(context) {
-                    ReflectionSourcePoll::Ready(value) => {
-                        self.follow_value(context.root_value(value))
-                    }
-                    ReflectionSourcePoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    ReflectionSourcePoll::Yielded => EvaluationMachinePoll::Yielded,
-                    ReflectionSourcePoll::Failed(error) => self.fail(context, error),
-                };
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
@@ -1249,11 +1184,16 @@ fn eval_promised_in(
     promise: &PromisedValue,
 ) -> Result<Value, EvaluationHalt> {
     loop {
-        let (assignment, task, id) = context.with_value_access(|access| {
+        let (assignment, producer, id) = context.with_value_access(|access| {
             let promise = access.promise(promise);
             (promise.assignment(), promise.producer(), promise.id())
         });
         if let Some(assignment) = assignment {
+            if assignment.is_err()
+                && let Some(producer) = &producer
+            {
+                producer.acknowledge_propagated_failure();
+            }
             let value = assignment.map_err(EvaluationHalt::failure)?;
             if !context.with_value_access(|access| is_deferred_value(access.values(), &value)) {
                 return Ok(value);
@@ -1265,7 +1205,7 @@ fn eval_promised_in(
             }
             continue;
         }
-        if let Some(task) = task {
+        if let Some(task) = producer {
             if context.context().observes_as_task(task.owner()) {
                 return Err(EvaluationHalt::new(format!(
                     "reflection promise {} recursively observed itself in task {}",
@@ -1427,9 +1367,6 @@ mod ownership_tests {
                 let _: &ListEffectSourceMachine = machine;
             }
             LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
-            LazyTaskWork::Reflection(machine) => {
-                let _: &ReflectionSourceMachine = machine;
-            }
             LazyTaskWork::NetConstruction(machine) => {
                 let _: &NetConstructionMachine = machine;
             }
