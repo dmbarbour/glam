@@ -5673,27 +5673,59 @@ for it:
      are rooted before managed access closes; deferred-shell admission and
      dependency translation occur afterward through the canonical WHNF
      boundary adapter.
-   - **W6G.1f.3d.2 — edge-owned access representation.** Convert arguments,
+   - **W6G.1f.3d.2 — edge-owned access representation.** **Complete.** Convert arguments,
      current selection, pending dictionary members, list stacks/suffixes, and
      all nested converter/WHNF state to the regional forms. Add one exhaustive
      visitor over the complete access state. Preserve dynamic-key-before-base
      ordering, exact path/item indices, accumulated keys, missing-member `{}`
      behavior, and source-owner cycle diagnostics.
-   - **W6G.1f.3d.3 — managed checkpoint and source cutover.** Add the typed
+     Completion record: `AccessMachine` now contains only duplicated raw
+     `Value` edges, regional key/list converters, and `RegionalWhnfWork`.
+     Its compile-exhaustive visitor traces arguments, current selection,
+     nested demand, and either converter variant. Pending keys remain semantic
+     `Key` data and therefore introduce no hidden managed edge.
+   - **W6G.1f.3d.3 — managed checkpoint and source cutover.** **Complete.** Add the typed
      access arm to `ManagedLazyCheckpointEdge`, install it directly from the
      claimed `LazySource::Access`, and replace `LazyTaskWork::Access` with a
      state-free marker. Poll and mutate only through one collector transition.
      Translate dependency, host, and failure boundaries after managed access
      closes; use exact checkpoint replacement and family adoption on stale
      routes as established by W6G.1f.3c.
-   - **W6G.1f.3d.4 — forced schedules and bridge ledger.** Force suspension at
+
+     Completion record: dynamic access installs one typed
+     `ManagedAccessCheckpointCell` directly beneath its lazy and retains only
+     a state-free route marker. Each poll performs one traced state transition;
+     semantic boundary interpretation and terminal publication occur outside
+     that transition. Once traversal has selected its final value, the access
+     cell atomically hands off to the canonical managed WHNF checkpoint rather
+     than embedding a duplicate final-demand owner. A stale route adopts the
+     exact winning checkpoint family or terminal cache.
+   - **W6G.1f.3d.4 — forced schedules and bridge ledger.** **Complete.** Force suspension at
      scalar-key demand, dictionary-member recursion, path-list source, lazy
      middle chunk, selected dictionary base, and final result demand. For each
      shape, lose the active route, collect, resume from another route, and
      count completed prefixes so no member or chunk replays. Force concurrent
      routes across access-to-WHNF replacement. Close the access-family root
      inventory while recording every temporary durable converter wrapper
-     still owned by W6G.1f.3e/.3g.
+     still owned by W6G.1f.3e/.3g/.3i.
+
+     Verification forces scalar-promise and recursive dictionary-member key
+     suspension, lazy path-prefix and promised middle-chunk suspension,
+     selected-base suspension, and final-result suspension. Routes are lost
+     and managed collection runs between those stages; the completed prefix
+     thunk is counted once, dynamic keys remain ordered before base demand,
+     and terminal re-observation uses the cache. A deterministic two-route
+     fixture leaves one route carrying the stale access-family marker while
+     the other replaces the checkpoint with WHNF, then proves that the stale
+     route adopts that exact family and completes after collection.
+
+     The temporary bridge ledger is now closed: dictionary key/path parents
+     and effect key parents remain assigned to W6G.1f.3g; object-name
+     conversion remains assigned to W6G.1f.3e; pattern path/list conversion
+     remains assigned to W6G.1f.3i. The access family itself constructs no
+     temporary converter root. Root-publication, durable-owner, raw-value,
+     persistent-edge, evaluator-access, WHNF-boundary, and WHNF-work-shape
+     inventories latch this disposition.
 6. **W6G.1f.3e — object-fixpoint checkpoint.** Convert linearization and mix
    stacks after their shared key/list/WHNF child forms have an edge-owned
    representation. Do not duplicate object traversal state in a sidecar.

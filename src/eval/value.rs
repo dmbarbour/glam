@@ -12,13 +12,13 @@ use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
     EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    poll_lazy_checkpoint, poll_whnf_computation,
+    interpret_whnf_poll, poll_lazy_checkpoint, poll_whnf_computation,
 };
 #[cfg(test)]
 use crate::list::ListItem;
 use crate::number::Number;
 
-use super::access_machine::{AccessMachine, AccessMachinePoll};
+use super::access_machine::{AccessMachine, AccessRegionalPoll};
 use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
 use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
 use super::lazy_checkpoint::{
@@ -199,7 +199,7 @@ enum LazyTaskWork {
     Whnf(super::whnf::WhnfComputation),
     WhnfCheckpoint,
     NetWhnfCheckpoint,
-    Access(Box<AccessMachine>),
+    AccessCheckpoint,
     Builtin(Box<BuiltinTaskMachine>),
     ObjectFixpoint(Box<ObjectFixpointMachine>),
     ListEffect(Box<ListEffectSourceMachine>),
@@ -222,6 +222,7 @@ impl LazyTaskMachine {
             ManagedLazyCheckpointKindTag::Whnf => LazyTaskWork::WhnfCheckpoint,
             ManagedLazyCheckpointKindTag::HostCall => LazyTaskWork::HostCallCheckpoint,
             ManagedLazyCheckpointKindTag::NetWhnf => LazyTaskWork::NetWhnfCheckpoint,
+            ManagedLazyCheckpointKindTag::Access => LazyTaskWork::AccessCheckpoint,
         }
     }
 
@@ -408,6 +409,124 @@ impl LazyTaskMachine {
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 EvaluationMachinePoll::Yielded
+            }
+        }
+    }
+
+    fn poll_access_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Complete(crate::runtime::RuntimeValueRoot),
+            Failed(crate::runtime::RuntimeFailureRoot),
+            Whnf,
+            Terminal,
+            Boundary(super::whnf::RegionalBoundaryRequest),
+            Yielded,
+            Replaced(ManagedLazyCheckpointKindTag),
+        }
+
+        let transition = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            let checkpoint = lazy
+                .checkpoint_snapshot()
+                .expect("computed-access route must retain its managed checkpoint");
+            if checkpoint.kind() != ManagedLazyCheckpointKindTag::Access {
+                return Transition::Replaced(checkpoint.kind());
+            }
+            match checkpoint
+                .with_access_transition_in(&access, |machine| machine.poll_in(&access, step_budget))
+            {
+                AccessRegionalPoll::Ready(value) => {
+                    let evaluated = EvaluatedValue::try_from(value)
+                        .expect("computed access must demand its final selected value to WHNF");
+                    match self.lazy.cache(access.values(), Ok(evaluated)) {
+                        Ok(value) => Transition::Complete(
+                            access.values().root_runtime_value(value.into_value()),
+                        ),
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    }
+                }
+                AccessRegionalPoll::Boundary(request) => Transition::Boundary(request),
+                AccessRegionalPoll::Whnf(work) => {
+                    let next = ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
+                        .expect("canonical WHNF state must fit its reviewed managed slot");
+                    match lazy.replace_checkpoint(&checkpoint, next) {
+                        Ok(()) => Transition::Whnf,
+                        Err(_) => {
+                            if lazy.cached().is_some() {
+                                Transition::Terminal
+                            } else {
+                                match lazy.checkpoint_snapshot() {
+                                    Some(current) => Transition::Replaced(current.kind()),
+                                    None => unreachable!(
+                                        "a rejected access handoff must find a checkpoint or cache"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+                AccessRegionalPoll::Yielded => Transition::Yielded,
+                AccessRegionalPoll::Failed(failure) => {
+                    match self.lazy.cache(access.values(), Err(failure)) {
+                        Ok(value) => Transition::Complete(
+                            access.values().root_runtime_value(value.into_value()),
+                        ),
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    }
+                }
+            }
+        });
+
+        match transition {
+            Transition::Complete(value) => EvaluationMachinePoll::Complete(value),
+            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Whnf => {
+                self.work = LazyTaskWork::WhnfCheckpoint;
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Terminal => self.cached_poll(context),
+            Transition::Replaced(kind) => {
+                self.work = Self::work_for_checkpoint_kind(kind);
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Boundary(request) => {
+                let poll = match request {
+                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
+                        super::whnf::WhnfPoll::Pending(dependency)
+                    }
+                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
+                        super::whnf::WhnfPoll::Deferred(deferred)
+                    }
+                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
+                        super::whnf::WhnfPoll::External(boundary)
+                    }
+                };
+                match interpret_whnf_poll(poll, context.context()) {
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!("computed access produced an external {boundary:?} boundary")
+                    }
+                    WhnfOwnerPoll::Ready(_) => {
+                        unreachable!("an access boundary cannot produce an immediate value")
+                    }
+                }
             }
         }
     }
@@ -866,21 +985,31 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             LazyTaskWork::Whnf(computation)
                         }
                         LazySource::Access { path, arguments } => {
-                            let arguments = context.with_value_access(|access| {
-                                arguments
-                                    .iter()
-                                    .map(|value| {
-                                        access.values().root_runtime_value(
-                                            access.values().duplicate_value(value),
-                                        )
-                                    })
-                                    .collect()
+                            let installed = context.with_value_access(|access| {
+                                let machine = AccessMachine::new_in(
+                                    &access,
+                                    self.lazy.id(),
+                                    path,
+                                    &arguments,
+                                );
+                                let checkpoint = ManagedLazyCheckpointEdge::allocate_access_in(
+                                    &access, machine,
+                                )
+                                .expect(
+                                    "managed computed-access state must fit its reviewed slot",
+                                );
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
                             });
-                            LazyTaskWork::Access(Box::new(AccessMachine::new(
-                                self.lazy.id(),
-                                path,
-                                arguments,
-                            )))
+                            if installed {
+                                LazyTaskWork::AccessCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
                         }
                         LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
                             let arguments = context.with_value_access(|access| {
@@ -940,6 +1069,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_net_whnf_checkpoint(context, step_budget);
             }
 
+            if matches!(self.work, LazyTaskWork::AccessCheckpoint) {
+                return self.poll_access_checkpoint(context, step_budget);
+            }
+
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
@@ -952,23 +1085,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     }
                     NetConstructionPoll::Yielded => EvaluationMachinePoll::Yielded,
                     NetConstructionPoll::Failed(failure) => {
-                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
-            }
-
-            if let LazyTaskWork::Access(machine) = &mut self.work {
-                return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    AccessMachinePoll::Ready(value) => self.complete_root(context, &value),
-                    AccessMachinePoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    AccessMachinePoll::Yielded => EvaluationMachinePoll::Yielded,
-                    AccessMachinePoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
                     }
                 };
@@ -1502,6 +1618,8 @@ pub(super) fn is_undefined_dict_value(_access: &RuntimeValueAccess<'_>, value: &
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use crate::core::{Dict, Key};
+    use crate::core_net::CoreDataKey;
 
     fn assert_poll_spanning_owner_inventory(
         work: &LazyTaskWork,
@@ -1515,9 +1633,7 @@ mod ownership_tests {
             }
             LazyTaskWork::WhnfCheckpoint => {}
             LazyTaskWork::NetWhnfCheckpoint => {}
-            LazyTaskWork::Access(machine) => {
-                let _: &AccessMachine = machine;
-            }
+            LazyTaskWork::AccessCheckpoint => {}
             LazyTaskWork::Builtin(machine) => {
                 let _: &BuiltinTaskMachine = machine;
             }
@@ -1602,6 +1718,75 @@ mod ownership_tests {
             panic!("the yielded follower must resume from the assigned value")
         };
         assert_eq!(value.clone_core_for_test(), Value::Number(73.into()));
+    }
+
+    #[test]
+    fn stale_access_route_adopts_the_exact_whnf_replacement() {
+        let context = EvalContext::standalone();
+        let result = PromisedValue::new(context.values(), "access replacement result");
+        let source = LazyValue::from_access(
+            context.values(),
+            Arc::from([CoreDataKey::Index]),
+            Arc::from([
+                Value::Dict(
+                    Dict::new_sync().insert(Key::Number(1.into()), Value::Promised(result.clone())),
+                ),
+                Value::Number(1.into()),
+            ]),
+        );
+        let mut first = LazyTaskMachine {
+            context: (*context).clone(),
+            lazy: source.root(context.values()),
+            work: LazyTaskWork::Produce,
+        };
+        let mut stale = LazyTaskMachine {
+            context: (*context).clone(),
+            lazy: source.root(context.values()),
+            work: LazyTaskWork::Produce,
+        };
+        let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+        let step = |machine: &mut LazyTaskMachine| {
+            machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        };
+
+        assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));
+        assert!(matches!(first.work, LazyTaskWork::AccessCheckpoint));
+        assert!(matches!(step(&mut stale), EvaluationMachinePoll::Yielded));
+        assert!(matches!(stale.work, LazyTaskWork::AccessCheckpoint));
+
+        for _ in 0..8 {
+            assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));
+            if matches!(first.work, LazyTaskWork::WhnfCheckpoint) {
+                break;
+            }
+        }
+        assert!(matches!(first.work, LazyTaskWork::WhnfCheckpoint));
+        assert!(matches!(stale.work, LazyTaskWork::AccessCheckpoint));
+        assert!(matches!(step(&mut stale), EvaluationMachinePoll::Yielded));
+        assert!(matches!(stale.work, LazyTaskWork::WhnfCheckpoint));
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the exact WHNF replacement must survive both route markers");
+
+        crate::core::set_test_promise(context.values(), &result, Value::Number(91.into()))
+            .expect("the selected result promise should accept one assignment");
+        let completed = loop {
+            match step(&mut stale) {
+                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::Complete(value) => break value,
+                EvaluationMachinePoll::Blocked(_) => {
+                    panic!("the assigned result must not remain blocked")
+                }
+                EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
+                EvaluationMachinePoll::ScheduleSpark(_)
+                | EvaluationMachinePoll::Exit(_)
+                | EvaluationMachinePoll::Cancelled => {
+                    panic!("computed access must complete without orchestration")
+                }
+            }
+        };
+        assert_eq!(completed.clone_core_for_test(), Value::Number(91.into()));
     }
 }
 

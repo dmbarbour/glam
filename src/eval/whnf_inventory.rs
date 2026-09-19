@@ -666,7 +666,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6G.1f.3d.1 makes the two regional key/list trace walks explicit access-path
 // loops inside one managed converter checkpoint.
 const EXPECTED_OCCURRENCES: usize = 190;
-const EXPECTED_FINGERPRINT: u64 = 12_175_031_537_244_014_388;
+const EXPECTED_FINGERPRINT: u64 = 8_928_675_021_845_727_841;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -679,8 +679,8 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 73),
-    (Signal::UserSizedLoop, 50),
+    (Signal::StructuralRecursion, 72),
+    (Signal::UserSizedLoop, 51),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),

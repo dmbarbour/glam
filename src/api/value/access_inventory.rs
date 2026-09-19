@@ -122,9 +122,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/access_machine.rs",
         0,
         1,
-        1,
-        "computed-access dictionary selection; shared key/list conversion now retains one managed regional checkpoint instead of per-value runtime roots",
-        "W3C.2-W3C.3 rooted source progress; W6G.1f.3d.1 regional converter bridge"
+        0,
+        "shared key/list conversion retains one temporary managed regional checkpoint while computed access itself is an edge-owned lazy checkpoint",
+        "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover"
     ),
     entry!(
         "src/eval/annotation_machine.rs",
@@ -258,9 +258,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        6,
-        "computed-access, object-fixpoint, resumable builtin, immediate builtin result, and net-construction source arguments published before entering poll-spanning owners",
-        "W3B.2b, W3C.2, W6C.1b, and W6F.6 source handoff"
+        7,
+        "computed-access terminal publication plus object-fixpoint, resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
+        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3 source or terminal handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -523,7 +523,6 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl CoreValues::new"
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
-                | "src/eval/access_machine.rs::select_dict_member"
                 | "src/eval/annotation_machine.rs::annotation_error_root"
                 | "src/eval/annotation_machine.rs::finish_metadata_update"
                 | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized"
@@ -585,6 +584,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
+                | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
                 | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::regional_status_poll"
@@ -826,7 +826,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
-    "src/eval/access_machine.rs::select_dict_member#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/annotation_machine.rs::annotation_error_root#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::finish_metadata_update#1|surface=access-publication|scope=production",
@@ -929,7 +928,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#4|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#5|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#6|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=compatibility-new|scope=test",
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=access-publication|scope=test",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",

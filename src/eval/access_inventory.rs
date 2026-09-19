@@ -131,8 +131,8 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/access_machine.rs",
-        [7, 8],
-        "W3C.2-W3C.3 access source owner plus W6G.1f.3d.1 managed regional key/list wrapper and boundary adapter"
+        [5, 7],
+        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter"
     ),
     context_entry!(
         "src/eval/annotation_machine.rs",
@@ -236,8 +236,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [17, 8],
-        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access"
+        [18, 8],
+        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access"
     ),
 ];
 

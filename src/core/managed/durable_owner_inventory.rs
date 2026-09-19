@@ -352,13 +352,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/access_machine.rs",
         "computed-access source, recursive dictionary-key, and lazy-list progress",
-        "canonical RuntimeValueRoot fields plus root-free path/key cursors and accumulators",
-        "yielded or dependency-blocked lazy producer",
-        "source argument publication and bounded child-result publication",
-        "access completion, failure, cancellation, or lazy-owner retirement",
+        "regional raw Value/WHNF/converter state beneath traced cells plus one-root temporary converter adapters for unmigrated parents",
+        "one edge-owned access lazy checkpoint or one temporary durable converter wrapper",
+        "direct access-checkpoint installation or temporary parent seed promotion",
+        "access-to-WHNF replacement, terminal cache publication, or later parent-family converter cutover",
         ManagedRootSurface,
         RootSurface,
-        "W3C.2-W3C.3"
+        "W6G.1f.3d.1-.3"
     ),
     closed_durable!(
         "src/eval/list_machine.rs",
@@ -501,6 +501,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "one concrete typed arm beneath a managed lazy producer edge; semantic callbacks and contention waits occur after its transition closes",
         CompatibilityPayload,
         "W6G.1f.3c survives forced route loss and collection while resuming the exact net checkpoint"
+    ),
+    exact_managed!(
+        "src/eval/lazy_checkpoint.rs; src/eval/access_machine.rs",
+        "managed computed-access checkpoint cell",
+        "raw arguments/current selection, pending dictionary members, regional key/list conversion, and child WHNF state behind one representation mutex",
+        "one concrete typed arm beneath a managed lazy producer edge; scheduler boundary translation occurs after the transition closes",
+        CompatibilityPayload,
+        "W6G.1f.3d.2-.4 survives forced route loss and collection, then atomically replaces itself with canonical final-result WHNF state"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -946,11 +954,14 @@ fn is_production_source(relative: &Path) -> bool {
 // concrete net checkpoint and edge-owned driver/action declarations while
 // removing durable registered net roots from the driver. W6G.1f.3d.1 adds the
 // regional key/list conversion state and temporary managed wrapper while
-// retiring the corresponding per-value runtime-root fields.
+// retiring the corresponding per-value runtime-root fields. W6G.1f.3d.2-.3
+// then move computed-access arguments, demand, conversions, and terminal
+// failure into one traced lazy checkpoint, trading three durable root signals
+// for raw managed values plus one exact typed edge.
 const DECLARATION_BASELINE_COUNT: usize = 234;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([138, 266, 5, 18, 13, 7, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 17_303_654_308_851_427_169;
+    DeclarationSignals::new([141, 263, 5, 19, 13, 8, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_087_085_376_635_754_065;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1063,6 +1074,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "managed host-call checkpoint cell"
     } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedNetWhnfCheckpointCell" {
         "managed net-WHNF checkpoint cell"
+    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedAccessCheckpointCell" {
+        "managed computed-access checkpoint cell"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"

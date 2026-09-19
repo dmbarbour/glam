@@ -16,11 +16,16 @@ use crate::core::{
     Value, managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 
+use super::access_machine::AccessMachine;
 use super::net::NetWhnfMachine;
 use super::whnf::managed_state::ManagedLazyCheckpointCell;
 
 pub(in crate::eval) struct ManagedNetWhnfCheckpointCell {
     state: Mutex<ManagedNetWhnfCheckpointState>,
+}
+
+pub(in crate::eval) struct ManagedAccessCheckpointCell {
+    state: Mutex<AccessMachine>,
 }
 
 struct ManagedNetWhnfCheckpointState {
@@ -50,6 +55,7 @@ pub(in crate::eval) enum ManagedLazyCheckpointKindTag {
     Whnf,
     HostCall,
     NetWhnf,
+    Access,
 }
 
 pub(crate) struct ManagedLazyCheckpointEdge(ManagedLazyCheckpointKind);
@@ -58,6 +64,7 @@ enum ManagedLazyCheckpointKind {
     Whnf(Gc<ManagedLazyCheckpointCell>),
     HostCall(Gc<ManagedHostCallCheckpointCell>),
     NetWhnf(Gc<ManagedNetWhnfCheckpointCell>),
+    Access(Gc<ManagedAccessCheckpointCell>),
 }
 
 impl ManagedLazyCheckpointEdge {
@@ -74,6 +81,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::NetWhnf(_) => {
                 panic!("a net-WHNF checkpoint cannot be projected as ordinary WHNF state")
             }
+            ManagedLazyCheckpointKind::Access(_) => {
+                panic!("an access checkpoint cannot be projected as ordinary WHNF state")
+            }
         }
     }
 
@@ -82,6 +92,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Whnf(_) => ManagedLazyCheckpointKindTag::Whnf,
             ManagedLazyCheckpointKind::HostCall(_) => ManagedLazyCheckpointKindTag::HostCall,
             ManagedLazyCheckpointKind::NetWhnf(_) => ManagedLazyCheckpointKindTag::NetWhnf,
+            ManagedLazyCheckpointKind::Access(_) => ManagedLazyCheckpointKindTag::Access,
         }
     }
 
@@ -102,6 +113,9 @@ impl ManagedLazyCheckpointEdge {
                 ManagedLazyCheckpointKind::NetWhnf(left),
                 ManagedLazyCheckpointKind::NetWhnf(right),
             ) => authority.same_edge(left, right),
+            (ManagedLazyCheckpointKind::Access(left), ManagedLazyCheckpointKind::Access(right)) => {
+                authority.same_edge(left, right)
+            }
             _ => false,
         }
     }
@@ -114,6 +128,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Whnf(edge) => Some(authority.duplicate_edge(edge)),
             ManagedLazyCheckpointKind::HostCall(_) => None,
             ManagedLazyCheckpointKind::NetWhnf(_) => None,
+            ManagedLazyCheckpointKind::Access(_) => None,
         }
     }
 
@@ -144,6 +159,48 @@ impl ManagedLazyCheckpointEdge {
                 }),
             },
         ))))
+    }
+
+    pub(in crate::eval) fn allocate_access_in(
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        machine: AccessMachine,
+    ) -> Result<Self, UnsupportedLayout> {
+        let allocator = authority
+            .values()
+            .allocator::<ManagedAccessCheckpointCell>()?;
+        Ok(Self(ManagedLazyCheckpointKind::Access(allocator.alloc(
+            ManagedAccessCheckpointCell {
+                state: Mutex::new(machine),
+            },
+        ))))
+    }
+
+    pub(in crate::eval) fn with_access_transition_in<R>(
+        &self,
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        transition: impl FnOnce(&mut AccessMachine) -> R,
+    ) -> R {
+        let ManagedLazyCheckpointKind::Access(edge) = &self.0 else {
+            panic!("only an access checkpoint has computed-access state")
+        };
+        let cell = authority.values().get_edge(edge);
+        let mut state = cell
+            .state
+            .lock()
+            .expect("managed access checkpoint was poisoned");
+        // SAFETY: the owning lazy retains this exact checkpoint edge. The
+        // representation mutex excludes another regional transition, and the
+        // access machine's exhaustive visitor reports every leaving and
+        // adding semantic edge.
+        unsafe {
+            authority.values().with_managed_edge_state_transition(
+                edge,
+                &mut *state,
+                AccessMachine::trace_managed_edges,
+                AccessMachine::trace_managed_edges,
+                transition,
+            )
+        }
     }
 
     pub(in crate::eval) fn with_net_whnf_transition_in<R>(
@@ -274,6 +331,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Whnf(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::HostCall(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::NetWhnf(edge) => visitor.visit(edge),
+            ManagedLazyCheckpointKind::Access(edge) => visitor.visit(edge),
         }
     }
 
@@ -286,6 +344,9 @@ impl ManagedLazyCheckpointEdge {
                 authority.duplicate_edge(edge),
             )),
             ManagedLazyCheckpointKind::NetWhnf(edge) => Self(ManagedLazyCheckpointKind::NetWhnf(
+                authority.duplicate_edge(edge),
+            )),
+            ManagedLazyCheckpointKind::Access(edge) => Self(ManagedLazyCheckpointKind::Access(
                 authority.duplicate_edge(edge),
             )),
         }
@@ -374,5 +435,36 @@ unsafe impl ManagedFamily for ManagedNetWhnfCheckpointCell {
         "src/eval/lazy_checkpoint.rs",
         "no direct Drop implementation",
         "mutex and edge-owned net driver destroy passively",
+    );
+}
+
+// SAFETY: the access machine's compile-exhaustive visitor reports every raw
+// argument/current value, regional WHNF child, and recursive key/list
+// converter. Collection runs only after mutator quiescence, so an unpoisoned
+// busy mutex is an invariant failure rather than ordinary contention.
+unsafe impl Trace for ManagedAccessCheckpointCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed access state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional WHNF/converter state, scalar paths, and ordinary collections. It
+// invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedAccessCheckpointCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "managed computed-access checkpoint cell",
+        "src/eval/lazy_checkpoint.rs",
+        "no direct Drop implementation",
+        "mutex and edge-owned access state destroy passively",
     );
 }

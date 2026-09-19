@@ -3,6 +3,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
+fn isolated_context() -> crate::evaluation::OwnedEvalContext {
+    EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ))
+}
+
 fn lazy_machine(context: &EvalContext, lazy: LazyValue) -> LazyTaskMachine {
     LazyTaskMachine {
         context: context.clone(),
@@ -17,7 +24,7 @@ fn number(value: i64) -> Value {
 
 #[test]
 fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let lazy = LazyValue::semantic_thunk(
         context.values(),
         "W6G.1 exact checkpoint replacement",
@@ -94,7 +101,7 @@ fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWait
 
 #[test]
 fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     let lazy = LazyValue::host_call(context.values(), "W4 host boundary", {
@@ -159,7 +166,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
 
 #[test]
 fn interrupted_host_call_is_never_replayed_after_route_loss() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     let lazy = LazyValue::host_call(context.values(), "W6G.1 interrupted host call", move |_| {
@@ -200,7 +207,7 @@ fn interrupted_host_call_is_never_replayed_after_route_loss() {
 
 #[test]
 fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     let lazy = LazyValue::host_call(context.values(), "W6G.1 retained host outcome", {
@@ -244,7 +251,7 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
 
 #[test]
 fn net_whnf_checkpoint_survives_route_loss_and_collection() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let promise = PromisedValue::new(context.values(), "W6G.1 retained net callable");
     let mut builder =
         crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
@@ -355,7 +362,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
 
 #[test]
 fn failed_host_call_is_not_replayed_after_publication() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     let lazy = LazyValue::host_call(context.values(), "W4 failed host boundary", move |_| {
@@ -394,7 +401,7 @@ fn failed_host_call_is_not_replayed_after_publication() {
 
 #[test]
 fn host_call_follows_a_lazy_result_without_reinvocation() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let result_forces = Arc::new(AtomicUsize::new(0));
     let observed_forces = Arc::clone(&result_forces);
@@ -470,7 +477,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
 
 #[test]
 fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
-    let context = EvalContext::standalone();
+    let context = isolated_context();
     let value = Value::reflection_task_result(context.values(), number(0));
     let Value::Lazy(lazy) = value else {
         panic!("a reflection task result must be lazy")

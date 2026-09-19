@@ -1,9 +1,10 @@
 //! Resumable computed dictionary access and recursive key conversion.
 //!
 //! This is source-owned semantic state, not a second evaluator. Every value
-//! which crosses a poll boundary is a runtime root; ordinary WHNF demand and
-//! dependency admission remain delegated to `WhnfComputation` and its
-//! scheduler adapter.
+//! which crosses a poll boundary is either held by a traced managed checkpoint
+//! or by the temporary durable wrapper used by unmigrated parents. Ordinary
+//! WHNF demand and dependency admission remain delegated to the canonical
+//! regional reducer and its scheduler adapter.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, TryLockError};
@@ -12,44 +13,45 @@ use glam_gc::{Root, Trace, Visitor};
 
 use crate::core::{
     Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, List, ManagedDropRecord, ManagedFamily,
-    RuntimeValueAccess, Value, managed_slot_extent, trace_compatibility_value_managed_edges,
+    Value, managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
-    interpret_whnf_poll, poll_whnf_computation,
+    interpret_whnf_poll,
 };
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::whnf::{
-    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation, WhnfPoll,
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
     drive_regional_in_place, reduce_semantic_shell,
 };
 
-pub(super) enum AccessMachinePoll {
-    Ready(RuntimeValueRoot),
-    Pending(crate::evaluation::WorkDependency),
+pub(in crate::eval) enum AccessRegionalPoll {
+    Ready(Value),
+    Whnf(RegionalWhnfWork),
+    Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
-pub(super) struct AccessMachine {
+pub(in crate::eval) struct AccessMachine {
     path: Arc<[CoreDataKey]>,
-    arguments: Vec<RuntimeValueRoot>,
+    arguments: Vec<Value>,
     next_part: usize,
     next_argument: usize,
     pending_keys: VecDeque<Key>,
-    current: RuntimeValueRoot,
-    demand: Option<WhnfComputation>,
+    current: Value,
+    demand: Option<RegionalWhnfWork>,
     conversion: Option<AccessConversion>,
     source_owner: LazyId,
 }
 
 enum AccessConversion {
-    Key(KeyConversionMachine),
-    Path(Box<KeyListMachine>),
+    Key(RegionalKeyConversion),
+    Path(Box<RegionalKeyList>),
 }
 
 pub(crate) enum ConversionPoll<T> {
@@ -147,18 +149,22 @@ enum DurableConversionPoll<T> {
 }
 
 impl AccessMachine {
-    pub(super) fn new(
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
         source_owner: LazyId,
         path: Arc<[CoreDataKey]>,
-        arguments: Vec<RuntimeValueRoot>,
+        arguments: &[Value],
     ) -> Self {
         let current = arguments
             .first()
-            .cloned()
+            .map(|value| access.values().duplicate_value(value))
             .expect("value access must retain its base value");
         Self {
             path,
-            arguments,
+            arguments: arguments
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect(),
             next_part: 0,
             next_argument: 1,
             pending_keys: VecDeque::new(),
@@ -169,129 +175,155 @@ impl AccessMachine {
         }
     }
 
-    pub(super) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> AccessMachinePoll {
+    ) -> AccessRegionalPoll {
         if let Some(conversion) = &mut self.conversion {
             let result = match conversion {
-                AccessConversion::Key(machine) => {
-                    machine.poll(poll_context, context, durable_context, step_budget)
-                }
+                AccessConversion::Key(machine) => machine.poll_optional_in(access, step_budget),
                 AccessConversion::Path(machine) => {
-                    return match machine.poll(poll_context, context, durable_context, step_budget) {
-                        ConversionPoll::Ready(keys) => {
+                    return match machine.poll_optional_in(access, step_budget) {
+                        RegionalConversionPoll::Ready(Some(keys)) => {
                             self.conversion = None;
                             self.next_part += 1;
-                            self.begin_key_sequence(keys);
-                            AccessMachinePoll::Yielded
+                            self.begin_key_sequence(access, keys);
+                            AccessRegionalPoll::Yielded
                         }
-                        ConversionPoll::Pending(dependency) => {
-                            AccessMachinePoll::Pending(dependency)
+                        RegionalConversionPoll::Ready(None) => {
+                            AccessRegionalPoll::Failed(Arc::new(EvaluationFailure::message(
+                                "dictionary keys must evaluate to keyable values",
+                            )))
                         }
-                        ConversionPoll::Yielded => AccessMachinePoll::Yielded,
-                        ConversionPoll::Failed(failure) => AccessMachinePoll::Failed(failure),
+                        RegionalConversionPoll::Boundary(request) => {
+                            AccessRegionalPoll::Boundary(request)
+                        }
+                        RegionalConversionPoll::Yielded => AccessRegionalPoll::Yielded,
+                        RegionalConversionPoll::Failed(failure) => {
+                            AccessRegionalPoll::Failed(failure)
+                        }
                     };
                 }
             };
             return match result {
-                ConversionPoll::Ready(key) => {
+                RegionalConversionPoll::Ready(Some(key)) => {
                     self.conversion = None;
                     self.next_part += 1;
-                    self.begin_key_sequence([key]);
-                    AccessMachinePoll::Yielded
+                    self.begin_key_sequence(access, [key]);
+                    AccessRegionalPoll::Yielded
                 }
-                ConversionPoll::Pending(dependency) => AccessMachinePoll::Pending(dependency),
-                ConversionPoll::Yielded => AccessMachinePoll::Yielded,
-                ConversionPoll::Failed(failure) => AccessMachinePoll::Failed(failure),
+                RegionalConversionPoll::Ready(None) => AccessRegionalPoll::Failed(Arc::new(
+                    EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
+                )),
+                RegionalConversionPoll::Boundary(request) => AccessRegionalPoll::Boundary(request),
+                RegionalConversionPoll::Yielded => AccessRegionalPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => AccessRegionalPoll::Failed(failure),
             };
         }
 
         if let Some(demand) = &mut self.demand {
-            let current =
-                match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(value) => value,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return AccessMachinePoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return AccessMachinePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return AccessMachinePoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("computed access produced an external {boundary:?} boundary")
-                    }
-                };
+            let current = match poll_regional_whnf(demand, access, step_budget) {
+                RegionalConversionPoll::Ready(value) => value,
+                RegionalConversionPoll::Boundary(request) => {
+                    return AccessRegionalPoll::Boundary(request);
+                }
+                RegionalConversionPoll::Yielded => return AccessRegionalPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => {
+                    return AccessRegionalPoll::Failed(failure);
+                }
+            };
             self.demand = None;
             let Some(key) = self.pending_keys.pop_front() else {
                 debug_assert_eq!(self.next_part, self.path.len());
-                return AccessMachinePoll::Ready(current);
+                return AccessRegionalPoll::Ready(current);
             };
-            let selected = context
-                .with_value_access(|access| select_dict_member(access.values(), &current, &key));
-            return match selected {
+            return match select_dict_member_in(access, &current, &key) {
                 Ok(value) => {
                     self.current = value;
                     if !self.pending_keys.is_empty() {
-                        self.demand = Some(
-                            WhnfComputation::from_root(self.current.clone())
-                                .with_source_owner(self.source_owner),
-                        );
+                        self.demand = Some(regional_whnf(
+                            access,
+                            access.values().duplicate_value(&self.current),
+                            Some(self.source_owner),
+                        ));
                     }
-                    AccessMachinePoll::Yielded
+                    AccessRegionalPoll::Yielded
                 }
-                Err(error) => AccessMachinePoll::Failed(root_halt(context, error)),
+                Err(error) => AccessRegionalPoll::Failed(error.into_permanent_failure()),
             };
         }
 
         let Some(part) = self.path.get(self.next_part) else {
-            self.demand = Some(
-                WhnfComputation::from_root(self.current.clone())
-                    .with_source_owner(self.source_owner),
-            );
-            return AccessMachinePoll::Yielded;
+            return AccessRegionalPoll::Whnf(regional_whnf(
+                access,
+                access.values().duplicate_value(&self.current),
+                Some(self.source_owner),
+            ));
         };
         match part {
             CoreDataKey::Key(key) => {
                 self.next_part += 1;
-                self.begin_key_sequence([key.clone()]);
+                self.begin_key_sequence(access, [key.clone()]);
             }
             CoreDataKey::Index => {
-                let argument = self.next_dynamic_argument();
-                self.conversion = Some(AccessConversion::Key(KeyConversionMachine::new(
+                let argument = self.next_dynamic_argument(access);
+                self.conversion = Some(AccessConversion::Key(RegionalKeyConversion::new(
+                    access,
                     argument,
                     Some(self.source_owner),
                 )));
             }
             CoreDataKey::PathIndex => {
-                let argument = self.next_dynamic_argument();
-                self.conversion = Some(AccessConversion::Path(Box::new(KeyListMachine::new(
+                let argument = self.next_dynamic_argument(access);
+                self.conversion = Some(AccessConversion::Path(Box::new(RegionalKeyList::new(
+                    access,
                     argument,
                     Some(self.source_owner),
                 ))));
             }
         }
-        AccessMachinePoll::Yielded
+        AccessRegionalPoll::Yielded
     }
 
-    fn next_dynamic_argument(&mut self) -> RuntimeValueRoot {
+    fn next_dynamic_argument(&mut self, access: &EvaluationValueAccess<'_>) -> Value {
         let argument = self
             .arguments
             .get(self.next_argument)
-            .cloned()
+            .map(|value| access.values().duplicate_value(value))
             .expect("lowered access index must retain its argument");
         self.next_argument += 1;
         argument
     }
 
-    fn begin_key_sequence(&mut self, keys: impl IntoIterator<Item = Key>) {
+    fn begin_key_sequence(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        keys: impl IntoIterator<Item = Key>,
+    ) {
         self.pending_keys.extend(keys);
         if !self.pending_keys.is_empty() {
-            self.demand = Some(
-                WhnfComputation::from_root(self.current.clone())
-                    .with_source_owner(self.source_owner),
-            );
+            self.demand = Some(regional_whnf(
+                access,
+                access.values().duplicate_value(&self.current),
+                Some(self.source_owner),
+            ));
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for argument in &self.arguments {
+            trace_compatibility_value_managed_edges(argument, visitor);
+        }
+        trace_compatibility_value_managed_edges(&self.current, visitor);
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(conversion) = &self.conversion {
+            match conversion {
+                AccessConversion::Key(machine) => machine.trace_managed_edges(visitor),
+                AccessConversion::Path(machine) => machine.trace_managed_edges(visitor),
+            }
         }
     }
 }
@@ -940,23 +972,18 @@ unsafe impl ManagedFamily for ManagedKeyConversionCell {
     );
 }
 
-fn select_dict_member(
-    access: &RuntimeValueAccess<'_>,
-    current: &RuntimeValueRoot,
+fn select_dict_member_in(
+    access: &EvaluationValueAccess<'_>,
+    current: &Value,
     key: &Key,
-) -> Result<RuntimeValueRoot, EvaluationHalt> {
-    let Value::Dict(dict) = current.clone_core_with(access) else {
+) -> Result<Value, EvaluationHalt> {
+    let Value::Dict(dict) = current else {
         return Err(EvaluationHalt::new("value access base is not a dictionary"));
     };
-    Ok(access.root_runtime_value(
-        dict.get(key)
-            .map(|value| access.duplicate_value(value))
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
-    ))
-}
-
-fn root_halt(context: &EvaluatorStepContext<'_>, halt: EvaluationHalt) -> RuntimeFailureRoot {
-    context.root_failure(halt.into_permanent_failure())
+    Ok(dict
+        .get(key)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| Value::Dict(Dict::new_sync())))
 }
 
 fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFailureRoot {
@@ -965,6 +992,8 @@ fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFai
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::core::{CoreValueFactory, LazyValue, ListThunk, PromisedValue};
     use crate::evaluation::EvaluationStepBudget;
@@ -1063,10 +1092,18 @@ mod tests {
             [CoreDataKey::Index],
             vec![base, Value::Promised(promise.clone())],
         );
+        let Value::Lazy(access_lazy) = &access else {
+            unreachable!("computed access fixture must be lazy")
+        };
+        let access_root = access_lazy.root(context.values());
 
         let blocked = crate::eval::eval_value(&context, &access)
             .expect_err("the dynamic key must wait on its exact promise");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the lazy-owned access checkpoint must survive route loss");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(42.into()))
             .expect("the dynamic key promise should accept its assignment");
 
@@ -1074,6 +1111,7 @@ mod tests {
             crate::eval::eval_value(&context, &access).expect("computed access should resume"),
             Value::binary_from_text("found")
         );
+        drop(access_root);
     }
 
     #[test]
@@ -1127,6 +1165,91 @@ mod tests {
             crate::eval::eval_value(&context, &access).expect("computed path should resume"),
             Value::binary_from_text("path")
         );
+    }
+
+    #[test]
+    fn computed_path_preserves_completed_prefix_base_and_result_across_route_loss() {
+        let context = context();
+        let prefix_forces = Arc::new(AtomicUsize::new(0));
+        let middle = PromisedValue::new(context.values(), "computed path middle chunk");
+        let base = PromisedValue::new(context.values(), "computed access base");
+        let result = PromisedValue::new(context.values(), "computed access result");
+        let result_root = result.root(context.values());
+        let observed_prefix_forces = Arc::clone(&prefix_forces);
+        let prefix = Value::semantic_thunk(context.values(), "computed path prefix", move |_| {
+            observed_prefix_forces.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Number(1.into()))
+        });
+        let path = Value::List(List::concat(
+            List::from_values(vec![prefix]),
+            List::from_thunk(ListThunk::Promised(middle.clone())),
+        ));
+        let access = access_value(
+            &context,
+            [CoreDataKey::PathIndex],
+            vec![Value::Promised(base.clone()), path],
+        );
+        let Value::Lazy(access_lazy) = &access else {
+            unreachable!("computed access fixture must be lazy")
+        };
+        let access_root = access_lazy.root(context.values());
+
+        crate::eval::eval_value(&context, &access)
+            .expect_err("the first route must suspend at the middle path chunk");
+        assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the edge-owned access state must survive first-route loss");
+        crate::eval::eval_value(&context, &access)
+            .expect_err("a later route must resume the exact middle dependency");
+        assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &middle,
+            Value::List(List::from_values(vec![Value::Number(2.into())])),
+        )
+        .expect("the middle path promise should accept its assignment");
+        crate::eval::eval_value(&context, &access)
+            .expect_err("the completed path must next demand the selected base");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the completed path must survive while its base is pending");
+        crate::core::set_test_promise(
+            context.values(),
+            &base,
+            Value::Dict(Dict::new_sync().insert(
+                Key::Number(1.into()),
+                Value::Dict(
+                    Dict::new_sync().insert(Key::Number(2.into()), Value::Promised(result.clone())),
+                ),
+            )),
+        )
+        .expect("the selected base promise should accept its assignment");
+        crate::eval::eval_value(&context, &access)
+            .expect_err("the selected value must be demanded before completion");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the WHNF handoff must survive while its result is pending");
+        crate::core::set_test_promise(context.values(), &result, Value::binary_from_text("done"))
+            .expect("the selected result promise should accept its assignment");
+        assert_eq!(
+            crate::eval::eval_value(&context, &access)
+                .expect("the resumed route should demand the selected result"),
+            Value::binary_from_text("done")
+        );
+        assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            crate::eval::eval_value(&context, &access)
+                .expect("a terminal route must use the access cache"),
+            Value::binary_from_text("done")
+        );
+        assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
+        drop(access_root);
+        drop(result_root);
     }
 
     #[test]

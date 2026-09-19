@@ -8,7 +8,9 @@ use std::fs;
 use std::path::Path;
 
 const EXPECTED_VARIANTS: &[&str] = &[
-    "Access",
+    // W6G.1f.3d carries no access progress: it marks the typed checkpoint
+    // retained directly beneath the managed lazy.
+    "AccessCheckpoint",
     "Builtin",
     // Only the installer receives one transient invocation permit. Durable
     // before/after state belongs to the managed checkpoint.

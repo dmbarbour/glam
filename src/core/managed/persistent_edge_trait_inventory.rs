@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        778,
+        786,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -834,10 +834,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // adds one test-only typed observation for its forced stale-route latch.
     // W6G.1f.3d.1 adds one fresh regional-converter allocation and its exact
     // root creation/projection pair; recursive child state remains traced
-    // inside that single allocation.
+    // inside that single allocation. W6G.1f.3d.2-.3 add the concrete access
+    // checkpoint allocation, trace, and duplicate arms plus one forced
+    // route-loss observation; access arguments and child state remain inside
+    // the one traced cell.
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_238_914_585_686_791_382,
+        9_102_811_208_123_585_211,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -882,9 +885,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 185),
+            ((SourceScope::Production, EdgeSurface::Typed), 188),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 543),
+            ((SourceScope::Test, EdgeSurface::Typed), 548),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
