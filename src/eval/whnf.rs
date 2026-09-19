@@ -919,14 +919,15 @@ impl ManagedLazyCheckpointEdge {
         &self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
-    ) -> WhnfPoll {
+    ) -> Option<WhnfPoll> {
+        let _ = self.duplicate_whnf_in(access.values())?;
         let managed = self.access(access);
         let mut reduce = reduce_semantic_shell;
         let (status, _) = match drive_managed_state_in(&managed, access, budget, &mut reduce) {
             Ok(result) => result,
-            Err(error) => return managed_state_error_poll(access, error),
+            Err(error) => return Some(managed_state_error_poll(access, error)),
         };
-        regional_status_poll(access, status)
+        Some(regional_status_poll(access, status))
     }
 }
 

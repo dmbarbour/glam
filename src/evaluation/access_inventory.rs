@@ -584,6 +584,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::core_cursor_step_rejects_a_live_claim#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::core_net_access_rejects_a_foreign_runtime#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::core_net_matching_access_reads_its_managed_cell#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/core_net.rs::tests::frontier_observation_is_a_nonrooting_edge_for_managed_driver_state#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::identity_only_net_work_outlives_scoped_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::identity_only_net_work_outlives_scoped_access#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_closes_and_publishes_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -598,12 +599,13 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::cursor_driver_releases_each_runtime_before_crossing_to_the_next#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::frame_bearing_callable_checkpoint_survives_every_ownership_handoff#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::fresh_operator_claim_release_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::fresh_operator_claim_unwind_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::net_whnf_machine_retains_one_root_across_semantic_dependency#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net.rs::driver_tests::net_whnf_machine_retains_one_edge_across_semantic_dependency#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#3|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -631,6 +633,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::zero_arity_apply_operator_is_data_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -643,6 +646,8 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#4|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::interrupted_host_call_is_never_replayed_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -828,7 +833,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // P2B moves exact net identity observation behind the same bounded
         // access authority as topology inspection. P2C adds one explicit
         // test-only duplicate gateway and roots a net before a worker handoff.
-        ("src/core_net.rs", GatewayCounts::new(16, 0)),
+        ("src/core_net.rs", GatewayCounts::new(17, 0)),
         ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
         // W6F.4d.3 gives test application construction the same short,
         // callback-free value region used by production lazy application.
@@ -843,7 +848,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // under two additional bounded test accesses. NC3-NC4 add three
         // forced-order checkpoint fixtures which duplicate managed promise
         // edges only inside matching test access.
-        ("src/eval/net.rs", GatewayCounts::new(23, 0)),
+        ("src/eval/net.rs", GatewayCounts::new(24, 0)),
         // NC5's promise-chain and usage fixtures duplicate managed promise
         // edges only beneath three explicit matching-runtime access regions.
         // NC6C roots the task-terminal net in one additional bounded region;
@@ -862,10 +867,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // payload in one explicit access region.
         // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
         // inspect their exact lazy-owned checkpoint under two bounded regions.
-        ("src/eval/tests.rs", GatewayCounts::new(12, 0)),
+        ("src/eval/tests.rs", GatewayCounts::new(13, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(7, 0)),
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(9, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the

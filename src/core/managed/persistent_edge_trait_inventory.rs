@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        758,
+        775,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -826,10 +826,15 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // its fresh allocation and trace visit. W6G.1f.3b removes the obsolete
     // reflection observation carrier and its two test projections; the
     // managed completion promise is already represented by Value's existing
-    // traced promise edge. None has an ordinary Clone/Eq surface.
+    // traced promise edge. W6G.1f.3c adds the concrete net-checkpoint edge,
+    // its allocation/trace arm, and the explicit duplicates required by the
+    // access-bound net driver and forced route-loss fixtures. The driver still
+    // inherits seven reviewed CoreRuntimeNet Clone/Debug interlocks owned by
+    // the later parent-carrier trait cutover. Exact checkpoint replacement
+    // adds one test-only typed observation for its forced stale-route latch.
     assert_eq!(
         occurrence_fingerprint(actual),
-        4_463_723_765_720_724_129,
+        3_872_170_652_459_387_004,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -874,9 +879,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 168),
+            ((SourceScope::Production, EdgeSurface::Typed), 182),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 540),
+            ((SourceScope::Test, EdgeSurface::Typed), 543),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -916,7 +921,11 @@ fn remaining_defect_owner(occurrence: &EdgeOccurrence) -> Option<RemainingDefect
         }
         declaration
             if declaration.starts_with("src/core.rs::")
-                || declaration.starts_with("src/core_net.rs::") =>
+                || declaration.starts_with("src/core_net.rs::")
+                || matches!(
+                    declaration,
+                    "src/eval/net.rs::NetDriverWork" | "src/eval/net.rs::NormalizationRequest"
+                ) =>
         {
             Some(RemainingDefectOwner::ParentRawValueCompatibilityCutover)
         }
@@ -930,7 +939,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         .iter()
         .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
         .collect::<Vec<_>>();
-    assert_eq!(defects.len(), 70);
+    assert_eq!(defects.len(), 77);
     assert!(defects.iter().all(|occurrence| matches!(
         occurrence.kind,
         OccurrenceKind::TraitDependency | OccurrenceKind::PointerIdentity
@@ -953,7 +962,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
         BTreeMap::from([
             (RemainingDefectOwner::P4CollectorTraitCutover, 5),
             (RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent, 13),
-            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 52),
+            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 59),
         ])
     );
 }
@@ -1037,6 +1046,26 @@ fn parent_raw_value_compatibility_interlocks_are_exact() {
     expected.insert("src/core.rs::LazySource".to_owned(), traits(&["Clone"]));
     expected.insert(
         "src/core_net.rs::CoreRuntimeNet".to_owned(),
+        traits(&["Clone"]),
+    );
+    expected.insert(
+        "src/core_net.rs::CoreCursorDependency".to_owned(),
+        traits(&["Clone", "Debug"]),
+    );
+    expected.insert(
+        "src/core_net.rs::CoreCursorStep".to_owned(),
+        traits(&["Debug"]),
+    );
+    expected.insert(
+        "src/core_net.rs::CoreFrontierObservation".to_owned(),
+        traits(&["Clone", "Debug"]),
+    );
+    expected.insert(
+        "src/eval/net.rs::NetDriverWork".to_owned(),
+        traits(&["Clone"]),
+    );
+    expected.insert(
+        "src/eval/net.rs::NormalizationRequest".to_owned(),
         traits(&["Clone"]),
     );
     for name in ["Debug", "Eq", "PartialEq"] {

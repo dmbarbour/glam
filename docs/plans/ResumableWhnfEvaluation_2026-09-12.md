@@ -5544,6 +5544,72 @@ for it:
    normalization request/worklist with traced managed-net edges and retain
    scalar ports, frontier observations, and driver state in one concrete
    checkpoint.
+
+   Partition this transition:
+
+   - **W6G.1f.3c.0 — edge-owned driver representation.** Give the request,
+     worklist items, cursor dependencies, and frontier observations one
+     compile-exhaustive managed-edge visitor. Remove registered net roots from
+     that durable state while preserving transient roots at post-access
+     semantic handoffs.
+   - **W6G.1f.3c.1 — concrete checkpoint cell.** Add one typed
+     `ManagedLazyCheckpointEdge` arm whose representation mutex contains the
+     complete net driver, request interface, operation label, and pending
+     semantic handoff. Trace through that state and mutate it only through one
+     collector edge transition.
+   - **W6G.1f.3c.2 — access and orchestration split.** Drive cursor/frontier
+     work beneath the checkpoint's existing `EvaluationValueAccess`, publish
+     any semantic active-pair handoff back into the checkpoint, close access,
+     and only then perform semantic evaluation or wait for net contention.
+     Re-enter one short transition to record the resulting retry/progress;
+     never hold the checkpoint mutex or a mutator while waiting.
+   - **W6G.1f.3c.3 — source cutover and forced schedules.** Construct and
+     install function-call and lazy-net checkpoints in the source-claim region,
+     replace `LazyTaskWork::NetWhnf` with a state-free marker, and force budget
+     yield, semantic blockage, route loss, later resumption, and collection.
+     Count exact net progress and prove the durable checkpoint owns no
+     registered root.
+
+   **Complete (2026-09-19).** The normalization request, driver worklist,
+   cursor dependencies, and frontier observations now retain
+   `CoreRuntimeNet` edges and expose one compile-exhaustive trace path.
+   `ManagedNetWhnfCheckpointCell` stores the complete `NetWhnfMachine` behind
+   the typed checkpoint carrier; `LazyTaskWork` retains only a
+   `NetWhnfCheckpoint` route marker. Function-call and lazy-net sources install
+   that checkpoint while their source claim and value access are still open.
+
+   Cursor and frontier transitions run beneath the checkpoint's existing
+   access. A semantic active pair is republished as the exact next retry before
+   the checkpoint releases access, then temporarily rooted and executed only
+   after both access and the checkpoint mutex close. Net contention likewise
+   waits outside both scopes. The checkpoint records one scalar in-flight
+   handoff while that semantic step runs, so another route yields rather than
+   driving the temporarily claimed pair. The winning route clears the marker
+   under a short re-entry and immediately reconciles the stored retry with the
+   changed topology. This leaves no callback, wait, or registered net root in
+   durable checkpoint state while preserving the pair which must be retried
+   after a blocked semantic step.
+
+   Checkpoint-family replacement now names the exact managed edge a route
+   observed. A stale route may adopt the current family or terminal cache, but
+   cannot overwrite a newer checkpoint merely because the lazy remains
+   unresolved. This applies equally to host-to-WHNF and net-to-WHNF handoffs;
+   ordinary WHNF polling treats a concurrent terminal publication as a normal
+   route retirement rather than asserting that its stale checkpoint remains.
+
+   Focused fixtures force budget yield, semantic dependency suspension,
+   contention, route loss, collection, later route recreation, and successful
+   completion. The route-loss fixture observes retirement of the route's net
+   root before collecting with only the lazy/checkpoint and exact scheduler
+   subscription alive. Source-backed inventories establish that the durable
+   checkpoint owns no registered net root. Seven temporary `Clone`/`Debug`
+   dependencies introduced by the edge-owned driver representation are
+   explicitly assigned to the parent-carrier trait cutover rather than being
+   accepted as permanent value-edge contracts. A deterministic stale-route
+   fixture latches exact replacement, while the existing forced compiler-cache
+   concurrency fixture latches in-flight exclusion. Direct driver-only tests
+   use an isolated value heap and explicit fixture roots so an unrelated
+   parallel collector cannot lend accidental lifetime to a raw test edge.
 5. **W6G.1f.3d — access checkpoint.** Convert path arguments, current values,
    pending key/list conversion state, and child WHNF owners to traced edges.
    Preserve exact conversion position and source-owner diagnostics.

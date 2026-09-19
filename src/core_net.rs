@@ -21,7 +21,6 @@ use crate::interaction_net::{
     OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
     SourceFrontier,
 };
-use crate::runtime::RuntimeValueRoot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDataKey {
@@ -649,14 +648,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.runtime.cell().with(|runtime| runtime.claim_call(call))
     }
 
-    pub(crate) fn claim_call_rooted(
-        &self,
-        call: crate::interaction_net::Call,
-    ) -> Option<RuntimeValueRoot> {
-        self.claim_call(call)
-            .map(|value| self.values.root_runtime_value(value))
-    }
-
     pub(crate) fn install_claimed_call_checkpoint(
         &self,
         call: crate::interaction_net::Call,
@@ -965,7 +956,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn reclaim_blocked_call(
         &self,
         blocked: &BlockedCall<CoreWaitToken>,
-    ) -> Option<(crate::interaction_net::Call, RuntimeValueRoot)> {
+    ) -> Option<(crate::interaction_net::Call, Value)> {
         self.runtime
             .cell()
             .with_conditional_mut_via(&self.runtime, |runtime| {
@@ -978,7 +969,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 let callable = runtime
                     .claim_call(call)
                     .expect("reclaimed call must expose its callable data");
-                RuntimeNetMutation::Changed(Some((call, self.values.root_runtime_value(callable))))
+                RuntimeNetMutation::Changed(Some((call, callable)))
             })
     }
 
@@ -1219,7 +1210,7 @@ impl std::fmt::Debug for CoreNetContention {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoreFrontierObservation {
-    root: ManagedCoreNetRoot,
+    source: CoreRuntimeNet,
     observed_topology: u64,
     endpoint: DemandEndpoint,
 }
@@ -1230,22 +1221,26 @@ impl CoreFrontierObservation {
         access: &RuntimeValueAccess<'_>,
     ) -> Self {
         Self {
-            root: inner.source().root_in(access),
+            source: inner.source().duplicate_in(access),
             observed_topology: inner.observed_topology_revision(),
             endpoint: inner.endpoint(),
         }
     }
 
     pub(crate) fn source(&self, access: &RuntimeValueAccess<'_>) -> CoreRuntimeNet {
-        CoreRuntimeNet::from_root(&self.root, access)
+        self.source.duplicate_in(access)
     }
 
     pub(crate) fn endpoint(&self) -> DemandEndpoint {
         self.endpoint
     }
 
-    pub(crate) fn root(&self) -> &ManagedCoreNetRoot {
-        &self.root
+    pub(crate) fn retained_source(&self) -> &CoreRuntimeNet {
+        &self.source
+    }
+
+    pub(crate) fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.source.trace_managed_edge(visitor);
     }
 
     pub(crate) fn step_active_pair(
@@ -1317,6 +1312,15 @@ impl CoreCursorDependency {
             }
             Self::SourceFrontier(observation) => {
                 CursorDependency::SourceFrontier(observation.to_generic(access))
+            }
+        }
+    }
+
+    pub(crate) fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        match self {
+            Self::LocalCursor(_) => {}
+            Self::SourceCursor(observation) | Self::SourceFrontier(observation) => {
+                observation.trace_managed_edges(visitor);
             }
         }
     }
@@ -1394,8 +1398,9 @@ impl CoreActivePairStep {
 }
 
 // These are representation diagnostics for the observer-free I8A.0 handoff,
-// not ABI promises. Durable wrappers retain one registered root plus only
-// their edge-free operation snapshot.
+// not ABI promises. A frontier observation is now one traceable net edge plus
+// only its scalar operation snapshot; external temporary copy preparation
+// continues to use a registered root.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<CorePreparedCopySource>() == 16);
@@ -1475,11 +1480,11 @@ mod tests {
         let _: &NetContention = inner;
 
         let CoreFrontierObservation {
-            root,
+            source,
             observed_topology,
             endpoint,
         } = observation;
-        let _: &ManagedCoreNetRoot = root;
+        let _: &CoreRuntimeNet = source;
         let _: &u64 = observed_topology;
         let _: &DemandEndpoint = endpoint;
 
@@ -2085,7 +2090,6 @@ mod tests {
         assert_eq!(records[0].adding_edges(), 0);
         assert_eq!(records[1].leaving_edges(), 1);
         assert_eq!(records[1].adding_edges(), 0);
-        drop((target, dependency));
     }
 
     #[test]
@@ -2259,34 +2263,33 @@ mod tests {
     }
 
     #[test]
-    fn frontier_observation_is_an_exact_temporary_net_owner() {
+    fn frontier_observation_is_a_nonrooting_edge_for_managed_driver_state() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let public_values = crate::api::Values::from_core_factory(values.clone());
         let baseline = values
             .collect_managed_for_test()
             .expect("the frontier-observation fixture should start collectible");
-        let observation = {
-            let source = values.instantiate_core_net(&closed_unit_template(&values));
-            let exposed = source.test_with(&values, RuntimeNet::exposed);
-            let CorePreparedCopySource { root, .. } = source.test_prepare_copy_source(&values);
-            CoreFrontierObservation {
-                root,
-                observed_topology: 0,
-                endpoint: DemandEndpoint::Cursor(exposed.node()),
-            }
-        };
+        let source = values.instantiate_core_net(&closed_unit_template(&values));
+        let exposed = source.test_with(&values, RuntimeNet::exposed);
+        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(source.clone())));
+        let _observation = values.with_runtime_value_access(|access| CoreFrontierObservation {
+            source: source.duplicate_in(&access),
+            observed_topology: 0,
+            endpoint: DemandEndpoint::Cursor(exposed.node()),
+        });
 
         let retained = values
             .collect_managed_for_test()
-            .expect("the frontier observation should retain its semantic net");
+            .expect("the explicit external owner should retain the semantic net");
         assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
-        assert_eq!(retained.marked_slots(), baseline.marked_slots() + 1);
+        assert!(retained.marked_slots() > baseline.marked_slots());
 
-        drop(observation);
+        drop(owner);
         let retired = values
             .collect_managed_for_test()
-            .expect("dropping the frontier observation should retire its semantic net");
+            .expect("dropping the explicit owner should retire its semantic net");
         assert_eq!(retired.root_entries(), baseline.root_entries());
-        assert_eq!(retired.finalized_slots(), 1);
+        assert!(retired.finalized_slots() >= 1);
     }
 
     #[test]

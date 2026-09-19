@@ -15,11 +15,81 @@ fn number(value: i64) -> Value {
     Value::Number(value.into())
 }
 
+#[test]
+fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
+    let context = EvalContext::standalone();
+    let lazy = LazyValue::semantic_thunk(
+        context.values(),
+        "W6G.1 exact checkpoint replacement",
+        |_| unreachable!("the replacement fixture does not evaluate its source"),
+    );
+    let rooted = lazy.root(context.values());
+
+    crate::eval::with_direct_evaluator(&context, |evaluator| {
+        evaluator.with_value_access(|access| {
+            let lazy = access.lazy_root(&rooted);
+            let initial = ManagedLazyCheckpointEdge::allocate_regional_in(
+                &access,
+                super::super::whnf::RegionalWhnfWork::from_focus(&access, context.values().unit()),
+            )
+            .expect("the initial fixture checkpoint must fit its managed slot");
+            assert!(lazy.install_checkpoint(initial).is_ok());
+
+            let first_route = lazy
+                .checkpoint_snapshot()
+                .expect("the first route must observe the installed checkpoint");
+            let stale_route = lazy
+                .checkpoint_snapshot()
+                .expect("the stale route must observe the same checkpoint");
+            let replacement = ManagedLazyCheckpointEdge::allocate_regional_in(
+                &access,
+                super::super::whnf::RegionalWhnfWork::from_focus(&access, number(1)),
+            )
+            .expect("the replacement fixture checkpoint must fit its managed slot");
+            assert!(lazy.replace_checkpoint(&first_route, replacement).is_ok());
+            let installed = lazy
+                .checkpoint_snapshot()
+                .expect("the winning replacement must remain installed");
+
+            let stale_replacement = ManagedLazyCheckpointEdge::allocate_regional_in(
+                &access,
+                super::super::whnf::RegionalWhnfWork::from_focus(&access, number(2)),
+            )
+            .expect("the stale fixture checkpoint must fit its managed slot");
+            assert!(
+                lazy.replace_checkpoint(&stale_route, stale_replacement)
+                    .is_err(),
+                "a route may replace only the exact checkpoint it drove"
+            );
+            let current = lazy
+                .checkpoint_snapshot()
+                .expect("a rejected stale replacement must preserve the winner");
+            assert!(current.same_checkpoint_in(&installed, access.values()));
+        });
+    });
+}
+
 fn collect_between_handoffs(context: &EvalContext) {
     context
         .values()
         .collect_managed_for_test()
         .expect("a returned W4 poll must leave no managed access active");
+}
+
+fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWaitToken) {
+    for attempt in 0..64 {
+        match context.pump_wait(wait, 256) {
+            crate::evaluation::EvaluationPumpOutcome::TargetReady => return,
+            crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
+            crate::evaluation::EvaluationPumpOutcome::Busy => {
+                panic!("deterministic W6G.1 fixture unexpectedly found a claimed producer")
+            }
+            crate::evaluation::EvaluationPumpOutcome::NoProgress => {
+                panic!("deterministic W6G.1 fixture lost its producer")
+            }
+        }
+        assert_ne!(attempt, 63, "W6G.1 fixture exhausted its pump bound");
+    }
 }
 
 #[test]
@@ -170,6 +240,117 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
     };
     assert_eq!(value.clone_core_for_test(), number(45));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn net_whnf_checkpoint_survives_route_loss_and_collection() {
+    let context = EvalContext::standalone();
+    let promise = PromisedValue::new(context.values(), "W6G.1 retained net callable");
+    let mut builder =
+        crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
+    let [application, argument, result] = builder.bind();
+    let function = builder.data(Value::Promised(promise.clone()));
+    let value = builder.data(context.values().unit());
+    builder.wire(application, function);
+    builder.wire(argument, value);
+    let runtime = context
+        .values()
+        .instantiate_core_net(&builder.finish(result));
+    let lazy =
+        LazyValue::from_net_computation(context.values(), crate::core::NetValue::new(runtime));
+    let retained = lazy.root(context.values());
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+    let wait = 'blocked: {
+        for attempt in 0..64 {
+            match machine.poll(
+                &poll,
+                &mut crate::evaluation::EvaluationStepBudget::new(256),
+            ) {
+                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::Blocked(block) => {
+                    let Some(WorkDependency::Wait(wait)) = block.dependency else {
+                        panic!("the blocked callable must publish its subscribed wait")
+                    };
+                    break 'blocked wait;
+                }
+                _ => panic!("unexpected pre-assignment net-WHNF poll"),
+            }
+            assert_ne!(
+                attempt, 63,
+                "net-WHNF fixture did not reach its promise wait"
+            );
+        }
+        unreachable!("bounded block loop must block or panic")
+    };
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = machine
+            .lazy
+            .access(&access)
+            .expect("the net fixture must share its value domain")
+            .checkpoint_snapshot()
+            .expect("semantic blockage must remain in a managed checkpoint");
+        assert_eq!(checkpoint.kind(), ManagedLazyCheckpointKindTag::NetWhnf);
+    });
+
+    let routed_report = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the active route and managed net checkpoint must survive collection");
+    drop(machine);
+    let retained_report = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the edge-owned net checkpoint must survive collection");
+    assert_eq!(
+        routed_report.root_entries(),
+        retained_report.root_entries() + 1,
+        "dropping the route must retire exactly its lazy root while the checkpoint and semantic subscription remain live"
+    );
+
+    let callable = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(context.values().unit()),
+    );
+    crate::core::set_test_promise(context.values(), &promise, callable)
+        .expect("the retained callable promise should accept its assignment");
+    pump_to_ready(&context, &wait);
+
+    let retained = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    let mut resumed = lazy_machine(&context, retained);
+    let value = 'resume: {
+        for attempt in 0..64 {
+            match resumed.poll(
+                &poll,
+                &mut crate::evaluation::EvaluationStepBudget::new(256),
+            ) {
+                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::Complete(value) => break 'resume value,
+                EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
+                EvaluationMachinePoll::Blocked(block) => {
+                    if let Some(WorkDependency::Wait(wait)) = block.dependency {
+                        pump_to_ready(&context, &wait);
+                    }
+                }
+                EvaluationMachinePoll::ScheduleSpark(_) => {
+                    panic!("resumed net-WHNF checkpoint unexpectedly scheduled a spark")
+                }
+                EvaluationMachinePoll::Exit(_) => {
+                    panic!("resumed net-WHNF checkpoint unexpectedly requested exit")
+                }
+                EvaluationMachinePoll::Cancelled => {
+                    panic!("resumed net-WHNF checkpoint was unexpectedly cancelled")
+                }
+            }
+            assert_ne!(attempt, 63, "retained net-WHNF fixture did not complete");
+        }
+        unreachable!("bounded resume loop must complete or panic")
+    };
+    assert_eq!(value.clone_core_for_test(), context.values().unit());
 }
 
 #[test]

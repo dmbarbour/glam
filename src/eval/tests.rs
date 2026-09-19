@@ -254,7 +254,17 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     assert_eq!(profile.driver.work_items, 16);
     assert!(demand.poll().is_none());
     assert_eq!(context.client_demand_count_for_test(), 1);
-    assert!(computation_lazy.source_snapshot(context.values()).is_some());
+    assert!(computation_lazy.source_snapshot(context.values()).is_none());
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = computation_lazy
+            .access(&access)
+            .checkpoint_snapshot()
+            .expect("bounded net work must remain in its managed checkpoint");
+        assert_eq!(
+            checkpoint.kind(),
+            crate::eval::lazy_checkpoint::ManagedLazyCheckpointKindTag::Whnf
+        );
+    });
     assert!(computation_lazy.cached(context.values()).is_none());
     assert_eq!(
         computation_runtime.active_normalization_batch(context.values()),

@@ -198,10 +198,7 @@ enum LazyTaskWork {
     Produce,
     Whnf(super::whnf::WhnfComputation),
     WhnfCheckpoint,
-    NetWhnf {
-        machine: Box<NetWhnfMachine>,
-        failure_context: Option<&'static str>,
-    },
+    NetWhnfCheckpoint,
     Access(Box<AccessMachine>),
     Builtin(Box<BuiltinTaskMachine>),
     ObjectFixpoint(Box<ObjectFixpointMachine>),
@@ -224,6 +221,7 @@ impl LazyTaskMachine {
         match kind {
             ManagedLazyCheckpointKindTag::Whnf => LazyTaskWork::WhnfCheckpoint,
             ManagedLazyCheckpointKindTag::HostCall => LazyTaskWork::HostCallCheckpoint,
+            ManagedLazyCheckpointKindTag::NetWhnf => LazyTaskWork::NetWhnfCheckpoint,
         }
     }
 
@@ -325,7 +323,12 @@ impl LazyTaskMachine {
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        match poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget) {
+        let Some(poll) =
+            poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget)
+        else {
+            return self.cached_poll(context);
+        };
+        match poll {
             WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
             WhnfOwnerPoll::Pending(dependency) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -352,6 +355,7 @@ impl LazyTaskMachine {
             Interrupted,
             Whnf,
             Terminal,
+            Replaced(ManagedLazyCheckpointKindTag),
         }
 
         let transition = context.with_value_access(|access| {
@@ -359,20 +363,26 @@ impl LazyTaskMachine {
             let checkpoint = lazy
                 .checkpoint_snapshot()
                 .expect("host-call route must retain its managed checkpoint");
+            if checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall {
+                return Transition::Replaced(checkpoint.kind());
+            }
             match checkpoint.observe_host_call_in(access.values()) {
                 HostCallCheckpointObservation::Invoking => Transition::Interrupted,
                 HostCallCheckpointObservation::After(Ok(value)) => {
                     let work = super::whnf::RegionalWhnfWork::from_focus(&access, value);
                     let next = ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
                         .expect("canonical WHNF state must fit its reviewed managed slot");
-                    match lazy.replace_checkpoint(next) {
+                    match lazy.replace_checkpoint(&checkpoint, next) {
                         Ok(()) => Transition::Whnf,
                         Err(_) => {
-                            assert!(
-                                lazy.cached().is_some(),
-                                "a rejected host-to-WHNF transition must find a terminal cache"
-                            );
-                            Transition::Terminal
+                            if lazy.cached().is_some() {
+                                Transition::Terminal
+                            } else {
+                                match lazy.checkpoint_snapshot() {
+                                    Some(current) => Transition::Replaced(current.kind()),
+                                    None => Transition::Terminal,
+                                }
+                            }
                         }
                     }
                 }
@@ -395,6 +405,144 @@ impl LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Transition::Terminal => self.cached_poll(context),
+            Transition::Replaced(kind) => {
+                self.work = Self::work_for_checkpoint_kind(kind);
+                EvaluationMachinePoll::Yielded
+            }
+        }
+    }
+
+    fn poll_net_whnf_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Pending(Result<NetWhnfAccessPoll, EvaluationHalt>),
+            Whnf,
+            Terminal,
+            Replaced(ManagedLazyCheckpointKindTag),
+        }
+
+        #[cfg(feature = "interaction-net-profiling")]
+        context
+            .context()
+            .values()
+            .record_net_driver(crate::interaction_net::profiling::DriverEvent::MachinePoll);
+        loop {
+            let (transition, failure_context) = context.with_value_access(|access| {
+                let lazy = access.lazy_root(&self.lazy);
+                let checkpoint = lazy
+                    .checkpoint_snapshot()
+                    .expect("net-WHNF route must retain its managed checkpoint");
+                if checkpoint.kind() != ManagedLazyCheckpointKindTag::NetWhnf {
+                    return (Transition::Replaced(checkpoint.kind()), None);
+                }
+                let (outcome, failure_context) =
+                    checkpoint.with_net_whnf_transition_in(&access, |machine, in_flight| {
+                        if *in_flight {
+                            return (
+                                Ok(NetWhnfAccessPoll::SemanticInFlight),
+                                machine.failure_context(),
+                            );
+                        }
+                        let outcome = machine.poll_in(context, &access, step_budget);
+                        if matches!(
+                            outcome,
+                            Ok(NetWhnfAccessPoll::Ready(_) | NetWhnfAccessPoll::Semantic(_))
+                        ) {
+                            *in_flight = true;
+                        }
+                        (outcome, machine.failure_context())
+                    });
+                let transition = match outcome {
+                    Ok(NetWhnfAccessPoll::Ready(value)) => {
+                        let work = super::whnf::RegionalWhnfWork::from_focus(&access, value);
+                        let next = ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
+                            .expect(
+                                "canonical post-net WHNF state must fit its reviewed managed slot",
+                            );
+                        match lazy.replace_checkpoint(&checkpoint, next) {
+                            Ok(()) => Transition::Whnf,
+                            Err(_) => {
+                                if lazy.cached().is_some() {
+                                    Transition::Terminal
+                                } else {
+                                    match lazy.checkpoint_snapshot() {
+                                        Some(current) => Transition::Replaced(current.kind()),
+                                        None => Transition::Terminal,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    outcome => Transition::Pending(outcome),
+                };
+                (transition, failure_context)
+            });
+            match transition {
+                Transition::Whnf => {
+                    self.work = LazyTaskWork::WhnfCheckpoint;
+                    return EvaluationMachinePoll::Yielded;
+                }
+                Transition::Terminal => return self.cached_poll(context),
+                Transition::Replaced(kind) => {
+                    self.work = Self::work_for_checkpoint_kind(kind);
+                    return EvaluationMachinePoll::Yielded;
+                }
+                Transition::Pending(Ok(NetWhnfAccessPoll::Yielded)) => {
+                    return EvaluationMachinePoll::Yielded;
+                }
+                Transition::Pending(Ok(NetWhnfAccessPoll::SemanticInFlight)) => {
+                    return EvaluationMachinePoll::Yielded;
+                }
+                Transition::Pending(Ok(NetWhnfAccessPoll::Contended(contention))) => {
+                    contention.wait_for_disturbance();
+                    return EvaluationMachinePoll::Yielded;
+                }
+                Transition::Pending(Ok(NetWhnfAccessPoll::Semantic(action))) => {
+                    let result = drive_net_semantic_action(context, action, step_budget);
+                    context.with_value_access(|access| {
+                        let lazy = access.lazy_root(&self.lazy);
+                        if let Some(checkpoint) = lazy.checkpoint_snapshot()
+                            && checkpoint.kind() == ManagedLazyCheckpointKindTag::NetWhnf
+                        {
+                            checkpoint.with_net_whnf_transition_in(
+                                &access,
+                                |_machine, in_flight| {
+                                    assert!(
+                                        *in_flight,
+                                        "semantic completion must retire one in-flight handoff"
+                                    );
+                                    *in_flight = false;
+                                },
+                            );
+                        }
+                    });
+                    if let Err(error) = result {
+                        return self.fail(context, error);
+                    }
+                    // The semantic operation ran outside managed access and
+                    // the checkpoint mutex. Re-enter now so its exact retry
+                    // observes progress or suspension before yielding.
+                }
+                Transition::Pending(Ok(NetWhnfAccessPoll::Ready(_))) => {
+                    unreachable!("ready net work transitions to an ordinary WHNF checkpoint")
+                }
+                Transition::Pending(Err(error)) => {
+                    let error = if let Some(operation) = failure_context {
+                        context.with_value_access(|access| {
+                            error.with_context(
+                                access.values(),
+                                evaluation_context_frame_in(access.values(), operation),
+                            )
+                        })
+                    } else {
+                        error
+                    };
+                    return self.fail(context, error);
+                }
+            }
         }
     }
 }
@@ -628,27 +776,62 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         LazySource::FunctionCall {
                             function,
                             arguments,
-                        } => LazyTaskWork::NetWhnf {
-                            machine: Box::new(context.with_value_access(|access| {
-                                NetWhnfMachine::from_function_call(&access, &function, &arguments)
-                            })),
-                            failure_context: None,
-                        },
+                        } => {
+                            let installed = context.with_value_access(|access| {
+                                let machine = NetWhnfMachine::from_function_call(
+                                    &access,
+                                    &function,
+                                    &arguments,
+                                );
+                                let checkpoint =
+                                    ManagedLazyCheckpointEdge::allocate_net_whnf_in(
+                                        &access, machine,
+                                    )
+                                    .expect(
+                                        "managed function-call net state must fit its reviewed slot",
+                                    );
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
+                            });
+                            if installed {
+                                LazyTaskWork::NetWhnfCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
+                        }
                         LazySource::NetComputation(net) => {
-                            let runtime = context.with_value_access(|access| {
-                                net.runtime().duplicate_in(access.values())
-                            });
-                            let exposed = context.with_value_access(|access| {
-                                access.net(&runtime).with(|runtime| runtime.exposed())
-                            });
-                            LazyTaskWork::NetWhnf {
-                                machine: Box::new(NetWhnfMachine::new(
-                                    context,
+                            let installed = context.with_value_access(|access| {
+                                let runtime = net.runtime().duplicate_in(access.values());
+                                let exposed = access.net(&runtime).with(|runtime| runtime.exposed());
+                                let machine = NetWhnfMachine::new_in(
+                                    &access,
                                     runtime,
                                     exposed,
-                                    "lazy net computation",
-                                )),
-                                failure_context: Some("net_computation"),
+                                    Arc::from("lazy net computation"),
+                                )
+                                .with_failure_context("net_computation");
+                                let checkpoint =
+                                    ManagedLazyCheckpointEdge::allocate_net_whnf_in(
+                                        &access, machine,
+                                    )
+                                    .expect(
+                                        "managed lazy-net state must fit its reviewed slot",
+                                    );
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
+                            });
+                            if installed {
+                                LazyTaskWork::NetWhnfCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
                             }
                         }
                         LazySource::ListEffectComputation(recipe) => {
@@ -753,6 +936,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_host_call_checkpoint(context);
             }
 
+            if matches!(self.work, LazyTaskWork::NetWhnfCheckpoint) {
+                return self.poll_net_whnf_checkpoint(context, step_budget);
+            }
+
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
@@ -766,30 +953,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     NetConstructionPoll::Yielded => EvaluationMachinePoll::Yielded,
                     NetConstructionPoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
-            }
-
-            if let LazyTaskWork::NetWhnf {
-                machine,
-                failure_context,
-            } = &mut self.work
-            {
-                return match machine.poll(context, step_budget) {
-                    Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context.root_value(value)),
-                    Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
-                    Err(error) => {
-                        let error = if let Some(operation) = failure_context {
-                            context.with_value_access(|access| {
-                                error.with_context(
-                                    access.values(),
-                                    evaluation_context_frame_in(access.values(), operation),
-                                )
-                            })
-                        } else {
-                            error
-                        };
-                        self.fail(context, error)
                     }
                 };
             }
@@ -1351,9 +1514,7 @@ mod ownership_tests {
                 let _: &crate::eval::whnf::WhnfComputation = computation;
             }
             LazyTaskWork::WhnfCheckpoint => {}
-            LazyTaskWork::NetWhnf { machine, .. } => {
-                let _: &NetWhnfMachine = machine;
-            }
+            LazyTaskWork::NetWhnfCheckpoint => {}
             LazyTaskWork::Access(machine) => {
                 let _: &AccessMachine = machine;
             }

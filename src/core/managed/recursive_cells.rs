@@ -690,12 +690,6 @@ impl ManagedCoreNetRoot {
     }
 
     #[cfg(test)]
-    pub(crate) fn same_root_in(&self, other: &Self, authority: &RuntimeValueAccess<'_>) -> bool {
-        self.edge(authority)
-            .same_allocation_in(&other.edge(authority), authority)
-    }
-
-    #[cfg(test)]
     pub(crate) fn access<'access, 'scope>(
         &'access self,
         authority: &'access RuntimeValueAccess<'scope>,
@@ -845,6 +839,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     /// intermediate source or registered root.
     pub(crate) fn replace_checkpoint(
         &self,
+        expected: &ManagedLazyCheckpointEdge,
         checkpoint: ManagedLazyCheckpointEdge,
     ) -> Result<(), ManagedLazyCheckpointEdge> {
         if self.cell.result.get().is_some() {
@@ -855,12 +850,12 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .producer
             .lock()
             .expect("managed lazy producer cell was poisoned");
-        if self.cell.result.get().is_some()
-            || !matches!(
-                producer.as_ref(),
-                Some(ManagedLazyProducerState::Checkpoint(_))
-            )
-        {
+        let expected_is_current = matches!(
+            producer.as_ref(),
+            Some(ManagedLazyProducerState::Checkpoint(current))
+                if current.same_checkpoint_in(expected, self.authority)
+        );
+        if self.cell.result.get().is_some() || !expected_is_current {
             return Err(checkpoint);
         }
         let producer = RefCell::new(producer);
@@ -3746,25 +3741,26 @@ mod tests {
                 "PromisedValue",
             ),
             (
-                source_declaration(eval_net, "struct NormalizationRequest"),
-                "ManagedCoreNetRoot",
-                "CoreRuntimeNet",
-            ),
-            (
                 source_declaration(core_net, "struct CorePreparedCopySource"),
                 "ManagedCoreNetRoot",
                 "PreparedCopySource<",
-            ),
-            (
-                source_declaration(core_net, "struct CoreFrontierObservation"),
-                "ManagedCoreNetRoot",
-                "FrontierObservation<",
             ),
         ] {
             assert!(declaration.contains(required));
             assert!(
                 !declaration.contains(forbidden),
                 "durable {required} wrapper also caches {forbidden}"
+            );
+        }
+
+        for declaration in [
+            source_declaration(eval_net, "struct NormalizationRequest"),
+            source_declaration(core_net, "struct CoreFrontierObservation"),
+        ] {
+            assert!(declaration.contains("CoreRuntimeNet"));
+            assert!(
+                !declaration.contains("ManagedCoreNetRoot"),
+                "managed checkpoint children must retain traced net edges, not registered roots"
             );
         }
     }

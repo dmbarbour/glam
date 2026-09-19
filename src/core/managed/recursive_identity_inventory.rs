@@ -491,9 +491,9 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     owner!(
         "src/core_net.rs::CoreFrontierObservation",
         [0, 0, 1],
-        DurableRoot,
+        ExactManagedEdge,
         None,
-        "frontier observation keeps its source net alive after source access closes"
+        "frontier observation is traced only beneath the managed net-driver checkpoint"
     ),
     owner!(
         "src/core_net.rs::CorePreparedCopySource",
@@ -547,16 +547,23 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     owner!(
         "src/eval/net.rs::NetDriverWork",
         [0, 0, 4],
-        BoundedAccess,
+        ExactManagedEdge,
         None,
-        "reconstructible normalization worklist is local to one drive"
+        "normalization worklist edges are traced beneath the managed net-driver checkpoint"
+    ),
+    owner!(
+        "src/eval/net.rs::NetSemanticAction",
+        [0, 0, 1],
+        DurableRoot,
+        None,
+        "post-access semantic handoff temporarily roots the exact net until the callback-free driver transition resumes"
     ),
     owner!(
         "src/eval/net.rs::NormalizationRequest",
         [0, 0, 1],
-        DurableRoot,
+        ExactManagedEdge,
         None,
-        "normalization request retains only its net root across retryable evaluator boundaries"
+        "normalization request is traced as part of the managed net-driver checkpoint"
     ),
     owner!(
         "src/eval/value.rs::LazyTaskMachine",
@@ -798,7 +805,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [15, 22, 9],
+        [18, 21, 8],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

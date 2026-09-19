@@ -56,12 +56,9 @@ pub(crate) fn poll_lazy_checkpoint(
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> WhnfOwnerPoll {
+) -> Option<WhnfOwnerPoll> {
     let poll = poll_context.with_value_access(context, |access| {
-        let checkpoint = access
-            .lazy_root(lazy)
-            .checkpoint_snapshot()
-            .expect("checkpoint-backed lazy work must retain its managed checkpoint");
+        let checkpoint = access.lazy_root(lazy).checkpoint_snapshot()?;
         checkpoint.poll_semantic_in(&access, step_budget)
     });
     #[cfg(test)]
@@ -69,7 +66,7 @@ pub(crate) fn poll_lazy_checkpoint(
         !thread_has_runtime_value_access_for_test(),
         "lazy-checkpoint orchestration must begin only after managed access closes"
     );
-    interpret_poll(poll, context)
+    poll.map(|poll| interpret_poll(poll, context))
 }
 
 fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {

@@ -16,7 +16,8 @@ const EXPECTED_VARIANTS: &[&str] = &[
     "HostCallInvoke",
     "ListEffect",
     "NetConstruction",
-    "NetWhnf",
+    // W6G.1f.3c retains the complete driver beneath the managed lazy.
+    "NetWhnfCheckpoint",
     "ObjectFixpoint",
     "Produce",
     "Whnf",

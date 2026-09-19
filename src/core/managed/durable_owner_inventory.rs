@@ -494,6 +494,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         CompatibilityPayload,
         "W6G.1f.3a.1 publishes Invoking before arbitrary Rust, converts the rooted outcome back to traced managed edges, and refuses replay after unwind or route loss"
     ),
+    exact_managed!(
+        "src/eval/lazy_checkpoint.rs",
+        "managed net-WHNF checkpoint cell",
+        "one complete edge-owned normalization request, worklist, frontier state, operation label, and semantic retry behind a representation mutex",
+        "one concrete typed arm beneath a managed lazy producer edge; semantic callbacks and contention waits occur after its transition closes",
+        CompatibilityPayload,
+        "W6G.1f.3c survives forced route loss and collection while resuming the exact net checkpoint"
+    ),
     closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
@@ -934,11 +942,13 @@ fn is_production_source(relative: &Path) -> bool {
 // typed checkpoint sum. W6G.1f.3b then replaces the registered reflection
 // observation root with a semantic managed promise edge held directly by the
 // computation. The declaration count is unchanged while that reviewed handoff
-// moves one signal from `RuntimeValueRoot` to `Value`.
-const DECLARATION_BASELINE_COUNT: usize = 227;
+// moves one signal from `RuntimeValueRoot` to `Value`. W6G.1f.3c adds the
+// concrete net checkpoint and edge-owned driver/action declarations while
+// removing durable registered net roots from the driver.
+const DECLARATION_BASELINE_COUNT: usize = 231;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([132, 270, 5, 17, 6, 6, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_036_773_009_167_588_772;
+    DeclarationSignals::new([133, 269, 5, 17, 13, 7, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 217_632_320_203_533_268;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1039,11 +1049,18 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
             | "src/eval/whnf/managed_state.rs::ManagedWhnfAccess"
             | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointEdge"
             | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointKind"
-            | "src/eval/lazy_checkpoint.rs::ManagedHostCallCheckpointCell"
+            | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointKindTag"
+    ) {
+        "managed lazy checkpoint cell and edge"
+    } else if matches!(
+        declaration,
+        "src/eval/lazy_checkpoint.rs::ManagedHostCallCheckpointCell"
             | "src/eval/lazy_checkpoint.rs::ManagedHostCallCheckpointState"
             | "src/eval/lazy_checkpoint.rs::HostCallCheckpointObservation"
     ) {
-        "managed lazy checkpoint cell and edge"
+        "managed host-call checkpoint cell"
+    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedNetWhnfCheckpointCell" {
+        "managed net-WHNF checkpoint cell"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"
@@ -1315,19 +1332,23 @@ const LIFECYCLE_DELTA: &[LifecycleDeltaEntry] = &[
         phase: "I8",
         subsystem: "core synchronized nets",
         owner: "CorePreparedCopySource / CoreFrontierObservation / NormalizationRequest",
-        change: "each existing temporary owner now stores one root-only ManagedCoreNetRoot and reconstructs its edge only inside matching access",
+        change: "prepared copy and post-access semantic handoffs retain transient ManagedCoreNetRoot owners; frontier observations and normalization driver state retain traced CoreRuntimeNet edges beneath the managed lazy checkpoint",
         disposition: LifecycleDeltaDisposition::ReconciledOwner,
         behavior: "core_net_durable_owner_inventory_is_compile_exhaustive",
-        owner_drop: "prepared_copy_source_is_an_exact_temporary_net_owner; frontier_observation_is_an_exact_temporary_net_owner; normalization_request_is_an_exact_temporary_net_owner",
+        owner_drop: "prepared_copy_source_is_an_exact_temporary_net_owner; frontier_observation_is_a_nonrooting_edge_for_managed_driver_state; normalization_request_is_a_nonrooting_edge_for_managed_driver_state; net_whnf_checkpoint_survives_route_loss_and_collection",
         isolated_reclamation: Some("managed_core_net_source_self_cycle_is_traced_and_reclaimed"),
         latches: &[
             LifecycleSourceLatch {
                 path: "src/core_net.rs",
-                needle: "fn frontier_observation_is_an_exact_temporary_net_owner()",
+                needle: "fn frontier_observation_is_a_nonrooting_edge_for_managed_driver_state()",
+            },
+            LifecycleSourceLatch {
+                path: "src/eval/value/tests/w4.rs",
+                needle: "fn net_whnf_checkpoint_survives_route_loss_and_collection()",
             },
             LifecycleSourceLatch {
                 path: "src/eval/net.rs",
-                needle: "fn normalization_request_is_an_exact_temporary_net_owner()",
+                needle: "fn normalization_request_is_a_nonrooting_edge_for_managed_driver_state()",
             },
             LifecycleSourceLatch {
                 path: "src/core/managed/recursive_cells.rs",
