@@ -5613,6 +5613,53 @@ for it:
 5. **W6G.1f.3d — access checkpoint.** Convert path arguments, current values,
    pending key/list conversion state, and child WHNF owners to traced edges.
    Preserve exact conversion position and source-owner diagnostics.
+
+   The implementation review after W6G.1f.3c found that this is also the
+   ownership bridge for shared key conversion. `KeyConversionMachine` is used
+   by access, dictionary, object, and effect machines; `KeyListMachine` is used
+   by access, dictionary, and pattern machines. Moving their present rooted
+   fields directly into the access checkpoint would either duplicate the
+   conversion reducer or force W6G.1f.3e-W6G.1f.3g into this checkpoint. Do
+   neither implicitly.
+
+   Partition the transition:
+
+   - **W6G.1f.3d.0 — shared-converter ownership decision and census.** Record
+     every key/list converter constructor, durable parent, registered root,
+     child WHNF owner, and result/failure boundary. Choose explicitly between
+     the recommended regional-state bridge below and a deliberately broader
+     cross-family cutover. Reject an access-private copy of the conversion
+     algorithm: it would create two resumable semantics which later phases
+     must prove equivalent and remove.
+   - **W6G.1f.3d.1 — canonical regional key/list state.** Under the recommended
+     bridge, split the existing converters into traced regional state holding
+     ordinary `Value` edges plus `RegionalWhnfWork`, and a temporary durable
+     wrapper for parents not yet migrated. That wrapper owns one managed cell
+     and registered root, promotes any seed root only under matching access,
+     and delegates to the same regional reducer. It is transitional ownership,
+     not a second converter implementation; W6G.1f.3e/.3g/.3i must remove its
+     remaining parent uses.
+   - **W6G.1f.3d.2 — edge-owned access representation.** Convert arguments,
+     current selection, pending dictionary members, list stacks/suffixes, and
+     all nested converter/WHNF state to the regional forms. Add one exhaustive
+     visitor over the complete access state. Preserve dynamic-key-before-base
+     ordering, exact path/item indices, accumulated keys, missing-member `{}`
+     behavior, and source-owner cycle diagnostics.
+   - **W6G.1f.3d.3 — managed checkpoint and source cutover.** Add the typed
+     access arm to `ManagedLazyCheckpointEdge`, install it directly from the
+     claimed `LazySource::Access`, and replace `LazyTaskWork::Access` with a
+     state-free marker. Poll and mutate only through one collector transition.
+     Translate dependency, host, and failure boundaries after managed access
+     closes; use exact checkpoint replacement and family adoption on stale
+     routes as established by W6G.1f.3c.
+   - **W6G.1f.3d.4 — forced schedules and bridge ledger.** Force suspension at
+     scalar-key demand, dictionary-member recursion, path-list source, lazy
+     middle chunk, selected dictionary base, and final result demand. For each
+     shape, lose the active route, collect, resume from another route, and
+     count completed prefixes so no member or chunk replays. Force concurrent
+     routes across access-to-WHNF replacement. Close the access-family root
+     inventory while recording every temporary durable converter wrapper
+     still owned by W6G.1f.3e/.3g.
 6. **W6G.1f.3e — object-fixpoint checkpoint.** Convert linearization and mix
    stacks after their shared key/list/WHNF child forms have an edge-owned
    representation. Do not duplicate object traversal state in a sidecar.
