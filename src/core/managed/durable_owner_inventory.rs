@@ -451,13 +451,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
-        "managed lazy owner plus one specialized producer machine; ordinary WHNF uses only a state-free route marker after publishing its exact managed checkpoint beneath the lazy, host work retains one rooted callback result after invocation, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
+        "managed lazy owner plus one specialized producer machine; ordinary WHNF and host-call work use state-free route markers after publishing exact managed checkpoints beneath the lazy, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
         "yielded or dependency-blocked evaluator task",
         "root publication within the producing evaluator step or existing promise-root ownership",
         "lazy/promise completion, failure, cancellation, or machine retirement",
         ManagedRootSurface,
         RootSurface,
-        "GCI11R-002B / W2B.2 / W6G.1f.2a"
+        "GCI11R-002B / W2B.2 / W6G.1f.2a / W6G.1f.3a.1"
     ),
     closed_durable!(
         "src/eval/whnf.rs",
@@ -485,6 +485,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "one registered ManagedWhnfRoot or one managed lazy producer edge, projected only under bounded matching-runtime access",
         CompatibilityPayload,
         "W6G.3c and W6G.1f.1 trace the same canonical state through registered roots or lazy-owned edges and collect unreachable lazy/checkpoint cycles"
+    ),
+    exact_managed!(
+        "src/eval/lazy_checkpoint.rs",
+        "managed host-call checkpoint cell",
+        "one Invoking producer with explicit semantic captures or one published Value/EvaluationFailure outcome behind a representation mutex",
+        "one concrete typed arm beneath a managed lazy producer edge; callback invocation authority remains a transient state-free route marker",
+        CompatibilityPayload,
+        "W6G.1f.3a.1 publishes Invoking before arbitrary Rust, converts the rooted outcome back to traced managed edges, and refuses replay after unwind or route loss"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -925,10 +933,10 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3a.0 replaces the single-field WHNF edge wrapper with one concrete
 // typed checkpoint sum. The new kind declaration contributes one additional
 // `Gc` carrier while preserving the same one-edge runtime representation.
-const DECLARATION_BASELINE_COUNT: usize = 226;
+const DECLARATION_BASELINE_COUNT: usize = 227;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([131, 270, 5, 16, 6, 5, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_593_214_601_845_554_375;
+    DeclarationSignals::new([133, 269, 5, 17, 6, 6, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_177_492_236_484_791_859;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1029,6 +1037,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
             | "src/eval/whnf/managed_state.rs::ManagedWhnfAccess"
             | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointEdge"
             | "src/eval/lazy_checkpoint.rs::ManagedLazyCheckpointKind"
+            | "src/eval/lazy_checkpoint.rs::ManagedHostCallCheckpointCell"
+            | "src/eval/lazy_checkpoint.rs::ManagedHostCallCheckpointState"
+            | "src/eval/lazy_checkpoint.rs::HostCallCheckpointObservation"
     ) {
         "managed lazy checkpoint cell and edge"
     } else if matches!(

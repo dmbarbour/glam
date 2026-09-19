@@ -1790,6 +1790,14 @@ impl HostCallProducer {
     pub(crate) fn captures(&self) -> &[Value] {
         &self.captures
     }
+
+    /// Reports the producer's declared semantic captures while its opaque
+    /// callback owner remains an edge-free external lease.
+    pub(crate) fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        for capture in self.captures.iter() {
+            trace_compatibility_value_managed_edges(capture, visitor);
+        }
+    }
 }
 
 #[cfg(test)]

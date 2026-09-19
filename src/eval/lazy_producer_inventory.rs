@@ -10,7 +10,10 @@ use std::path::Path;
 const EXPECTED_VARIANTS: &[&str] = &[
     "Access",
     "Builtin",
-    "HostCall",
+    // Only the installer receives one transient invocation permit. Durable
+    // before/after state belongs to the managed checkpoint.
+    "HostCallCheckpoint",
+    "HostCallInvoke",
     "ListEffect",
     "NetConstruction",
     "NetWhnf",
@@ -48,12 +51,18 @@ fn lazy_task_work_families_are_exact() {
 
 #[test]
 fn lazy_task_work_external_boundaries_remain_visible() {
-    let source =
+    let mut source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/eval/value.rs"))
             .expect("lazy producer source should be readable");
+    source.push_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/eval/lazy_checkpoint.rs"),
+        )
+        .expect("lazy checkpoint source should be readable"),
+    );
 
     for boundary in [
-        "HostCallSourceState::Invoking",
+        "ManagedHostCallCheckpointState::Invoking",
         "ReflectionTaskReservation",
         "NetConstructionMachine",
         "ManagedPromiseRoot",

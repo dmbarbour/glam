@@ -838,6 +838,71 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         Ok(())
     }
 
+    /// Replaces one durable checkpoint with its next typed producer family.
+    ///
+    /// Source installation must win exactly once, while a checkpoint family
+    /// may deliberately hand its traced result to another family without an
+    /// intermediate source or registered root.
+    pub(crate) fn replace_checkpoint(
+        &self,
+        checkpoint: ManagedLazyCheckpointEdge,
+    ) -> Result<(), ManagedLazyCheckpointEdge> {
+        if self.cell.result.get().is_some() {
+            return Err(checkpoint);
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some()
+            || !matches!(
+                producer.as_ref(),
+                Some(ManagedLazyProducerState::Checkpoint(_))
+            )
+        {
+            return Err(checkpoint);
+        }
+        let producer = RefCell::new(producer);
+        let proposed = RefCell::new(Some(checkpoint));
+        // SAFETY: the lazy cell and both checkpoint edges belong to this exact
+        // access region. The producer mutex excludes another transition, and
+        // the visitors report the complete leaving and adding identities
+        // before the closure atomically replaces the state.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                &self.owner.0,
+                |visitor| {
+                    trace_lazy_producer_state(
+                        producer
+                            .borrow()
+                            .as_ref()
+                            .expect("unresolved lazy must retain producer state"),
+                        visitor,
+                    );
+                },
+                |visitor| {
+                    proposed
+                        .borrow()
+                        .as_ref()
+                        .expect("checkpoint replacement must retain its proposed edge")
+                        .trace(visitor);
+                },
+                || {
+                    let checkpoint = proposed
+                        .borrow_mut()
+                        .take()
+                        .expect("checkpoint replacement must consume its edge once");
+                    let prior = producer
+                        .borrow_mut()
+                        .replace(ManagedLazyProducerState::Checkpoint(checkpoint));
+                    drop(prior);
+                },
+            )
+        }
+        Ok(())
+    }
+
     pub(crate) fn cached(&self) -> Option<LazyResult> {
         self.cell.result.get().cloned()
     }

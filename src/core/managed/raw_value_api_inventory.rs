@@ -180,6 +180,7 @@ impl ApiOccurrence {
             .starts_with("src/core/managed/payload_edges")
             || self.declaration == "src/core/managed.rs::trace_compatibility_value_managed_edges"
             || self.declaration == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
+            || self.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
             || self.declaration == "src/eval/whnf.rs::trace_whnf_value"
             || self.declaration == "src/eval/whnf.rs::trace_whnf_values"
         {
@@ -1358,13 +1359,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        440,
+        442,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        1_605_397_504_196_341_789,
+        2_827_598_967_443_584_443,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1375,8 +1376,8 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 140),
-        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 141),
+        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 29),
         ((ApiKind::Function, ApiDisposition::Violation), 262),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
@@ -1429,6 +1430,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
                 == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
             || occurrence.declaration
                 == "src/core/managed.rs::trace_compatibility_value_managed_edges"
+            || occurrence.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
             || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_value"
             || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_values"
     }));

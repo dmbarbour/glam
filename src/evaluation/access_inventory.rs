@@ -631,7 +631,16 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::zero_arity_apply_operator_is_data_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#4|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::interrupted_host_call_is_never_replayed_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -850,9 +859,14 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
         // inspect their exact lazy-owned checkpoint under two bounded regions.
         ("src/eval/tests.rs", GatewayCounts::new(10, 1)),
+        // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
+        // explicit same-runtime test regions, including forced route loss.
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(7, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
-        ("src/eval/value.rs", GatewayCounts::new(1, 0)),
+        // W6G.1f.3a.1 adds two short production regions on either side of the
+        // mutator-free arbitrary host callback.
+        ("src/eval/value.rs", GatewayCounts::new(3, 0)),
         // W3B application fixtures inspect or terminalize exact managed
         // application checkpoints under four bounded test regions. Their shared
         // application/poll helpers reuse the caller's poll access and are not
@@ -1052,7 +1066,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        21
+        23
     );
 }
 

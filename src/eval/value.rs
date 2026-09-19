@@ -21,6 +21,9 @@ use crate::number::Number;
 use super::access_machine::{AccessMachine, AccessMachinePoll};
 use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
 use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
+use super::lazy_checkpoint::{
+    HostCallCheckpointObservation, ManagedLazyCheckpointEdge, ManagedLazyCheckpointKindTag,
+};
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
 use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
@@ -203,56 +206,12 @@ enum LazyTaskWork {
     Builtin(Box<BuiltinTaskMachine>),
     ObjectFixpoint(Box<ObjectFixpointMachine>),
     ListEffect(Box<ListEffectSourceMachine>),
-    HostCall(HostCallSourceMachine),
+    /// Transient one-shot authority held only by the route which installed an
+    /// `Invoking` host-call checkpoint.
+    HostCallInvoke,
+    HostCallCheckpoint,
     Reflection(ReflectionSourceMachine),
     NetConstruction(Box<NetConstructionMachine>),
-}
-
-enum HostCallSourceState {
-    Before(Arc<crate::core::HostCallProducer>),
-    Invoking,
-    After(Result<crate::runtime::RuntimeValueRoot, Arc<EvaluationFailure>>),
-    Consumed,
-}
-
-/// Durable owner for one opaque host callback invocation.
-///
-/// Moving to `Invoking` before entering the callback makes replay impossible
-/// even if the callback unwinds. The callback runs only from the outer poll,
-/// where no evaluator value-access region is active; its rooted result is
-/// consumed by a later regional poll.
-struct HostCallSourceMachine {
-    state: HostCallSourceState,
-}
-
-impl HostCallSourceMachine {
-    fn new(producer: Arc<crate::core::HostCallProducer>) -> Self {
-        Self {
-            state: HostCallSourceState::Before(producer),
-        }
-    }
-
-    fn is_before(&self) -> bool {
-        matches!(self.state, HostCallSourceState::Before(_))
-    }
-
-    fn invoke(&mut self, values: &crate::core::CoreValueFactory) {
-        let HostCallSourceState::Before(producer) =
-            std::mem::replace(&mut self.state, HostCallSourceState::Invoking)
-        else {
-            unreachable!("a host callback may be invoked only from its before-call state")
-        };
-        self.state = HostCallSourceState::After(producer.invoke(values));
-    }
-
-    fn take_result(&mut self) -> Result<crate::runtime::RuntimeValueRoot, Arc<EvaluationFailure>> {
-        let HostCallSourceState::After(result) =
-            std::mem::replace(&mut self.state, HostCallSourceState::Consumed)
-        else {
-            unreachable!("a host callback result may be consumed exactly once")
-        };
-        result
-    }
 }
 
 struct ReflectionSourceMachine {
@@ -374,6 +333,22 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
+    fn work_for_checkpoint_kind(kind: ManagedLazyCheckpointKindTag) -> LazyTaskWork {
+        match kind {
+            ManagedLazyCheckpointKindTag::Whnf => LazyTaskWork::WhnfCheckpoint,
+            ManagedLazyCheckpointKindTag::HostCall => LazyTaskWork::HostCallCheckpoint,
+        }
+    }
+
+    fn checkpoint_work(&self, context: &EvaluatorStepContext<'_>) -> Option<LazyTaskWork> {
+        context.with_value_access(|access| {
+            access
+                .lazy_root(&self.lazy)
+                .checkpoint_snapshot()
+                .map(|checkpoint| Self::work_for_checkpoint_kind(checkpoint.kind()))
+        })
+    }
+
     fn complete(
         &self,
         context: &EvaluatorStepContext<'_>,
@@ -481,6 +456,60 @@ impl LazyTaskMachine {
             }
         }
     }
+
+    fn poll_host_call_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Interrupted,
+            Whnf,
+            Terminal,
+        }
+
+        let transition = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            let checkpoint = lazy
+                .checkpoint_snapshot()
+                .expect("host-call route must retain its managed checkpoint");
+            match checkpoint.observe_host_call_in(access.values()) {
+                HostCallCheckpointObservation::Invoking => Transition::Interrupted,
+                HostCallCheckpointObservation::After(Ok(value)) => {
+                    let work = super::whnf::RegionalWhnfWork::from_focus(&access, value);
+                    let next = ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
+                        .expect("canonical WHNF state must fit its reviewed managed slot");
+                    match lazy.replace_checkpoint(next) {
+                        Ok(()) => Transition::Whnf,
+                        Err(_) => {
+                            assert!(
+                                lazy.cached().is_some(),
+                                "a rejected host-to-WHNF transition must find a terminal cache"
+                            );
+                            Transition::Terminal
+                        }
+                    }
+                }
+                HostCallCheckpointObservation::After(Err(failure)) => {
+                    let _ = self.lazy.cache(access.values(), Err(failure));
+                    Transition::Terminal
+                }
+            }
+        });
+
+        match transition {
+            Transition::Interrupted => self.fail(
+                context,
+                EvaluationHalt::new(
+                    "host callback was interrupted after invocation began; refusing to replay it",
+                ),
+            ),
+            Transition::Whnf => {
+                self.work = LazyTaskWork::WhnfCheckpoint;
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Terminal => self.cached_poll(context),
+        }
+    }
 }
 
 impl EvaluationTaskMachine for LazyTaskMachine {
@@ -490,12 +519,52 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
-        if let LazyTaskWork::HostCall(machine) = &mut self.work
-            && machine.is_before()
-        {
-            machine.invoke(durable_context.values());
-            // Keep the callback result rooted across a deliberate scheduling
-            // boundary. The next poll re-enters managed access to consume it.
+        if matches!(self.work, LazyTaskWork::HostCallInvoke) {
+            // Retire the sole invocation permit before entering arbitrary
+            // Rust. If the callback unwinds, this route and every later route
+            // observe only the non-replayable `Invoking` checkpoint.
+            self.work = LazyTaskWork::HostCallCheckpoint;
+            let producer = durable_context
+                .values()
+                .with_runtime_value_access(|access| {
+                    let lazy = self
+                        .lazy
+                        .access(&access)
+                        .expect("host-call route and lazy must share one runtime");
+                    lazy.checkpoint_snapshot()
+                        .and_then(|checkpoint| checkpoint.host_call_producer_in(&access))
+                });
+            let Some(producer) = producer else {
+                // Another terminal publication won before invocation. The
+                // ordinary evaluator path below observes that cache.
+                return EvaluationMachinePoll::Yielded;
+            };
+            let outcome = match producer.invoke(durable_context.values()) {
+                Ok(value) if value.runtime_id() != durable_context.values().runtime_id() => {
+                    Err(Arc::new(EvaluationFailure::message(format!(
+                        "host call returned a value from evaluation runtime {}, expected evaluation runtime {}",
+                        value.runtime_id().get(),
+                        durable_context.values().runtime_id().get()
+                    ))))
+                }
+                Ok(value) => Ok(value),
+                Err(failure) => Err(failure),
+            };
+            durable_context
+                .values()
+                .with_runtime_value_access(|access| {
+                    let lazy = self
+                        .lazy
+                        .access(&access)
+                        .expect("host-call route and lazy must share one runtime");
+                    let checkpoint = lazy
+                        .checkpoint_snapshot()
+                        .expect("invoked host call must retain its checkpoint");
+                    let outcome = outcome.map(|value| value.clone_core_with(&access));
+                    checkpoint.complete_host_call_in(&access, outcome);
+                });
+            // The rooted callback result has become a traced managed edge.
+            // A later poll performs the host-to-WHNF family handoff.
             return EvaluationMachinePoll::Yielded;
         }
         poll_context.evaluate(&durable_context, |context| {
@@ -513,61 +582,67 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             if matches!(self.work, LazyTaskWork::Produce) {
                 let source = context
                     .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
-                let Some(source) = source else {
-                    let has_checkpoint = context.with_value_access(|access| {
-                        access
-                            .lazy_root(&self.lazy)
-                            .checkpoint_snapshot()
-                            .is_some()
-                    });
-                    if has_checkpoint {
-                        self.work = LazyTaskWork::WhnfCheckpoint;
-                    } else {
+                if source.is_none() {
+                    let Some(work) = self.checkpoint_work(context) else {
                         return self.cached_poll(context);
-                    }
-                    return self.poll_whnf_checkpoint(
-                        context,
-                        poll_context,
-                        &durable_context,
-                        step_budget,
-                    );
-                };
-                self.work = match source {
-                    LazySource::NetConstruction(effect) => {
-                        let effect = context.with_value_access(|access| {
-                            access.values().root_runtime_value(
-                                access.values().duplicate_value(effect.as_ref()),
-                            )
-                        });
-                        let machine = match NetConstructionMachine::new(
-                            durable_context.clone(),
-                            effect,
-                        ) {
-                            Ok(machine) => machine,
-                            Err(error) => return self.fail(context, error),
-                        };
-                        LazyTaskWork::NetConstruction(Box::new(machine))
-                    }
-                    LazySource::HostCall(producer) => {
-                        LazyTaskWork::HostCall(HostCallSourceMachine::new(producer))
-                    }
-                    LazySource::ReflectionTask(computation) => {
-                        LazyTaskWork::Reflection(ReflectionSourceMachine::new(computation))
-                    }
-                    LazySource::Application(application) => {
-                        let computation = context.with_value_access(|access| {
-                            super::whnf::WhnfComputation::from_application_checkpoint_in(
-                                &access,
-                                application.function().clone(),
-                                application.arguments(),
-                                None,
-                            )
-                        });
-                        LazyTaskWork::Whnf(computation)
-                    }
-                    LazySource::ComputedFixpoint(fixpoint) => match fixpoint.as_ref() {
-                        FixpointComputation::Function(function) => {
+                    };
+                    self.work = work;
+                }
+                if let Some(source) = source {
+                    self.work = match source {
+                        LazySource::NetConstruction(effect) => {
+                            let effect = context.with_value_access(|access| {
+                                access.values().root_runtime_value(
+                                    access.values().duplicate_value(effect.as_ref()),
+                                )
+                            });
+                            let machine = match NetConstructionMachine::new(
+                                durable_context.clone(),
+                                effect,
+                            ) {
+                                Ok(machine) => machine,
+                                Err(error) => return self.fail(context, error),
+                            };
+                            LazyTaskWork::NetConstruction(Box::new(machine))
+                        }
+                        LazySource::HostCall(producer) => {
+                            let installed = context.with_value_access(|access| {
+                                let checkpoint = ManagedLazyCheckpointEdge::allocate_host_call_in(
+                                    access.values(),
+                                    producer,
+                                )
+                                .expect("managed host-call state must fit its reviewed slot");
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
+                            });
+                            if installed {
+                                LazyTaskWork::HostCallInvoke
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
+                        }
+                        LazySource::ReflectionTask(computation) => {
+                            LazyTaskWork::Reflection(ReflectionSourceMachine::new(computation))
+                        }
+                        LazySource::Application(application) => {
                             let computation = context.with_value_access(|access| {
+                                super::whnf::WhnfComputation::from_application_checkpoint_in(
+                                    &access,
+                                    application.function().clone(),
+                                    application.arguments(),
+                                    None,
+                                )
+                            });
+                            LazyTaskWork::Whnf(computation)
+                        }
+                        LazySource::ComputedFixpoint(fixpoint) => {
+                            match fixpoint.as_ref() {
+                                FixpointComputation::Function(function) => {
+                                    let computation = context.with_value_access(|access| {
                                 let marker =
                                     Value::Lazy(LazyValue::from_root(&self.lazy, access.values()));
                                 super::whnf::WhnfComputation::from_application_checkpoint_in(
@@ -577,141 +652,142 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     None,
                                 )
                             });
-                            LazyTaskWork::Whnf(computation)
+                                    LazyTaskWork::Whnf(computation)
+                                }
+                                FixpointComputation::ObjectInstance(spec) => {
+                                    let (spec, marker) = context.with_value_access(|access| {
+                                        let spec = access.values().root_runtime_value(
+                                            access.values().duplicate_value(spec),
+                                        );
+                                        let marker =
+                                            access.values().root_runtime_value(Value::Lazy(
+                                                LazyValue::from_root(&self.lazy, access.values()),
+                                            ));
+                                        (spec, marker)
+                                    });
+                                    LazyTaskWork::ObjectFixpoint(Box::new(
+                                        ObjectFixpointMachine::new(self.lazy.id(), spec, marker),
+                                    ))
+                                }
+                            }
                         }
-                        FixpointComputation::ObjectInstance(spec) => {
-                            let (spec, marker) = context.with_value_access(|access| {
-                                let spec = access
-                                    .values()
-                                    .root_runtime_value(access.values().duplicate_value(spec));
-                                let marker = access.values().root_runtime_value(Value::Lazy(
-                                    LazyValue::from_root(&self.lazy, access.values()),
-                                ));
-                                (spec, marker)
+                        LazySource::FunctionCall {
+                            function,
+                            arguments,
+                        } => LazyTaskWork::NetWhnf {
+                            machine: Box::new(context.with_value_access(|access| {
+                                NetWhnfMachine::from_function_call(&access, &function, &arguments)
+                            })),
+                            failure_context: None,
+                        },
+                        LazySource::NetComputation(net) => {
+                            let runtime = context.with_value_access(|access| {
+                                net.runtime().duplicate_in(access.values())
                             });
-                            LazyTaskWork::ObjectFixpoint(Box::new(ObjectFixpointMachine::new(
+                            let exposed = context.with_value_access(|access| {
+                                access.net(&runtime).with(|runtime| runtime.exposed())
+                            });
+                            LazyTaskWork::NetWhnf {
+                                machine: Box::new(NetWhnfMachine::new(
+                                    context,
+                                    runtime,
+                                    exposed,
+                                    "lazy net computation",
+                                )),
+                                failure_context: Some("net_computation"),
+                            }
+                        }
+                        LazySource::ListEffectComputation(recipe) => {
+                            LazyTaskWork::ListEffect(Box::new(ListEffectSourceMachine::new(
+                                context,
                                 self.lazy.id(),
-                                spec,
-                                marker,
+                                &recipe,
                             )))
                         }
-                    },
-                    LazySource::FunctionCall {
-                        function,
-                        arguments,
-                    } => LazyTaskWork::NetWhnf {
-                        machine: Box::new(context.with_value_access(|access| {
-                            NetWhnfMachine::from_function_call(&access, &function, &arguments)
-                        })),
-                        failure_context: None,
-                    },
-                    LazySource::NetComputation(net) => {
-                        let runtime = context.with_value_access(|access| {
-                            net.runtime().duplicate_in(access.values())
-                        });
-                        let exposed = context.with_value_access(|access| {
-                            access.net(&runtime).with(|runtime| runtime.exposed())
-                        });
-                        LazyTaskWork::NetWhnf {
-                            machine: Box::new(NetWhnfMachine::new(
-                                context,
-                                runtime,
-                                exposed,
-                                "lazy net computation",
-                            )),
-                            failure_context: Some("net_computation"),
-                        }
-                    }
-                    LazySource::ListEffectComputation(recipe) => {
-                        LazyTaskWork::ListEffect(Box::new(ListEffectSourceMachine::new(
-                            context,
-                            self.lazy.id(),
-                            &recipe,
-                        )))
-                    }
-                    LazySource::Access { path, arguments }
-                        if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
-                    {
-                        let keys = path
-                            .iter()
-                            .map(|part| match part {
-                                CoreDataKey::Key(key) => key.clone(),
-                                CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
-                            })
-                            .collect::<Vec<_>>();
-                        let base = arguments
-                            .first()
-                            .cloned()
-                            .expect("value access must retain its base value");
-                        let computation = context.with_value_access(|access| {
-                            super::whnf::WhnfComputation::from_static_access_checkpoint_in(
-                                &access,
-                                base,
-                                Arc::from(keys),
-                                Some(self.lazy.id()),
-                            )
-                        });
-                        LazyTaskWork::Whnf(computation)
-                    }
-                    LazySource::Access { path, arguments } => {
-                        let arguments = context.with_value_access(|access| {
-                            arguments
+                        LazySource::Access { path, arguments }
+                            if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
+                        {
+                            let keys = path
                                 .iter()
-                                .map(|value| {
-                                    access
-                                        .values()
-                                        .root_runtime_value(access.values().duplicate_value(value))
+                                .map(|part| match part {
+                                    CoreDataKey::Key(key) => key.clone(),
+                                    CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
                                 })
-                                .collect()
-                        });
-                        LazyTaskWork::Access(Box::new(AccessMachine::new(
-                            self.lazy.id(),
-                            path,
-                            arguments,
-                        )))
-                    }
-                    LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
-                        let arguments = context.with_value_access(|access| {
-                            call.arguments
-                                .iter()
-                                .map(|value| {
-                                    access
-                                        .values()
-                                        .root_runtime_value(access.values().duplicate_value(value))
-                                })
-                                .collect()
-                        });
-                        LazyTaskWork::Builtin(Box::new(BuiltinTaskMachine::new(
-                            call.builtin,
-                            arguments,
-                        )))
-                    }
-                    LazySource::Builtin(call) => {
-                        let result = context.with_value_access(|access| {
-                            let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
-                            let argument = arguments
-                                .pop()
-                                .expect("saturated builtin source must contain an argument");
-                            apply_builtin_in(&access, call.builtin, arguments, argument).map(
-                                |value| access.values().root_runtime_value(value),
-                            )
-                        });
-                        match result {
-                            Ok(value) => LazyTaskWork::Whnf(
-                                super::whnf::WhnfComputation::from_root(value),
-                            ),
-                            Err(error) => return self.fail(context, error),
+                                .collect::<Vec<_>>();
+                            let base = arguments
+                                .first()
+                                .cloned()
+                                .expect("value access must retain its base value");
+                            let computation = context.with_value_access(|access| {
+                                super::whnf::WhnfComputation::from_static_access_checkpoint_in(
+                                    &access,
+                                    base,
+                                    Arc::from(keys),
+                                    Some(self.lazy.id()),
+                                )
+                            });
+                            LazyTaskWork::Whnf(computation)
                         }
-                    }
-                    _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
-                        self.lazy.clone(),
-                        durable_context.values().runtime_id(),
-                    )),
-                };
+                        LazySource::Access { path, arguments } => {
+                            let arguments = context.with_value_access(|access| {
+                                arguments
+                                    .iter()
+                                    .map(|value| {
+                                        access.values().root_runtime_value(
+                                            access.values().duplicate_value(value),
+                                        )
+                                    })
+                                    .collect()
+                            });
+                            LazyTaskWork::Access(Box::new(AccessMachine::new(
+                                self.lazy.id(),
+                                path,
+                                arguments,
+                            )))
+                        }
+                        LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
+                            let arguments = context.with_value_access(|access| {
+                                call.arguments
+                                    .iter()
+                                    .map(|value| {
+                                        access.values().root_runtime_value(
+                                            access.values().duplicate_value(value),
+                                        )
+                                    })
+                                    .collect()
+                            });
+                            LazyTaskWork::Builtin(Box::new(BuiltinTaskMachine::new(
+                                call.builtin,
+                                arguments,
+                            )))
+                        }
+                        LazySource::Builtin(call) => {
+                            let result = context.with_value_access(|access| {
+                                let mut arguments =
+                                    call.arguments.iter().cloned().collect::<Vec<_>>();
+                                let argument = arguments
+                                    .pop()
+                                    .expect("saturated builtin source must contain an argument");
+                                apply_builtin_in(&access, call.builtin, arguments, argument)
+                                    .map(|value| access.values().root_runtime_value(value))
+                            });
+                            match result {
+                                Ok(value) => LazyTaskWork::Whnf(
+                                    super::whnf::WhnfComputation::from_root(value),
+                                ),
+                                Err(error) => return self.fail(context, error),
+                            }
+                        }
+                        _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
+                            self.lazy.clone(),
+                            durable_context.values().runtime_id(),
+                        )),
+                    };
+                }
                 if matches!(
                     self.work,
                     LazyTaskWork::NetConstruction(_)
-                        | LazyTaskWork::HostCall(_)
+                        | LazyTaskWork::HostCallInvoke
                         | LazyTaskWork::Reflection(_)
                 ) {
                     return EvaluationMachinePoll::Yielded;
@@ -721,21 +797,8 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
             }
 
-            if let LazyTaskWork::HostCall(machine) = &mut self.work {
-                return match machine.take_result() {
-                    Ok(value) if value.runtime_id() != durable_context.values().runtime_id() => {
-                        self.fail(
-                            context,
-                            EvaluationHalt::new(format!(
-                                "host call returned a value from evaluation runtime {}, expected evaluation runtime {}",
-                                value.runtime_id().get(),
-                                durable_context.values().runtime_id().get()
-                            )),
-                        )
-                    }
-                    Ok(value) => self.follow_value(value),
-                    Err(failure) => self.fail(context, EvaluationHalt::failure(failure)),
-                };
+            if matches!(self.work, LazyTaskWork::HostCallCheckpoint) {
+                return self.poll_host_call_checkpoint(context);
             }
 
             if let LazyTaskWork::Reflection(machine) = &mut self.work {
@@ -756,12 +819,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-                return match machine.poll(
-                    poll_context,
-                    context,
-                    &durable_context,
-                    step_budget,
-                ) {
+                return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
                     NetConstructionPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -783,9 +841,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             } = &mut self.work
             {
                 return match machine.poll(context, step_budget) {
-                    Ok(NetWhnfPoll::Ready(value)) => {
-                        self.follow_value(context.root_value(value))
-                    }
+                    Ok(NetWhnfPoll::Ready(value)) => self.follow_value(context.root_value(value)),
                     Ok(NetWhnfPoll::Yielded) => EvaluationMachinePoll::Yielded,
                     Err(error) => {
                         let error = if let Some(operation) = failure_context {
@@ -904,12 +960,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             let LazyTaskWork::WhnfCheckpoint = self.work else {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };
-            self.poll_whnf_checkpoint(
-                context,
-                poll_context,
-                &durable_context,
-                step_budget,
-            )
+            self.poll_whnf_checkpoint(context, poll_context, &durable_context, step_budget)
         })
     }
 }
@@ -1375,9 +1426,7 @@ mod ownership_tests {
             LazyTaskWork::ListEffect(machine) => {
                 let _: &ListEffectSourceMachine = machine;
             }
-            LazyTaskWork::HostCall(producer) => {
-                let _: &HostCallSourceMachine = producer;
-            }
+            LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
             LazyTaskWork::Reflection(machine) => {
                 let _: &ReflectionSourceMachine = machine;
             }

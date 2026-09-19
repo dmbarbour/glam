@@ -42,7 +42,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
         EvaluationMachinePoll::Yielded
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(machine.work, LazyTaskWork::HostCall(_)));
+    assert!(matches!(machine.work, LazyTaskWork::HostCallInvoke));
     collect_between_handoffs(&context);
 
     assert!(matches!(
@@ -50,10 +50,19 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
         EvaluationMachinePoll::Yielded
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let LazyTaskWork::HostCall(host) = &machine.work else {
-        panic!("the callback result must remain in its typed owner")
-    };
-    assert!(matches!(host.state, HostCallSourceState::After(Ok(_))));
+    assert!(matches!(machine.work, LazyTaskWork::HostCallCheckpoint));
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = machine
+            .lazy
+            .access(&access)
+            .expect("host fixture must share its value domain")
+            .checkpoint_snapshot()
+            .expect("the callback result must remain in its managed checkpoint");
+        assert!(matches!(
+            checkpoint.observe_host_call_in(&access),
+            HostCallCheckpointObservation::After(Ok(_))
+        ));
+    });
     collect_between_handoffs(&context);
 
     assert!(matches!(
@@ -75,6 +84,91 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
         panic!("a repeated poll must use the lazy cache")
     };
     assert_eq!(value.clone_core_for_test(), number(42));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn interrupted_host_call_is_never_replayed_after_route_loss() {
+    let context = EvalContext::standalone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let lazy = LazyValue::host_call(context.values(), "W6G.1 interrupted host call", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        panic!("injected host callback unwind")
+    });
+    let retained = lazy.root(context.values());
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert!(matches!(machine.work, LazyTaskWork::HostCallInvoke));
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1));
+    }));
+    assert!(unwind.is_err(), "the injected callback must unwind");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(machine.work, LazyTaskWork::HostCallCheckpoint));
+
+    drop(machine);
+    collect_between_handoffs(&context);
+    let retained = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    let mut resumed = lazy_machine(&context, retained);
+    let EvaluationMachinePoll::Failed(failure) =
+        resumed.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    else {
+        panic!("a later route must reject the interrupted host call")
+    };
+    assert!(failure.to_string().contains("refusing to replay"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
+    let context = EvalContext::standalone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let lazy = LazyValue::host_call(context.values(), "W6G.1 retained host outcome", {
+        let values = context.values().clone();
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::runtime::RuntimeValueRoot::new(&values, number(45)))
+        }
+    });
+    let retained = lazy.root(context.values());
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(machine);
+    collect_between_handoffs(&context);
+
+    let retained = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    let mut resumed = lazy_machine(&context, retained);
+    let value = loop {
+        match resumed.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
+            EvaluationMachinePoll::Complete(value) => break value,
+            EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
+            _ => panic!("unexpected retained host-call poll"),
+        }
+    };
+    assert_eq!(value.clone_core_for_test(), number(45));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -123,29 +217,46 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let result_forces = Arc::new(AtomicUsize::new(0));
     let observed_forces = Arc::clone(&result_forces);
-    let result = Value::semantic_thunk(context.values(), "W4 lazy host result", move |_| {
-        observed_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(number(44))
+    let result_root = context.values().with_runtime_value_access(|access| {
+        let result = Value::Lazy(LazyValue::semantic_thunk_in(
+            &access,
+            "W4 lazy host result",
+            move |_| {
+                observed_forces.fetch_add(1, Ordering::SeqCst);
+                Ok(number(44))
+            },
+        ));
+        access.root_runtime_value(result)
     });
+    let result = context
+        .values()
+        .with_runtime_value_access(|access| result_root.clone_core_with(&access));
     assert_eq!(eval_value(&context, &result).unwrap(), number(44));
     let observed_calls = Arc::clone(&calls);
-    let lazy = LazyValue::external_host_call(
-        context.values(),
-        "W4 lazy host callback",
-        crate::core::HostCallRecord::external_with_semantic_values(
-            "W4 host fixture",
-            "eval/value/tests/w4.rs",
-            "one explicit lazy result",
-        ),
-        [result],
-        move |bundle| {
-            observed_calls.fetch_add(1, Ordering::SeqCst);
-            let mut roots = bundle.into_roots().into_vec();
-            Ok(roots
-                .pop()
-                .expect("the explicit capture bundle must contain the lazy result"))
-        },
-    );
+    let lazy_root = context.values().with_runtime_value_access(|access| {
+        let result = result_root.clone_core_with(&access);
+        let lazy = LazyValue::external_host_call_in(
+            &access,
+            "W4 lazy host callback",
+            crate::core::HostCallRecord::external_with_semantic_values(
+                "W4 host fixture",
+                "eval/value/tests/w4.rs",
+                "one explicit lazy result",
+            ),
+            [result],
+            move |bundle| {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                let mut roots = bundle.into_roots().into_vec();
+                Ok(roots
+                    .pop()
+                    .expect("the explicit capture bundle must contain the lazy result"))
+            },
+        );
+        lazy.root_in(&access)
+    });
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&lazy_root, &access));
     let mut machine = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
     let value = loop {

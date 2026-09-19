@@ -5263,6 +5263,17 @@ verification: lazy-owned state alone does not make the coordinator route
 session-neutral, and the complete suite is not a green gate until the forced
 subscriber/close ordering and this configured CLI path both pass.
 
+The full parallel verification after W6G.1f.3a.1 produced a second concrete
+schedule through
+`reflection::machine::tests::coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return`:
+the effect fixture's compilation remained blocked on its deferred wait instead
+of reaching the descendant failure. Focused and forced host-checkpoint tests
+pass, and this reflection fixture does not traverse a host-call checkpoint;
+classify the result as another W6G.1f.2b route/session-affinity reproduction,
+not as host-checkpoint evidence. The final cutover must force this ordering or
+an equivalent latch-controlled schedule before either historical full-suite
+failure may be considered repaired.
+
 For W6G.1f.2a, reuse the already-managed cell owned by `WhnfComputation`
 rather than walking or reallocating its state. Under one matching access,
 project its typed edge while the registered root remains live, install that
@@ -5340,6 +5351,31 @@ payload:
    source until invocation completes, and publish the rooted callback outcome
    back as traced checkpoint edges before yielding. A panic must leave a
    non-replayable checkpoint, never the original callable source state.
+
+   **Complete (2026-09-19).** The concrete typed checkpoint sum now includes
+   `Gc<ManagedHostCallCheckpointCell>`. Its mutex-protected state is either
+   `Invoking(HostCallProducer)`—which continues to trace every declared
+   semantic capture—or `After(Result<Value, EvaluationFailure>)`. The route
+   which wins the source-to-checkpoint transition alone receives a transient
+   state-free `HostCallInvoke` permit. It retires that permit before entering
+   arbitrary Rust, so unwind, route loss, or later demand can observe
+   `Invoking` but can never replay the callback.
+
+   Callback execution remains outside managed access. The rooted callback
+   result is validated against the runtime, projected back into the managed
+   checkpoint under one short access, and then handed directly to a newly
+   allocated WHNF checkpoint through an exact checkpoint-to-checkpoint edge
+   transition. Failure publication uses the existing cache-first lazy
+   terminal transition. No callback result root or state-bearing host machine
+   remains in coordinator work.
+
+   Forced fixtures count callback invocation across successful route loss,
+   collection, and later resumption, and catch an injected callback unwind
+   before dropping the original route and demanding the lazy again. Both
+   schedules invoke exactly once. The explicit semantic-capture fixture now
+   roots its intermediate lazy before any later mutator entry; this repairs an
+   older raw-fixture lifetime gap rather than treating repetition as race
+   evidence. Focused host-call tests also pass with aggressive collection.
 3. **W6G.1f.3b — reflection checkpoint.** Preserve one stable reservation and
    activation disposition across route loss. The managed state retains only
    traced effect/target edges and edge-free task observation; any temporary
