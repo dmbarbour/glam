@@ -4991,26 +4991,27 @@ deferred causal traversal:
   background selectors reject a queued foreground record while the exact
   client claim remains live. The temporary same-session admission guard and
   the combined client registry remain transitional.
-- **W6G.1e.2 — causal background traversal — Complete (2026-09-18).** Workers
-  now begin with a ready spark/reflection root or scan a blocked background
-  root's exact dependency chain for the first queued reflection/deferred
-  descendant. The explicit runtime drain uses the same traversal from
-  reflection roots only. Promoted deferred producers with no such root remain
-  invisible to both selectors while exact foreground claims remain valid.
-  Runtime pump activity uses the same causal predicate, so an unrooted queued
-  producer cannot make the background drain spin. Forced fixtures cover an
-  unrooted promoted producer, a spark-rooted deferred descendant, and
-  reflection-rooted patient/owner-close schedules. The generic ready-task
-  selector survives only as a test compatibility aid pending W6G.1e.3.
+- **W6G.1e.2 — causal background traversal.** Reordered after implementation
+  probes established W6G.1c/W6G.1f as hard prerequisites. Both causal-only and
+  causal-first-with-global-fallback selectors changed the first-discoverer
+  race enough to strand a canonical lazy in the four-worker executable while
+  producers still inherit their first session. Keep the old globally ready
+  deferred selection for now. After the lazy owns its checkpoint and routes
+  are session-neutral, install causal traversal and retire the global queue in
+  one mechanism checkpoint. Current-behavior fixtures cover unrooted promoted
+  work and a deferred dependency discovered by a spark; the foreground and
+  reflection-rooted fixtures remain ready for the later policy transition.
 - **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
-  serialization policy cannot be removed before the registry topology which
-  replaces it exists:
-  - **W6G.1e.3a — drain authority — Complete (2026-09-18).** Session drains
-    now begin only at reflection roots owned by that session and may follow
-    exact deferred-producer dependencies. They do not claim another session's
-    independently owned reflection root. A forced fixture keeps queued client
-    and spark roots present while proving the session drain selects only
-    reflection work.
+  drain and serialization policies cannot be narrowed before the registry
+  topology which replaces them exists:
+  - **W6G.1e.3a — drain authority.** Retain the current session selector until
+    W6G.1b-W6G.1f distinguish roots, shared producers, and causal child work.
+    An attempted early restriction to session-owned reflection roots exposed a
+    schedule where configured `conf.log` depends on reflection work hosted by
+    another session. Do not choose between “claim that cross-session root” and
+    “represent a different exact dependency” through queue filtering. After
+    the topology migration, add forced configured-logger and client/spark
+    coexistence schedules before narrowing the drain.
   - **W6G.1e.3b — implicit-child audit and fallback retirement.** Exact demand
     pumping still has a same-session reflection fallback. The attempted direct
     removal exposed reflection/effect flows which launch causally related

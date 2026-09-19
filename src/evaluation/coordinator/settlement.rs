@@ -13,9 +13,8 @@ use super::{
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
     EvaluationWorkCoordinator, EvaluationWorkId, ExitIntent, ProducerSettlementObligation,
     TaskOwnedPromiseObligation, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake,
-    WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState,
-    background_descendant_candidate, task_block, task_for_record, task_observation_epoch,
-    terminal_task_status, work_dependency,
+    WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState, task_block,
+    task_for_record, task_observation_epoch, terminal_task_status, work_dependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,10 +110,8 @@ impl EvaluationWorkCoordinator {
             .expect("evaluation work coordinator was poisoned");
         RuntimePumpSnapshot {
             background_ready: state.work.values().any(|record| {
-                matches!(record.kind, WorkKind::Reflection(_))
-                    && (matches!(record.state, WorkState::Queued)
-                        || (matches!(record.state, WorkState::Blocked)
-                            && background_descendant_candidate(&state, record.id).is_some()))
+                matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
+                    && matches!(record.state, WorkState::Queued)
             }),
             progress_owned: state.work.values().any(|record| {
                 matches!(record.state, WorkState::Running | WorkState::Terminalizing)

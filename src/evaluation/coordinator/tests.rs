@@ -1970,7 +1970,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
 }
 
 #[test]
-fn background_selectors_reject_an_unrooted_promoted_deferred_producer() {
+fn transitional_background_fallback_claims_an_unrooted_promoted_deferred_producer() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2000,27 +2000,19 @@ fn background_selectors_reject_an_unrooted_promoted_deferred_producer() {
         .expect("deferred work should retain its wait index");
     assert!(coordinator.promote_deferred_wait(&wait));
 
-    assert!(matches!(
-        coordinator.select_worker(),
-        CoordinatorSelection::None
-    ));
-    assert!(matches!(
-        coordinator.select_runtime_pump(),
-        CoordinatorSelection::None
-    ));
-    let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_task(task)
-        .expect("an exact foreground dependency retains claim authority")
+    let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
+        coordinator.select_worker()
     else {
-        panic!("the exact claim should preserve deferred work")
+        panic!("the transitional global fallback must keep the producer runnable")
     };
+    assert_eq!(claimed.task, task);
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
     assert!(release.terminal);
     settle_test_deferred(&coordinator, work);
 }
 
 #[test]
-fn worker_follows_a_spark_root_to_its_exact_deferred_descendant() {
+fn global_fallback_claims_a_deferred_dependency_after_a_spark_blocks() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let producer = TestDemand::new(&coordinator);
@@ -2058,14 +2050,10 @@ fn worker_follows_a_spark_root_to_its_exact_deferred_descendant() {
         SparkWorkPoll::Blocked(WorkDependency::Wait(wait.clone())),
     );
 
-    assert!(matches!(
-        coordinator.select_runtime_pump(),
-        CoordinatorSelection::None
-    ));
     let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
         coordinator.select_worker()
     else {
-        panic!("worker must reach the exact deferred descendant from its spark root")
+        panic!("the global fallback should claim the promoted deferred producer")
     };
     assert_eq!(claimed.task, task);
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
@@ -2652,49 +2640,6 @@ fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
         client.poll(),
         Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
     ));
-}
-
-#[test]
-fn session_drain_selects_only_its_reflection_roots() {
-    let (coordinator, _executor) =
-        super::super::test_execution_resources(0).expect("test execution resources should build");
-    let session = TestDemand::new(&coordinator);
-    let context = session.context();
-    let expected = context.values().unit();
-    let client = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
-        .expect("foreground demand should be admitted");
-    coordinator.executor_started(1);
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
-    let (_, reflection_work) = reserve_ready_test_reflection(&coordinator, &session);
-
-    let ClaimedTaskWork::Reflection(claimed) = coordinator
-        .claim_ready_reflection_for_session(session.demand.id)
-        .expect("the session drain should claim its reflection root")
-    else {
-        panic!("session draining must not claim client or spark roots")
-    };
-    assert_eq!(claimed.id(), reflection_work);
-    let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
-    assert!(release.terminal);
-    settle_test_reflection(&coordinator, reflection_work);
-    assert!(
-        coordinator
-            .claim_ready_reflection_for_session(session.demand.id)
-            .is_none(),
-        "client and spark roots must remain outside session reflection draining"
-    );
-
-    let claimed = coordinator
-        .claim_client_demand(client.work())
-        .expect("the exact foreground driver must retain claim authority");
-    coordinator.poll_claimed_client_demand(claimed);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
-    finish_queued_test_spark(&coordinator);
-    coordinator.executor_stopped();
 }
 
 #[test]

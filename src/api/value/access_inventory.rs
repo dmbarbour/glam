@@ -964,7 +964,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/tests.rs::permanent_exit_wait_retains_only_its_summary_and_obligations#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_deferred_machine_does_not_delay_same_session_client_admission#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::session_drain_selects_only_its_reflection_roots#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::terminal_publication_releases_same_session_client_admission_before_retirement#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::worker_and_runtime_pump_selectors_reject_foreground_client_demand#1|surface=compatibility-new|scope=test",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
