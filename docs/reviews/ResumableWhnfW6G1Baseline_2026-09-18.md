@@ -56,16 +56,18 @@ mean replay is operationally acceptable.
 | `ObjectFixpoint` | rooted spec/self/base/definitions and nested conversion/WHNF stacks | promise/lazy dependencies only | pure, but restart loses traversal and mix progress | traced object/checkpoint state |
 | `ListEffect` | rooted continuations/front machines/WHNF work; fix state owns a managed promise root | promise creation/assignment in fix handling | replay can manufacture a distinct promise and repeat effect traversal | managed promise edge and traced list-effect state |
 | `HostCall` | before/invoking/after/consumed state and callback result root | opaque Rust callback, exactly once | no after `Before -> Invoking` | edge-free callback token plus managed captures/result/failure edges |
-| `Reflection` | computation plus optional task reservation | task reservation and activation, exactly once | no after reservation | managed effect/target edges plus edge-free stable task token |
+| `Reflection` | computation plus optional task reservation | task reservation, activation, and autonomous terminal execution, exactly once | no after reservation | task-owned managed completion promise followed through the ordinary WHNF checkpoint path; no reflection checkpoint |
 | `NetConstruction` | isolated effect search, branch journals, exposed-value WHNF work | effect-search task lifecycle and journal progression | no: replay repeats search/task observations | split traceable search state from edge-free host/orchestration state |
 
 The last four rows prevent a narrow `Whnf`-only ownership change from being a
-sound last-subscriber policy. In particular, `RuntimeValueRoot`,
-`ManagedLazyRoot`, `ManagedPromiseRoot`, and `ManagedWhnfRoot` cannot be hidden
-inside a managed lazy checkpoint: their registered roots would create an
-untraced backedge and retain cycles. Each producer family must expose its
-semantic `Value`/`Gc` edges directly to tracing while keeping only edge-free
-orchestration tokens outside managed memory.
+sound last-subscriber policy, but they do not all require checkpoints. In
+particular, `RuntimeValueRoot`, `ManagedLazyRoot`, `ManagedPromiseRoot`, and
+`ManagedWhnfRoot` cannot be hidden inside a managed lazy checkpoint: their
+registered roots would create an untraced backedge and retain cycles.
+Demand-driven families must expose their semantic `Value`/`Gc` edges directly
+to tracing. A started reflection task instead remains an autonomous
+background root and fulfills a managed promise; its temporary registered
+roots are task obligations outside the value graph and retire terminally.
 
 ## Existing deterministic coverage
 
@@ -99,14 +101,26 @@ current mismatch without treating repeated parallel runs as evidence.
    current coordinator-owned producer machine until the managed checkpoint is
    ready.
 3. Introduce the lazy source/checkpoint/result protocol and migrate producer
-   families as one exhaustively inventoried boundary. A discriminated
-   transitional state is acceptable; two simultaneous authoritative producer
-   states are not.
+   families as one exhaustively inventoried boundary. Demand-driven work uses
+   checkpoints; autonomous reflection work uses a task-owned managed
+   completion promise. A discriminated transitional state is acceptable; two
+   simultaneous authoritative producer states are not.
 4. Change deferred selection from a global ready queue to exact traversal from
    the selected client, spark, or reflection root.
 5. Retire the temporary session-wide machine scan only after every selector
    expresses its role directly.
 
 The producer-family migration is substantially larger than a `Whnf` cell
-change. It should be partitioned by state family, with a compile-exhaustive
+change. It should be partitioned by ownership family, with a compile-exhaustive
 inventory and a forced no-replay test at every host/reflection boundary.
+
+## 2026-09-19 design correction
+
+The baseline's implementation inventory remains accurate, but its original
+target classification treated reflection as if it were resumable lazy work.
+That was incorrect. Once activated, a reflection task runs to a terminal
+disposition independently of continued demand for the lazy which launched it.
+The corrected W6G.1f.3b design gives the task a managed completion promise and
+lets the lazy follow that promise through its ordinary WHNF checkpoint. No
+task handle, task continuation, or registered root is stored in the managed
+value graph.

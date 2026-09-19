@@ -4750,6 +4750,11 @@ thread role is authorized to claim a machine.
 
 #### W6G.1 — Role-specific pumping and causal work ownership
 
+The mid-phase design audit after W6G.1f.3a.1 is recorded in
+[`ResumableWhnfW6G1Design_2026-09-19.md`](../reviews/ResumableWhnfW6G1Design_2026-09-19.md).
+It corrects the original reflection-checkpoint model and reviews the remaining
+W6G.1 ownership, retention, selection, drain, and verification boundaries.
+
 Replace the current shared work-stealing policy with an explicit distinction
 between demand roots, shared completion-source producers, and temporary poll
 authority. The runtime coordinator remains the common coordination boundary,
@@ -4758,8 +4763,11 @@ but not every coordinated record is globally executor-visible:
 - a client-evaluation record owns one foreground continuation and its wake
   state;
 - a spark or reflection record owns one background continuation;
-- the managed lazy identity owns the partial producer checkpoint shared by
-  every observer of that lazy identity;
+- the managed lazy identity owns demand-driven partial producer checkpoints
+  shared by every observer of that lazy identity;
+- an autonomous reflection task owns its continuation after launch and
+  fulfills an exact managed completion source rather than moving that
+  continuation into the lazy;
 - a canonical coordinator route owns only transient claim, block, subscriber,
   and wake state while at least one observer actively demands that lazy; and
 - completion subscriptions connect those role-specific roots to canonical
@@ -4849,11 +4857,13 @@ record owns the resumable machine, which demand session or task profile it
 inherits, and which target pump role it implements.
 
 Distinguish consumer-local partial work from a completion source's shared
-partial work. For an uncached lazy, demonstrate that the client, spark, and
-reflection continuations remain distinct while all three resolve to one
-canonical lazy-owned producer checkpoint. For an ordinary rooted value with no
-lazy, promise, wait, or net identity, preserve independent WHNF requests rather
-than inventing scheduler memoization.
+partial work. For an uncached demand-driven lazy, demonstrate that the client,
+spark, and reflection continuations remain distinct while all three resolve to
+one canonical lazy-owned producer checkpoint. For an autonomous-reflection
+source, demonstrate instead that all observers follow one managed completion
+promise and that exactly one task launches. For an ordinary rooted value with
+no lazy, promise, wait, or net identity, preserve independent WHNF requests
+rather than inventing scheduler memoization.
 
 Add deterministic fixtures before changing policy which force, at minimum:
 
@@ -4886,8 +4896,9 @@ order. Continue the implementation in this dependency order:
    producer records while retaining one coordinator mutex and generation.
 2. **W6G.1f.1, W6G.1c, then W6G.1f.2-W6G.1f.4:** give the managed lazy one
    authoritative source/checkpoint/result state, make producer routes
-   session-neutral, and migrate every producer family before changing how
-   workers discover producers.
+   session-neutral, migrate demand-driven producer state into that graph, and
+   hand autonomous reflection work an exact managed completion source before
+   changing how workers discover producers.
 3. **W6G.1d:** layer the internal foreground driver on the separated client
    registry; keep the public incremental handle deferred unless its drop
    contract becomes necessary to complete an internal invariant.
@@ -5150,21 +5161,40 @@ later demand for a still-reachable lazy creates a new route around the stored
 checkpoint rather than reconstructing the original computation.
 
 This transition covers the complete `LazyTaskWork`, not only its `Whnf`
-variant. Access, builtin, object, list-effect, net-WHNF, reflection,
-net-construction, and host-call states may all cross a scheduling boundary.
+variant, but it must not force every family into the same ownership shape.
+Classify each family before migration:
+
+- access, builtin, object, list-effect, net-WHNF, net-construction, and other
+  demand-driven partial work belong in traced lazy-owned checkpoints;
+- a synchronous one-shot host callback needs a traced before/after checkpoint
+  because no independent runtime root continues it after the route vanishes;
+- a started reflection task is already an autonomous background root and must
+  run to a terminal disposition even after its observing route vanishes. It
+  fulfills a managed completion source owned by that task; it is not itself a
+  lazy checkpoint; and
+- fire-and-forget orchestration such as best-effort spark admission remains
+  outside managed access. The durable builtin checkpoint records only enough
+  scalar phase state to avoid accidental replay.
+
 Inventory which fields are traced semantic state, edge-free scalar or task
-identity, and external owner state. A managed checkpoint must not contain a
-`RuntimeValueRoot`, `ManagedLazyRoot`, or other registered root. Convert rooted
-callback results back to managed `Value` edges before publishing a durable
-checkpoint, and represent external owners through reviewed edge-free handles
-whose semantic captures remain visible to the lazy's trace.
+identity, active task obligation, and external owner state. A managed
+checkpoint must not contain a `RuntimeValueRoot`, `ManagedLazyRoot`, or other
+registered root. Active autonomous work may temporarily own registered roots
+for its inputs, completion mapping, or managed promise, but those roots live
+in the task obligation, never inside the value graph, and must be released on
+every terminal disposition. Convert rooted callback results back to managed
+`Value` edges before publishing a durable checkpoint, and represent passive
+external owners through reviewed edge-free handles whose semantic captures
+remain visible to tracing.
 
 In particular, never replay a host callback after its producer crossed the
 `Before -> Invoking` boundary, and never create a second reflection-task
-reservation merely because active demand temporarily fell to zero. Although
-restarting abandoned pure work cannot change a Glam result, those one-shot
-boundaries, reflection traces, diagnostics, and host observations make
-checkpoint loss operationally observable.
+reservation merely because active demand temporarily fell to zero. A started
+reflection task continues as background root work and terminally assigns its
+one managed completion source. Although restarting abandoned pure work cannot
+change a Glam result, those one-shot boundaries, reflection traces,
+diagnostics, and host observations make ownership loss operationally
+observable.
 
 Implement this as the following checkpoints. Reorder W6G.1b-W6G.1f where a
 narrower migration sequence avoids maintaining two authoritative producer
@@ -5177,6 +5207,15 @@ states.
 constraints. `lazy_producer_inventory` makes the family and one-shot-boundary
 census source-backed. The inventory confirms that W6G.1f must migrate the
 complete producer family rather than installing a `Whnf`-only checkpoint.
+
+**Design correction (2026-09-19).** The baseline correctly identified
+reflection reservation and activation as a one-shot boundary, but incorrectly
+classified the started reflection task as lazy-checkpoint state. Reflection
+tasks are autonomous background roots. W6G.1f.3b replaces the route-owned
+reservation with a task-owned managed completion promise and an ordinary WHNF
+handoff. Update `lazy_producer_inventory` when that implementation lands so
+the source-backed classification distinguishes demand checkpoints from
+autonomous completion sources.
 
 Enumerate every `LazyTaskWork` variant, all roots and semantic edges it retains,
 its callback or task activation boundaries, and whether its current state can
@@ -5242,16 +5281,20 @@ Implementation is deliberately reordered around the representation boundary:
    coordinator-owned `WhnfComputation` into the lazy's exact managed
    checkpoint. The coordinator retains a stateless route adapter temporarily;
    no second WHNF state may remain in that adapter.
-2. **W6G.1f.3** migrates the remaining producer families. This must precede
-   removal of the coordinator machine because those families do not yet have
-   a managed checkpoint representation.
+2. **W6G.1f.3** migrates the remaining producer families. Demand-driven
+   families receive managed checkpoint representations; reflection receives
+   a task-owned managed completion source instead. This must precede removal
+   of the lazy-producer coordinator machine because those ownership forms are
+   not yet available.
 3. **W6G.1f.2b** performs the coordinator cutover below once every route can
    poll state owned by its lazy. It removes the temporary adapters and owns
    the final subscriber/claim race matrix.
 
 This is staging, not a weakened target: after W6G.1f.2a the WHNF family has
-one lazy-owned authoritative state, and after W6G.1f.2b no producer family has
-a durable machine in its coordinator record.
+one lazy-owned authoritative state, and after W6G.1f.2b no *lazy-producer
+route* has a durable machine in its coordinator record. Autonomous reflection
+tasks remain ordinary background task records until they terminate; they no
+longer borrow the lifetime or machine of the lazy route which launched them.
 
 The first full-suite run after W6G.1f.3a.0 reproduced the same open route
 ownership defect through `command_line_workers_override_glam_workers`:
@@ -5297,9 +5340,11 @@ cross-session fixture closes the first producer session, observes its old
 wait as abandoned, then resumes the lazy-owned checkpoint from a later
 same-runtime session without rerunning the source callback. Source-backed
 root-publication, managed-access, persistent-edge, producer-family, and WHNF
-checkpoint inventories classify the new handoff. The remaining nine producer
-families still retain coordinator-owned state and therefore remain assigned
-to W6G.1f.3 before the route-machine cutover in W6G.1f.2b.
+checkpoint inventories classify the new handoff. The remaining nine source
+families still retain route-owned state or orchestration and therefore remain
+assigned to W6G.1f.3 before the route-machine cutover in W6G.1f.2b. One of
+those families—reflection—will leave the route through an autonomous task and
+managed completion source rather than adding a checkpoint variant.
 
 Reduce the coordinator's lazy-producer record to transient claim, blocker,
 subscriber, generation, and wake state. The record owns no durable producer
@@ -5314,13 +5359,17 @@ exactly one route and claim remain authoritative, no registration epoch is
 reused, and a background subscriber outlives closure of the first discovering
 client session.
 
-###### W6G.1f.3 — Complete producer-family migration
+###### W6G.1f.3 — Complete producer-family ownership migration
 
-Move every remaining `LazyTaskWork` family behind the lazy-owned checkpoint
-protocol. Preserve one-shot host invocation and reflection activation across
-zero-demand intervals. Ensure callback execution, reflection admission, and
-other orchestration still occur only after managed access closes; the lazy
-stores the durable before/after state, not an active callback or held mutator.
+Move every remaining `LazyTaskWork` family behind its correct durable
+ownership boundary. Demand-driven work uses the lazy-owned checkpoint
+protocol. A started reflection task uses a task-owned managed completion
+source and then rejoins the ordinary WHNF checkpoint path. Preserve one-shot
+host invocation, reflection reservation/activation, and other orchestration
+across zero-demand intervals. Ensure callback execution, task admission, and
+other orchestration still occur only after managed access closes; the value
+graph stores traced semantic state and managed completion identities, never an
+active callback, task continuation, registered root, or held mutator.
 
 If a family requires an external sidecar, the managed lazy must own only an
 edge-free lease/identity and its trace must still account for every semantic
@@ -5328,8 +5377,10 @@ edge. The sidecar must not retain a root back to the owning lazy or another
 rooted checkpoint which reaches it. Treat any exception as a separate design
 review rather than hiding it behind the external-owner registry.
 
-Execute the migration as an exhaustive typed sum, not one erased checkpoint
-payload:
+Execute demand-driven checkpoint migration as an exhaustive typed sum, not
+one erased checkpoint payload. Keep the autonomous reflection handoff
+compile-exhaustive beside that sum rather than manufacturing a checkpoint arm
+for it:
 
 1. **W6G.1f.3a.0 — typed checkpoint carrier.** Move the field-opaque edge into
    an evaluator-owned discriminated carrier whose variants are concrete typed
@@ -5376,11 +5427,88 @@ payload:
    roots its intermediate lazy before any later mutator entry; this repairs an
    older raw-fixture lifetime gap rather than treating repetition as race
    evidence. Focused host-call tests also pass with aggressive collection.
-3. **W6G.1f.3b — reflection checkpoint.** Preserve one stable reservation and
-   activation disposition across route loss. The managed state retains only
-   traced effect/target edges and edge-free task observation; any temporary
-   activation root remains in the reviewed activation permit and must be
-   consumed before the checkpoint can become inactive.
+3. **W6G.1f.3b — autonomous reflection handoff.** Do not add a reflection
+   checkpoint. A reflection task which has started is autonomous background
+   work and runs to a terminal disposition after the observing lazy route
+   disappears. Represent its eventual result through a managed promise edge,
+   not through a task handle or registered result root stored in the value
+   graph.
+
+   Partition this transition:
+
+   - **W6G.1f.3b.0 — completion-source representation and terminal matrix.**
+     Allocate one initially unassigned ordinary managed promise in the same
+     value-access region which constructs the reflection computation, and
+     trace it with the existing effect and optional gate target. Do not open a
+     nested value-access region merely to prepare the promise. Generalize the
+     task-owned promise settlement obligation so a reviewed terminal mapper
+     may assign success as well as propagate failure. Return-value success
+     assigns the task result; gate success assigns the target after the
+     existing unit-result policy passes; failure, cancellation, abandonment,
+     exit, and killing assign their existing structured failure and reflection
+     context. Preserve the current distinction between assignment and
+     propagation: an autonomous task failure remains unacknowledged if nobody
+     ever observes the promised result, but the generic failed-promise path
+     acknowledges it when an evaluator actually propagates that failure.
+     Extend the promise's existing edge-free producer obligation with the
+     task/session acknowledgement authority needed for that timing-independent
+     operation; do not put a task handle or registered root in the managed
+     cell. An unobserved reflection source owns no registered root.
+   - **W6G.1f.3b.1 — one-shot reservation and activation handoff.** The first
+     observer reserves exactly one reflection task and registers the managed
+     completion promise with it. Retire
+     `ReflectionComputationOwner`, its external-owner handle, and the cached
+     weak task observation; they existed only to preserve a reservation in the
+     old route-owned machine. The managed source promise, the lazy's exclusive
+     source transition, and the transient activation permit are the complete
+     linearization mechanism.
+
+     Perform the handoff in this order: project and root the effect, target,
+     and promise while the route owns the lazy claim; close managed access;
+     reserve the task in the runtime-owned background context and register its
+     terminal mapper; reopen matching access and replace the reflection source
+     with the ordinary WHNF checkpoint focused on that exact promise; close
+     access again; then activate. No task code may run before the producer and
+     checkpoint publications are authoritative. The activation permit
+     temporarily roots the effect, and the terminal-mapping obligation may
+     temporarily root the gate target; these are active task obligations
+     outside the managed graph. Dropping an unconsumed permit must terminalize
+     the promise. If unwind happens before the source transition, later demand
+     observes that terminal promise through the still-present source and
+     performs the ordinary source-to-WHNF handoff; it never reserves a second
+     task.
+   - **W6G.1f.3b.2 — session-neutral background ownership.** Admit the task
+     through one runtime-owned background-production session and the selected
+     default reflection profile, not the client, spark, or reflection session
+     which happened to discover the lazy first. This session lives until
+     runtime teardown and supplies lifecycle/accounting identity without
+     capturing an observer's close policy. Preserve the source's ordinary
+     evaluation context frames in the mapped result; session neutrality must
+     not erase semantic diagnostic provenance. The task remains a normal
+     executor-visible reflection root; the lazy route merely depends on its
+     promise and may retire independently. Registering the promise producer
+     before activation also makes the task the exact causal dependency of the
+     blocked lazy route, eliminating any need for same-session fallback. A
+     client or session-local driver may poll this runtime-scoped task only by
+     following such an exact dependency. Once no demanding route remains,
+     workers or the runtime-wide background drain—not an arbitrary session
+     drain—remain responsible for autonomous completion.
+   - **W6G.1f.3b.3 — forced lifecycle and collection verification.** Force
+     route loss before activation, while the task is queued/running/blocked,
+     and after terminal assignment but before a later observer resumes. Count
+     one reservation, activation, and terminal promise assignment across two
+     sessions. Cover every terminal disposition, a result and gate target
+     which point back to the owning lazy, first-session closure, collection
+     while the task owns its promise/inputs, and reclamation after the task
+     drops its final registered roots. Force ordinary failure propagation and
+     prove it creates one promised failure, remains in the task ledger while
+     unobserved, and is acknowledged without a duplicate diagnostic when a
+     later evaluator propagates it. With zero workers, prove an exact client
+     dependency may drive the task, then separately drop all demanding routes
+     and prove a session-local drain does not adopt it while the runtime-wide
+     drain completes it. Force a reflection task which depends back on its own
+     result lazy so exact dependency/cycle reporting does not regress when the
+     promise replaces the route-owned reservation.
 4. **W6G.1f.3c — net-WHNF checkpoint.** Replace registered net roots in the
    normalization request/worklist with traced managed-net edges and retain
    scalar ports, frontier observations, and driver state in one concrete
@@ -5397,37 +5525,51 @@ payload:
 8. **W6G.1f.3g — builtin checkpoint.** Migrate the compile-exhaustive builtin
    task sum after its shared access, object, list, and WHNF child forms are
    available. Retain spark publication as post-access orchestration rather
-   than managed checkpoint state.
+   than managed checkpoint state. A best-effort spark is an autonomous
+   background root after admission but is not a completion dependency of the
+   enclosing builtin. Preserve only an at-most-once scalar admission phase in
+   the checkpoint; loss before admission is allowed by best-effort semantics,
+   while route replay must not multiply an admission already returned to the
+   coordinator. Force the current release-before-submit ordering explicitly.
 9. **W6G.1f.3h — net-construction checkpoint and decision audit.** Separate
    traced search/journal state from task-host orchestration. If the existing
    isolated search cannot be represented without a rooted backedge, stop for
    a focused lifecycle design review rather than storing the search behind an
    opaque external sidecar.
-10. **W6G.1f.3i — family closure.** Remove every state-bearing coordinator
-    variant, make route markers compile-exhaustive over the typed checkpoint
-    carrier, and close the source-backed producer, registered-root,
-    persistent-edge, and no-replay inventories before W6G.1f.2b.
+10. **W6G.1f.3i — family closure.** Remove every state-bearing
+    *lazy-producer route* variant, make route markers compile-exhaustive over
+    the typed checkpoint carrier plus the reflection-to-promise handoff, and
+    close the source-backed producer, registered-root, persistent-edge,
+    autonomous-obligation, and no-replay inventories before W6G.1f.2b.
 
-Each family checkpoint must force budget yield or exact dependency suspension,
-loss of its active route, collection while the lazy remains reachable, and
-resumption from a later authorized route. The host, reflection, list-fix, and
-net-construction checkpoints additionally count their one-shot actions. Do
-not defer a family merely because terminal equality hides replay.
+Each demand-driven family checkpoint must force budget yield or exact
+dependency suspension, loss of its active route, collection while the lazy
+remains reachable, and resumption from a later authorized route. Host,
+list-fix, and net-construction checkpoints additionally count their one-shot
+actions. Reflection instead forces route loss while its autonomous task and
+managed completion promise continue, and counts reservation, activation, and
+terminal assignment. Do not defer a family merely because terminal equality
+hides replay.
 
 ###### W6G.1f.4 — Retention and collection verification
 
 Add forced client/spark/reflection schedules showing that all observers share
-one advancing lazy checkpoint, that losing the final demand preserves the
-checkpoint while the lazy remains semantically reachable, and that later
-demand resumes rather than restarts it. Count semantic transitions, host-call
-invocations, and reflection reservations rather than relying only on terminal
-equality.
+one authoritative source, checkpoint, or managed completion source. Losing
+the final demand preserves demand-driven checkpoints while the lazy remains
+semantically reachable; a started reflection task instead remains live as a
+background root and assigns its task-owned promise exactly once. Later demand
+resumes rather than restarting either form. Count semantic transitions,
+host-call invocations, reflection reservations/activations/assignments, and
+spark admissions rather than relying only on terminal equality.
 
 Drop every external value root and route while retaining and then releasing a
 semantic path to the lazy. Under aggressive collection, prove respectively
 that the lazy/checkpoint survives and that source/checkpoint cycles reclaim.
-Audit root counts so inactive routes and external sidecars do not become a new
-permanent root class.
+For reflection, also drop every ordinary observer while the autonomous task
+retains only its reviewed effect/target/promise obligations, then prove all
+registered roots return to baseline after terminal assignment. Audit root
+counts so inactive routes, passive external owners, and completed autonomous
+work do not become a new permanent root class.
 
 After this boundary is stable, investigate whether the lazy should also own
 its exclusive claim flag, current blocker, or completion subscriptions. That
@@ -5444,6 +5586,13 @@ thread's client demand. It never polls a spark; stable quiescence may abandon
 unclaimed best-effort sparks under the existing lifecycle policy. Readiness
 and snapshot APIs remain observational.
 
+Runtime-owned reflection tasks launched from canonical lazy sources belong to
+the runtime-wide background scope, not whichever session first demanded the
+source. A session-local driver may reach one only as an exact dependency of a
+root it is authorized to poll. If that root disappears, the autonomous task
+remains runtime-visible and is completed by workers or the runtime-wide drain.
+Do not recreate first-observer affinity as a separate drain-scope tag.
+
 Separate “help execute background reflection work” from “classify stable
 runtime state” in names and tests even if the public `pump_until_stable`
 convenience operation performs both in sequence.
@@ -5453,6 +5602,9 @@ whether an outstanding parked client handle contributes an external-demand
 activity count, but do not classify it as ready background work or a runtime
 deadlock merely because no client is currently polling it. Shared producers
 remain visible to readiness only through the live roots which demand them.
+Autonomous reflection tasks are themselves background roots after launch and
+remain visible independently of the lazy route which awaits their managed
+completion promise.
 
 ##### W6G.1h — Serialization retirement and verification
 
@@ -5467,13 +5619,15 @@ Run the forced W6G.1a matrix plus zero-/one-/many-worker client demand,
 reflection, spark, cancellation, owner-close, lost-wakeup, no-false-
 quiescence, last-subscriber retirement, cross-root producer sharing, and
 terminal-publication suites. The sharing fixtures must count source polls and
-prove that all observers see one canonical result without copying the
-lazy-owned producer checkpoint. Update current architecture only after
-implementation so it states that workers select background roots and causal
-descendants, clients retain their own registry records, shared producers are
-session-neutral and lazy-owned, and explicit drains have distinct claim
-authority. Performance attribution remains W6G.4; W6G.1 records only gross
-regressions which would make the ownership mechanism nonviable.
+prove that all observers see one canonical result without copying a
+lazy-owned producer checkpoint or launching a second autonomous task. Update
+current architecture only after implementation so it states that workers
+select background roots and causal descendants, clients retain their own
+registry records, demand-driven shared producers are session-neutral and
+lazy-owned, autonomous reflection work fulfills managed completion sources,
+and explicit drains have distinct claim authority. Performance attribution
+remains W6G.4; W6G.1 records only gross regressions which would make the
+ownership mechanism nonviable.
 
 #### W6G.2 — Regional standard-effect fusion investigation
 
