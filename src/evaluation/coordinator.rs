@@ -27,14 +27,18 @@ mod client_demand;
 mod completion;
 mod deferred;
 mod reflection;
+#[cfg(test)]
+mod registry_inventory;
 mod settlement;
 mod spark;
 mod task;
 pub(crate) use client_demand::{
     ClaimedClientDemand, ClientDemandHandle, ClientDemandOperation, ClientDemandPoll,
-    ClientDemandResult, ClientDemandSink, ClientDemandSnapshot, ClientDemandWork,
+    ClientDemandResult, ClientDemandSink, ClientDemandSnapshot,
 };
-use client_demand::{ClientDemandRetirement, detach_client_demand, queue_client_demand};
+use client_demand::{
+    ClientDemandRecord, ClientDemandRetirement, detach_client_demand, queue_client_demand,
+};
 #[cfg(test)]
 use completion::DependencyWakeBatch;
 pub(crate) use completion::{
@@ -125,7 +129,6 @@ enum ProducerSettlementObligation {
 struct SettlementObligations {
     producer: Option<ProducerSettlementObligation>,
     owned_promises: Vec<TaskOwnedPromiseObligation>,
-    client_sink: Option<ClientDemandSink>,
 }
 
 #[derive(Clone)]
@@ -168,7 +171,6 @@ impl SettlementObligations {
                 TaskTerminalPublisher::new(wait),
             )),
             owned_promises: Vec::new(),
-            client_sink: None,
         }
     }
 
@@ -176,24 +178,11 @@ impl SettlementObligations {
         Self {
             producer: Some(ProducerSettlementObligation::DeferredClaim { wait, producer }),
             owned_promises: Vec::new(),
-            client_sink: None,
-        }
-    }
-
-    fn client_demand(sink: ClientDemandSink) -> Self {
-        Self {
-            producer: None,
-            owned_promises: Vec::new(),
-            client_sink: Some(sink),
         }
     }
 
     fn take_producer(&mut self) -> Option<ProducerSettlementObligation> {
         self.producer.take()
-    }
-
-    fn take_client_sink(&mut self) -> Option<ClientDemandSink> {
-        self.client_sink.take()
     }
 
     fn task_publisher_mut(&mut self) -> Option<&mut TaskTerminalPublisher> {
@@ -220,7 +209,7 @@ impl SettlementObligations {
     }
 
     fn is_empty(&self) -> bool {
-        self.producer.is_none() && self.owned_promises.is_empty() && self.client_sink.is_none()
+        self.producer.is_none() && self.owned_promises.is_empty()
     }
 }
 
@@ -362,7 +351,6 @@ enum WorkKind {
     Spark(SparkWork),
     Reflection(ReflectionWork),
     Deferred(DeferredWork),
-    ClientDemand(ClientDemandWork),
 }
 
 struct WorkRecord {
@@ -512,6 +500,8 @@ struct WorkCoordinatorState {
     pending_failure_reports: RuntimeFailureLedger,
     work: HashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
+    client_demands: HashMap<EvaluationWorkId, ClientDemandRecord>,
+    client_demands_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
     ready_task_set: HashSet<EvaluationWorkId>,
     ready_sparks: VecDeque<EvaluationWorkId>,
@@ -569,7 +559,10 @@ impl fmt::Debug for EvaluationWorkCoordinator {
             .field("runtime", &self.runtime)
             .field("session_count", &state.demand_sessions.len())
             .field("ready_task_count", &state.ready_task_set.len())
-            .field("work_count", &state.work.len())
+            .field(
+                "work_count",
+                &(state.work.len() + state.client_demands.len()),
+            )
             .field("work_generation", &state.work_generation)
             .finish_non_exhaustive()
     }
@@ -868,29 +861,34 @@ impl EvaluationWorkCoordinator {
                             changed = true;
                         }
                     }
-                    WorkKind::ClientDemand(_) => {
-                        let record = state
-                            .work
-                            .get_mut(&id)
-                            .expect("indexed client demand must remain registered");
-                        if record.control.close_reason.is_none() {
-                            record.control.close_reason =
-                                Some(WorkCloseReason::DemandSessionClosed);
-                            changed = true;
-                        }
-                        if running {
-                            continue;
-                        }
-                        client_demands.push(detach_client_demand(
-                            &mut state,
-                            id,
-                            None,
-                            None,
-                            ClientDemandResult::Abandoned,
-                        ));
-                        changed = true;
-                    }
                 }
+            }
+            let clients = state
+                .client_demands_by_session
+                .get(&session)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            for id in clients {
+                let Some(record) = state.client_demands.get_mut(&id) else {
+                    continue;
+                };
+                if record.control.close_reason.is_none() {
+                    record.control.close_reason = Some(WorkCloseReason::DemandSessionClosed);
+                    changed = true;
+                }
+                if matches!(record.state, WorkState::Running) {
+                    continue;
+                }
+                client_demands.push(detach_client_demand(
+                    &mut state,
+                    id,
+                    None,
+                    None,
+                    ClientDemandResult::Abandoned,
+                ));
+                changed = true;
             }
             changed |= prune_closed_session_registration(&mut state, session);
             if changed {
@@ -985,7 +983,7 @@ impl EvaluationWorkCoordinator {
         (
             state.work_generation,
             state.demand_sessions.len(),
-            state.work.len(),
+            state.work.len() + state.client_demands.len(),
         )
     }
 
@@ -1013,12 +1011,18 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn runtime_has_running_machine(&self) -> bool {
-        self.state
+        let state = self
+            .state
             .lock()
-            .expect("evaluation work coordinator was poisoned")
+            .expect("evaluation work coordinator was poisoned");
+        state
             .work
             .values()
             .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
+            || state
+                .client_demands
+                .values()
+                .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
     }
 
     /// Selects one executor-worker root.
@@ -1221,7 +1225,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::Reflection(_) => claim_reflection_task(&mut state, self.runtime, id),
                 WorkKind::Deferred(_) => claim_deferred(&mut state, self.runtime, id, false)
                     .map(ClaimedTaskWork::Deferred),
-                WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+                WorkKind::Spark(_) => None,
             }?;
             state.work_generation = state.work_generation.wrapping_add(1);
             Some(work)
@@ -1474,7 +1478,7 @@ impl EvaluationWorkCoordinator {
         match &record.kind {
             WorkKind::Reflection(work) => work.block.as_ref(),
             WorkKind::Deferred(work) => work.block.as_ref(),
-            WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+            WorkKind::Spark(_) => None,
         }
         .and_then(|block| block.dependency.clone())
     }
@@ -1609,10 +1613,8 @@ impl EvaluationWorkCoordinator {
         self.state
             .lock()
             .expect("evaluation work coordinator was poisoned")
-            .work
-            .values()
-            .filter(|record| matches!(record.kind, WorkKind::ClientDemand(_)))
-            .count()
+            .client_demands
+            .len()
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
@@ -1815,7 +1817,7 @@ fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
     match &record.kind {
         WorkKind::Reflection(work) => Some(work.task),
         WorkKind::Deferred(work) => Some(work.task),
-        WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+        WorkKind::Spark(_) => None,
     }
 }
 
@@ -1823,7 +1825,7 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     match &record.kind {
         WorkKind::Reflection(work) => work.block.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref(),
-        WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+        WorkKind::Spark(_) => None,
     }
 }
 
@@ -1842,10 +1844,6 @@ fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
         WorkKind::Spark(work) => work.dependency.as_ref(),
         WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref(),
-        WorkKind::ClientDemand(work) => work
-            .subscription
-            .as_ref()
-            .map(|subscription| &subscription.dependency),
     }
 }
 
@@ -1890,7 +1888,6 @@ fn publish_task_block_locked(
         WorkKind::Reflection(work) => work.block = Some(block),
         WorkKind::Deferred(work) => work.block = Some(block),
         WorkKind::Spark(_) => panic!("spark work cannot publish a task block"),
-        WorkKind::ClientDemand(_) => panic!("client demand cannot publish a task block"),
     }
     record.state = WorkState::Blocked;
     if let Some(observed_epoch) = observed_epoch {
@@ -1964,7 +1961,7 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
 /// non-semantic cleanup. Treating that tail as an active poll can deadlock a
 /// same-session client demand created while unwinding the completed machine.
 fn session_has_running_machine(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
-    state
+    let background = state
         .work_by_session
         .get(&session)
         .into_iter()
@@ -1972,7 +1969,15 @@ fn session_has_running_machine(state: &WorkCoordinatorState, session: Evaluation
         .filter_map(|id| state.work.get(id))
         .any(|record| {
             matches!(record.state, WorkState::Running) && !matches!(record.kind, WorkKind::Spark(_))
-        })
+        });
+    background
+        || state
+            .client_demands_by_session
+            .get(&session)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| state.client_demands.get(id))
+            .any(|record| matches!(record.state, WorkState::Running))
 }
 
 fn claim_ready_task(
@@ -2018,7 +2023,7 @@ fn claim_ready_task(
             WorkKind::Deferred(_) => {
                 claim_deferred(state, runtime, id, true).map(ClaimedTaskWork::Deferred)
             }
-            WorkKind::Spark(_) | WorkKind::ClientDemand(_) => None,
+            WorkKind::Spark(_) => None,
         };
         if let Some(claimed) = claimed {
             return Some(claimed);
@@ -2061,8 +2066,25 @@ fn queue_current_registration(
 ) -> bool {
     enum ReadyQueue {
         Spark,
-        ClientDemand,
         Task,
+    }
+
+    if let Some(record) = state.client_demands.get_mut(&registration.work) {
+        if !matches!(record.state, WorkState::Blocked)
+            || record.subscription_epoch != registration.subscription_epoch
+            || source.is_some_and(|source| {
+                record
+                    .work
+                    .subscription
+                    .as_ref()
+                    .is_none_or(|subscription| subscription.dependency.key() != source)
+            })
+        {
+            return false;
+        }
+        record.state = WorkState::Queued;
+        queue_client_demand(state, registration.work);
+        return true;
     }
 
     let kind = {
@@ -2080,14 +2102,12 @@ fn queue_current_registration(
         record.state = WorkState::Queued;
         match record.kind {
             WorkKind::Spark(_) => ReadyQueue::Spark,
-            WorkKind::ClientDemand(_) => ReadyQueue::ClientDemand,
             WorkKind::Reflection(_) | WorkKind::Deferred(_) => ReadyQueue::Task,
         }
     };
     state.observation_waiters.remove(&registration.work);
     match kind {
         ReadyQueue::Spark => queue_spark(state, registration.work),
-        ReadyQueue::ClientDemand => queue_client_demand(state, registration.work),
         ReadyQueue::Task => queue_task(state, registration.work),
     }
     true

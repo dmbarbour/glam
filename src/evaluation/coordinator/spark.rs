@@ -341,7 +341,7 @@ impl EvaluationWorkCoordinator {
 pub(super) fn spark_work(record: &WorkRecord) -> &SparkWork {
     match &record.kind {
         WorkKind::Spark(work) => work,
-        WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::ClientDemand(_) => {
+        WorkKind::Reflection(_) | WorkKind::Deferred(_) => {
             panic!("spark operation addressed non-spark work")
         }
     }
@@ -350,7 +350,7 @@ pub(super) fn spark_work(record: &WorkRecord) -> &SparkWork {
 pub(super) fn spark_work_mut(record: &mut WorkRecord) -> &mut SparkWork {
     match &mut record.kind {
         WorkKind::Spark(work) => work,
-        WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::ClientDemand(_) => {
+        WorkKind::Reflection(_) | WorkKind::Deferred(_) => {
             panic!("spark operation addressed non-spark work")
         }
     }

@@ -11,10 +11,9 @@ use super::super::EvaluationDemandState;
 #[cfg(test)]
 use super::session_has_running_machine;
 use super::{
-    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
-    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind,
-    WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
-    queue_current_registration,
+    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration,
+    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkState,
+    demand_session_is_closed, prune_closed_session_registration, queue_current_registration,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -268,6 +267,22 @@ pub(crate) struct ClientDemandWork {
     pub(super) subscription: Option<ClientDemandSubscription>,
 }
 
+/// Foreground evaluation state, intentionally separate from executor-visible
+/// background work records.
+///
+/// IDs remain runtime-global so completion registrations can address either
+/// registry without an extra tag. Only the exact client driver may detach the
+/// operation and poll it.
+pub(super) struct ClientDemandRecord {
+    pub(super) id: EvaluationWorkId,
+    pub(super) demand_session: super::EvaluationSessionId,
+    pub(super) subscription_epoch: u64,
+    pub(super) control: WorkControl,
+    pub(super) state: WorkState,
+    pub(super) sink: ClientDemandSink,
+    pub(super) work: ClientDemandWork,
+}
+
 pub(crate) struct ClaimedClientDemand {
     pub(in crate::evaluation) id: EvaluationWorkId,
     pub(in crate::evaluation) demand: ClaimedDemandSession,
@@ -332,21 +347,25 @@ impl EvaluationWorkCoordinator {
                 return Err(Arc::from("evaluation demand session is closed"));
             }
             let session = demand.id;
-            let record = WorkRecord {
+            let record = ClientDemandRecord {
                 id,
                 demand_session: session,
                 subscription_epoch: 0,
                 control: WorkControl::default(),
-                obligations: SettlementObligations::client_demand(sink),
                 state: WorkState::Queued,
-                kind: WorkKind::ClientDemand(ClientDemandWork {
+                sink,
+                work: ClientDemandWork {
                     demand: Arc::downgrade(&demand),
                     operation: Some(operation),
                     subscription: None,
-                }),
+                },
             };
-            assert!(state.work.insert(id, record).is_none());
-            state.work_by_session.entry(session).or_default().insert(id);
+            assert!(state.client_demands.insert(id, record).is_none());
+            state
+                .client_demands_by_session
+                .entry(session)
+                .or_default()
+                .insert(id);
             queue_client_demand(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
         }
@@ -415,10 +434,8 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        let record = state.work.get(&id)?;
-        let WorkKind::ClientDemand(client) = &record.kind else {
-            return None;
-        };
+        let record = state.client_demands.get(&id)?;
+        let client = &record.work;
         match record.state {
             WorkState::Queued => Some(ClientDemandSnapshot::Queued),
             WorkState::Running => Some(ClientDemandSnapshot::Running),
@@ -454,12 +471,11 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let close_requested = {
                 let record = state
-                    .work
+                    .client_demands
                     .get(&claimed.id)
                     .expect("claimed client demand must remain registered");
                 assert_eq!(record.demand_session, claimed.demand.id());
                 assert!(matches!(record.state, WorkState::Running));
-                assert!(matches!(record.kind, WorkKind::ClientDemand(_)));
                 record.control.close_reason
             };
             let mut obsolete_subscription = None;
@@ -501,10 +517,10 @@ impl EvaluationWorkCoordinator {
                     ClientDemandPoll::Yielded => {
                         obsolete_subscription = claimed.prior_subscription.take();
                         let record = state
-                            .work
+                            .client_demands
                             .get_mut(&claimed.id)
                             .expect("yielded client demand must remain registered");
-                        let client = client_demand_work_mut(record);
+                        let client = &mut record.work;
                         assert!(client.operation.is_none());
                         client.operation = claimed.operation.take();
                         client.subscription = None;
@@ -531,7 +547,7 @@ impl EvaluationWorkCoordinator {
                     ClientDemandPoll::Blocked(dependency) => {
                         obsolete_subscription = claimed.prior_subscription.take();
                         let record = state
-                            .work
+                            .client_demands
                             .get_mut(&claimed.id)
                             .expect("blocked client demand must remain registered");
                         record.subscription_epoch = record
@@ -542,7 +558,7 @@ impl EvaluationWorkCoordinator {
                             work: claimed.id,
                             subscription_epoch: record.subscription_epoch,
                         };
-                        let client = client_demand_work_mut(record);
+                        let client = &mut record.work;
                         assert!(client.operation.is_none());
                         client.operation = claimed.operation.take();
                         client.subscription = Some(ClientDemandSubscription {
@@ -585,12 +601,9 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let Some(record) = state.work.get_mut(&id) else {
+            let Some(record) = state.client_demands.get_mut(&id) else {
                 return false;
             };
-            if !matches!(record.kind, WorkKind::ClientDemand(_)) {
-                return false;
-            }
             if matches!(record.state, WorkState::Terminalizing) {
                 return true;
             }
@@ -627,13 +640,11 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let record = state.work.get(&id)?;
+            let record = state.client_demands.get(&id)?;
             if !matches!(record.state, WorkState::Blocked) {
                 return None;
             }
-            let WorkKind::ClientDemand(client) = &record.kind else {
-                return None;
-            };
+            let client = &record.work;
             let subscription = client
                 .subscription
                 .as_ref()
@@ -669,13 +680,11 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let record = state.work.get(&id)?;
+            let record = state.client_demands.get(&id)?;
             if !matches!(record.state, WorkState::Blocked) {
                 return None;
             }
-            let WorkKind::ClientDemand(client) = &record.kind else {
-                return None;
-            };
+            let client = &record.work;
             let subscription = client
                 .subscription
                 .as_ref()
@@ -706,12 +715,10 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let Some(record) = state.work.get(&id) else {
+            let Some(record) = state.client_demands.get(&id) else {
                 return false;
             };
-            if !matches!(record.kind, WorkKind::ClientDemand(_))
-                || matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-            {
+            if matches!(record.state, WorkState::Running | WorkState::Terminalizing) {
                 return false;
             }
             let retirement = detach_client_demand(
@@ -747,7 +754,7 @@ fn claim_ready_client_demand(
 ) -> Option<ClaimedClientDemand> {
     while let Some(position) = state.ready_client_demands.iter().position(|id| {
         state
-            .work
+            .client_demands
             .get(id)
             .is_some_and(|record| !session_has_running_machine(state, record.demand_session))
     }) {
@@ -768,17 +775,13 @@ fn claim_client_demand(
     runtime: EvaluationRuntimeId,
     id: EvaluationWorkId,
 ) -> Option<ClaimedClientDemand> {
-    let demand_session = state.work.get(&id)?.demand_session;
+    let demand_session = state.client_demands.get(&id)?.demand_session;
     let demand = ClaimedDemandSession::registered(state, demand_session, runtime)?;
-    let record = state.work.get(&id)?;
-    if !matches!(record.state, WorkState::Queued)
-        || !matches!(record.kind, WorkKind::ClientDemand(_))
-    {
+    let record = state.client_demands.get(&id)?;
+    if !matches!(record.state, WorkState::Queued) {
         return None;
     }
-    let WorkKind::ClientDemand(client) = &record.kind else {
-        unreachable!("validated client demand must preserve its work kind")
-    };
+    let client = &record.work;
     if !Weak::ptr_eq(&client.demand, &Arc::downgrade(&demand.demand())) {
         return None;
     }
@@ -787,11 +790,11 @@ fn claim_client_demand(
         .ready_client_demands
         .retain(|candidate| *candidate != id);
     let record = state
-        .work
+        .client_demands
         .get_mut(&id)
         .expect("claimable client demand must remain registered");
     record.state = WorkState::Running;
-    let client = client_demand_work_mut(record);
+    let client = &mut record.work;
     let operation = client
         .operation
         .take()
@@ -805,15 +808,6 @@ fn claim_client_demand(
     })
 }
 
-fn client_demand_work_mut(record: &mut WorkRecord) -> &mut ClientDemandWork {
-    match &mut record.kind {
-        WorkKind::ClientDemand(work) => work,
-        WorkKind::Spark(_) | WorkKind::Reflection(_) | WorkKind::Deferred(_) => {
-            panic!("client-demand operation addressed non-client work")
-        }
-    }
-}
-
 pub(super) fn detach_client_demand(
     state: &mut WorkCoordinatorState,
     id: EvaluationWorkId,
@@ -825,18 +819,15 @@ pub(super) fn detach_client_demand(
     state
         .ready_client_demands
         .retain(|candidate| *candidate != id);
-    state.observation_waiters.remove(&id);
-    let mut record = state
-        .work
+    let record = state
+        .client_demands
         .remove(&id)
         .expect("retired client demand must remain registered");
     assert!(
         !matches!(record.state, WorkState::Running) || claimed_operation.is_some(),
         "worker-owned client demand requires its claimed operation at retirement"
     );
-    let WorkKind::ClientDemand(mut client) = record.kind else {
-        panic!("client-demand retirement must contain client work")
-    };
+    let mut client = record.work;
     let operation = match (claimed_operation, client.operation.take()) {
         (Some(operation), None) | (None, Some(operation)) => operation,
         (Some(_), Some(_)) => panic!("client demand operation cannot have two owners"),
@@ -847,18 +838,16 @@ pub(super) fn detach_client_demand(
         (None, None) => None,
         (Some(_), Some(_)) => panic!("client demand subscription cannot have two owners"),
     };
-    let sink = record
-        .obligations
-        .take_client_sink()
-        .expect("client demand must retain its result sink until retirement");
-    assert!(
-        record.obligations.is_empty(),
-        "client demand retirement must consume every settlement obligation"
-    );
-    if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
+    let sink = record.sink;
+    if let Some(session_work) = state
+        .client_demands_by_session
+        .get_mut(&record.demand_session)
+    {
         session_work.remove(&id);
         if session_work.is_empty() {
-            state.work_by_session.remove(&record.demand_session);
+            state
+                .client_demands_by_session
+                .remove(&record.demand_session);
         }
     }
     prune_closed_session_registration(state, record.demand_session);

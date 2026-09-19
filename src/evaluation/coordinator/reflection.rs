@@ -772,9 +772,6 @@ pub(super) fn reflection_work(record: &WorkRecord) -> &ReflectionWork {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
-        WorkKind::ClientDemand(_) => {
-            panic!("client demand cannot be used as a reflection task")
-        }
     }
 }
 
@@ -783,9 +780,6 @@ pub(super) fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWor
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
-        WorkKind::ClientDemand(_) => {
-            panic!("client demand cannot be used as a reflection task")
-        }
     }
 }
 

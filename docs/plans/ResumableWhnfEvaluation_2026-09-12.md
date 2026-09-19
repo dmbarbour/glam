@@ -4877,7 +4877,58 @@ Repeated parallel runs are stress evidence only. Preserve a red or explicitly
 current-behavior assertion for each mismatch so the transition demonstrates
 which policy changed.
 
+##### W6G.1 execution order and migration audits
+
+The checkpoint labels group the target contracts; they do not impose source
+order. Continue the implementation in this dependency order:
+
+1. **W6G.1b:** separate foreground client records from background/root and
+   producer records while retaining one coordinator mutex and generation.
+2. **W6G.1f.1, W6G.1c, then W6G.1f.2-W6G.1f.4:** give the managed lazy one
+   authoritative source/checkpoint/result state, make producer routes
+   session-neutral, and migrate every producer family before changing how
+   workers discover producers.
+3. **W6G.1d:** layer the internal foreground driver on the separated client
+   registry; keep the public incremental handle deferred unless its drop
+   contract becomes necessary to complete an internal invariant.
+4. **W6G.1e.2-W6G.1e.3 and W6G.1g:** replace global deferred selection with
+   causal traversal, make implicit reflection-child relationships explicit,
+   then narrow session/runtime drains.
+5. **W6G.1h:** remove the temporary session-wide serialization scan and close
+   the forced-order verification matrix.
+
+Maintain two source-backed audits during the transition:
+
+- a **cross-registry wake audit** enumerating every completion publication,
+  subscription, cancellation, session close, settlement, and readiness path
+  which currently assumes all work IDs resolve through one `work` map; and
+- an **implicit reflection-child audit** enumerating each task launch which is
+  currently made reachable only by the foreground/session same-session
+  fallback rather than by an exact dependency or explicit background root.
+
+The first audit must fail closed while `ClientDemand` is removed from
+`WorkKind`. The second may remain an inventory until the managed producer
+transition is complete, but it must be closed before the fallback is retired.
+Do not reintroduce causal-first producer selection between these steps: the
+current first-observer-owned producer record makes that ordering unsound.
+
 ##### W6G.1b — Separate demand-root and producer registries
+
+**Complete (2026-09-19).** Foreground evaluations now live in a dedicated
+`client_demands` registry and session index under the existing coordinator
+mutex. `WorkKind` contains only executor-visible background and producer
+records. Completion wake routing resolves the runtime-global work ID against
+the foreground registry before the background registry; session closure,
+readiness/deadlock snapshots, forced settlement, generation accounting, and
+debug inventory all deliberately combine the two where lifecycle semantics
+require it. The client ready queue is private to exact client claims (plus a
+test-only compatibility driver) and is never an executor selection surface.
+
+`coordinator::registry_inventory` is the fail-closed cross-registry audit. It
+locks the `WorkKind` boundary and the wake, close, settlement, and readiness
+sites which must account for the foreground map. The temporary shared
+`EvaluationWorkId` domain avoids tagging completion registrations while IDs
+remain runtime-global and unique.
 
 Refactor the coordinator topology so role-specific root records and shared
 producer records are distinct even if they initially remain beneath one state

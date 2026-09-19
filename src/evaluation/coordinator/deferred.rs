@@ -492,9 +492,6 @@ pub(super) fn deferred_work(record: &WorkRecord) -> &DeferredWork {
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
         }
-        WorkKind::ClientDemand(_) => {
-            panic!("client demand cannot be used as a deferred producer")
-        }
     }
 }
 
@@ -504,9 +501,6 @@ pub(super) fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
         WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
-        }
-        WorkKind::ClientDemand(_) => {
-            panic!("client demand cannot be used as a deferred producer")
         }
     }
 }

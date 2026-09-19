@@ -115,6 +115,8 @@ impl EvaluationWorkCoordinator {
             }),
             progress_owned: state.work.values().any(|record| {
                 matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            }) || state.client_demands.values().any(|record| {
+                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
             }),
             abandonable_sparks: state.work.values().any(|record| {
                 matches!(record.kind, WorkKind::Spark(_))
@@ -207,6 +209,38 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
         });
     }
 
+    for record in state.client_demands.values() {
+        if matches!(
+            record.state,
+            WorkState::Queued | WorkState::Running | WorkState::Terminalizing
+        ) {
+            return RuntimeCoordinatorReadiness::Busy;
+        }
+        let state_snapshot = match record.state {
+            WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
+            WorkState::Dormant | WorkState::Reserved | WorkState::ExitWaiting => {
+                unreachable!("client demand entered an unsupported work state")
+            }
+            WorkState::Queued | WorkState::Running | WorkState::Terminalizing => {
+                unreachable!("handled above")
+            }
+        };
+        unfinished.push(RuntimeDeadlockWorkSnapshot {
+            work: record.id,
+            session: record.demand_session,
+            task: None,
+            kind: RuntimeWorkKindSnapshot::ClientDemand,
+            state: state_snapshot,
+            dependency: record
+                .work
+                .subscription
+                .as_ref()
+                .map(|subscription| runtime_dependency_snapshot(&subscription.dependency)),
+            observed_epoch: None,
+            blocked_error: None,
+        });
+    }
+
     exits.sort_by_key(|exit| exit.work.get());
     if unfinished.is_empty() {
         RuntimeCoordinatorReadiness::Ready {
@@ -252,7 +286,6 @@ fn runtime_work_kind(record: &WorkRecord) -> RuntimeWorkKindSnapshot {
     match record.kind {
         WorkKind::Reflection(_) => RuntimeWorkKindSnapshot::ReflectionTask,
         WorkKind::Deferred(_) => RuntimeWorkKindSnapshot::DeferredEvaluation,
-        WorkKind::ClientDemand(_) => RuntimeWorkKindSnapshot::ClientDemand,
         WorkKind::Spark(_) => RuntimeWorkKindSnapshot::Spark,
     }
 }
@@ -360,14 +393,7 @@ impl EvaluationWorkCoordinator {
             }
 
             for proposed in &plan.kills {
-                if matches!(
-                    state
-                        .work
-                        .get(&proposed.work)
-                        .expect("validated killed work must remain registered")
-                        .kind,
-                    WorkKind::ClientDemand(_)
-                ) {
+                if state.client_demands.contains_key(&proposed.work) {
                     client_demands.push(detach_client_demand(
                         &mut state,
                         proposed.work,
@@ -408,7 +434,6 @@ impl EvaluationWorkCoordinator {
                         WorkKind::Spark(_) => {
                             unreachable!("stable deadlock cannot retain best-effort spark work")
                         }
-                        WorkKind::ClientDemand(_) => unreachable!("handled above"),
                     };
                     let mut producer = record
                         .obligations
@@ -508,7 +533,7 @@ impl EvaluationWorkCoordinator {
                             );
                         }
                         WorkKind::Deferred(_) => detach_deferred(&mut state, selected.work),
-                        WorkKind::Spark(_) | WorkKind::ClientDemand(_) => {
+                        WorkKind::Spark(_) => {
                             unreachable!("selected task settlement must contain task work")
                         }
                     }
