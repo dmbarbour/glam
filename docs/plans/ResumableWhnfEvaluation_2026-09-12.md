@@ -5624,13 +5624,36 @@ for it:
 
    Partition the transition:
 
-   - **W6G.1f.3d.0 — shared-converter ownership decision and census.** Record
+   - **W6G.1f.3d.0 — shared-converter ownership decision and census.**
+     **Complete.** Record
      every key/list converter constructor, durable parent, registered root,
      child WHNF owner, and result/failure boundary. Choose explicitly between
      the recommended regional-state bridge below and a deliberately broader
      cross-family cutover. Reject an access-private copy of the conversion
      algorithm: it would create two resumable semantics which later phases
      must prove equivalent and remove.
+
+     The source census selects the regional-state bridge. Scalar key
+     conversion is constructed by access, dictionary insertion, object
+     linearization, and named-effect dispatch. Key-list conversion is
+     constructed by access, dictionary path update, and the path/list pattern
+     machines. The latter parents remain rooted machine families assigned to
+     W6G.1f.3e/.3g/.3i; migrating them here would be a broad cross-family
+     cutover rather than access-checkpoint work.
+
+     The pre-transition ownership and boundary ledger is:
+
+     | State | Durable parents | Registered ownership | Nested resumable work | Boundary translation |
+     | --- | --- | --- | --- | --- |
+     | `AccessMachine` | `LazyTaskWork::Access` | rooted arguments/current value and rooted child machines | selected-value WHNF plus scalar/path conversion | `AccessMachinePoll` roots ready/failure and exposes scheduler dependencies |
+     | `KeyConversionMachine` | access, dictionary, object, effect | rooted seed/member/list values | WHNF, recursive dict member, or `KeyListMachine` | `ConversionPoll` roots failures and exposes scheduler dependencies |
+     | `KeyListMachine` | access, dictionary, pattern | rooted source/list/suffix values | source/chunk WHNF plus recursive scalar conversion | `ConversionPoll` roots failures and exposes scheduler dependencies |
+
+     The canonical reducer will therefore use raw `Value` edges,
+     `RegionalWhnfWork`, and semantic boundary/failure results. Only the
+     temporary durable wrappers and, later, the access checkpoint translate
+     those results into registered roots and scheduler dependencies after the
+     managed access closes.
    - **W6G.1f.3d.1 — canonical regional key/list state.** Under the recommended
      bridge, split the existing converters into traced regional state holding
      ordinary `Value` edges plus `RegionalWhnfWork`, and a temporary durable
