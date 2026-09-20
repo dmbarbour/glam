@@ -384,14 +384,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     ),
     closed_durable!(
         "src/eval/list_transform_machine.rs",
-        "structural list-map callable and source progress",
-        "canonical RuntimeValueRoot callable plus one child WhnfComputation",
-        "yielded or dependency-blocked map source demand",
-        "saturated map admission and one-node mapped-list publication",
-        "map completion, failure, cancellation, or builtin-source retirement",
+        "structural list-map/list-concat inputs and text-lines traversal progress",
+        "raw traced callable, source, list-front, item-demand, and accepted-byte state beneath the shared builtin checkpoint",
+        "yielded or dependency-blocked source, list chunk, or item demand",
+        "saturated builtin admission beneath the owning lazy checkpoint",
+        "transform completion, failure, cancellation, or builtin-source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W6D.4a"
+        "W6G.1f.3g.3d"
     ),
     closed_durable!(
         "src/eval/pattern_machine.rs",
@@ -992,10 +992,12 @@ fn is_production_source(relative: &Path) -> bool {
 // remains only for pattern families pending W6G.1f.3g.3e.
 // W6G.1f.3g.3c replaces the durable list-observation owner with raw index,
 // subject, front/back traversal, and result state beneath the checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 239;
+// W6G.1f.3g.3d replaces three durable list-transform owners with raw callable,
+// source, list-front, item, and accepted-byte state beneath that checkpoint.
+const DECLARATION_BASELINE_COUNT: usize = 242;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([201, 209, 5, 30, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_725_574_259_674_271_980;
+    DeclarationSignals::new([206, 208, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_435_273_185_333_944_082;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1161,7 +1163,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/list_observation_machine.rs::") {
         "list observation operands, traversal progress, and completed prefixes or suffixes"
     } else if declaration.starts_with("src/eval/list_transform_machine.rs::") {
-        "structural list-map callable and source progress"
+        "structural list-map/list-concat inputs and text-lines traversal progress"
     } else if declaration.starts_with("src/eval/pattern_machine.rs::") {
         "compiler-pattern path, dictionary, and collection progress"
     } else if declaration.starts_with("src/eval/object_builtin_machine.rs::") {

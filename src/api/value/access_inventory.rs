@@ -151,14 +151,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge"
     ),
     entry!(
-        "src/eval/list_transform_machine.rs",
-        0,
-        0,
-        3,
-        "durable structural list-transformation result publication",
-        "W6D.4 non-forcing structural transforms and resumable text extraction"
-    ),
-    entry!(
         "src/eval/object_builtin_machine.rs",
         0,
         0,
@@ -491,9 +483,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/effect_machine.rs::root_effect_map_sequence"
                 | "src/eval/list_machine.rs::impl ManagedListBackRoot::poll_in"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
-                | "src/eval/list_transform_machine.rs::finish_text_lines"
-                | "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll"
-                | "src/eval/list_transform_machine.rs::impl ListMapMachine::poll"
                 | "src/eval/object_builtin_machine.rs::optional_spec_member"
                 | "src/eval/object_builtin_machine.rs::finish_dict_defs"
                 | "src/eval/object_builtin_machine.rs::root_local_name"
@@ -785,9 +774,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::back_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
-    "src/eval/list_transform_machine.rs::finish_text_lines#1|surface=access-publication|scope=production",
-    "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/list_transform_machine.rs::impl ListMapMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
     "src/eval/object_builtin_machine.rs::finish_dict_defs#1|surface=access-publication|scope=production",
     "src/eval/object_builtin_machine.rs::optional_spec_member#1|surface=access-publication|scope=production",
@@ -811,6 +797,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",

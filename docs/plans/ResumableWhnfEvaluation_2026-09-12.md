@@ -6087,9 +6087,38 @@ for it:
        regressions pass. This repetition remains evidence for the pending
        coordinator cutover rather than evidence against the list-observation
        representation.
-     - **W6G.1f.3g.3d — list transformation.** Move structure-preserving map,
+     - **W6G.1f.3g.3d — Complete (2026-09-20): list transformation.** Move structure-preserving map,
        balanced concat, and resumable text-lines extraction. Preserve lazy
        fragment boundaries and completed transform prefixes.
+       - **W6G.1f.3g.3d.1 — Complete (2026-09-20): structural map and concat.** Move the callable,
+         source demand, and one-node map/flatten transform beneath the typed
+         checkpoint. Preserve every deferred outer child and delayed invalid
+         concat leaf; neither transform gains an item-by-item eager walk.
+       - **W6G.1f.3g.3d.2 — Complete (2026-09-20): text-lines traversal.** Move source demand,
+         regional list-front work, exact item demand, and accepted bytes as
+         one traced frame. Preserve `binary_extraction` failure context and
+         prove a collected, route-lost prefix is not replayed.
+       - **W6G.1f.3g.3d.3 — Complete (2026-09-20): family closure.** Remove the three durable owners
+         and their result publications, then reconcile access, owner,
+         checkpoint, edge, raw-value, and WHNF inventories. Retain the
+         structural laziness fixtures as semantic gates in addition to the
+         forced collection schedule.
+       Completion record: map, concat, and text-lines are compile-exhaustive
+       regional builtin variants. Map and concat demand only the outer source,
+       preserve deferred children as lazy structural transforms, and return
+       their raw one-node result without registered-root publication.
+       Text-lines retains its exact source/list-front/item child plus accepted
+       bytes beneath the typed checkpoint and preserves the established
+       `binary_extraction` context. A private-heap schedule accepts one byte,
+       blocks on the next, collects and re-enters before and after assignment,
+       and proves the prefix callback runs once. The pre-existing structural
+       laziness, delayed-invalid-leaf, back-suffix, binary, and error fixtures
+       remain green; exact owner, access, root-publication, checkpoint, edge,
+       raw-value, and WHNF inventories record removal of all three durable
+       owners. The parallel gate also exposed the lazy-list error fixture
+       carrying its managed result unrooted on the process-global test heap;
+       that regression now constructs, roots, and observes the result in one
+       private value domain, preserving the original delayed-error assertion.
      - **W6G.1f.3g.3e — patterns.** Move list, path, dictionary predicate/take,
        and equality patterns after their comparison and list/key dependencies
        are regional. Preserve fallthrough versus permanent failure exactly.

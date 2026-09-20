@@ -24,7 +24,9 @@ use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::list_observation_machine::RegionalListObservationMachine;
-use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
+use super::list_transform_machine::{
+    RegionalListConcatMachine, RegionalListMapMachine, RegionalTextLinesMachine,
+};
 use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
 use super::pattern_machine::{
@@ -64,7 +66,10 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
     Dictionary(RegionalDictBuiltinMachine),
+    ListConcat(RegionalListConcatMachine),
+    ListMap(RegionalListMapMachine),
     ListObservation(Box<RegionalListObservationMachine>),
+    TextLines(RegionalTextLinesMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Provenance(RegionalProvenanceMachine),
@@ -168,6 +173,9 @@ impl RegionalBuiltinMachine {
                 | Builtin::ListAt
                 | Builtin::ListHead
                 | Builtin::ListTail
+                | Builtin::Map
+                | Builtin::ListConcat
+                | Builtin::TextLines
         )
     }
 
@@ -285,6 +293,21 @@ impl RegionalBuiltinMachine {
                     arguments,
                 )))
             }
+            Builtin::Map => Self::ListMap(RegionalListMapMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            )),
+            Builtin::ListConcat => Self::ListConcat(RegionalListConcatMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            )),
+            Builtin::TextLines => Self::TextLines(RegionalTextLinesMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            )),
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -309,7 +332,10 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
             Self::Dictionary(machine) => machine.poll_in(access, step_budget),
+            Self::ListConcat(machine) => machine.poll_in(access, step_budget),
+            Self::ListMap(machine) => machine.poll_in(access, step_budget),
             Self::ListObservation(machine) => machine.poll_in(access, step_budget),
+            Self::TextLines(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
@@ -323,7 +349,10 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
             Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
+            Self::ListConcat(machine) => machine.trace_managed_edges(visitor),
+            Self::ListMap(machine) => machine.trace_managed_edges(visitor),
             Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
+            Self::TextLines(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
@@ -769,9 +798,6 @@ impl RegionalStrategyMachine {
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
     Effect(EffectBuiltinMachine),
-    ListMap(ListMapMachine),
-    ListConcat(ListConcatMachine),
-    TextLines(TextLinesMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
     PatternList(PatternListMachine),
@@ -862,9 +888,6 @@ impl BuiltinTaskMachine {
             builtin if EffectBuiltinMachine::supports(builtin) => {
                 Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
             }
-            Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
-            Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
-            Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
             builtin if ObjectBuiltinMachine::supports(builtin) => {
                 Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
             }
@@ -902,15 +925,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Effect(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::ListMap(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::ListConcat(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::TextLines(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Object(machine) => {
@@ -1525,5 +1539,53 @@ mod tests {
         crate::eval::eval_value(&context, &observation).expect("back list observation must resume");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
         drop(observation_root);
+    }
+
+    #[test]
+    fn text_lines_retains_completed_bytes_across_collection() {
+        let context = context();
+        let prefix_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&prefix_demands);
+        let prefix =
+            LazyValue::semantic_thunk(context.values(), "text-lines collected prefix", move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Number(Number::from_u8(b'a')))
+            });
+        let item = PromisedValue::new(context.values(), "text-lines collected item");
+        let source = Value::List(crate::core::List::from_values(vec![
+            Value::Lazy(prefix),
+            Value::Promised(item.clone()),
+            Value::Number(Number::from_u8(b'\n')),
+        ]));
+        let lines = Value::builtin_call(context.values(), Builtin::TextLines, vec![source]);
+        let Value::Lazy(lines_lazy) = &lines else {
+            unreachable!("a saturated text-lines builtin must remain lazy")
+        };
+        let lines_root = lines_lazy.root(context.values());
+
+        crate::eval::eval_value(&context, &lines)
+            .expect_err("the deferred byte must suspend text-lines traversal");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the text-lines checkpoint must trace its completed bytes");
+        crate::eval::eval_value(&context, &lines)
+            .expect_err("a later route must retain the exact deferred byte");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &item,
+            Value::Number(Number::from_u8(b'b')),
+        )
+        .expect("the deferred byte should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned text-lines checkpoint must remain live");
+        crate::eval::eval_value(&context, &lines).expect("text-lines traversal must resume");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        drop(lines_root);
     }
 }

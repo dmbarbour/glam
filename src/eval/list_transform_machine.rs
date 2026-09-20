@@ -3,75 +3,84 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, LazyValue, List, ListThunk, Value,
+    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, LazyId, LazyValue, List, ListThunk,
+    Value, trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
-};
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::number::Number;
-use crate::runtime::RuntimeValueRoot;
 
-use super::builtin_machine::BuiltinTaskPoll;
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
+use super::builtin_machine::RegionalBuiltinPoll;
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::sequence::append_sequence;
 use super::value::evaluation_context_frame_in;
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
+    reduce_semantic_shell,
+};
 
-pub(crate) struct ListMapMachine {
-    function: RuntimeValueRoot,
-    source: WhnfComputation,
+pub(in crate::eval) struct RegionalListMapMachine {
+    function: Value,
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
 }
 
-pub(crate) struct ListConcatMachine {
-    source: WhnfComputation,
+pub(in crate::eval) struct RegionalListConcatMachine {
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
 }
 
-pub(crate) struct TextLinesMachine {
-    source: WhnfComputation,
-    source_ready: bool,
-    front: Option<ListFrontMachine>,
-    item: Option<WhnfComputation>,
+pub(in crate::eval) struct RegionalTextLinesMachine {
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    item: Option<RegionalWhnfWork>,
     bytes: Vec<u8>,
+    source_owner: LazyId,
 }
 
-impl TextLinesMachine {
-    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [source]: [RuntimeValueRoot; 1] =
-            arguments.try_into().expect("text lines retains one source");
+impl RegionalTextLinesMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [source] = arguments else {
+            panic!("text lines retains one source")
+        };
         Self {
-            source: WhnfComputation::from_root(source),
-            source_ready: false,
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
             front: None,
             item: None,
             bytes: Vec::new(),
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         if let Some(item) = &mut self.item {
-            let item = match poll_whnf_computation(item, poll_context, durable_context, step_budget)
-            {
-                WhnfOwnerPoll::Ready(item) => item,
-                WhnfOwnerPoll::Pending(dependency) => {
-                    return BuiltinTaskPoll::Pending(dependency);
-                }
-                WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => {
-                    return BuiltinTaskPoll::Failed(contextual_binary_failure(context, failure));
-                }
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("text-lines item produced an external {boundary:?} boundary")
-                }
-            };
-            let item = context.with_value_access(|access| access.clone_root(&item));
+            let item =
+                match drive_regional_in_place(access, item, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(item) => item,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(contextual_binary_failure_in(
+                            access, failure,
+                        ));
+                    }
+                };
             let item = EvaluatedValue::try_from(item)
                 .expect("text-lines item demand must reach WHNF")
                 .into_value();
@@ -79,125 +88,133 @@ impl TextLinesMachine {
                 Value::Number(number) => match number.to_u8_if_integer() {
                     Some(byte) => byte,
                     None => {
-                        return failure(
-                            context,
-                            format!("text lines builtin cannot encode number `{number}` as a byte"),
-                        );
+                        return failure_in(format!(
+                            "text lines builtin cannot encode number `{number}` as a byte"
+                        ));
                     }
                 },
                 other => {
-                    return failure(
-                        context,
-                        format!(
-                            "text lines builtin requires list items to be byte integers, got {other:?}"
-                        ),
-                    );
+                    return failure_in(format!(
+                        "text lines builtin requires list items to be byte integers, got {other:?}"
+                    ));
                 }
             };
             self.bytes.push(byte);
             self.item = None;
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         if let Some(front) = &mut self.front {
-            return match front.poll(poll_context, context, durable_context, step_budget) {
-                ListFrontPoll::Ready(Some((item, tail))) => {
-                    self.front = Some(ListFrontMachine::unowned(tail));
-                    self.item = Some(WhnfComputation::from_root(item));
-                    BuiltinTaskPoll::Yielded
+            return match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some((item, tail))) => {
+                    self.front = Some(RegionalListFront::new_in(
+                        access,
+                        tail,
+                        Some(self.source_owner),
+                    ));
+                    self.item = Some(
+                        RegionalWhnfWork::from_focus(access, item)
+                            .with_source_owner(self.source_owner),
+                    );
+                    RegionalBuiltinPoll::Yielded
                 }
-                ListFrontPoll::Ready(None) => {
-                    finish_text_lines(context, Bytes::from(std::mem::take(&mut self.bytes)))
-                }
-                ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListFrontPoll::Failed(failure) => {
-                    BuiltinTaskPoll::Failed(contextual_binary_failure(context, failure))
+                RegionalListFrontPoll::Ready(None) => RegionalBuiltinPoll::Ready(
+                    finish_text_lines_in(access, Bytes::from(std::mem::take(&mut self.bytes))),
+                ),
+                RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => {
+                    RegionalBuiltinPoll::Failed(contextual_binary_failure_in(access, failure))
                 }
             };
         }
 
-        assert!(
-            !self.source_ready,
-            "finished text-lines work cannot be polled"
-        );
-        let source = match poll_whnf_computation(
+        let source = match poll_regional_source(
+            access,
             &mut self.source,
-            poll_context,
-            durable_context,
+            &mut self.source_demand,
+            self.source_owner,
             step_budget,
         ) {
-            WhnfOwnerPoll::Ready(source) => source,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return BuiltinTaskPoll::Pending(dependency);
+            RegionalSourcePoll::Ready(source) => source,
+            RegionalSourcePoll::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
             }
-            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("text-lines source produced an external {boundary:?} boundary")
-            }
+            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
-        self.source_ready = true;
-        match context.with_value_access(|access| access.clone_root(&source)) {
-            Value::Binary(bytes) => finish_text_lines(context, bytes),
-            Value::List(_) => {
-                self.front = Some(ListFrontMachine::unowned(source));
-                BuiltinTaskPoll::Yielded
+        match source {
+            Value::Binary(bytes) => RegionalBuiltinPoll::Ready(finish_text_lines_in(access, bytes)),
+            source @ Value::List(_) => {
+                self.front = Some(RegionalListFront::new_in(
+                    access,
+                    source,
+                    Some(self.source_owner),
+                ));
+                RegionalBuiltinPoll::Yielded
             }
-            _ => failure(
-                context,
-                "text lines builtin requires a binary-compatible list or binary value",
-            ),
+            _ => failure_in("text lines builtin requires a binary-compatible list or binary value"),
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(source) = &self.source {
+            trace_compatibility_value_managed_edges(source, visitor);
+        }
+        if let Some(demand) = &self.source_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+        if let Some(item) = &self.item {
+            item.trace_managed_edges(visitor);
         }
     }
 }
 
-impl ListConcatMachine {
-    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [source]: [RuntimeValueRoot; 1] = arguments
-            .try_into()
-            .expect("list concat retains one list source");
+impl RegionalListConcatMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [source] = arguments else {
+            panic!("list concat retains one list source")
+        };
         Self {
-            source: WhnfComputation::from_root(source),
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        let source = match poll_whnf_computation(
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        let source = match poll_regional_source(
+            access,
             &mut self.source,
-            poll_context,
-            durable_context,
+            &mut self.source_demand,
+            self.source_owner,
             step_budget,
         ) {
-            WhnfOwnerPoll::Ready(value) => value,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return BuiltinTaskPoll::Pending(dependency);
+            RegionalSourcePoll::Ready(source) => source,
+            RegionalSourcePoll::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
             }
-            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("list-concat source produced an external {boundary:?} boundary")
-            }
+            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
-
-        let result = context.with_value_access(|access| {
-            let source = EvaluatedValue::try_from(access.clone_root(&source))
-                .expect("list-concat source demand must reach WHNF")
-                .into_value();
-            let Value::List(source) = source else {
-                return Err(EvaluationHalt::new(
-                    "list concat builtin requires a list of lists",
-                ));
-            };
-            let flattened = source.flat_map_root_step(
-                &mut |_| Ok(invalid_concat_item_in(access.values())),
-                &mut |value| Ok(concat_item_in(access.values(), value)),
+        let Value::List(source) = source else {
+            return failure_in("list concat builtin requires a list of lists");
+        };
+        let flattened = source
+            .flat_map_root_step(
+                &mut |_| Ok::<_, EvaluationHalt>(invalid_concat_item_in(access.values())),
+                &mut |value| Ok::<_, EvaluationHalt>(concat_item_in(access.values(), value)),
                 &mut |list| deferred_concat_in(access.values(), Value::List(list)),
                 &mut |thunk| {
                     deferred_concat_in(
@@ -205,95 +222,140 @@ impl ListConcatMachine {
                         thunk.duplicate_as_value_in(access.values()),
                     )
                 },
-            )?;
-            Ok(access.values().root_runtime_value(Value::List(flattened)))
-        });
-        match result {
-            Ok(value) => BuiltinTaskPoll::Ready(value),
-            Err(error) => {
-                BuiltinTaskPoll::Failed(context.root_failure(error.into_permanent_failure()))
-            }
+            )
+            .expect("list-concat structural leaf conversion is infallible");
+        RegionalBuiltinPoll::Ready(Value::List(flattened))
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(source) = &self.source {
+            trace_compatibility_value_managed_edges(source, visitor);
+        }
+        if let Some(demand) = &self.source_demand {
+            demand.trace_managed_edges(visitor);
         }
     }
 }
 
-impl ListMapMachine {
-    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [function, source]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("map retains a callable and a list source");
+impl RegionalListMapMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [function, source] = arguments else {
+            panic!("map retains a callable and a list source")
+        };
         Self {
-            function,
-            source: WhnfComputation::from_root(source),
+            function: access.values().duplicate_value(function),
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        let source = match poll_whnf_computation(
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        let source = match poll_regional_source(
+            access,
             &mut self.source,
-            poll_context,
-            durable_context,
+            &mut self.source_demand,
+            self.source_owner,
             step_budget,
         ) {
-            WhnfOwnerPoll::Ready(value) => value,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return BuiltinTaskPoll::Pending(dependency);
+            RegionalSourcePoll::Ready(source) => source,
+            RegionalSourcePoll::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
             }
-            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("map source produced an external {boundary:?} boundary")
-            }
+            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
+        let source = match source {
+            Value::Binary(bytes) => List::from_bytes(bytes),
+            Value::List(list) => list,
+            _ => return failure_in("map builtin requires a list or binary value"),
+        };
+        let mapped = source.map_root_step(
+            &mut |byte| {
+                lazy_item_in(
+                    access.values(),
+                    &self.function,
+                    Value::Number(Number::from_u8(byte)),
+                )
+            },
+            &mut |value| {
+                lazy_item_in(
+                    access.values(),
+                    &self.function,
+                    access.values().duplicate_value(value),
+                )
+            },
+            &mut |list| deferred_map_in(access.values(), &self.function, Value::List(list)),
+            &mut |thunk| {
+                deferred_map_in(
+                    access.values(),
+                    &self.function,
+                    thunk.duplicate_as_value_in(access.values()),
+                )
+            },
+        );
+        RegionalBuiltinPoll::Ready(Value::List(mapped))
+    }
 
-        let result = context.with_value_access(|access| {
-            let function = access.clone_root(&self.function);
-            let source = EvaluatedValue::try_from(access.clone_root(&source))
-                .expect("map source demand must reach WHNF")
-                .into_value();
-            let source = match source {
-                Value::Binary(bytes) => List::from_bytes(bytes),
-                Value::List(list) => list,
-                _ => return None,
-            };
-            let mapped = source.map_root_step(
-                &mut |byte| {
-                    lazy_item_in(
-                        access.values(),
-                        &function,
-                        Value::Number(Number::from_u8(byte)),
-                    )
-                },
-                &mut |value| {
-                    lazy_item_in(
-                        access.values(),
-                        &function,
-                        access.values().duplicate_value(value),
-                    )
-                },
-                &mut |list| deferred_map_in(access.values(), &function, Value::List(list)),
-                &mut |thunk| {
-                    deferred_map_in(
-                        access.values(),
-                        &function,
-                        thunk.duplicate_as_value_in(access.values()),
-                    )
-                },
-            );
-            Some(access.values().root_runtime_value(Value::List(mapped)))
-        });
-        match result {
-            Some(value) => BuiltinTaskPoll::Ready(value),
-            None => BuiltinTaskPoll::Failed(context.root_failure(Arc::new(
-                EvaluationFailure::message("map builtin requires a list or binary value"),
-            ))),
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.function, visitor);
+        if let Some(source) = &self.source {
+            trace_compatibility_value_managed_edges(source, visitor);
         }
+        if let Some(demand) = &self.source_demand {
+            demand.trace_managed_edges(visitor);
+        }
+    }
+}
+
+enum RegionalSourcePoll {
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
+fn poll_regional_source(
+    access: &EvaluationValueAccess<'_>,
+    source: &mut Option<Value>,
+    demand: &mut Option<RegionalWhnfWork>,
+    source_owner: LazyId,
+    step_budget: &mut EvaluationStepBudget,
+) -> RegionalSourcePoll {
+    if demand.is_none() {
+        let source = source
+            .take()
+            .expect("regional list transform must retain its source");
+        *demand =
+            Some(RegionalWhnfWork::from_focus(access, source).with_source_owner(source_owner));
+    }
+    match drive_regional_in_place(
+        access,
+        demand
+            .as_mut()
+            .expect("regional list transform source demand must be installed"),
+        step_budget,
+        reduce_semantic_shell,
+    ) {
+        RegionalWhnfStatus::Ready(source) => {
+            *demand = None;
+            RegionalSourcePoll::Ready(
+                EvaluatedValue::try_from(source)
+                    .expect("regional list-transform source demand must reach WHNF")
+                    .into_value(),
+            )
+        }
+        RegionalWhnfStatus::Boundary(request) => RegionalSourcePoll::Boundary(request),
+        RegionalWhnfStatus::Yielded => RegionalSourcePoll::Yielded,
+        RegionalWhnfStatus::Failed(failure) => RegionalSourcePoll::Failed(failure),
     }
 }
 
@@ -347,7 +409,7 @@ fn invalid_concat_item_in(access: &crate::core::RuntimeValueAccess<'_>) -> List 
     )
 }
 
-fn finish_text_lines(context: &EvaluatorStepContext<'_>, bytes: Bytes) -> BuiltinTaskPoll {
+fn finish_text_lines_in(_access: &EvaluationValueAccess<'_>, bytes: Bytes) -> Value {
     let mut lines = Vec::new();
     let mut start = 0;
     for (index, byte) in bytes.iter().enumerate() {
@@ -357,27 +419,22 @@ fn finish_text_lines(context: &EvaluatorStepContext<'_>, bytes: Bytes) -> Builti
         }
     }
     lines.push(Value::Binary(bytes.slice(start..bytes.len())));
-    BuiltinTaskPoll::Ready(context.with_value_access(|access| {
-        access
-            .values()
-            .root_runtime_value(Value::List(List::from_values(lines)))
-    }))
+    Value::List(List::from_values(lines))
 }
 
-fn contextual_binary_failure(
-    context: &EvaluatorStepContext<'_>,
-    failure: crate::runtime::RuntimeFailureRoot,
-) -> crate::runtime::RuntimeFailureRoot {
-    let failure = context.with_value_access(|access| {
-        EvaluationHalt::failure(failure.into_failure()).with_context(
+fn contextual_binary_failure_in(
+    access: &EvaluationValueAccess<'_>,
+    failure: Arc<EvaluationFailure>,
+) -> Arc<EvaluationFailure> {
+    EvaluationHalt::failure(failure)
+        .with_context(
             access.values(),
             evaluation_context_frame_in(access.values(), "binary_extraction"),
         )
-    });
-    context.root_failure(failure.into_permanent_failure())
+        .into_permanent_failure()
 }
 
-fn failure(context: &EvaluatorStepContext<'_>, message: impl Into<String>) -> BuiltinTaskPoll {
+fn failure_in(message: impl Into<String>) -> RegionalBuiltinPoll {
     let message = message.into();
-    BuiltinTaskPoll::Failed(context.root_failure(Arc::new(EvaluationFailure::message(message))))
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message)))
 }

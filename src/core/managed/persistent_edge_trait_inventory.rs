@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        822,
+        823,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -874,9 +874,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // progress beneath the shared checkpoint.
     // W6G.1f.3g.3c adds front/back list-observation route-loss roots while
     // keeping production traversal as raw traced checkpoint state.
+    // W6G.1f.3g.3d adds one owning-lazy root for the forced text-lines
+    // collection schedule; production transform state remains raw and traced.
     assert_eq!(
         occurrence_fingerprint(actual),
-        16_246_847_373_718_214_224,
+        1_686_012_915_186_220_137,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -923,7 +925,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 204),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 568),
+            ((SourceScope::Test, EdgeSurface::Typed), 569),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

@@ -3050,23 +3050,32 @@ fn list_concat_resumes_after_its_source_becomes_available() {
 
 #[test]
 fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
-    let expr = builtin2_expr(
+    // The returned list retains managed lazy structure. Keep both its
+    // construction and observation on one private heap, and root it while a
+    // parallel collector may run in another fixture.
+    let context = isolated_test_context();
+    let sum = Value::builtin_call(context.values(), Builtin::Add, vec![n(1), n(1)]);
+    let append = Value::builtin_call(
+        context.values(),
         Builtin::Append,
-        TestExpr::Value(Value::binary_from_text("Hi")),
-        builtin2_expr(Builtin::Add, TestExpr::Value(n(1)), TestExpr::Value(n(1))),
+        vec![Value::binary_from_text("Hi"), sum],
     );
-
-    let value = eval_closed_expr(&expr).expect("append should preserve lazy chunk");
+    let value = eval_value(&context, &append).expect("append should preserve lazy chunk");
+    let value_root = context
+        .values()
+        .with_runtime_value_access(|access| access.root_runtime_value(value));
+    let value = value_root.clone_core_for_test();
     let Value::List(list) = value else {
         panic!("append should produce a list");
     };
 
-    let err = list_output_bytes(&test_context(), &list)
-        .expect_err("bad lazy chunk should fail when observed");
+    let err =
+        list_output_bytes(&context, &list).expect_err("bad lazy chunk should fail when observed");
     assert!(
         err.to_string()
             .contains("lazy list chunk must evaluate to a list or binary value")
     );
+    drop(value_root);
 }
 
 #[test]

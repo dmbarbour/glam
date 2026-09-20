@@ -180,11 +180,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6G.1f.3e.1 and W6G.1f.3g.1a expose regional logical-list front/back bridges while retaining the compatibility owners until parent-family cutover"
     ),
     context_entry!(
-        "src/eval/list_transform_machine.rs",
-        [6, 3],
-        "W6D.4 durable list-transform owners and resumable text extraction"
-    ),
-    context_entry!(
         "src/eval/net.rs",
         [22, 7],
         "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner; NC1 shared net-WHNF budget driver; NC3-NC5 regional callable spill, resumption, and cold exact terminalization; NC6 retired the synchronous deferred-callable context; W6B.4b.1 retired synchronous access resolution; W6G.1f.3c drives managed net checkpoints beneath caller-supplied access"

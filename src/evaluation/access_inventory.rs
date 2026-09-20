@@ -627,6 +627,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::promised_list_chunks_remain_assignable_after_early_observation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -870,7 +871,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // payload in one explicit access region.
         // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
         // inspect their exact lazy-owned checkpoint under two bounded regions.
-        ("src/eval/tests.rs", GatewayCounts::new(13, 0)),
+        // W6G.1f.3g.3d isolates and roots one managed lazy-list result so a
+        // parallel collector cannot retire the fixture during observation.
+        ("src/eval/tests.rs", GatewayCounts::new(14, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
         // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a
