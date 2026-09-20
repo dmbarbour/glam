@@ -2,8 +2,8 @@
 
 Status: active; PNC0-PNC3 completed on 2026-09-20. The
 [post-PNC3 review](../reviews/PureInteractionNetConstructionPNC3_2026-09-20.md)
-found no confirmed semantic defect. Its focused verification and reset-key
-representation remediations gate PNC4. This is the focused
+found no semantic defect, and its focused verification and reset-key
+representation remediations are complete. PNC4 is next. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -647,6 +647,9 @@ The executable reference matrix is:
 | one future per alternative | indexed managed `ListEffectFix` recipe | `list_effect_fix_allocates_one_future_for_each_observed_alternative` |
 | fix hides/restores reset scope | clear before body; per-outcome restore adapter | `hidden_builder_fix_uses_independent_alternatives_and_restores_control` |
 | recursive fix observation | lazy value projection from the complete promised outcome | `hidden_builder_fix_reports_recursive_future_observation` |
+| exact path/state suspension and route loss | retained builtin checkpoint plus exact promise dependencies | `builder_checkpoint_survives_path_and_state_dependencies_without_replay` |
+| lazy key suspension and route loss | counted key source beneath the retained builtin checkpoint | `builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss` |
+| later fix alternative route loss | retained selection route across fix and restoration adapters | `later_builder_fix_alternative_survives_route_loss_without_replay` |
 
 `.r`, successful state operations, reset return, resume return, and fixed
 outcome restoration all converge on one return dispatcher. `.cut` stops that
@@ -667,15 +670,15 @@ The raw-value, durable-owner, persistent-edge, regional-constructor, and WHNF
 censuses classify the new helpers as access-bounded evaluator work. Focused
 control/fix fixtures, all source inventories, Clippy, the complete Rust suite,
 and the interaction-net profiling matrix passed for the PNC3 implementation.
-The post-PNC3 review identifies the additional forced-order and malformed-key
-fixtures required before PNC4 begins; those narrower gaps supersede the
-stronger original closure claim.
+The post-PNC3 review's additional forced-order and malformed-key fixtures now
+close the narrower gaps in the original completion record. PNC4 may therefore
+begin without changing PNC3's architecture or semantics.
 
 ### PNC4 — Pure net-builder API
 
-Status: pending the post-PNC3 review remediations. The implementation should
-use the following checkpoints rather than combining state representation,
-operand demand, and API assembly in one change.
+Status: ready after the post-PNC3 review remediations. The implementation
+should use the following checkpoints rather than combining state
+representation, operand demand, and API assembly in one change.
 
 #### PNC4A — Initial state and operation schema
 

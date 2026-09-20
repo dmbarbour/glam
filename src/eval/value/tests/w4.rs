@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::core::{Builtin, ListEffectComputation};
+use crate::core::{Builtin, BuiltinCall, ListEffectComputation};
 use crate::eval::list_machine::{ListFrontMachine, ListFrontPoll};
 
 fn isolated_context() -> crate::evaluation::OwnedEvalContext {
@@ -319,6 +319,147 @@ fn fix_function_returning_its_future_twice(context: &EvalContext) -> Value {
         Arc::new(handler),
     );
     crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
+}
+
+fn retained_application_machine(
+    context: &EvalContext,
+    function: Value,
+    arguments: Arc<[Value]>,
+) -> (ManagedLazyRoot, LazyTaskMachine) {
+    let retained =
+        LazyValue::from_application(context.values(), function, arguments).root(context.values());
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    (retained, lazy_machine(context, lazy))
+}
+
+fn retained_lazy_machine(
+    context: &EvalContext,
+    value: Value,
+) -> (ManagedLazyRoot, LazyTaskMachine) {
+    let Value::Lazy(lazy) = value else {
+        panic!("the retained fixture must be a lazy value")
+    };
+    let retained = lazy.root(context.values());
+    (retained, lazy_machine(context, lazy))
+}
+
+fn resume_after_lazy_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    machine: LazyTaskMachine,
+) -> LazyTaskMachine {
+    drop(machine);
+    collect_between_handoffs(context);
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+    lazy_machine(context, lazy)
+}
+
+fn assert_lazy_checkpoint_kind(
+    context: &EvalContext,
+    machine: &LazyTaskMachine,
+    expected: ManagedLazyCheckpointKindTag,
+) {
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = machine
+            .lazy
+            .access(&access)
+            .expect("the fixture route must share its value domain")
+            .checkpoint_snapshot()
+            .expect("blocked lazy work must retain a managed checkpoint");
+        assert_eq!(checkpoint.kind(), expected);
+    });
+}
+
+fn poll_until_blocked_after_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+    route_losses: &mut usize,
+) -> (LazyTaskMachine, WorkDependency) {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..512 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_lazy_route_loss(context, retained, machine);
+                *route_losses += 1;
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                let dependency = block
+                    .dependency
+                    .expect("the blocked fixture must expose an exact dependency");
+                match dependency {
+                    WorkDependency::Wait(wait) => {
+                        pump_to_ready(context, &wait);
+                        machine = resume_after_lazy_route_loss(context, retained, machine);
+                        *route_losses += 1;
+                    }
+                    WorkDependency::Promise(promise) => {
+                        return (machine, WorkDependency::Promise(promise));
+                    }
+                    WorkDependency::Test(_) => {
+                        panic!("the fixture exposed a synthetic dependency")
+                    }
+                }
+            }
+            EvaluationMachinePoll::Complete(_) => panic!("the fixture completed before blocking"),
+            EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("the fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(attempt, 511, "the fixture did not reach its dependency");
+    }
+    unreachable!("the bounded fixture must block or panic")
+}
+
+fn drive_after_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+    route_losses: &mut usize,
+) -> Value {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..2048 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_lazy_route_loss(context, retained, machine);
+                *route_losses += 1;
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                let dependency = block
+                    .dependency
+                    .expect("the blocked fixture must expose an exact dependency");
+                match dependency {
+                    WorkDependency::Wait(wait) => {
+                        pump_to_ready(context, &wait);
+                        machine = resume_after_lazy_route_loss(context, retained, machine);
+                        *route_losses += 1;
+                    }
+                    WorkDependency::Promise(_) => {
+                        panic!("the self-contained fixture left an unresolved promise")
+                    }
+                    WorkDependency::Test(_) => {
+                        panic!("the self-contained fixture exposed a synthetic dependency")
+                    }
+                }
+            }
+            EvaluationMachinePoll::Complete(value) => return value.clone_core_for_test(),
+            EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("the fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(attempt, 2047, "the fixture exhausted its route-loss bound");
+    }
+    unreachable!("the bounded fixture must complete or panic")
 }
 
 fn poll_object_until_blocked(
@@ -1131,6 +1272,226 @@ fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
         context.values().managed_promise_lifecycle_counts_for_test(),
         lifecycle_after_exhaustion,
         "the memoized exhausted tail must not allocate or publish another future"
+    );
+}
+
+#[test]
+fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
+    let context = isolated_context();
+    let visible = crate::core::Key::atom_from_text("visible");
+    let path_promise = PromisedValue::new(context.values(), "builder path dependency");
+    let path_owner = path_promise.root(context.values());
+    let state_promise = PromisedValue::new(context.values(), "builder state dependency");
+    let state_owner = state_promise.root(context.values());
+    let path_value = Value::List(List::from_values(vec![
+        visible.to_value_with(context.values()),
+    ]));
+    let path_root = crate::runtime::RuntimeValueRoot::new(context.values(), path_value);
+    let state = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::initial_state_for_test(
+            &access,
+            Value::Dict(Dict::new_sync().insert(visible, number(73))),
+        )
+    });
+    let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
+
+    let (path, state) = context.values().with_runtime_value_access(|access| {
+        (
+            Value::Promised(PromisedValue::from_root(&path_owner, &access)),
+            Value::Promised(PromisedValue::from_root(&state_owner, &access)),
+        )
+    });
+    let call = Value::builtin_call(
+        context.values(),
+        Builtin::InteractionNetBuilderGet,
+        vec![path, state],
+    );
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
+    let WorkDependency::Promise(dependency) = dependency else {
+        panic!("builder path demand must publish its exact promise dependency")
+    };
+    assert_eq!(dependency.id(), path_promise.id(context.values()));
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(
+        context.values(),
+        &path_promise,
+        path_root.clone_core_for_test(),
+    )
+    .expect("the path dependency should accept its assignment");
+
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
+    let WorkDependency::Promise(dependency) = dependency else {
+        panic!("builder state demand must publish its exact promise dependency")
+    };
+    assert_eq!(dependency.id(), state_promise.id(context.values()));
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(
+        context.values(),
+        &state_promise,
+        state_root.clone_core_for_test(),
+    )
+    .expect("the state dependency should accept its assignment");
+
+    let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    let (outcome, tail) =
+        list_front(&context, results).expect("builder get must return one outcome");
+    assert!(list_front(&context, tail).is_none());
+    let [value, _state] = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
+            .expect("builder get must retain the strict outcome schema")
+    });
+    assert_eq!(value, number(73));
+    assert!(
+        route_losses >= 3,
+        "the fixture must lose routes before and after exact dependency publication"
+    );
+}
+
+#[test]
+fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
+    let context = isolated_context();
+    let key_demands = Arc::new(AtomicUsize::new(0));
+    let observed_key_demands = Arc::clone(&key_demands);
+    let key = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted builder reset key",
+        move |_| {
+            observed_key_demands.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::binary_from_text("route-loss prompt"))
+        },
+    ));
+    let state = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
+    });
+    let operation = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::InteractionNetBuilderReturn,
+        arguments: Arc::from([number(74)]),
+    });
+    let call = Value::builtin_call(
+        context.values(),
+        Builtin::InteractionNetBuilderReset,
+        vec![key, operation, state],
+    );
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+    let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    let (outcome, tail) =
+        list_front(&context, results).expect("builder reset must return one outcome");
+    assert!(list_front(&context, tail).is_none());
+    let [value, _state] = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
+            .expect("builder reset must retain the strict outcome schema")
+    });
+    assert_eq!(value, number(74));
+    assert_eq!(key_demands.load(Ordering::SeqCst), 1);
+    assert!(
+        route_losses > 0,
+        "the lazy reset-key observation must cross a forced route loss"
+    );
+}
+
+#[test]
+fn later_builder_fix_alternative_survives_route_loss_without_replay() {
+    let context = isolated_context();
+    let state = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
+    });
+    let function_demands = Arc::new(AtomicUsize::new(0));
+    let continuation_demands = Arc::new(AtomicUsize::new(0));
+    let (operation, state) = context.values().with_runtime_value_access(|access| {
+        let returned = |value| {
+            Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::InteractionNetBuilderReturn,
+                arguments: Arc::from([number(value)]),
+            })
+        };
+        let choices = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderAlt,
+            arguments: Arc::from([returned(81), returned(82)]),
+        });
+        let function = crate::eval::test_support::closed_function_value_in(
+            context.values(),
+            1,
+            crate::eval::test_support::TestExpr::Value(choices),
+        );
+        let function = crate::runtime::RuntimeValueRoot::new(context.values(), function);
+        let observed_function = Arc::clone(&function_demands);
+        let function = Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "counted builder fix function",
+            move |_| {
+                observed_function.fetch_add(1, Ordering::SeqCst);
+                Ok(function.clone_core_for_test())
+            },
+        ));
+        let fixed = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderFix,
+            arguments: Arc::from([function]),
+        });
+
+        let continuation = crate::eval::test_support::closed_function_value_in(
+            context.values(),
+            1,
+            crate::eval::test_support::TestExpr::Apply(
+                Arc::new(crate::eval::test_support::TestExpr::Value(Value::Builtin(
+                    Builtin::InteractionNetBuilderReturn,
+                ))),
+                Arc::new(crate::eval::test_support::TestExpr::Local(0)),
+            ),
+        );
+        let continuation = crate::runtime::RuntimeValueRoot::new(context.values(), continuation);
+        let observed_continuation = Arc::clone(&continuation_demands);
+        let continuation = Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "counted builder fix continuation",
+            move |_| {
+                observed_continuation.fetch_add(1, Ordering::SeqCst);
+                Ok(continuation.clone_core_for_test())
+            },
+        ));
+        let operation = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderSeq,
+            arguments: Arc::from([fixed, continuation]),
+        });
+        (operation, access.duplicate_value(&state))
+    });
+    let results = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        operation,
+        Arc::from([state]),
+    ));
+    let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
+    let (retained, machine) = retained_application_machine(
+        &context,
+        Value::Builtin(Builtin::ListAt),
+        Arc::from([number(1), results]),
+    );
+    let mut route_losses = 0;
+    let outcome = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    let [value, _state] = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
+            .expect("the selected builder fix alternative must use the outcome schema")
+    });
+    let value = crate::eval::eval_value(&context, &value)
+        .expect("the selected builder continuation value should evaluate");
+    assert_eq!(value, number(82));
+    assert_eq!(function_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(continuation_demands.load(Ordering::SeqCst), 1);
+    let lifecycle_after = context.values().managed_promise_lifecycle_counts_for_test();
+    assert_eq!(lifecycle_after.0 - lifecycle_before.0, 2);
+    assert_eq!(lifecycle_after.1 - lifecycle_before.1, 2);
+    assert!(
+        route_losses > 0,
+        "the later builder-fix alternative must survive at least one forced route loss"
     );
 }
 

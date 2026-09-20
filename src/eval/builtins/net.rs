@@ -12,6 +12,8 @@ mod tests;
 pub(in crate::eval) use builder::RegionalBuilderBuiltinMachine;
 pub(super) use builder::apply_builder_builtin_in;
 #[cfg(test)]
+pub(in crate::eval) use builder::{decode_outcome_for_test, initial_state_for_test};
+#[cfg(test)]
 pub(crate) use construction::assert_construction_port_family_shape;
 pub(in crate::eval) use construction::{NetConstructionMachine, NetConstructionPoll};
 pub(in crate::eval) use netlist::interaction_net_from_netlist_in;

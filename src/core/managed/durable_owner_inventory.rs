@@ -975,11 +975,12 @@ const DECLARATION_BASELINE_COUNT: usize = 245;
 // beneath that same checkpoint: protected state fields, replacement state,
 // and resumable delegated path/update progress.
 // PNC3 adds two access-bounded builder fix adapters and seven raw values. The
-// values are consumed synchronously beneath the managed builtin checkpoint;
-// neither helper is a durable owner.
+// PNC3R-004 remediation replaces one reset-frame Value with its decoded Key.
+// The remaining values are consumed synchronously beneath the managed builtin
+// checkpoint; neither helper is a durable owner.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([308, 116, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 18_332_894_746_561_041_689;
+    DeclarationSignals::new([307, 116, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_551_188_357_520_574_460;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

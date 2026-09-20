@@ -2,6 +2,9 @@
 
 mod net;
 
+#[cfg(test)]
+pub(in crate::eval) use net::{decode_outcome_for_test, initial_state_for_test};
+
 use super::sequence::append_values;
 use super::*;
 use crate::evaluation::EvaluationValueAccess;

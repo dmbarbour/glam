@@ -5,10 +5,10 @@ Baseline: PNC2 closes at `f857f9dd`. The reviewed PNC3 implementation spans
 coordinator repairs `6215e347` and `56d5e804` were discovered while exercising
 that implementation.
 
-Status: review complete. No confirmed semantic defect was found in PNC3's
-state/control or list-fix implementation. Four focused remediations below gate
-PNC4 because the PNC3 completion record currently claims stronger verification
-than its direct fixtures provide.
+Status: review and remediation complete. No semantic defect was found in
+PNC3's state/control or list-fix implementation. PNC3R-001 through PNC3R-004
+now close the proof and representation gaps found by this review, so PNC4 may
+begin.
 
 ## Scope and Method
 
@@ -131,7 +131,7 @@ are unclosed proof or representation issues, not observed result mismatches.
 
 ## Findings
 
-### PNC3R-001 — Open: builder-specific suspension and route-loss proof is missing
+### PNC3R-001 — Resolved: builder-specific suspension and route-loss proof was missing
 
 **Severity:** medium verification
 
@@ -144,13 +144,14 @@ yield, dependency publication, route loss, collection, and resumption.
 The generic list-fix fixture does force route loss for alternative zero, but
 does not cover the builder fix adapters or a later indexed alternative.
 
-Before PNC4, add a retained-source harness which:
-
-- interrupts state and key/path demand on both sides of publication;
-- drops and reconstructs the evaluator route, collects, then resumes;
-- counts key/function/continuation observations so replay cannot hide behind
-  equal values; and
-- repeats the exercise while demanding a later builder-fix alternative.
+A retained-source harness now reconstructs the evaluator route and collects
+after every relevant handoff. One fixture forces exact path and state promise
+dependencies, loses the route after each dependency publication, assigns them
+in order, and resumes the same managed builtin checkpoint. A second counts one
+lazy reset-key observation across route loss. A third selects builder-fix
+alternative one while counting function and continuation observations and
+requiring exactly two fix-promise constructions and publications. Equal final
+values therefore cannot conceal replay.
 
 ### PNC3R-002 — Resolved: per-alternative future identity and exhaustion were under-latched
 
@@ -229,8 +230,8 @@ review:
 
 ## Future-Phase Assessment
 
-PNC4 remains the correct next implementation phase after PNC3R-001 through
-PNC3R-004 close. Its regional construction operations should extend the
+PNC4 remains the correct next implementation phase now that PNC3R-001 through
+PNC3R-004 are closed. Its regional construction operations should extend the
 existing managed builder checkpoint and return through `dispatch_return`;
 they should not introduce another machine family. Protected journal fields
 must remain O(1)-prepend structures rather than being fully decoded on every
@@ -253,7 +254,7 @@ not replace the public one-shot and cycle-reclamation matrix.
 
 ## Verification
 
-The implementation baseline passed immediately before and during this review:
+The remediated implementation passes:
 
 ```text
 cargo fmt --check
@@ -262,8 +263,9 @@ cargo test -q
 scripts/check-interaction-net-profiling.sh
 ```
 
-The ordinary suite reported 1,767 passed library tests and three ignored at
-the fixed-width baseline, plus all workspace partitions. The profiling script
-passed all thirteen named profiling fixtures on the reviewed tree. Focused
-PNC3 tests cover the behavior listed in the completion matrix; findings
-PNC3R-001 through PNC3R-003 precisely delimit what those tests do not force.
+The ordinary suite reports 1,771 passed library tests and three ignored, plus
+all workspace partitions. The profiling script passes all thirteen named
+profiling fixtures. The source-backed root-publication, mutator-introduction,
+persistent-edge, and durable-owner inventories were reconciled with the new
+test roots and the reset-frame `Value` to `Key` refinement; their focused gates
+also pass.

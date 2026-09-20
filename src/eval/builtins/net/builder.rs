@@ -58,6 +58,28 @@ pub(super) fn reset_tag_for_test() -> Key {
     RESET_TAG.clone()
 }
 
+#[cfg(test)]
+pub(in crate::eval) fn initial_state_for_test(
+    access: &RuntimeValueAccess<'_>,
+    user_state: Value,
+) -> Value {
+    super::netlist::encode_builder_state(
+        access,
+        &Arc::new(super::construction::ConstructionBrand::default()),
+        1,
+        Vec::new(),
+        user_state,
+    )
+}
+
+#[cfg(test)]
+pub(in crate::eval) fn decode_outcome_for_test(
+    access: &RuntimeValueAccess<'_>,
+    outcome: &Value,
+) -> Result<[Value; 2], EvaluationHalt> {
+    decode_outcome(access, outcome)
+}
+
 pub(in crate::eval) fn apply_builder_builtin_in(
     access: &RuntimeValueAccess<'_>,
     builtin: Builtin,

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        840,
+        844,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -906,9 +906,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // direct-result list flat-map remains source ordered across suspension.
     // PNC3D adds one test-only promise working duplicate while forcing two
     // ordered fix alternatives and proving that each receives its own future.
+    // PNC3R-001 adds four test-only registered roots for exact builder
+    // path/state dependencies and retained route-loss applications.
     assert_eq!(
         occurrence_fingerprint(actual),
-        15_225_425_590_203_497_707,
+        3_505_358_059_458_879_632,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -955,7 +957,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 588),
+            ((SourceScope::Test, EdgeSurface::Typed), 592),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
