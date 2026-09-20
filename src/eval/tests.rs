@@ -7361,7 +7361,9 @@ fn reflection_gate_memoizes_task_failure() {
 }
 
 fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
-    let context = test_context();
+    // This fixture forces collection explicitly, so it must not share the
+    // process-wide test value domain with unrelated parallel tests.
+    let context = isolated_test_context();
     let detail = Key::atom_from_text("detail");
     let emission = Value::Dict(
         Dict::new_sync()
@@ -7390,10 +7392,19 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
     let Value::Lazy(gate_lazy) = &gate else {
         panic!("reflection annotation should produce a lazy gate")
     };
+    let gate_root = gate_lazy.root(context.values());
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the rooted reflection gate must survive collection before launch");
 
     let first = eval_value(&context, &gate)
         .expect_err("the reflection gate should retain its structured task failure")
         .into_permanent_failure();
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the terminal gate cache must survive collection after launch");
     assert_eq!(first.emission_value(), Some(&emission));
     assert_eq!(
         first.contexts(),
@@ -7422,6 +7433,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         0,
         "a propagated gate failure must not remain a detached task failure"
     );
+    drop(gate_root);
 }
 
 #[test]
