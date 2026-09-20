@@ -9,24 +9,16 @@ use crate::core::{
     Atom, Builtin, BuiltinCall, Dict, Key, LazyId, List, RuntimeValueAccess, Value, keys,
     trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationStepBudget, EvaluationValueAccess,
-    EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
-};
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::number::Number;
-use crate::runtime::RuntimeValueRoot;
 
-use super::access_machine::{
-    ConversionPoll, KeyListMachine, RegionalConversionPoll, RegionalKeyList,
-};
-use super::builtin_machine::{BuiltinTaskPoll, RegionalBuiltinPoll};
+use super::access_machine::{RegionalConversionPoll, RegionalKeyList};
+use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{
     RegionalListBack, RegionalListBackPoll, RegionalListFront, RegionalListFrontPoll,
 };
-use super::tagged_machine::{SemanticUndefinedMachine, SemanticUndefinedPoll};
 use super::whnf::{
-    RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation, drive_regional_in_place,
-    reduce_semantic_shell,
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
 
 #[derive(Clone, Copy)]
@@ -60,18 +52,20 @@ pub(in crate::eval) struct RegionalPatternDictPredicateMachine {
     source_owner: LazyId,
 }
 
-pub(crate) struct PatternDictTakeMachine {
+pub(in crate::eval) struct RegionalPatternDictTakeMachine {
     optional: bool,
-    path: Option<KeyListMachine>,
+    path: RegionalKeyList,
     keys: Option<Vec<Key>>,
-    source: Option<WhnfComputation>,
-    original: Option<RuntimeValueRoot>,
-    current: Option<RuntimeValueRoot>,
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    original: Option<Value>,
+    current: Option<Value>,
     next_key: usize,
-    selected: Option<WhnfComputation>,
-    selected_value: Option<RuntimeValueRoot>,
-    frames: Vec<PatternDictTakeFrame>,
-    undefined: Option<SemanticUndefinedMachine>,
+    selected: Option<RegionalWhnfWork>,
+    selected_value: Option<Value>,
+    frames: Vec<RegionalPatternDictTakeFrame>,
+    undefined: Option<super::tagged_machine::RegionalSemanticUndefined>,
+    source_owner: LazyId,
 }
 
 pub(in crate::eval) struct RegionalPatternEqualMachine {
@@ -93,14 +87,14 @@ enum PatternLiteral {
     Unsupported(String),
 }
 
-struct PatternDictTakeFrame {
-    parent: RuntimeValueRoot,
+struct RegionalPatternDictTakeFrame {
+    parent: Value,
     key: Key,
 }
 
 enum PatternDictSelection {
     Missing,
-    Present(RuntimeValueRoot),
+    Present(Value),
 }
 
 enum RegionalPatternDictPredicateState {
@@ -212,16 +206,26 @@ impl RegionalPatternDictPredicateMachine {
     }
 }
 
-impl PatternDictTakeMachine {
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [path, source]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("dictionary pattern extraction retains two operands");
+impl RegionalPatternDictTakeMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let [path, source] = arguments else {
+            panic!("dictionary pattern extraction retains two operands")
+        };
         Self {
             optional: builtin == Builtin::PatternDictTryTakeOptional,
-            path: Some(KeyListMachine::unowned(path)),
+            path: RegionalKeyList::new(
+                access,
+                access.values().duplicate_value(path),
+                Some(source_owner),
+            ),
             keys: None,
-            source: Some(WhnfComputation::from_root(source)),
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
             original: None,
             current: None,
             next_key: 0,
@@ -229,133 +233,150 @@ impl PatternDictTakeMachine {
             selected_value: None,
             frames: Vec::new(),
             undefined: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        if let Some(path) = &mut self.path {
-            return match path.poll(poll_context, context, durable_context, step_budget) {
-                ConversionPoll::Ready(keys) if keys.is_empty() => BuiltinTaskPoll::Failed(
-                    context.root_failure(Arc::new(crate::core::EvaluationFailure::message(
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if self.keys.is_none() {
+            return match self.path.poll_in(access, step_budget) {
+                RegionalConversionPoll::Ready(keys) if keys.is_empty() => {
+                    RegionalBuiltinPoll::Failed(Arc::new(crate::core::EvaluationFailure::message(
                         "pattern-dict-try-take received an empty compiler path",
-                    ))),
-                ),
-                ConversionPoll::Ready(keys) => {
-                    self.keys = Some(keys);
-                    self.path = None;
-                    BuiltinTaskPoll::Yielded
+                    )))
                 }
-                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalConversionPoll::Ready(keys) => {
+                    self.keys = Some(keys);
+                    RegionalBuiltinPoll::Yielded
+                }
+                RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
 
         if let Some(undefined) = &mut self.undefined {
-            return match undefined.poll(poll_context, context, durable_context, step_budget) {
-                SemanticUndefinedPoll::Ready(true) => self.finish_absent(context),
-                SemanticUndefinedPoll::Ready(false) => self.finish_found(context),
-                SemanticUndefinedPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                SemanticUndefinedPoll::Yielded => BuiltinTaskPoll::Yielded,
-                SemanticUndefinedPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            return match undefined.poll_in(access, step_budget) {
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(true) => {
+                    self.finish_absent(access)
+                }
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(false) => {
+                    self.finish_found(access)
+                }
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
+                    RegionalBuiltinPoll::Boundary(request)
+                }
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Yielded => {
+                    RegionalBuiltinPoll::Yielded
+                }
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
+                    RegionalBuiltinPoll::Failed(failure)
+                }
             };
         }
 
         if let Some(selected) = &mut self.selected {
             let value =
-                match poll_whnf_computation(selected, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(value) => value,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
+                match drive_regional_in_place(access, selected, step_budget, reduce_semantic_shell)
+                {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
                     }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!(
-                            "dictionary pattern member produced an external {boundary:?} boundary"
-                        )
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
             self.selected = None;
             if self.next_key == self.keys().len() {
-                self.selected_value = Some(value.clone());
-                self.undefined = Some(SemanticUndefinedMachine::new(value));
-                return BuiltinTaskPoll::Yielded;
+                self.undefined = Some(super::tagged_machine::RegionalSemanticUndefined::new_in(
+                    access,
+                    access.values().duplicate_value(&value),
+                    self.source_owner,
+                ));
+                self.selected_value = Some(value);
+                return RegionalBuiltinPoll::Yielded;
             }
-            let is_dict = context
-                .with_value_access(|access| matches!(access.clone_root(&value), Value::Dict(_)));
-            if !is_dict {
-                return rooted_pattern_failure(context);
+            if !matches!(value, Value::Dict(_)) {
+                return pattern_failure_in(access);
             }
             let key = self.keys()[self.next_key - 1].clone();
-            self.frames.push(PatternDictTakeFrame {
+            self.frames.push(RegionalPatternDictTakeFrame {
                 parent: self
                     .current
                     .as_ref()
-                    .expect("dictionary extraction must retain its current parent")
-                    .clone(),
+                    .map(|parent| access.values().duplicate_value(parent))
+                    .expect("dictionary extraction must retain its current parent"),
                 key,
             });
             self.current = Some(value);
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
-        if let Some(source) = &mut self.source {
-            let source =
-                match poll_whnf_computation(source, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(source) => source,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!(
-                            "dictionary pattern source produced an external {boundary:?} boundary"
-                        )
-                    }
-                };
-            self.source = None;
-            let is_dict = context
-                .with_value_access(|access| matches!(access.clone_root(&source), Value::Dict(_)));
-            if !is_dict {
-                return rooted_pattern_failure(context);
+        if self.source.is_some() || self.source_demand.is_some() {
+            if self.source_demand.is_none() {
+                let source = self
+                    .source
+                    .take()
+                    .expect("dictionary extraction must retain its source");
+                self.source_demand = Some(
+                    RegionalWhnfWork::from_focus(access, source)
+                        .with_source_owner(self.source_owner),
+                );
             }
-            self.original = Some(source.clone());
+            let source = match drive_regional_in_place(
+                access,
+                self.source_demand
+                    .as_mut()
+                    .expect("dictionary extraction source demand must be installed"),
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(source) => source,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            self.source_demand = None;
+            if !matches!(source, Value::Dict(_)) {
+                return pattern_failure_in(access);
+            }
+            self.original = Some(access.values().duplicate_value(&source));
             self.current = Some(source);
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         let key = &self.keys()[self.next_key];
-        let selection = context.with_value_access(|access| {
-            let Value::Dict(dict) = access.clone_root(
-                self.current
-                    .as_ref()
-                    .expect("dictionary extraction must retain its current dictionary"),
-            ) else {
-                unreachable!("dictionary extraction advances only through dictionaries")
-            };
-            dict.get(key)
-                .map_or(PatternDictSelection::Missing, |value| {
-                    PatternDictSelection::Present(
-                        access
-                            .values()
-                            .root_runtime_value(access.values().duplicate_value(value)),
-                    )
-                })
-        });
+        let Value::Dict(dict) = self
+            .current
+            .as_ref()
+            .expect("dictionary extraction must retain its current dictionary")
+        else {
+            unreachable!("dictionary extraction advances only through dictionaries")
+        };
+        let selection = dict
+            .get(key)
+            .map_or(PatternDictSelection::Missing, |value| {
+                PatternDictSelection::Present(access.values().duplicate_value(value))
+            });
         match selection {
-            PatternDictSelection::Missing => self.finish_absent(context),
+            PatternDictSelection::Missing => self.finish_absent(access),
             PatternDictSelection::Present(value) => {
                 self.next_key += 1;
-                self.selected = Some(WhnfComputation::from_root(value));
-                BuiltinTaskPoll::Yielded
+                self.selected = Some(
+                    RegionalWhnfWork::from_focus(access, value)
+                        .with_source_owner(self.source_owner),
+                );
+                RegionalBuiltinPoll::Yielded
             }
         }
     }
@@ -366,65 +387,86 @@ impl PatternDictTakeMachine {
             .expect("dictionary extraction path must be ready")
     }
 
-    fn finish_absent(&self, context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
+    fn finish_absent(&self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
         if !self.optional {
-            return rooted_pattern_failure(context);
+            return pattern_failure_in(access);
         }
-        context.with_value_access(|access| {
-            BuiltinTaskPoll::Ready(pattern_success_in(
-                access.values(),
-                Value::Dict(
-                    Dict::new_sync()
-                        .insert((*keys::VALUE).clone(), Value::Dict(Dict::new_sync()))
-                        .insert(
-                            (*keys::REST).clone(),
-                            access.clone_root(
-                                self.original.as_ref().expect(
-                                    "optional extraction must retain its original dictionary",
-                                ),
-                            ),
-                        ),
-                ),
-            ))
-        })
+        RegionalBuiltinPoll::Ready(pattern_success_value_in(
+            access.values(),
+            Value::Dict(
+                Dict::new_sync()
+                    .insert((*keys::VALUE).clone(), Value::Dict(Dict::new_sync()))
+                    .insert(
+                        (*keys::REST).clone(),
+                        self.original
+                            .as_ref()
+                            .map(|original| access.values().duplicate_value(original))
+                            .expect("optional extraction must retain its original dictionary"),
+                    ),
+            ),
+        ))
     }
 
-    fn finish_found(&self, context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
-        context.with_value_access(|access| {
-            let leaf_parent = self
-                .current
-                .as_ref()
-                .expect("successful extraction must retain its leaf parent");
-            let Value::Dict(leaf_parent) = access.clone_root(leaf_parent) else {
-                unreachable!("the extraction leaf parent must be a dictionary")
+    fn finish_found(&self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+        let Value::Dict(leaf_parent) = self
+            .current
+            .as_ref()
+            .expect("successful extraction must retain its leaf parent")
+        else {
+            unreachable!("the extraction leaf parent must be a dictionary")
+        };
+        let mut rest = leaf_parent.remove(&self.keys()[self.next_key - 1]);
+        for frame in self.frames.iter().rev() {
+            let Value::Dict(parent) = &frame.parent else {
+                unreachable!("an extraction frame parent must be a dictionary")
             };
-            let mut rest = leaf_parent.remove(&self.keys()[self.next_key - 1]);
-            for frame in self.frames.iter().rev() {
-                let Value::Dict(parent) = access.clone_root(&frame.parent) else {
-                    unreachable!("an extraction frame parent must be a dictionary")
-                };
-                rest = if rest.is_empty() {
-                    parent.remove(&frame.key)
-                } else {
-                    parent.insert(frame.key.clone(), Value::Dict(rest))
-                };
-            }
-            BuiltinTaskPoll::Ready(pattern_success_in(
-                access.values(),
-                Value::Dict(
-                    Dict::new_sync()
-                        .insert(
-                            (*keys::VALUE).clone(),
-                            access.clone_root(
-                                self.selected_value
-                                    .as_ref()
-                                    .expect("successful extraction must retain its selected value"),
-                            ),
-                        )
-                        .insert((*keys::REST).clone(), Value::Dict(rest)),
-                ),
-            ))
-        })
+            rest = if rest.is_empty() {
+                parent.remove(&frame.key)
+            } else {
+                parent.insert(frame.key.clone(), Value::Dict(rest))
+            };
+        }
+        RegionalBuiltinPoll::Ready(pattern_success_value_in(
+            access.values(),
+            Value::Dict(
+                Dict::new_sync()
+                    .insert(
+                        (*keys::VALUE).clone(),
+                        self.selected_value
+                            .as_ref()
+                            .map(|value| access.values().duplicate_value(value))
+                            .expect("successful extraction must retain its selected value"),
+                    )
+                    .insert((*keys::REST).clone(), Value::Dict(rest)),
+            ),
+        ))
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.path.trace_managed_edges(visitor);
+        for value in [
+            self.source.as_ref(),
+            self.original.as_ref(),
+            self.current.as_ref(),
+            self.selected_value.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(source_demand) = &self.source_demand {
+            source_demand.trace_managed_edges(visitor);
+        }
+        if let Some(selected) = &self.selected {
+            selected.trace_managed_edges(visitor);
+        }
+        for frame in &self.frames {
+            trace_compatibility_value_managed_edges(&frame.parent, visitor);
+        }
+        if let Some(undefined) = &self.undefined {
+            undefined.trace_managed_edges(visitor);
+        }
     }
 }
 
@@ -1010,24 +1052,6 @@ fn pattern_failure_in(access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll
 
 fn pattern_success_value_in(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
     pattern_effect_value_in(access, &keys::R, vec![value])
-}
-
-fn pattern_success_in(access: &RuntimeValueAccess<'_>, value: Value) -> RuntimeValueRoot {
-    pattern_effect_in(access, &keys::R, vec![value])
-}
-
-fn rooted_pattern_failure(context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
-    BuiltinTaskPoll::Ready(
-        context.with_value_access(|access| pattern_effect_in(access.values(), &keys::FAIL, vec![])),
-    )
-}
-
-fn pattern_effect_in(
-    access: &RuntimeValueAccess<'_>,
-    name: &crate::core::Key,
-    arguments: Vec<Value>,
-) -> RuntimeValueRoot {
-    access.root_runtime_value(pattern_effect_value_in(access, name, arguments))
 }
 
 fn pattern_effect_value_in(

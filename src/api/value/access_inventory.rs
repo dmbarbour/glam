@@ -167,28 +167,12 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6F.3 resumable object composition ownership"
     ),
     entry!(
-        "src/eval/pattern_machine.rs",
-        0,
-        0,
-        2,
-        "durable compiler-pattern result publication",
-        "W6D.5 resumable pattern observations"
-    ),
-    entry!(
         "src/eval/strategy_machine.rs",
         0,
         0,
         1,
         "hidden metadata retained across resumable seq and spark demand",
         "W6C.6 shared durable strategy-demand owner"
-    ),
-    entry!(
-        "src/eval/tagged_machine.rs",
-        0,
-        0,
-        1,
-        "legacy recursive semantic-undefined traversal retained for pattern families",
-        "W6G.1f.3g.3b regional tagged-payload owner; W6G.1f.3g.3e pending pattern cutover"
     ),
     entry!(
         "src/eval/builtins/net/construction.rs",
@@ -495,10 +479,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_composition_machine.rs::next_override_step"
                 | "src/eval/object_composition_machine.rs::root_application"
                 | "src/eval/object_composition_machine.rs::root_plain_extension_in"
-                | "src/eval/pattern_machine.rs::pattern_effect_in"
-                | "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
-                | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint"
@@ -786,10 +767,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_composition_machine.rs::next_override_step#3|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_application#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_plain_extension_in#1|surface=access-publication|scope=production",
-    "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/pattern_machine.rs::pattern_effect_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",

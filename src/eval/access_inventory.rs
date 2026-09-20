@@ -185,11 +185,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner; NC1 shared net-WHNF budget driver; NC3-NC5 regional callable spill, resumption, and cold exact terminalization; NC6 retired the synchronous deferred-callable context; W6B.4b.1 retired synchronous access resolution; W6G.1f.3c drives managed net checkpoints beneath caller-supplied access"
     ),
     context_entry!(
-        "src/eval/pattern_machine.rs",
-        [4, 1],
-        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1-.3a regional list/path/literal/dictionary-predicate state"
-    ),
-    context_entry!(
         "src/eval/sequence.rs",
         [2, 3],
         "I3B.2 and I3D/I3E direct sequence callers"
@@ -201,8 +196,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/tagged_machine.rs",
-        [1, 3],
-        "W6G.1f.3g.3b regional tagged-payload owner with one legacy semantic-undefined owner pending pattern cutover"
+        [0, 2],
+        "W6G.1f.3g.3b regional tagged-payload and semantic-undefined owner; W6G.1f.3g.3e.3b retires the durable pattern client"
     ),
     context_entry!(
         "src/eval/value.rs",

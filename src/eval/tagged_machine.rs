@@ -13,15 +13,11 @@ use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, Key, LazyId, Value,
     trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
-    WorkDependency, poll_whnf_computation,
-};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::evaluation::EvaluationValueAccess;
 
 use super::whnf::{
-    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation,
-    drive_regional_in_place, reduce_semantic_shell,
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
+    reduce_semantic_shell,
 };
 
 pub(in crate::eval) enum RegionalTaggedPayloadPoll {
@@ -225,90 +221,11 @@ impl RegionalSemanticUndefined {
     }
 }
 
-pub(crate) enum SemanticUndefinedPoll {
-    Ready(bool),
-    Pending(WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-/// A depth-first semantic-undefined walk with no Rust recursion.
-pub(crate) struct SemanticUndefinedMachine {
-    remaining: Vec<RuntimeValueRoot>,
-    demand: Option<WhnfComputation>,
-}
-
-impl SemanticUndefinedMachine {
-    pub(crate) fn new(value: RuntimeValueRoot) -> Self {
-        Self {
-            remaining: vec![value],
-            demand: None,
-        }
-    }
-
-    pub(crate) fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> SemanticUndefinedPoll {
-        if self.demand.is_none() {
-            let Some(value) = self.remaining.pop() else {
-                return SemanticUndefinedPoll::Ready(true);
-            };
-            self.demand = Some(WhnfComputation::from_root(value));
-        }
-
-        let value = match poll_whnf_computation(
-            self.demand
-                .as_mut()
-                .expect("undefined traversal demand must be installed"),
-            poll_context,
-            durable_context,
-            step_budget,
-        ) {
-            WhnfOwnerPoll::Ready(value) => value,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return SemanticUndefinedPoll::Pending(dependency);
-            }
-            WhnfOwnerPoll::Yielded => return SemanticUndefinedPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return SemanticUndefinedPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("semantic-undefined demand produced an external {boundary:?} boundary")
-            }
-        };
-        self.demand = None;
-
-        let members = context.with_value_access(|access| match access.clone_root(&value) {
-            Value::Dict(dict) => Some(
-                dict.iter()
-                    .map(|(_, value)| {
-                        access
-                            .values()
-                            .root_runtime_value(access.values().duplicate_value(value))
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        });
-        let Some(members) = members else {
-            return SemanticUndefinedPoll::Ready(false);
-        };
-        self.remaining.extend(members.into_iter().rev());
-        if self.remaining.is_empty() {
-            SemanticUndefinedPoll::Ready(true)
-        } else {
-            SemanticUndefinedPoll::Yielded
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{CoreValueFactory, PromisedValue};
-    use crate::evaluation::EvaluationStepBudget;
+    use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationStepBudget};
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn context() -> crate::evaluation::OwnedEvalContext {

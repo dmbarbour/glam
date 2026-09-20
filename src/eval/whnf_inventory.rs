@@ -687,7 +687,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6G.1f.3g.3e.2b replaces rooted literal/list-item demand and durable
 // list-front recursion with regional state under that owner.
 const EXPECTED_OCCURRENCES: usize = 192;
-const EXPECTED_FINGERPRINT: u64 = 16_212_674_206_744_898_025;
+const EXPECTED_FINGERPRINT: u64 = 1_994_383_537_077_532_997;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -700,8 +700,8 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 57),
-    (Signal::UserSizedLoop, 68),
+    (Signal::StructuralRecursion, 55),
+    (Signal::UserSizedLoop, 70),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),

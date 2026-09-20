@@ -3871,12 +3871,27 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
         vec![path, Value::Dict(Dict::new_sync().insert(foo, child))],
     )
     .expect("dictionary extraction application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated dictionary extraction builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved leaf should suspend dictionary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("dictionary extraction must trace its completed path prefix and frames");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised dictionary leaf");
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &promised_leaf, n(7)).expect("the owner should resolve the leaf");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned dictionary extraction checkpoint must remain live");
 
     let effect = eval_value(&observer, &application)
         .expect("dictionary extraction should resume from the leaf");
@@ -3895,6 +3910,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     };
     assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]

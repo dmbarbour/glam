@@ -6203,17 +6203,34 @@ for it:
            collection structurally irrelevant. The gate then reached the
            separately tracked CLI prepared-session deadlock assigned to
            W6G.1f.2b.
-         - **W6G.1f.3g.3e.3b — dictionary extraction.** Move required and
+         - **W6G.1f.3g.3e.3b — Complete (2026-09-20): dictionary extraction.** Move required and
            optional path conversion, source/member demand, parent frames,
            selected leaf, semantic-undefined traversal, and remainder
            rebuilding beneath the checkpoint. Force collection after a
            completed path prefix and preserve exact required/optional
            fallthrough, failure, and empty-compiler-path behavior.
-       - **W6G.1f.3g.3e.4 — effect and family closure.** Construct raw pattern
+           Completion record: required/optional key conversion, source and
+           selected-member demand, parent frames, selected leaf,
+           semantic-undefined traversal, and persistent remainder rebuilding
+           now remain raw traced state beneath the typed builtin checkpoint.
+           A promised-leaf schedule roots the application, completes a nested
+           prefix, collects and re-enters before and after assignment, and
+           proves the prefix thunk is evaluated once. Existing required,
+           optional, wrong-kind, missing, undefined, forcing-failure, empty
+           compiler-path, and remainder-shape fixtures remain green.
+       - **W6G.1f.3g.3e.4 — Complete (2026-09-20): effect and family closure.** Construct raw pattern
          success/failure effects under caller access, remove the five durable
          pattern owners plus the now-unused durable semantic-undefined owner,
          force collection on the existing promised path/dictionary/list
          schedules, and reconcile every exact inventory.
+         Completion record: all pattern success and fallthrough effects are
+         constructed as raw values under caller access. List, path, literal,
+         dictionary-predicate, and dictionary-extraction owners have all moved
+         beneath the one typed builtin checkpoint, and the final durable
+         semantic-undefined traversal and its registered publications are
+         removed. Forced path, list, literal, emptiness, and extraction
+         schedules plus exact root-publication, owner, access, checkpoint,
+         edge, raw-value, and WHNF ledgers close the family.
      - **W6G.1f.3g.3f — annotations.** Move annotation recognition and its
        pure, metadata, reflection, and diagnostic-context phases last. Return
        reflection scheduling only as a post-access boundary intent; never

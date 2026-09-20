@@ -1004,10 +1004,12 @@ fn is_production_source(relative: &Path) -> bool {
 // list-front, and item state beneath the shared builtin checkpoint.
 // W6G.1f.3g.3e.3a replaces the rooted dictionary-predicate owner with raw
 // source or semantic-undefined state beneath the shared checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 245;
+// W6G.1f.3g.3e.3b replaces rooted dictionary extraction and the final durable
+// semantic-undefined helper with raw path, frame, leaf, and traversal state.
+const DECLARATION_BASELINE_COUNT: usize = 244;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([213, 203, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_458_051_803_445_979_957;
+    DeclarationSignals::new([219, 197, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_548_482_372_370_961_716;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
