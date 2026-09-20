@@ -696,8 +696,8 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC1 moves the two strict semantic replay loops from the construction host
 // into `netlist.rs`; their reviewed shape is now a collection walk rather
 // than generic construction demand-and-inspect work.
-const EXPECTED_OCCURRENCES: usize = 204;
-const EXPECTED_FINGERPRINT: u64 = 16_647_533_649_234_182_830;
+const EXPECTED_OCCURRENCES: usize = 207;
+const EXPECTED_FINGERPRINT: u64 = 15_649_953_041_697_268_275;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -710,14 +710,14 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 51),
+    (Signal::StructuralRecursion, 54),
     (Signal::UserSizedLoop, 86),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 117),
+    (WorkShape::DemandThenInspect, 118),
     (WorkShape::OrderedOperands, 10),
-    (WorkShape::CollectionWalk, 14),
+    (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),

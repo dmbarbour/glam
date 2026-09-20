@@ -914,13 +914,11 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
     let mapped = drive_list_effect_after_route_loss(&context, &retained, machine);
 
     for (index, expected) in [number(1), number(2)].into_iter().enumerate() {
-        let selected = context.values().with_runtime_value_access(|access| {
-            Value::builtin_call_in(
-                &access,
-                Builtin::ListAt,
-                vec![number(index as i64), access.duplicate_value(&mapped)],
-            )
-        });
+        let selected = Value::builtin_call(
+            context.values(),
+            Builtin::ListAt,
+            vec![number(index as i64), mapped.clone()],
+        );
         assert_eq!(
             crate::eval::eval_value(&context, &selected)
                 .expect("direct-result item should evaluate"),

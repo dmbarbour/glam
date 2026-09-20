@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Builtin, Dict, LazyValue, List, RuntimeValueAccess, Value};
+use crate::core::{Builtin, BuiltinCall, Dict, LazyValue, List, RuntimeValueAccess, Value};
 use crate::evaluation::EvalContext;
 
 use super::construction::{ConstructionBrand, ConstructionPortId};
@@ -182,11 +182,15 @@ fn replay_copies_a_lazy_data_payload_without_demanding_it() {
 }
 
 fn partial_builder(
-    access: &RuntimeValueAccess<'_>,
+    _access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Value {
-    Value::builtin_call_in(access, builtin, arguments)
+    assert!(arguments.len() < builtin.arity());
+    Value::PartialBuiltin(BuiltinCall {
+        builtin,
+        arguments: Arc::from(arguments),
+    })
 }
 
 fn constant_builder(access: &RuntimeValueAccess<'_>, value: Value, state: Value) -> Value {
@@ -194,7 +198,7 @@ fn constant_builder(access: &RuntimeValueAccess<'_>, value: Value, state: Value)
         access.values(),
         1,
         crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![
-            super::builder::outcome(value, state),
+            super::builder::outcome(access, value, state),
         ]))),
     )
 }
@@ -213,24 +217,52 @@ fn run_builder_at(
     state: Value,
     index: usize,
 ) -> [Value; 2] {
-    let selected = with_access(context, |access| {
-        let results = Value::Lazy(LazyValue::from_application_in(
-            access,
-            operation,
-            Arc::from([state]),
-        ));
-        Value::builtin_call_in(
-            access,
-            Builtin::ListAt,
-            vec![Value::Number((index as i64).into()), results],
-        )
-    });
+    let results = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        operation,
+        Arc::from([state]),
+    ));
+    let selected = Value::builtin_call(
+        context.values(),
+        Builtin::ListAt,
+        vec![Value::Number((index as i64).into()), results],
+    );
     let outcome = crate::eval::eval_value(context, &selected)
         .expect("builder outcome should evaluate at the requested index");
     with_access(context, |access| {
         super::builder::decode_outcome(access, &outcome)
             .expect("builder outcome should use the strict record schema")
     })
+}
+
+fn builder_result_at(
+    context: &EvalContext,
+    operation: Value,
+    state: Value,
+    index: usize,
+) -> Result<Value, crate::core::EvaluationHalt> {
+    let results = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        operation,
+        Arc::from([state]),
+    ));
+    let selected = Value::builtin_call(
+        context.values(),
+        Builtin::ListAt,
+        vec![Value::Number((index as i64).into()), results],
+    );
+    crate::eval::eval_value(context, &selected)
+}
+
+fn path(
+    values: &crate::core::CoreValueFactory,
+    keys: impl IntoIterator<Item = crate::core::Key>,
+) -> Value {
+    Value::List(List::from_values(
+        keys.into_iter()
+            .map(|key| key.to_value_with(values))
+            .collect(),
+    ))
 }
 
 #[test]
@@ -311,4 +343,147 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         [Value::binary_from_text("selected"), selected_state],
         "cut must retain the selected alternative's state"
     );
+}
+
+#[test]
+fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
+    let context = EvalContext::standalone();
+    let visible = crate::core::Key::atom_from_text("visible");
+    let (initial, get_all, set_visible, set_all, invalid_set) = with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        let initial = encode_builder_state(
+            access,
+            &brand,
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let get_all = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderGet,
+            vec![path(access.values(), [])],
+        );
+        let set_visible = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![
+                path(access.values(), [visible.clone()]),
+                Value::binary_from_text("kept"),
+            ],
+        );
+        let set_all = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+        );
+        let invalid_set = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![path(access.values(), []), Value::Number(42.into())],
+        );
+        (initial, get_all, set_visible, set_all, invalid_set)
+    });
+
+    let [whole, unchanged] = run_builder_at(&context, get_all.clone(), initial.clone(), 0);
+    let Value::Dict(whole) = whole else {
+        panic!("whole-state get must return the user dictionary")
+    };
+    assert!(whole.get(&super::builder::control_key_for_test()).is_some());
+    assert_eq!(unchanged, initial);
+
+    let [_unit, nested_state] = run_builder_at(&context, set_visible, initial.clone(), 0);
+    let [nested_whole, _] = run_builder_at(&context, get_all.clone(), nested_state, 0);
+    let Value::Dict(nested_whole) = nested_whole else {
+        panic!("nested state update must retain a dictionary")
+    };
+    assert_eq!(
+        nested_whole.get(&visible),
+        Some(&Value::binary_from_text("kept"))
+    );
+    assert!(
+        nested_whole
+            .get(&super::builder::control_key_for_test())
+            .is_some(),
+        "a nonempty user path must preserve hidden control state"
+    );
+
+    let invalid = builder_result_at(&context, invalid_set, initial.clone(), 0)
+        .expect_err("whole-state replacement must remain a dictionary");
+    assert!(invalid.to_string().contains("must be a dictionary"));
+
+    let [_unit, replaced_state] = run_builder_at(&context, set_all, initial, 0);
+    let [replacement, _] = run_builder_at(&context, get_all, replaced_state, 0);
+    assert_eq!(replacement, Value::Dict(Dict::new_sync()));
+}
+
+#[test]
+fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_ones() {
+    let context = EvalContext::standalone();
+    let outer = crate::core::Key::atom_from_text("outer");
+    let inner = crate::core::Key::atom_from_text("inner");
+    let source_path = path(context.values(), [outer.clone(), inner.clone()]);
+    let lazy_path = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "lazy builder state path",
+        move |_| Ok(source_path.clone()),
+    ));
+    let inner_dict =
+        Value::Dict(Dict::new_sync().insert(inner.clone(), Value::binary_from_text("ready")));
+    let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "lazy builder state intermediate",
+        move |_| Ok(inner_dict.clone()),
+    ));
+    let (state, get, get_missing) = with_access(&context, |access| {
+        let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
+            unreachable!()
+        };
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            Value::Dict(user_state.insert(outer.clone(), lazy_inner)),
+        );
+        let get = partial_builder(access, Builtin::InteractionNetBuilderGet, vec![lazy_path]);
+        let get_missing = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderGet,
+            vec![path(
+                access.values(),
+                [crate::core::Key::atom_from_text("missing")],
+            )],
+        );
+        (state, get, get_missing)
+    });
+    assert_eq!(
+        run_builder_at(&context, get, state.clone(), 0)[0],
+        Value::binary_from_text("ready")
+    );
+    assert_eq!(
+        run_builder_at(&context, get_missing, state, 0)[0],
+        Value::Dict(Dict::new_sync())
+    );
+
+    let (invalid_state, invalid_get) = with_access(&context, |access| {
+        let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
+            unreachable!()
+        };
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            Value::Dict(user_state.insert(outer.clone(), Value::Number(42.into()))),
+        );
+        let get = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderGet,
+            vec![path(access.values(), [outer, inner])],
+        );
+        (state, get)
+    });
+    let error = builder_result_at(&context, invalid_get, invalid_state, 0)
+        .expect_err("a non-dictionary path intermediate must fail");
+    assert!(error.to_string().contains("not a dictionary"), "{error}");
 }

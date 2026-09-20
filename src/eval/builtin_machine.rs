@@ -16,6 +16,7 @@ use crate::evaluation::EvaluationValueAccess;
 use crate::number::Number;
 
 use super::annotation_machine::RegionalAnnotationMachine;
+use super::builtins::RegionalBuilderBuiltinMachine;
 use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::RegionalEffectMachine;
@@ -53,6 +54,7 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 /// the lazy-owned checkpoint.
 pub(in crate::eval) enum RegionalBuiltinMachine {
     Annotation(Box<RegionalAnnotationMachine>),
+    Builder(Box<RegionalBuilderBuiltinMachine>),
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
@@ -161,6 +163,8 @@ impl RegionalBuiltinMachine {
                 | Builtin::InspectOrigin
                 | Builtin::InteractionNet
                 | Builtin::InteractionNetFromNetlist
+                | Builtin::InteractionNetBuilderGet
+                | Builtin::InteractionNetBuilderSet
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
@@ -295,6 +299,14 @@ impl RegionalBuiltinMachine {
                     source_owner,
                 })
             }
+            Builtin::InteractionNetBuilderGet | Builtin::InteractionNetBuilderSet => {
+                Self::Builder(Box::new(RegionalBuilderBuiltinMachine::new_in(
+                    access,
+                    source_owner,
+                    builtin,
+                    arguments,
+                )))
+            }
             Builtin::NetArity => {
                 let [arity, net] = arguments else {
                     unreachable!("net arity must retain its arity and net operands")
@@ -413,6 +425,7 @@ impl RegionalBuiltinMachine {
     ) -> RegionalBuiltinPoll {
         match self {
             Self::Annotation(machine) => machine.poll_in(access, step_budget),
+            Self::Builder(machine) => machine.poll_in(access, step_budget),
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
@@ -439,6 +452,7 @@ impl RegionalBuiltinMachine {
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match self {
             Self::Annotation(machine) => machine.trace_managed_edges(visitor),
+            Self::Builder(machine) => machine.trace_managed_edges(visitor),
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),

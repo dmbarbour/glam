@@ -1,6 +1,6 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0-PNC1 completed on 2026-09-20. This is the focused
+Status: active; PNC0-PNC2 completed on 2026-09-20. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -424,6 +424,8 @@ traceable, independent of `g_syntax`, and absent from `import 'std`.
 
 #### PNC2C — Protected task-local state
 
+Completed on 2026-09-20.
+
 - Add hierarchical `.get/.set` over only the `user_state` field, using the
   existing regional key-list, WHNF, and dictionary-update machinery.
 - Reserve the pure control key with `abstract_global_path` and initialize its
@@ -434,6 +436,13 @@ traceable, independent of `g_syntax`, and absent from `import 'std`.
 - Verify lazy paths/intermediates, missing and invalid paths, whole-state
   replacement, and preservation of the control entry by ordinary nested
   updates.
+
+The implementation keeps only one new regional adapter around existing
+components: path conversion uses `RegionalKeyList`, reads use `AccessMachine`,
+and nested writes use `DictUpdate`. The adapter owns the protected four-field
+builder record and rebuilds it only after the delegated operation completes.
+No runtime root, reflection task, or additional search state enters the
+semantic graph.
 
 Stop for review if this layer requires a new producer route, a root stored in
 the semantic graph, or a second implementation of ordered list search.

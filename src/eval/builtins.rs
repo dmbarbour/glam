@@ -5,6 +5,7 @@ mod net;
 use super::sequence::append_values;
 use super::*;
 use crate::evaluation::EvaluationValueAccess;
+pub(in crate::eval) use net::RegionalBuilderBuiltinMachine;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
 pub(in crate::eval) use net::interaction_net_from_netlist_in;

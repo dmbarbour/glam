@@ -461,9 +461,9 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph; list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand, list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss, and list_effect_fix_checkpoint_constructs_and_assigns_one_promise force route loss and collection across every recipe family"
     ),
     exact_managed!(
-        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/annotation_machine.rs; src/eval/object_builtin_machine.rs; src/eval/object_composition_machine.rs",
+        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/builtins/net/builder.rs; src/eval/annotation_machine.rs; src/eval/object_builtin_machine.rs; src/eval/object_composition_machine.rs",
         "managed builtin checkpoint cell",
-        "raw builtin arguments, selected strict netlist records, completed scalar/object/composition prefixes, recursive override frames, and regional WHNF/list-front child state behind one representation mutex",
+        "raw builtin arguments, protected builder state/path progress, selected strict netlist records, completed scalar/object/composition prefixes, recursive override frames, and regional WHNF/list-front child state behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
         CompatibilityPayload,
         "W6G.1f.3g.2a-.4c introduce numeric, assertion, provenance, conditional, net, collection, pattern, metadata, annotation, object-inspection, and object-composition arms; forced fixtures collect across exact dependencies, diagnostic phases, deferred traversals, and completed prefixes"
@@ -968,12 +968,15 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.4b removes the durable object-builtin owner and keeps its raw
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 240;
+const DECLARATION_BASELINE_COUNT: usize = 243;
 // PNC1 gives the managed builtin checkpoint one additional traced raw value:
 // the already-selected strict semantic netlist consumed by hidden replay.
+// PNC2C adds three nested regional builder declarations and eight raw values
+// beneath that same checkpoint: protected state fields, replacement state,
+// and resumable delegated path/update progress.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([293, 116, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_672_021_774_992_206_831;
+    DeclarationSignals::new([301, 116, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_746_842_384_446_569_914;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1096,7 +1099,9 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         || declaration.starts_with("src/eval/list_effect_machine.rs::")
     {
         "managed list-effect checkpoint cell"
-    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedBuiltinCheckpointCell" {
+    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedBuiltinCheckpointCell"
+        || declaration.starts_with("src/eval/builtins/net/builder.rs::")
+    {
         "managed builtin checkpoint cell"
     } else if matches!(
         declaration,

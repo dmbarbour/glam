@@ -353,10 +353,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::RuntimeId, 1),
     // Fully regional source scanning latches exact source ownership across
     // access, builtin, list, list-effect, and object child reducers.
-    (CheckpointApi::WithSourceOwner, 46),
+    // PNC2C gives the builder state record and nested dictionary update the
+    // same exact lazy source owner as their managed builtin checkpoint.
+    (CheckpointApi::WithSourceOwner, 48),
 ];
-const EXPECTED_OCCURRENCES: usize = 77;
-const EXPECTED_FINGERPRINT: u64 = 14_423_323_512_758_566_742;
+const EXPECTED_OCCURRENCES: usize = 79;
+const EXPECTED_FINGERPRINT: u64 = 14_172_938_360_768_588_101;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

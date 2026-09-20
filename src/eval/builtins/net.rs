@@ -9,6 +9,7 @@ mod netlist_inventory;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::eval) use builder::RegionalBuilderBuiltinMachine;
 pub(super) use builder::apply_builder_builtin_in;
 #[cfg(test)]
 pub(crate) use construction::assert_construction_port_family_shape;
