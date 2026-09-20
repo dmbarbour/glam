@@ -306,6 +306,7 @@ impl ApiOccurrence {
             | "src/eval/annotation_machine.rs"
             | "src/eval/builtins/effect.rs"
             | "src/eval/builtins/effect/implementation.rs"
+            | "src/eval/effect_machine.rs"
             | "src/eval/builtins/list_effect.rs"
             | "src/eval/builtins/list_effect/implementation.rs"
             | "src/eval/list_effect_machine.rs" => D2cFamily::AnnotationsAndEffects,
@@ -524,9 +525,8 @@ impl ApiOccurrence {
                 _,
             ) => W6E4AnnotationReflection,
             (AnnotationsAndEffects, "src/eval/builtins/effect.rs", _)
-            | (AnnotationsAndEffects, "src/eval/builtins/effect/implementation.rs", _) => {
-                W6E6EffectMap
-            }
+            | (AnnotationsAndEffects, "src/eval/builtins/effect/implementation.rs", _)
+            | (AnnotationsAndEffects, "src/eval/effect_machine.rs", _) => W6E6EffectMap,
             (
                 Objects,
                 "src/eval/builtins/object/implementation.rs",
@@ -1380,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        511,
+        518,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        15_354_072_187_813_870_318,
+        8_037_499_408_490_317_226,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1400,7 +1400,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // W6G.1f.3g.1a-.3e.3b expose the regional list/key constructors and
         // builtin family entry points through literal-pattern migration. Each
         // raw value handoff remains tied to caller-supplied value access.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 215),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 222),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

@@ -688,8 +688,8 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // list-front recursion with regional state under that owner.
 // W6G.1f.3g.3f exposes annotation recognition and collection/metadata walks
 // as regional work beneath the managed builtin checkpoint.
-const EXPECTED_OCCURRENCES: usize = 193;
-const EXPECTED_FINGERPRINT: u64 = 15_260_963_898_592_530_183;
+const EXPECTED_OCCURRENCES: usize = 200;
+const EXPECTED_FINGERPRINT: u64 = 5_044_278_698_429_924_192;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -702,12 +702,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 54),
-    (Signal::UserSizedLoop, 72),
+    (Signal::StructuralRecursion, 53),
+    (Signal::UserSizedLoop, 80),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 108),
+    (WorkShape::DemandThenInspect, 115),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 12),
     (WorkShape::KeyConversion, 2),

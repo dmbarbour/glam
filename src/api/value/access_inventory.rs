@@ -127,14 +127,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover; W6G.1f.3g.1b shared path child"
     ),
     entry!(
-        "src/eval/effect_machine.rs",
-        0,
-        0,
-        6,
-        "durable effect-call and map operands, deferred application, continuation, and fixpoint result publication",
-        "W6E.5-W6E.6 resumable effect dispatch, map, and fixpoint ownership"
-    ),
-    entry!(
         "src/eval/list_machine.rs",
         0,
         1,
@@ -445,12 +437,6 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
                 | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
-                | "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll"
-                | "src/eval/effect_machine.rs::root_application"
-                | "src/eval/effect_machine.rs::root_effect_call"
-                | "src/eval/effect_machine.rs::root_effect_map"
-                | "src/eval/effect_machine.rs::root_effect_map_continuation"
-                | "src/eval/effect_machine.rs::root_effect_map_sequence"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
                 | "src/eval/object_builtin_machine.rs::optional_spec_member"
                 | "src/eval/object_builtin_machine.rs::finish_dict_defs"
@@ -716,12 +702,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
     "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::root_application#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::root_effect_call#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::root_effect_map#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::root_effect_map_continuation#1|surface=access-publication|scope=production",
-    "src/eval/effect_machine.rs::root_effect_map_sequence#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
@@ -744,6 +724,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
+    "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",

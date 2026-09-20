@@ -338,7 +338,7 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // source-owned regional demands beneath that checkpoint.
     // W6G.1f.3g.3f removes fourteen rooted annotation demands and replaces
     // their two distinct regional seeds with explicit source ownership.
-    (CheckpointApi::FromRoot, 43),
+    (CheckpointApi::FromRoot, 38),
     (CheckpointApi::FromLazySource, 1),
     (CheckpointApi::FromApplicationCheckpoint, 4),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
@@ -349,10 +349,10 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::RuntimeId, 1),
     // Fully regional source scanning latches exact source ownership across
     // access, builtin, list, list-effect, and object child reducers.
-    (CheckpointApi::WithSourceOwner, 36),
+    (CheckpointApi::WithSourceOwner, 39),
 ];
-const EXPECTED_OCCURRENCES: usize = 92;
-const EXPECTED_FINGERPRINT: u64 = 2_482_125_478_225_795_346;
+const EXPECTED_OCCURRENCES: usize = 90;
+const EXPECTED_FINGERPRINT: u64 = 13_324_051_210_573_366_021;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

@@ -6282,7 +6282,35 @@ for it:
    - **W6G.1f.3g.4 — effect and object families.** Regionalize effect,
      object-builtin, and object-composition state. Reuse application
      checkpoints and regional child forms rather than embedding a registered
-     root or reconstructing a completed prefix.
+     root or reconstructing a completed prefix. Partition this deliberately:
+     - **W6G.1f.3g.4a — Complete (2026-09-20): effect construction.** Move effect application/call,
+       fixpoint construction, and effect-map traversal beneath the typed
+       checkpoint. Effect values are evaluator-pure recipes here: this phase
+       constructs lazy applications and selections but does not interpret a
+       user or host callback. Completion record: function, key, argument-list,
+       result-list, and fixpoint demand plus completed argument prefixes now
+       remain raw traced state in one managed builtin checkpoint. Six
+       production result-root publications and the durable effect owner are
+       removed; five rooted WHNF seeds become three source-owned regional
+       seeds. Forced effect-call and effect-map schedules collect the owning
+       lazy while suspended, resume through a later route, and prove completed
+       argument prefixes and delayed API selection are not replayed. The
+       collection fixture also roots a function captured by a host semantic
+       thunk rather than retaining an untraced managed value.
+     - **W6G.1f.3g.4b — object inspection and construction.** Move object
+       specification, diagnostic-object, local-name, instance, default/dict
+       definitions, and object-from-dictionary progress beneath the typed
+       checkpoint. Preserve list-front and nested specification demand
+       without rooted intermediate members.
+     - **W6G.1f.3g.4c — object composition.** Move ordinary extension,
+       composed definitions, and the recursive override stack beneath the
+       checkpoint. Keep each completed prior/update prefix as traced raw state
+       and use regional application demand for callable stages.
+     - **W6G.1f.3g.4d — family closure.** Remove the three durable family
+       owners, reconcile exact inventories, and force collection plus route
+       loss during representative effect-call/map, object-member/list-front,
+       and recursive override suspensions. Count completed traversal and
+       callable prefixes so terminal equality cannot hide replay.
    - **W6G.1f.3g.5 — typed checkpoint and source cutover closure.** Complete
      the incrementally introduced compile-exhaustive
      `ManagedBuiltinCheckpointCell`, allocate every selected regional family

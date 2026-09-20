@@ -145,11 +145,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6C.1b regional dispatcher and test-only durable compatibility wrapper"
     ),
     context_entry!(
-        "src/eval/effect_machine.rs",
-        [7, 2],
-        "W6E.5-W6E.6 durable effect dispatch, map traversal, and fixpoint construction"
-    ),
-    context_entry!(
         "src/eval/builtins/net/construction.rs",
         [4, 1],
         "I3D.4/W6F.6-W6F.7 scoped result decoding and replay with one durable exposed-port WHNF owner"

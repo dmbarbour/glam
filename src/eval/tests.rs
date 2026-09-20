@@ -4684,9 +4684,21 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Builtin(Builtin::Add))
     });
+    let prefix_demands = Arc::new(AtomicUsize::new(0));
+    let observed_prefix = Arc::clone(&prefix_demands);
+    let prefix = Value::semantic_thunk(observer.values(), "effect call prefix", move |_| {
+        observed_prefix.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::List(List::from_values(vec![n(19)])))
+    });
     let api = Value::Dict(Dict::new_sync().insert(Key::binary_from_text("add"), method));
     let arguments = Value::List(List::concat(
-        List::from_values(vec![n(19)]),
+        List::from_thunk(
+            match prefix {
+                Value::Lazy(prefix) => prefix,
+                _ => unreachable!("a semantic thunk must remain lazy"),
+            }
+            .into(),
+        ),
         List::from_thunk(ListThunk::Promised(tail.clone())),
     ));
     let call = apply_values(
@@ -4695,19 +4707,36 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         vec![Value::binary_from_text("add"), arguments, api],
     )
     .expect("effect call should build");
+    let Value::Lazy(call_lazy) = &call else {
+        panic!("a saturated effect call should remain lazy")
+    };
+    let call_root = call_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &call)
         .expect_err("the unresolved argument tail should suspend effect dispatch");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the effect-call checkpoint must trace its completed prefix");
+    eval_value(&observer, &call).expect_err("a later route must resume the exact argument tail");
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(23)])))
         .expect("the owner should resolve the promised argument tail");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned effect-call checkpoint must remain live");
     assert_eq!(
         eval_value(&observer, &call).expect("effect dispatch should resume"),
         n(42)
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    drop(call_root);
 }
 
 #[test]
@@ -4718,11 +4747,14 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         .expect("the owner should allocate a promised map tail");
     let method_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&method_demands);
-    let return_method = closed_function_value_in(observer.values(), 1, TestExpr::Local(0));
+    let return_method = observer.values().with_runtime_value_access(|access| {
+        let return_method = closed_function_value_in(observer.values(), 1, TestExpr::Local(0));
+        access.root_runtime_value(return_method)
+    });
     let return_method =
         Value::semantic_thunk(observer.values(), "effect API return", move |context| {
             observed.fetch_add(1, Ordering::SeqCst);
-            Ok(context.with_value_access(|access| access.values().duplicate_value(&return_method)))
+            Ok(context.with_value_access(|access| access.clone_root(&return_method)))
         });
     let api = Value::Dict(Dict::new_sync().insert((*keys::R).clone(), return_method));
     let items = Value::List(List::from_thunk(ListThunk::Promised(tail.clone())));
@@ -4732,19 +4764,35 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         vec![n(0), items, Value::List(List::empty()), api],
     )
     .expect("effect map should build");
+    let Value::Lazy(operation_lazy) = &operation else {
+        panic!("a saturated effect-map run should remain lazy")
+    };
+    let operation_root = operation_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &operation)
         .expect_err("the unresolved list tail should suspend effect map");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the effect-map checkpoint must trace its suspended list front");
+    eval_value(&observer, &operation)
+        .expect_err("a later route must resume the exact effect-map list front");
+    assert_eq!(method_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&owner, &tail, Value::List(List::empty()))
         .expect("the owner should resolve the promised map tail");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned effect-map checkpoint must remain live");
     assert_eq!(
         eval_value(&observer, &operation).expect("effect map should resume"),
         Value::List(List::empty())
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
+    drop(operation_root);
 }
 
 #[test]

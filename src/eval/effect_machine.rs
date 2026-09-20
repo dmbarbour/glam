@@ -1,82 +1,89 @@
-//! Durable effect dispatch and fixpoint construction.
+//! Regional effect dispatch and fixpoint construction.
+//!
+//! Effect builtins construct ordinary semantic effect recipes. They do not
+//! interpret host callbacks here, so every poll-spanning edge can remain raw
+//! beneath the owning lazy's managed builtin checkpoint.
 
 use std::sync::Arc;
 
+use glam_gc::Visitor;
+
 use crate::core::{
-    Builtin, BuiltinCall, EvaluationFailure, FixpointComputation, Key, LazyValue, List, Value, keys,
+    Builtin, BuiltinCall, EvaluationFailure, FixpointComputation, Key, LazyId, LazyValue, List,
+    Value, keys, trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+use crate::evaluation::EvaluationValueAccess;
+
+use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion};
+use super::builtin_machine::RegionalBuiltinPoll;
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::access_machine::{ConversionPoll, KeyConversionMachine};
-use super::builtin_machine::BuiltinTaskPoll;
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
-use super::whnf::WhnfComputation;
-
-pub(crate) struct EffectBuiltinMachine {
+pub(in crate::eval) struct RegionalEffectMachine {
     phase: EffectPhase,
+    source_owner: LazyId,
 }
 
 enum EffectPhase {
     Apply {
-        function: WhnfComputation,
-        argument: RuntimeValueRoot,
-        api: RuntimeValueRoot,
+        function: RegionalWhnfWork,
+        argument: Value,
+        api: Value,
     },
     CallName {
-        name: KeyConversionMachine,
-        arguments: RuntimeValueRoot,
-        api: RuntimeValueRoot,
+        name: RegionalKeyConversion,
+        arguments: Value,
+        api: Value,
     },
     CallArguments {
         name: Key,
-        arguments: WhnfComputation,
-        api: RuntimeValueRoot,
+        arguments: RegionalWhnfWork,
+        api: Value,
     },
     CallItems {
         name: Key,
-        items: ListFrontMachine,
-        arguments: Vec<RuntimeValueRoot>,
-        api: RuntimeValueRoot,
+        items: RegionalListFront,
+        arguments: Vec<Value>,
+        api: Value,
     },
     Fixpoint {
-        function: WhnfComputation,
+        function: RegionalWhnfWork,
     },
     Map {
-        function: RuntimeValueRoot,
-        items: RuntimeValueRoot,
+        function: Value,
+        items: Value,
     },
     MapItems {
-        function: RuntimeValueRoot,
-        items: WhnfComputation,
-        results: RuntimeValueRoot,
-        api: RuntimeValueRoot,
+        function: Value,
+        items: RegionalWhnfWork,
+        results: Value,
+        api: Value,
     },
     MapResults {
-        function: RuntimeValueRoot,
-        items: RuntimeValueRoot,
-        results: WhnfComputation,
-        api: RuntimeValueRoot,
+        function: Value,
+        items: Value,
+        results: RegionalWhnfWork,
+        api: Value,
     },
     MapFront {
-        function: RuntimeValueRoot,
-        items: ListFrontMachine,
-        results: RuntimeValueRoot,
-        api: RuntimeValueRoot,
+        function: Value,
+        items: RegionalListFront,
+        results: Value,
+        api: Value,
     },
     MapContinue {
-        function: RuntimeValueRoot,
-        items: RuntimeValueRoot,
-        results: RuntimeValueRoot,
-        result: RuntimeValueRoot,
+        function: Value,
+        items: Value,
+        results: Value,
+        result: Value,
     },
 }
 
-impl EffectBuiltinMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
+impl RegionalEffectMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
             Builtin::EffectApply
@@ -88,185 +95,182 @@ impl EffectBuiltinMachine {
         )
     }
 
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let duplicate = |value: &Value| access.values().duplicate_value(value);
+        let demand = |value: &Value| {
+            RegionalWhnfWork::from_focus(access, duplicate(value)).with_source_owner(source_owner)
+        };
         let phase = match builtin {
             Builtin::EffectApply => {
-                let [function, argument, api]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("effect apply retains three operands");
+                let [function, argument, api] = arguments else {
+                    unreachable!("effect apply retains three operands")
+                };
                 EffectPhase::Apply {
-                    function: WhnfComputation::from_root(function),
-                    argument,
-                    api,
+                    function: demand(function),
+                    argument: duplicate(argument),
+                    api: duplicate(api),
                 }
             }
             Builtin::EffectCall => {
-                let [name, arguments, api]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("effect call retains three operands");
+                let [name, arguments, api] = arguments else {
+                    unreachable!("effect call retains three operands")
+                };
                 EffectPhase::CallName {
-                    name: KeyConversionMachine::new(name, None),
-                    arguments,
-                    api,
+                    name: RegionalKeyConversion::new(access, duplicate(name), Some(source_owner)),
+                    arguments: duplicate(arguments),
+                    api: duplicate(api),
                 }
             }
             Builtin::Fixpoint => {
-                let [function]: [RuntimeValueRoot; 1] =
-                    arguments.try_into().expect("fixpoint retains one operand");
+                let [function] = arguments else {
+                    unreachable!("fixpoint retains one operand")
+                };
                 EffectPhase::Fixpoint {
-                    function: WhnfComputation::from_root(function),
+                    function: demand(function),
                 }
             }
             Builtin::EffectMap => {
-                let [function, items]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("effect map retains two operands");
-                EffectPhase::Map { function, items }
+                let [function, items] = arguments else {
+                    unreachable!("effect map retains two operands")
+                };
+                EffectPhase::Map {
+                    function: duplicate(function),
+                    items: duplicate(items),
+                }
             }
             Builtin::EffectMapRun => {
-                let [function, items, results, api]: [RuntimeValueRoot; 4] = arguments
-                    .try_into()
-                    .expect("effect map run retains four operands");
+                let [function, items, results, api] = arguments else {
+                    unreachable!("effect map run retains four operands")
+                };
                 EffectPhase::MapItems {
-                    function,
-                    items: WhnfComputation::from_root(items),
-                    results,
-                    api,
+                    function: duplicate(function),
+                    items: demand(items),
+                    results: duplicate(results),
+                    api: duplicate(api),
                 }
             }
             Builtin::EffectMapContinue => {
-                let [function, items, results, result]: [RuntimeValueRoot; 4] = arguments
-                    .try_into()
-                    .expect("effect map continuation retains four operands");
+                let [function, items, results, result] = arguments else {
+                    unreachable!("effect map continuation retains four operands")
+                };
                 EffectPhase::MapContinue {
-                    function,
-                    items,
-                    results,
-                    result,
+                    function: duplicate(function),
+                    items: duplicate(items),
+                    results: duplicate(results),
+                    result: duplicate(result),
                 }
             }
             _ => unreachable!("effect machine received another builtin"),
         };
-        Self { phase }
+        Self {
+            phase,
+            source_owner,
+        }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+    ) -> RegionalBuiltinPoll {
         match &mut self.phase {
             EffectPhase::Apply {
                 function,
                 argument,
                 api,
             } => {
-                let function = match poll_whnf(function, poll_context, durable_context, step_budget)
-                {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let function = match poll_whnf_in(access, function, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                BuiltinTaskPoll::Ready(root_application(context, &function, &[api, argument]))
+                RegionalBuiltinPoll::Ready(application_in(access, function, &[api, argument]))
             }
             EffectPhase::CallName {
                 name,
                 arguments,
                 api,
             } => {
-                let name = match name.poll(poll_context, context, durable_context, step_budget) {
-                    ConversionPoll::Ready(name) => name,
-                    ConversionPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
+                let name = match name.poll_in(access, step_budget) {
+                    RegionalConversionPoll::Ready(name) => name,
+                    RegionalConversionPoll::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
                     }
-                    ConversionPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    ConversionPoll::Failed(failure) => {
-                        return BuiltinTaskPoll::Failed(failure);
+                    RegionalConversionPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalConversionPoll::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
                 self.phase = EffectPhase::CallArguments {
                     name,
-                    arguments: WhnfComputation::from_root(arguments.clone()),
-                    api: api.clone(),
+                    arguments: RegionalWhnfWork::from_focus(
+                        access,
+                        access.values().duplicate_value(arguments),
+                    )
+                    .with_source_owner(self.source_owner),
+                    api: access.values().duplicate_value(api),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             EffectPhase::CallArguments {
                 name,
                 arguments,
                 api,
             } => {
-                let arguments =
-                    match poll_whnf(arguments, poll_context, durable_context, step_budget) {
-                        DemandResult::Ready(value) => value,
-                        DemandResult::Pending(poll) => return poll,
-                    };
-                let is_list = context.with_value_access(|access| {
-                    matches!(access.clone_root(&arguments), Value::List(_))
-                });
-                if !is_list {
-                    return BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "effect call builtin requires a list of arguments",
-                    ));
+                let arguments = match poll_whnf_in(access, arguments, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                if !matches!(arguments, Value::List(_)) {
+                    return failure("effect call builtin requires a list of arguments");
                 }
                 self.phase = EffectPhase::CallItems {
                     name: name.clone(),
-                    items: ListFrontMachine::unowned(arguments),
+                    items: RegionalListFront::new_in(access, arguments, Some(self.source_owner)),
                     arguments: Vec::new(),
-                    api: api.clone(),
+                    api: access.values().duplicate_value(api),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             EffectPhase::CallItems {
                 name,
                 items,
                 arguments,
                 api,
-            } => match items.poll(poll_context, context, durable_context, step_budget) {
-                ListFrontPoll::Ready(Some((argument, tail))) => {
+            } => match items.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some((argument, tail))) => {
                     arguments.push(argument);
-                    *items = ListFrontMachine::unowned(tail);
-                    BuiltinTaskPoll::Yielded
+                    *items = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                    RegionalBuiltinPoll::Yielded
                 }
-                ListFrontPoll::Ready(None) => {
-                    BuiltinTaskPoll::Ready(root_effect_call(context, api, name, arguments))
+                RegionalListFrontPoll::Ready(None) => {
+                    RegionalBuiltinPoll::Ready(effect_call_in(access, api, name, arguments))
                 }
-                ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             EffectPhase::Fixpoint { function } => {
-                let function = match poll_whnf(function, poll_context, durable_context, step_budget)
-                {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let function = match poll_whnf_in(access, function, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let valid = context.with_value_access(|access| {
-                    matches!(
-                        access.clone_root(&function),
-                        Value::Function(_) | Value::Net(_)
-                    )
-                });
-                if !valid {
-                    return BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "fixpoint builtin requires a function value",
-                    ));
+                if !matches!(function, Value::Function(_) | Value::Net(_)) {
+                    return failure("fixpoint builtin requires a function value");
                 }
-                BuiltinTaskPoll::Ready(context.with_value_access(|access| {
-                    let function = access.clone_root(&function);
-                    let lazy = LazyValue::computed_fixpoint_in(
-                        access.values(),
-                        "fixpoint",
-                        FixpointComputation::Function(function),
-                    );
-                    access.values().root_runtime_value(Value::Lazy(lazy))
-                }))
+                let lazy = LazyValue::computed_fixpoint_in(
+                    access.values(),
+                    "fixpoint",
+                    FixpointComputation::Function(function),
+                );
+                RegionalBuiltinPoll::Ready(Value::Lazy(lazy))
             }
             EffectPhase::Map { function, items } => {
-                BuiltinTaskPoll::Ready(root_effect_map(context, function, items))
+                RegionalBuiltinPoll::Ready(effect_map_in(access, function, items))
             }
             EffectPhase::MapItems {
                 function,
@@ -274,26 +278,24 @@ impl EffectBuiltinMachine {
                 results,
                 api,
             } => {
-                let items = match poll_whnf(items, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let items = match poll_whnf_in(access, items, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let is_list = context.with_value_access(|access| {
-                    matches!(access.clone_root(&items), Value::List(_))
-                });
-                if !is_list {
-                    return BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "effect map requires a list",
-                    ));
+                if !matches!(items, Value::List(_)) {
+                    return failure("effect map requires a list");
                 }
                 self.phase = EffectPhase::MapResults {
-                    function: function.clone(),
+                    function: access.values().duplicate_value(function),
                     items,
-                    results: WhnfComputation::from_root(results.clone()),
-                    api: api.clone(),
+                    results: RegionalWhnfWork::from_focus(
+                        access,
+                        access.values().duplicate_value(results),
+                    )
+                    .with_source_owner(self.source_owner),
+                    api: access.values().duplicate_value(api),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             EffectPhase::MapResults {
                 function,
@@ -301,215 +303,279 @@ impl EffectBuiltinMachine {
                 results,
                 api,
             } => {
-                let results = match poll_whnf(results, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let results = match poll_whnf_in(access, results, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let is_list = context.with_value_access(|access| {
-                    matches!(access.clone_root(&results), Value::List(_))
-                });
-                if !is_list {
-                    return BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "effect map internal results must be a list",
-                    ));
+                if !matches!(results, Value::List(_)) {
+                    return failure("effect map internal results must be a list");
                 }
                 self.phase = EffectPhase::MapFront {
-                    function: function.clone(),
-                    items: ListFrontMachine::unowned(items.clone()),
+                    function: access.values().duplicate_value(function),
+                    items: RegionalListFront::new_in(
+                        access,
+                        access.values().duplicate_value(items),
+                        Some(self.source_owner),
+                    ),
                     results,
-                    api: api.clone(),
+                    api: access.values().duplicate_value(api),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             EffectPhase::MapFront {
                 function,
                 items,
                 results,
                 api,
-            } => match items.poll(poll_context, context, durable_context, step_budget) {
-                ListFrontPoll::Ready(Some((item, tail))) => BuiltinTaskPoll::Ready(
-                    root_effect_map_sequence(context, function, &item, &tail, results, api),
+            } => match items.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some((item, tail))) => RegionalBuiltinPoll::Ready(
+                    effect_map_sequence_in(access, function, &item, &tail, results, api),
                 ),
-                ListFrontPoll::Ready(None) => BuiltinTaskPoll::Ready(root_effect_call(
-                    context,
+                RegionalListFrontPoll::Ready(None) => RegionalBuiltinPoll::Ready(effect_call_in(
+                    access,
                     api,
                     &keys::R,
                     std::slice::from_ref(results),
                 )),
-                ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             EffectPhase::MapContinue {
                 function,
                 items,
                 results,
                 result,
-            } => match root_effect_map_continuation(context, function, items, results, result) {
-                Ok(value) => BuiltinTaskPoll::Ready(value),
-                Err(failure) => BuiltinTaskPoll::Failed(failure),
+            } => match effect_map_continuation_in(access, function, items, results, result) {
+                Ok(value) => RegionalBuiltinPoll::Ready(value),
+                Err(failure) => RegionalBuiltinPoll::Failed(failure),
             },
         }
     }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.phase.trace_managed_edges(visitor);
+    }
 }
 
-enum DemandResult {
-    Ready(RuntimeValueRoot),
-    Pending(BuiltinTaskPoll),
-}
-
-fn poll_whnf(
-    computation: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandResult {
-    match poll_whnf_computation(computation, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandResult::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => {
-            DemandResult::Pending(BuiltinTaskPoll::Pending(dependency))
-        }
-        WhnfOwnerPoll::Yielded => DemandResult::Pending(BuiltinTaskPoll::Yielded),
-        WhnfOwnerPoll::Failed(failure) => DemandResult::Pending(BuiltinTaskPoll::Failed(failure)),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("effect builtin produced an external {boundary:?} boundary")
+impl EffectPhase {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Apply {
+                function,
+                argument,
+                api,
+            } => {
+                function.trace_managed_edges(visitor);
+                for value in [argument, api] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::CallName {
+                name,
+                arguments,
+                api,
+            } => {
+                name.trace_managed_edges(visitor);
+                for value in [arguments, api] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::CallArguments { arguments, api, .. } => {
+                arguments.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(api, visitor);
+            }
+            Self::CallItems {
+                items,
+                arguments,
+                api,
+                ..
+            } => {
+                items.trace_managed_edges(visitor);
+                for argument in arguments {
+                    trace_compatibility_value_managed_edges(argument, visitor);
+                }
+                trace_compatibility_value_managed_edges(api, visitor);
+            }
+            Self::Fixpoint { function } => function.trace_managed_edges(visitor),
+            Self::Map { function, items } => {
+                for value in [function, items] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::MapItems {
+                function,
+                items,
+                results,
+                api,
+            } => {
+                trace_compatibility_value_managed_edges(function, visitor);
+                items.trace_managed_edges(visitor);
+                for value in [results, api] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::MapResults {
+                function,
+                items,
+                results,
+                api,
+            } => {
+                for value in [function, items, api] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+                results.trace_managed_edges(visitor);
+            }
+            Self::MapFront {
+                function,
+                items,
+                results,
+                api,
+            } => {
+                trace_compatibility_value_managed_edges(function, visitor);
+                items.trace_managed_edges(visitor);
+                for value in [results, api] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::MapContinue {
+                function,
+                items,
+                results,
+                result,
+            } => {
+                for value in [function, items, results, result] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
         }
     }
 }
 
-fn root_application(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    arguments: &[&RuntimeValueRoot],
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let function = access.clone_root(function);
+fn poll_whnf_in(
+    access: &EvaluationValueAccess<'_>,
+    computation: &mut RegionalWhnfWork,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> Result<Value, RegionalBuiltinPoll> {
+    match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
+        RegionalWhnfStatus::Ready(value) => Ok(value),
+        RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
+        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
+    }
+}
+
+fn application_in(
+    access: &EvaluationValueAccess<'_>,
+    function: Value,
+    arguments: &[&Value],
+) -> Value {
+    let arguments = arguments
+        .iter()
+        .map(|argument| access.values().duplicate_value(argument))
+        .collect::<Vec<_>>();
+    Value::Lazy(LazyValue::from_application_in(
+        access.values(),
+        function,
+        Arc::from(arguments),
+    ))
+}
+
+fn effect_call_in(
+    access: &EvaluationValueAccess<'_>,
+    api: &Value,
+    name: &Key,
+    arguments: &[Value],
+) -> Value {
+    let selected = LazyValue::from_access_in(
+        access.values(),
+        Arc::from([CoreDataKey::Key(name.clone())]),
+        Arc::from([access.values().duplicate_value(api)]),
+    );
+    let operation = if arguments.is_empty() {
+        selected
+    } else {
         let arguments = arguments
             .iter()
-            .map(|argument| access.clone_root(argument))
+            .map(|argument| access.values().duplicate_value(argument))
             .collect::<Vec<_>>();
-        let lazy = LazyValue::from_application_in(access.values(), function, Arc::from(arguments));
-        access.values().root_runtime_value(Value::Lazy(lazy))
-    })
+        LazyValue::from_application_in(access.values(), Value::Lazy(selected), Arc::from(arguments))
+    };
+    Value::Lazy(operation)
 }
 
-fn root_effect_call(
-    context: &EvaluatorStepContext<'_>,
-    api: &RuntimeValueRoot,
-    name: &Key,
-    arguments: &[RuntimeValueRoot],
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let selected = LazyValue::from_access_in(
-            access.values(),
-            Arc::from([CoreDataKey::Key(name.clone())]),
-            Arc::from([access.clone_root(api)]),
-        );
-        let operation = if arguments.is_empty() {
-            selected
-        } else {
-            let arguments = arguments
-                .iter()
-                .map(|argument| access.clone_root(argument))
-                .collect::<Vec<_>>();
-            LazyValue::from_application_in(
-                access.values(),
-                Value::Lazy(selected),
-                Arc::from(arguments),
-            )
-        };
-        access.values().root_runtime_value(Value::Lazy(operation))
-    })
+fn effect_map_sequence_in(
+    access: &EvaluationValueAccess<'_>,
+    function: &Value,
+    item: &Value,
+    tail: &Value,
+    results: &Value,
+    api: &Value,
+) -> Value {
+    let operation = Value::Lazy(LazyValue::from_application_in(
+        access.values(),
+        access.values().duplicate_value(function),
+        Arc::from([access.values().duplicate_value(item)]),
+    ));
+    let continuation = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::EffectMapContinue,
+        arguments: Arc::from([
+            access.values().duplicate_value(function),
+            access.values().duplicate_value(tail),
+            access.values().duplicate_value(results),
+        ]),
+    });
+    let selected = LazyValue::from_access_in(
+        access.values(),
+        Arc::from([CoreDataKey::Key((*keys::SEQ).clone())]),
+        Arc::from([access.values().duplicate_value(api)]),
+    );
+    Value::Lazy(LazyValue::from_application_in(
+        access.values(),
+        Value::Lazy(selected),
+        Arc::from([operation, continuation]),
+    ))
 }
 
-fn root_effect_map_sequence(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    item: &RuntimeValueRoot,
-    tail: &RuntimeValueRoot,
-    results: &RuntimeValueRoot,
-    api: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let operation = Value::Lazy(LazyValue::from_application_in(
-            access.values(),
-            access.clone_root(function),
-            Arc::from([access.clone_root(item)]),
-        ));
-        let continuation = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::EffectMapContinue,
-            arguments: Arc::from([
-                access.clone_root(function),
-                access.clone_root(tail),
-                access.clone_root(results),
-            ]),
-        });
-        let selected = LazyValue::from_access_in(
-            access.values(),
-            Arc::from([CoreDataKey::Key((*keys::SEQ).clone())]),
-            Arc::from([access.clone_root(api)]),
-        );
-        let sequence = LazyValue::from_application_in(
-            access.values(),
-            Value::Lazy(selected),
-            Arc::from([operation, continuation]),
-        );
-        access.values().root_runtime_value(Value::Lazy(sequence))
-    })
+fn effect_map_in(access: &EvaluationValueAccess<'_>, function: &Value, items: &Value) -> Value {
+    let function = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::EffectMapRun,
+        arguments: Arc::from([
+            access.values().duplicate_value(function),
+            access.values().duplicate_value(items),
+            Value::List(List::empty()),
+        ]),
+    });
+    super::application::effect_value(access.values(), function)
 }
 
-fn root_effect_map(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    items: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let function = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::EffectMapRun,
-            arguments: Arc::from([
-                access.clone_root(function),
-                access.clone_root(items),
-                Value::List(List::empty()),
-            ]),
-        });
-        access
-            .values()
-            .root_runtime_value(super::application::effect_value(access.values(), function))
-    })
+fn effect_map_continuation_in(
+    access: &EvaluationValueAccess<'_>,
+    function: &Value,
+    items: &Value,
+    results: &Value,
+    result: &Value,
+) -> Result<Value, Arc<EvaluationFailure>> {
+    let Value::List(results) = results else {
+        return Err(Arc::new(EvaluationFailure::message(
+            "effect map internal results must be a list",
+        )));
+    };
+    let results = List::concat(
+        results.clone(),
+        List::from_values(vec![access.values().duplicate_value(result)]),
+    );
+    let function = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::EffectMapRun,
+        arguments: Arc::from([
+            access.values().duplicate_value(function),
+            access.values().duplicate_value(items),
+            Value::List(results),
+        ]),
+    });
+    Ok(super::application::effect_value(access.values(), function))
 }
 
-fn root_effect_map_continuation(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    items: &RuntimeValueRoot,
-    results: &RuntimeValueRoot,
-    result: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
-    context.with_value_access(|access| {
-        let Value::List(results) = access.clone_root(results) else {
-            return Err(access.values().root_runtime_failure(Arc::new(
-                EvaluationFailure::message("effect map internal results must be a list"),
-            )));
-        };
-        let results = List::concat(results, List::from_values(vec![access.clone_root(result)]));
-        let function = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::EffectMapRun,
-            arguments: Arc::from([
-                access.clone_root(function),
-                access.clone_root(items),
-                Value::List(results),
-            ]),
-        });
-        Ok(access
-            .values()
-            .root_runtime_value(super::application::effect_value(access.values(), function)))
-    })
-}
-
-fn root_message(
-    context: &EvaluatorStepContext<'_>,
-    message: impl Into<Arc<str>>,
-) -> RuntimeFailureRoot {
-    context.root_failure(Arc::new(EvaluationFailure::message(message.into())))
+fn failure(message: impl Into<Arc<str>>) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message.into())))
 }

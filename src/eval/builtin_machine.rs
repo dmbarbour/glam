@@ -21,7 +21,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 use super::annotation_machine::RegionalAnnotationMachine;
 use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
-use super::effect_machine::EffectBuiltinMachine;
+use super::effect_machine::RegionalEffectMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::list_observation_machine::RegionalListObservationMachine;
 use super::list_transform_machine::{
@@ -67,6 +67,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
     Dictionary(RegionalDictBuiltinMachine),
+    Effect(Box<RegionalEffectMachine>),
     ListConcat(RegionalListConcatMachine),
     ListMap(RegionalListMapMachine),
     ListObservation(Box<RegionalListObservationMachine>),
@@ -193,6 +194,12 @@ impl RegionalBuiltinMachine {
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
                 | Builtin::PatternPathEqual
+                | Builtin::EffectApply
+                | Builtin::EffectCall
+                | Builtin::EffectMap
+                | Builtin::EffectMapRun
+                | Builtin::EffectMapContinue
+                | Builtin::Fixpoint
         )
     }
 
@@ -205,6 +212,9 @@ impl RegionalBuiltinMachine {
         assert!(Self::supports(builtin));
         assert_eq!(arguments.len(), builtin.arity());
         match builtin {
+            builtin if RegionalEffectMachine::supports(builtin) => Self::Effect(Box::new(
+                RegionalEffectMachine::new_in(access, source_owner, builtin, arguments),
+            )),
             Builtin::Anno => Self::Annotation(Box::new(RegionalAnnotationMachine::new_in(
                 access,
                 source_owner,
@@ -380,6 +390,7 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
             Self::Dictionary(machine) => machine.poll_in(access, step_budget),
+            Self::Effect(machine) => machine.poll_in(access, step_budget),
             Self::ListConcat(machine) => machine.poll_in(access, step_budget),
             Self::ListMap(machine) => machine.poll_in(access, step_budget),
             Self::ListObservation(machine) => machine.poll_in(access, step_budget),
@@ -403,6 +414,7 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
             Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
+            Self::Effect(machine) => machine.trace_managed_edges(visitor),
             Self::ListConcat(machine) => machine.trace_managed_edges(visitor),
             Self::ListMap(machine) => machine.trace_managed_edges(visitor),
             Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
@@ -855,7 +867,6 @@ impl RegionalStrategyMachine {
 }
 
 pub(crate) enum BuiltinTaskMachine {
-    Effect(EffectBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
 }
@@ -919,12 +930,6 @@ impl BuiltinTaskMachine {
                 | Builtin::ObjectDefaultDefs
                 | Builtin::ObjectDictDefs
                 | Builtin::ObjectFromDict
-                | Builtin::EffectApply
-                | Builtin::EffectCall
-                | Builtin::EffectMap
-                | Builtin::EffectMapRun
-                | Builtin::EffectMapContinue
-                | Builtin::Fixpoint
         )
     }
 
@@ -936,9 +941,6 @@ impl BuiltinTaskMachine {
             "a builtin source must contain one saturated call"
         );
         match builtin {
-            builtin if EffectBuiltinMachine::supports(builtin) => {
-                Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
-            }
             builtin if ObjectBuiltinMachine::supports(builtin) => {
                 Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
             }
@@ -957,9 +959,6 @@ impl BuiltinTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> BuiltinTaskPoll {
         match self {
-            Self::Effect(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
             Self::Object(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }

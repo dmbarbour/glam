@@ -328,17 +328,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.2"
     ),
     closed_durable!(
-        "src/eval/effect_machine.rs",
-        "effect application, API-name/argument/map-list traversal, and fixpoint progress",
-        "canonical RuntimeValueRoot operands, map accumulators, and completed argument prefixes plus child WHNF, key-conversion, and list-front machines",
-        "yielded or dependency-blocked effect/map/fixpoint evaluation",
-        "saturated builtin admission and bounded application, continuation, or result publication",
-        "effect/map/fixpoint completion, failure, cancellation, or builtin-source retirement",
-        ManagedRootSurface,
-        RootSurface,
-        "W6E.5-W6E.6"
-    ),
-    closed_durable!(
         "src/eval/access_machine.rs",
         "computed-access source, recursive dictionary-key, and lazy-list progress",
         "regional raw Value/WHNF/converter state beneath traced cells plus one-root temporary converter adapters for unmigrated parents",
@@ -995,10 +984,13 @@ fn is_production_source(relative: &Path) -> bool {
 // source or semantic-undefined state beneath the shared checkpoint.
 // W6G.1f.3g.3e.3b replaces rooted dictionary extraction and the final durable
 // semantic-undefined helper with raw path, frame, leaf, and traversal state.
-const DECLARATION_BASELINE_COUNT: usize = 244;
+// W6G.1f.3g.4a removes the durable effect owner and keeps its raw effect,
+// fixpoint, key-conversion, list-front, and WHNF progress beneath the managed
+// builtin checkpoint.
+const DECLARATION_BASELINE_COUNT: usize = 243;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([239, 177, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_533_257_108_846_041_400;
+    DeclarationSignals::new([261, 154, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_636_315_821_294_019_978;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1153,10 +1145,10 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         )
     {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
-    } else if declaration.starts_with("src/eval/annotation_machine.rs::") {
+    } else if declaration.starts_with("src/eval/annotation_machine.rs::")
+        || declaration.starts_with("src/eval/effect_machine.rs::")
+    {
         "managed builtin checkpoint cell"
-    } else if declaration.starts_with("src/eval/effect_machine.rs::") {
-        "effect application, API-name/argument/map-list traversal, and fixpoint progress"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
         "computed-access source, recursive dictionary-key, and lazy-list progress"
     } else if declaration.starts_with("src/eval/list_machine.rs::") {
