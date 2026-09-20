@@ -363,13 +363,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/list_machine.rs",
         "logical-list front/back source progress",
-        "canonical RuntimeValueRoot current-list and deferred-prefix/suffix fields plus one child WhnfComputation",
-        "yielded or dependency-blocked list traversal",
-        "source-list publication and deferred-chunk discovery",
-        "front/back completion, failure, cancellation, or enclosing source retirement",
+        "one traced regional front state with raw current/chunk/suffix edges plus the still-rooted back state",
+        "one temporary managed front cell or yielded/dependency-blocked rooted back traversal",
+        "front seed promotion or rooted back source publication and deferred-chunk discovery",
+        "front adapter cutover, back completion, failure, cancellation, or enclosing source retirement",
         ManagedRootSurface,
         RootSurface,
-        "W3B.2b/W6D.3"
+        "W6G.1f.3e.1 / W6D.3"
     ),
     closed_durable!(
         "src/eval/list_observation_machine.rs",
@@ -958,10 +958,10 @@ fn is_production_source(relative: &Path) -> bool {
 // then move computed-access arguments, demand, conversions, and terminal
 // failure into one traced lazy checkpoint, trading three durable root signals
 // for raw managed values plus one exact typed edge.
-const DECLARATION_BASELINE_COUNT: usize = 234;
+const DECLARATION_BASELINE_COUNT: usize = 236;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([141, 263, 5, 19, 13, 8, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_087_085_376_635_754_065;
+    DeclarationSignals::new([145, 260, 5, 20, 13, 8, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_521_991_096_834_021_463;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

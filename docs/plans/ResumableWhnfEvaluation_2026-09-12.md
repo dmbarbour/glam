@@ -5741,12 +5741,18 @@ for it:
 
    - **W6G.1f.3e.0 — object and list-front ownership census.** **Complete.**
      Record every object field, child owner, result/failure boundary, and
-     `ListFrontMachine` parent. The list-front parents are object
-     linearization plus three list-effect states. Object work also owns the
-     temporary key-conversion wrapper and ordinary rooted WHNF computations.
-     Select one canonical raw-edge list-front reducer with a temporary
-     one-root adapter for the unmigrated list-effect family.
-   - **W6G.1f.3e.1 — canonical regional list-front state.** Split
+     `ListFrontMachine` parent. The complete parent set is object
+     linearization, three list-effect states, and the builtin task family's
+     annotation, comparison, effect, list-observation, list-transform,
+     object-builtin, pattern, and direct builtin states. Object work also owns
+     the temporary key-conversion wrapper and ordinary rooted WHNF
+     computations. Select one canonical raw-edge list-front reducer with a
+     temporary one-root adapter for all unmigrated parents. Object consumes
+     the regional form in W6G.1f.3e.2, list effect removes its adapter in
+     W6G.1f.3f, and the compile-exhaustive builtin task sum removes every
+     remaining adapter in W6G.1f.3g.
+   - **W6G.1f.3e.1 — canonical regional list-front state.** **Complete
+     (2026-09-20).** Split
      `ListFrontMachine` into raw current/chunk/suffix state using
      `RegionalWhnfWork`, plus a temporary managed-cell/root adapter for current
      parents. Preserve byte projection, deferred binary/list chunk semantics,
@@ -5754,6 +5760,17 @@ for it:
      Force collection between deferred-chunk transitions and latch the
      one-root bound. Do not regionalize back projection before a checkpoint
      needs it.
+
+     `RegionalListFront` is now the canonical callback-free reducer and owns
+     only traced raw edges. `ListFrontMachine` promotes its rooted seed once
+     into one `ManagedListFrontCell`; every existing parent keeps the old poll
+     contract while object migration may embed the regional state directly.
+     A one-step deferred-binary fixture proves the wrapper survives collection
+     before and after its exact promise wait, preserves the suffix, and adds
+     exactly one managed checkpoint root at promotion. Full library tests
+     retain the existing non-list failure wording and the list/binary and byte
+     projection contracts. Back projection remains rooted because no current
+     managed checkpoint embeds it.
    - **W6G.1f.3e.2 — regional object representation.** Convert original spec,
      self marker, linearization frames, seen specs, dependency sequences,
      definitions stack, accumulated base, and application state to raw traced
@@ -5771,8 +5788,9 @@ for it:
      nested dependency return, definitions demand, base application, self
      application, and terminal object publication. Count mixin applications
      and completed dependency prefixes. Assign the remaining temporary
-     list-front adapter to W6G.1f.3f and the remaining key-conversion adapters
-     to W6G.1f.3g, then close the object-family inventories.
+     list-front adapters to W6G.1f.3f and W6G.1f.3g and the remaining
+     key-conversion adapters to W6G.1f.3g, then close the object-family
+     inventories.
 7. **W6G.1f.3f — list-effect checkpoint.** Preserve sequence/cut/fix progress
    and convert the fix promise root to a managed promise edge. Prove that
    route loss cannot manufacture another promise or repeat an assignment.

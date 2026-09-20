@@ -322,7 +322,7 @@ fn api_counts(occurrences: &[Occurrence]) -> BTreeMap<CheckpointApi, usize> {
 }
 
 const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
-    (CheckpointApi::FromRoot, 87),
+    (CheckpointApi::FromRoot, 86),
     (CheckpointApi::FromLazySource, 1),
     (CheckpointApi::FromApplicationCheckpoint, 6),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
@@ -333,8 +333,8 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::RuntimeId, 1),
     (CheckpointApi::WithSourceOwner, 6),
 ];
-const EXPECTED_OCCURRENCES: usize = 108;
-const EXPECTED_FINGERPRINT: u64 = 1_152_599_828_538_463_107;
+const EXPECTED_OCCURRENCES: usize = 107;
+const EXPECTED_FINGERPRINT: u64 = 5_568_281_684_238_611_840;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

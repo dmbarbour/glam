@@ -191,8 +191,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_machine.rs",
-        [4, 2],
-        "W3B.2b/W6D.3 shared resumable logical-list front and back owners"
+        [3, 4],
+        "W6G.1f.3e.1 regional logical-list front bridge and W6D.3 rooted back owner"
     ),
     context_entry!(
         "src/eval/list_observation_machine.rs",

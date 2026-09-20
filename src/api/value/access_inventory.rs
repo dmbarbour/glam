@@ -177,10 +177,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/eval/list_machine.rs",
         0,
-        0,
-        10,
-        "shared pollable logical-list front/back reconstruction and deferred-chunk publication",
-        "W3B.2b/W6D.3 resumable list traversal"
+        1,
+        7,
+        "one forced-collection fixture plus shared managed-front and rooted-back list reconstruction",
+        "W6G.1f.3e.1 regional list-front bridge / W6D.3 rooted back traversal"
     ),
     entry!(
         "src/eval/list_observation_machine.rs",
@@ -551,10 +551,9 @@ impl RootPublicationOccurrence {
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
                 | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
                 | "src/eval/list_effect_machine.rs::publish_fix_result"
-                | "src/eval/list_machine.rs::combine_chunk_and_suffix"
                 | "src/eval/list_machine.rs::combine_prefix_and_chunk"
                 | "src/eval/list_machine.rs::impl ListBackMachine::poll"
-                | "src/eval/list_machine.rs::impl ListFrontMachine::poll"
+                | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
                 | "src/eval/list_observation_machine.rs::rooted_binary_split"
                 | "src/eval/list_observation_machine.rs::rooted_list_from_items"
                 | "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root"
@@ -874,16 +873,14 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::publish_fix_result#1|surface=access-publication|scope=production",
     "src/eval/list_effect_machine.rs::publish_fix_result#2|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::combine_chunk_and_suffix#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::combine_prefix_and_chunk#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#4|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ListFrontMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ListFrontMachine::poll#2|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ListFrontMachine::poll#3|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ListFrontMachine::poll#4|surface=access-publication|scope=production",
+    "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
+    "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
+    "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/list_observation_machine.rs::rooted_binary_split#1|surface=access-publication|scope=production",
     "src/eval/list_observation_machine.rs::rooted_list_from_items#1|surface=access-publication|scope=production",
     "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root#1|surface=access-publication|scope=production",

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        786,
+        789,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -837,10 +837,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // inside that single allocation. W6G.1f.3d.2-.3 add the concrete access
     // checkpoint allocation, trace, and duplicate arms plus one forced
     // route-loss observation; access arguments and child state remain inside
-    // the one traced cell.
+    // the one traced cell. W6G.1f.3e.1 adds the temporary managed list-front
+    // cell's typed root field, root creation, and access-qualified projection;
+    // current/chunk/suffix edges remain beneath its exhaustive trace visitor.
     assert_eq!(
         occurrence_fingerprint(actual),
-        9_102_811_208_123_585_211,
+        11_559_027_540_629_734_293,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -885,7 +887,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 188),
+            ((SourceScope::Production, EdgeSurface::Typed), 191),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 548),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

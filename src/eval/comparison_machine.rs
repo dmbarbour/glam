@@ -43,6 +43,10 @@ pub(crate) struct ComparisonBuiltinMachine {
     child_result: Option<ComparisonResult>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "regional list-front state shrank the list variant before W6G.1f.3g converts this whole builtin family to one managed checkpoint"
+)]
 enum ComparisonFrame {
     Value(ValueComparisonFrame),
     List(ListComparisonFrame),
