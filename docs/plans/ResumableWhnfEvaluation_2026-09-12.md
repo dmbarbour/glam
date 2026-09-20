@@ -6297,20 +6297,35 @@ for it:
        argument prefixes and delayed API selection are not replayed. The
        collection fixture also roots a function captured by a host semantic
        thunk rather than retaining an untraced managed value.
-     - **W6G.1f.3g.4b — object inspection and construction.** Move object
+     - **W6G.1f.3g.4b — Complete (2026-09-20): object inspection and construction.** Move object
        specification, diagnostic-object, local-name, instance, default/dict
        definitions, and object-from-dictionary progress beneath the typed
        checkpoint. Preserve list-front and nested specification demand
-       without rooted intermediate members.
+       without rooted intermediate members. Completion record: the eight
+       non-composition object builtins now use one regional object phase
+       machine stored beneath the managed builtin checkpoint. Object, spec,
+       name, parts, definition, base, and dictionary values plus nested WHNF
+       and list-front work are traced in place; thirteen rooted WHNF seeds,
+       seven result-root publications, and the durable object-builtin owner
+       are removed. Object-producing leaf helpers retain explicit regional
+       access, and the constructor inventory classifies their managed values
+       as in-region forwarders rather than premature containing roots. Forced
+       local-name, dictionary-definition, and plain-dictionary schedules keep
+       only the owning lazy rooted, collect before and after dependency
+       assignment, re-enter through a later route, and prove completed
+       object/dictionary prefixes are not replayed. The exact inventories,
+       clippy gate, full workspace suite, and interaction-net profiling
+       regressions pass.
      - **W6G.1f.3g.4c — object composition.** Move ordinary extension,
        composed definitions, and the recursive override stack beneath the
        checkpoint. Keep each completed prior/update prefix as traced raw state
        and use regional application demand for callable stages.
-     - **W6G.1f.3g.4d — family closure.** Remove the three durable family
-       owners, reconcile exact inventories, and force collection plus route
-       loss during representative effect-call/map, object-member/list-front,
-       and recursive override suspensions. Count completed traversal and
-       callable prefixes so terminal equality cannot hide replay.
+     - **W6G.1f.3g.4d — family closure.** Confirm removal of the three
+       durable family owners, reconcile exact inventories, and force
+       collection plus route loss during representative effect-call/map,
+       object-member/list-front, and recursive override suspensions. Count
+       completed traversal and callable prefixes so terminal equality cannot
+       hide replay.
    - **W6G.1f.3g.5 — typed checkpoint and source cutover closure.** Complete
      the incrementally introduced compile-exhaustive
      `ManagedBuiltinCheckpointCell`, allocate every selected regional family

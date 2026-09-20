@@ -688,8 +688,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // list-front recursion with regional state under that owner.
 // W6G.1f.3g.3f exposes annotation recognition and collection/metadata walks
 // as regional work beneath the managed builtin checkpoint.
-const EXPECTED_OCCURRENCES: usize = 200;
-const EXPECTED_FINGERPRINT: u64 = 5_044_278_698_429_924_192;
+// W6G.1f.3g.4b replaces rooted object-builtin phases with one explicit
+// regional object state machine. Its list-prefix traversal is represented as
+// two user-sized loops rather than one recursive helper.
+const EXPECTED_OCCURRENCES: usize = 201;
+const EXPECTED_FINGERPRINT: u64 = 46_219_372_223_103_128;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -702,12 +705,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 53),
-    (Signal::UserSizedLoop, 80),
+    (Signal::StructuralRecursion, 52),
+    (Signal::UserSizedLoop, 82),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 115),
+    (WorkShape::DemandThenInspect, 116),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 12),
     (WorkShape::KeyConversion, 2),

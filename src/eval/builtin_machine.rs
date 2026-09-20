@@ -27,7 +27,7 @@ use super::list_observation_machine::RegionalListObservationMachine;
 use super::list_transform_machine::{
     RegionalListConcatMachine, RegionalListMapMachine, RegionalTextLinesMachine,
 };
-use super::object_builtin_machine::ObjectBuiltinMachine;
+use super::object_builtin_machine::RegionalObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
 use super::pattern_machine::{
     RegionalPatternDictPredicateMachine, RegionalPatternDictTakeMachine,
@@ -79,6 +79,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     TextLines(RegionalTextLinesMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
+    Object(Box<RegionalObjectBuiltinMachine>),
     Provenance(RegionalProvenanceMachine),
     Strategy(RegionalStrategyMachine),
 }
@@ -200,6 +201,14 @@ impl RegionalBuiltinMachine {
                 | Builtin::EffectMapRun
                 | Builtin::EffectMapContinue
                 | Builtin::Fixpoint
+                | Builtin::ObjectSpec
+                | Builtin::ObjectLocalName
+                | Builtin::DiagnosticObject
+                | Builtin::ObjectInstance
+                | Builtin::ObjectInstanceFromParts
+                | Builtin::ObjectDefaultDefs
+                | Builtin::ObjectDictDefs
+                | Builtin::ObjectFromDict
         )
     }
 
@@ -212,6 +221,9 @@ impl RegionalBuiltinMachine {
         assert!(Self::supports(builtin));
         assert_eq!(arguments.len(), builtin.arity());
         match builtin {
+            builtin if RegionalObjectBuiltinMachine::supports(builtin) => Self::Object(Box::new(
+                RegionalObjectBuiltinMachine::new_in(access, source_owner, builtin, arguments),
+            )),
             builtin if RegionalEffectMachine::supports(builtin) => Self::Effect(Box::new(
                 RegionalEffectMachine::new_in(access, source_owner, builtin, arguments),
             )),
@@ -402,6 +414,7 @@ impl RegionalBuiltinMachine {
             Self::TextLines(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
+            Self::Object(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
             Self::Strategy(machine) => machine.poll_in(access, step_budget),
         }
@@ -426,6 +439,7 @@ impl RegionalBuiltinMachine {
             Self::TextLines(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
+            Self::Object(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
             Self::Strategy(machine) => machine.trace_managed_edges(visitor),
         }
@@ -867,7 +881,6 @@ impl RegionalStrategyMachine {
 }
 
 pub(crate) enum BuiltinTaskMachine {
-    Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
 }
 
@@ -919,17 +932,9 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternDictTryTake
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
-                | Builtin::ObjectSpec
-                | Builtin::ObjectLocalName
-                | Builtin::DiagnosticObject
                 | Builtin::ObjectWithDefs
                 | Builtin::ObjectComposedDefs
                 | Builtin::ObjectOverrideDefs
-                | Builtin::ObjectInstance
-                | Builtin::ObjectInstanceFromParts
-                | Builtin::ObjectDefaultDefs
-                | Builtin::ObjectDictDefs
-                | Builtin::ObjectFromDict
         )
     }
 
@@ -941,9 +946,6 @@ impl BuiltinTaskMachine {
             "a builtin source must contain one saturated call"
         );
         match builtin {
-            builtin if ObjectBuiltinMachine::supports(builtin) => {
-                Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
-            }
             builtin if ObjectCompositionMachine::supports(builtin) => {
                 Self::ObjectComposition(Box::new(ObjectCompositionMachine::new(builtin, arguments)))
             }
@@ -959,9 +961,6 @@ impl BuiltinTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> BuiltinTaskPoll {
         match self {
-            Self::Object(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
             Self::ObjectComposition(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }

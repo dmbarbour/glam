@@ -135,14 +135,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge / W6G.1f.3g.3e.1 pattern-list embedding"
     ),
     entry!(
-        "src/eval/object_builtin_machine.rs",
-        0,
-        0,
-        7,
-        "durable object specification, diagnostic normalization, local-name, instance, definition-adapter, and plain-dictionary conversion result publication",
-        "W6F.2/W6F.4a-W6F.4c resumable object builtin ownership"
-    ),
-    entry!(
         "src/eval/object_composition_machine.rs",
         0,
         0,
@@ -438,13 +430,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
-                | "src/eval/object_builtin_machine.rs::optional_spec_member"
-                | "src/eval/object_builtin_machine.rs::finish_dict_defs"
-                | "src/eval/object_builtin_machine.rs::root_local_name"
-                | "src/eval/object_builtin_machine.rs::root_instance_from_plain_dict"
-                | "src/eval/object_builtin_machine.rs::root_object_from_dict"
-                | "src/eval/object_builtin_machine.rs::root_object_instance"
-                | "src/eval/object_builtin_machine.rs::spec_name"
                 | "src/eval/object_composition_machine.rs::finish_object_extension"
                 | "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll"
                 | "src/eval/object_composition_machine.rs::insert_override_value"
@@ -706,13 +691,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
-    "src/eval/object_builtin_machine.rs::finish_dict_defs#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::optional_spec_member#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::root_instance_from_plain_dict#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::root_local_name#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::root_object_from_dict#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::root_object_instance#1|surface=access-publication|scope=production",
-    "src/eval/object_builtin_machine.rs::spec_name#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::finish_object_extension#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::insert_override_value#1|surface=access-publication|scope=production",

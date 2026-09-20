@@ -155,11 +155,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6F.5 retains the builtin compatibility owner; W6G.1f.3g.2a-.2d move numeric, assertion, provenance, conditional, net, seq, and spark state beneath caller-supplied regional access"
     ),
     context_entry!(
-        "src/eval/object_builtin_machine.rs",
-        [12, 2],
-        "W6F.2/W6F.4a-W6F.4c durable object specification, diagnostic normalization, local-name, instance, definition-adapter, and plain-dictionary conversion ownership"
-    ),
-    context_entry!(
         "src/eval/object_composition_machine.rs",
         [12, 3],
         "W6F.3 durable ordinary extension, composed-definition application, and recursive override ownership"

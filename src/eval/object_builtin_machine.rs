@@ -1,89 +1,91 @@
-//! Durable object inspection and local-name construction.
+//! Regional object inspection and local-name construction.
 
 use std::sync::Arc;
 
+use glam_gc::Visitor;
+
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, LazyValue, List, Value,
-    keys,
+    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, LazyId, LazyValue, List,
+    Value, keys, trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
-};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::evaluation::EvaluationValueAccess;
 
-use super::builtin_machine::BuiltinTaskPoll;
+use super::builtin_machine::RegionalBuiltinPoll;
 use super::dict_machine::merge_dicts_in;
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
-use super::whnf::WhnfComputation;
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
+};
 
-pub(crate) struct ObjectBuiltinMachine {
+pub(in crate::eval) struct RegionalObjectBuiltinMachine {
     phase: ObjectPhase,
+    source_owner: LazyId,
 }
 
 enum ObjectPhase {
     SpecObject {
-        object: WhnfComputation,
+        object: RegionalWhnfWork,
     },
     SpecValue {
-        spec: WhnfComputation,
+        spec: RegionalWhnfWork,
     },
     DiagnosticMessage {
-        message: WhnfComputation,
+        message: RegionalWhnfWork,
     },
     DiagnosticSpec {
-        message: RuntimeValueRoot,
-        spec: WhnfComputation,
+        message: Value,
+        spec: RegionalWhnfWork,
     },
     LocalHost {
-        host: WhnfComputation,
-        parts: RuntimeValueRoot,
+        host: RegionalWhnfWork,
+        parts: Value,
     },
     LocalSpec {
-        spec: WhnfComputation,
-        parts: RuntimeValueRoot,
+        spec: RegionalWhnfWork,
+        parts: Value,
     },
     LocalName {
-        name: WhnfComputation,
-        parts: RuntimeValueRoot,
+        name: RegionalWhnfWork,
+        parts: Value,
     },
     LocalParts {
-        name: RuntimeValueRoot,
-        parts: WhnfComputation,
+        name: Value,
+        parts: RegionalWhnfWork,
     },
     LocalPartsFront {
-        values: Vec<RuntimeValueRoot>,
-        front: ListFrontMachine,
+        values: Vec<Value>,
+        front: RegionalListFront,
     },
     Instance {
-        spec: RuntimeValueRoot,
+        spec: Value,
     },
     InstanceFromParts {
-        name: RuntimeValueRoot,
-        deps: RuntimeValueRoot,
-        defs: RuntimeValueRoot,
+        name: Value,
+        deps: Value,
+        defs: Value,
     },
     DefaultDefs {
-        base: WhnfComputation,
+        base: RegionalWhnfWork,
     },
     DictDefsBase {
-        dict: RuntimeValueRoot,
-        base: WhnfComputation,
+        dict: Value,
+        base: RegionalWhnfWork,
     },
     DictDefsDict {
-        base: RuntimeValueRoot,
-        dict: WhnfComputation,
+        base: Value,
+        dict: RegionalWhnfWork,
     },
     FromDictValue {
-        value: WhnfComputation,
+        value: RegionalWhnfWork,
     },
     FromDictSpec {
-        value: RuntimeValueRoot,
-        spec: WhnfComputation,
+        value: Value,
+        spec: RegionalWhnfWork,
     },
 }
 
-impl ObjectBuiltinMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
+impl RegionalObjectBuiltinMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
             Builtin::ObjectSpec
@@ -97,502 +99,522 @@ impl ObjectBuiltinMachine {
         )
     }
 
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let duplicate = |value: &Value| access.values().duplicate_value(value);
+        let demand = |value: &Value| {
+            RegionalWhnfWork::from_focus(access, duplicate(value)).with_source_owner(source_owner)
+        };
         let phase = match builtin {
             Builtin::ObjectSpec => {
-                let [object]: [RuntimeValueRoot; 1] = arguments
-                    .try_into()
-                    .expect("object spec retains one operand");
+                let [object] = arguments else {
+                    unreachable!("object spec retains one operand")
+                };
                 ObjectPhase::SpecObject {
-                    object: WhnfComputation::from_root(object),
+                    object: demand(object),
                 }
             }
             Builtin::DiagnosticObject => {
-                let [message]: [RuntimeValueRoot; 1] = arguments
-                    .try_into()
-                    .expect("diagnostic object retains one operand");
+                let [message] = arguments else {
+                    unreachable!("diagnostic object retains one operand")
+                };
                 ObjectPhase::DiagnosticMessage {
-                    message: WhnfComputation::from_root(message),
+                    message: demand(message),
                 }
             }
             Builtin::ObjectLocalName => {
-                let [host, parts]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("object local name retains two operands");
+                let [host, parts] = arguments else {
+                    unreachable!("object local name retains two operands")
+                };
                 ObjectPhase::LocalHost {
-                    host: WhnfComputation::from_root(host),
-                    parts,
+                    host: demand(host),
+                    parts: duplicate(parts),
                 }
             }
             Builtin::ObjectInstance => {
-                let [spec]: [RuntimeValueRoot; 1] = arguments
-                    .try_into()
-                    .expect("object instance retains one specification");
-                ObjectPhase::Instance { spec }
-            }
-            Builtin::ObjectInstanceFromParts => {
-                let [name, deps, defs]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("parts-based object instance retains three fields");
-                ObjectPhase::InstanceFromParts { name, deps, defs }
-            }
-            Builtin::ObjectDefaultDefs => {
-                let [base, _self_value]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("default object definitions retain two operands");
-                ObjectPhase::DefaultDefs {
-                    base: WhnfComputation::from_root(base),
+                let [spec] = arguments else {
+                    unreachable!("object instance retains one specification")
+                };
+                ObjectPhase::Instance {
+                    spec: duplicate(spec),
                 }
             }
+            Builtin::ObjectInstanceFromParts => {
+                let [name, deps, defs] = arguments else {
+                    unreachable!("parts-based object instance retains three fields")
+                };
+                ObjectPhase::InstanceFromParts {
+                    name: duplicate(name),
+                    deps: duplicate(deps),
+                    defs: duplicate(defs),
+                }
+            }
+            Builtin::ObjectDefaultDefs => {
+                let [base, _self_value] = arguments else {
+                    unreachable!("default object definitions retain two operands")
+                };
+                ObjectPhase::DefaultDefs { base: demand(base) }
+            }
             Builtin::ObjectDictDefs => {
-                let [dict, base, _self_value]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("dictionary object definitions retain three operands");
+                let [dict, base, _self_value] = arguments else {
+                    unreachable!("dictionary object definitions retain three operands")
+                };
                 ObjectPhase::DictDefsBase {
-                    dict,
-                    base: WhnfComputation::from_root(base),
+                    dict: duplicate(dict),
+                    base: demand(base),
                 }
             }
             Builtin::ObjectFromDict => {
-                let [value]: [RuntimeValueRoot; 1] = arguments
-                    .try_into()
-                    .expect("object-from-dictionary retains one operand");
+                let [value] = arguments else {
+                    unreachable!("object-from-dictionary retains one operand")
+                };
                 ObjectPhase::FromDictValue {
-                    value: WhnfComputation::from_root(value),
+                    value: demand(value),
                 }
             }
             _ => unreachable!("object builtin machine received another builtin"),
         };
-        Self { phase }
+        Self {
+            phase,
+            source_owner,
+        }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+    ) -> RegionalBuiltinPoll {
+        let source_owner = self.source_owner;
         match &mut self.phase {
             ObjectPhase::SpecObject { object } => {
-                let object = match poll_whnf(object, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let object = match poll_whnf_in(access, object, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let spec = match object_spec_member(context, &object) {
+                let spec = match object_spec_member_in(access, &object) {
                     Ok(spec) => spec,
-                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                    Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
                 self.phase = ObjectPhase::SpecValue {
-                    spec: WhnfComputation::from_root(spec),
+                    spec: regional_demand(access, spec, source_owner),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::SpecValue { spec } => {
-                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let spec = match poll_whnf_in(access, spec, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                finish_object_spec(context, spec)
+                finish_object_spec_in(access, spec)
             }
             ObjectPhase::DiagnosticMessage { message } => {
-                let message = match poll_whnf(message, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let message = match poll_whnf_in(access, message, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let spec = match optional_spec_member(
-                    context,
+                let spec = match optional_spec_member_in(
+                    access,
                     &message,
                     "object_from_dict requires a dictionary value",
                 ) {
                     Ok(spec) => spec,
-                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                    Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
                 let Some(spec) = spec else {
-                    return BuiltinTaskPoll::Ready(root_object_from_dict(context, &message));
+                    return RegionalBuiltinPoll::Ready(object_from_dict_in(access, &message));
                 };
                 self.phase = ObjectPhase::DiagnosticSpec {
                     message,
-                    spec: WhnfComputation::from_root(spec),
+                    spec: regional_demand(access, spec, source_owner),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::DiagnosticSpec { message, spec } => {
-                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let spec = match poll_whnf_in(access, spec, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                if is_undefined(context, &spec) {
-                    BuiltinTaskPoll::Ready(root_object_from_dict(context, message))
+                if is_undefined_in(access, &spec) {
+                    RegionalBuiltinPoll::Ready(object_from_dict_in(access, message))
                 } else {
-                    BuiltinTaskPoll::Ready(message.clone())
+                    RegionalBuiltinPoll::Ready(access.values().duplicate_value(message))
                 }
             }
             ObjectPhase::LocalHost { host, parts } => {
-                let host = match poll_whnf(host, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let host = match poll_whnf_in(access, host, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let spec = match object_spec_member(context, &host) {
+                let spec = match object_spec_member_in(access, &host) {
                     Ok(spec) => spec,
-                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                    Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
                 self.phase = ObjectPhase::LocalSpec {
-                    spec: WhnfComputation::from_root(spec),
-                    parts: parts.clone(),
+                    spec: regional_demand(access, spec, source_owner),
+                    parts: access.values().duplicate_value(parts),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::LocalSpec { spec, parts } => {
-                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let spec = match poll_whnf_in(access, spec, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let name = match spec_name(context, &spec) {
+                let name = match spec_name_in(access, &spec) {
                     Ok(name) => name,
-                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                    Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
                 self.phase = ObjectPhase::LocalName {
-                    name: WhnfComputation::from_root(name),
-                    parts: parts.clone(),
+                    name: regional_demand(access, name, source_owner),
+                    parts: access.values().duplicate_value(parts),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::LocalName { name, parts } => {
-                let name = match poll_whnf(name, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let name = match poll_whnf_in(access, name, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
                 self.phase = ObjectPhase::LocalParts {
                     name,
-                    parts: WhnfComputation::from_root(parts.clone()),
+                    parts: regional_demand(
+                        access,
+                        access.values().duplicate_value(parts),
+                        source_owner,
+                    ),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::LocalParts { name, parts } => {
-                let parts = match poll_whnf(parts, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let parts = match poll_whnf_in(access, parts, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let kind = context.with_value_access(|access| match access.clone_root(&parts) {
-                    Value::List(_) => Some(true),
-                    Value::Dict(dict) if dict.is_empty() => Some(false),
-                    _ => None,
-                });
-                match kind {
-                    Some(true) => {
+                match &parts {
+                    Value::List(_) => {
                         self.phase = ObjectPhase::LocalPartsFront {
-                            values: vec![name.clone()],
-                            front: ListFrontMachine::unowned(parts),
+                            values: vec![access.values().duplicate_value(name)],
+                            front: RegionalListFront::new_in(
+                                access,
+                                parts,
+                                Some(self.source_owner),
+                            ),
                         };
-                        BuiltinTaskPoll::Yielded
+                        RegionalBuiltinPoll::Yielded
                     }
-                    Some(false) => root_local_name(context, std::slice::from_ref(name)),
-                    None => BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "object local name builtin requires a list of name parts",
-                    )),
+                    Value::Dict(dict) if dict.is_empty() => RegionalBuiltinPoll::Ready(
+                        local_name_in(access, std::slice::from_ref(name)),
+                    ),
+                    _ => failure("object local name builtin requires a list of name parts"),
                 }
             }
             ObjectPhase::LocalPartsFront { values, front } => {
-                match front.poll(poll_context, context, durable_context, step_budget) {
-                    ListFrontPoll::Ready(Some((value, tail))) => {
+                match front.poll_in(access, step_budget) {
+                    RegionalListFrontPoll::Ready(Some((value, tail))) => {
                         values.push(value);
-                        *front = ListFrontMachine::unowned(tail);
-                        BuiltinTaskPoll::Yielded
+                        *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                        RegionalBuiltinPoll::Yielded
                     }
-                    ListFrontPoll::Ready(None) => root_local_name(context, values),
-                    ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                    ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-                    ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                    RegionalListFrontPoll::Ready(None) => {
+                        RegionalBuiltinPoll::Ready(local_name_in(access, values))
+                    }
+                    RegionalListFrontPoll::Boundary(request) => {
+                        RegionalBuiltinPoll::Boundary(request)
+                    }
+                    RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
                 }
             }
-            ObjectPhase::Instance { spec } => BuiltinTaskPoll::Ready(root_object_instance(
-                context,
+            ObjectPhase::Instance { spec } => RegionalBuiltinPoll::Ready(object_instance_in(
+                access,
                 ObjectInstanceInput::Spec(spec),
             )),
-            ObjectPhase::InstanceFromParts { name, deps, defs } => BuiltinTaskPoll::Ready(
-                root_object_instance(context, ObjectInstanceInput::Parts { name, deps, defs }),
+            ObjectPhase::InstanceFromParts { name, deps, defs } => RegionalBuiltinPoll::Ready(
+                object_instance_in(access, ObjectInstanceInput::Parts { name, deps, defs }),
             ),
-            ObjectPhase::DefaultDefs { base } => {
-                match poll_whnf(base, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => BuiltinTaskPoll::Ready(value),
-                    DemandResult::Pending(poll) => poll,
-                }
-            }
+            ObjectPhase::DefaultDefs { base } => match poll_whnf_in(access, base, step_budget) {
+                Ok(value) => RegionalBuiltinPoll::Ready(value),
+                Err(poll) => poll,
+            },
             ObjectPhase::DictDefsBase { dict, base } => {
-                let base = match poll_whnf(base, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let base = match poll_whnf_in(access, base, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
                 self.phase = ObjectPhase::DictDefsDict {
                     base,
-                    dict: WhnfComputation::from_root(dict.clone()),
+                    dict: regional_demand(
+                        access,
+                        access.values().duplicate_value(dict),
+                        source_owner,
+                    ),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::DictDefsDict { base, dict } => {
-                let dict = match poll_whnf(dict, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let dict = match poll_whnf_in(access, dict, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                finish_dict_defs(context, base, &dict)
+                finish_dict_defs_in(access, base, &dict)
             }
             ObjectPhase::FromDictValue { value } => {
-                let value = match poll_whnf(value, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let value = match poll_whnf_in(access, value, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let spec = match optional_spec_member(
-                    context,
+                let spec = match optional_spec_member_in(
+                    access,
                     &value,
                     "object_from_dict requires a dictionary value",
                 ) {
                     Ok(spec) => spec,
-                    Err(failure) => return BuiltinTaskPoll::Failed(failure),
+                    Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
                 let Some(spec) = spec else {
-                    return BuiltinTaskPoll::Ready(root_instance_from_plain_dict(context, &value));
+                    return RegionalBuiltinPoll::Ready(instance_from_plain_dict_in(access, &value));
                 };
                 self.phase = ObjectPhase::FromDictSpec {
                     value,
-                    spec: WhnfComputation::from_root(spec),
+                    spec: regional_demand(access, spec, source_owner),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             ObjectPhase::FromDictSpec { value, spec } => {
-                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let spec = match poll_whnf_in(access, spec, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                if is_undefined(context, &spec) {
-                    BuiltinTaskPoll::Ready(root_instance_from_plain_dict(context, value))
+                if is_undefined_in(access, &spec) {
+                    RegionalBuiltinPoll::Ready(instance_from_plain_dict_in(access, value))
                 } else {
-                    BuiltinTaskPoll::Failed(root_message(
-                        context,
-                        "object_from_dict requires a plain dictionary, not an object",
-                    ))
+                    failure("object_from_dict requires a plain dictionary, not an object")
                 }
             }
         }
     }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.phase.trace_managed_edges(visitor);
+    }
 }
 
-fn finish_dict_defs(
-    context: &EvaluatorStepContext<'_>,
-    base: &RuntimeValueRoot,
-    dict: &RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let Value::Dict(base) = access.clone_root(base) else {
-            return Err("dictionary union requires dictionary values");
-        };
-        let Value::Dict(dict) = access.clone_root(dict) else {
-            return Err("dictionary union requires dictionary values");
-        };
-        Ok(access
-            .values()
-            .root_runtime_value(Value::Dict(merge_dicts_in(access.values(), &base, &dict))))
-    });
-    match result {
-        Ok(value) => BuiltinTaskPoll::Ready(value),
-        Err(message) => BuiltinTaskPoll::Failed(root_message(context, message)),
+impl ObjectPhase {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::SpecObject { object }
+            | Self::SpecValue { spec: object }
+            | Self::DiagnosticMessage { message: object }
+            | Self::DefaultDefs { base: object }
+            | Self::FromDictValue { value: object } => object.trace_managed_edges(visitor),
+            Self::DiagnosticSpec { message, spec }
+            | Self::FromDictSpec {
+                value: message,
+                spec,
+            } => {
+                trace_compatibility_value_managed_edges(message, visitor);
+                spec.trace_managed_edges(visitor);
+            }
+            Self::LocalHost { host, parts } => {
+                host.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(parts, visitor);
+            }
+            Self::LocalSpec { spec, parts } | Self::LocalName { name: spec, parts } => {
+                spec.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(parts, visitor);
+            }
+            Self::LocalParts { name, parts } => {
+                trace_compatibility_value_managed_edges(name, visitor);
+                parts.trace_managed_edges(visitor);
+            }
+            Self::LocalPartsFront { values, front } => {
+                for value in values {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+                front.trace_managed_edges(visitor);
+            }
+            Self::Instance { spec } => trace_compatibility_value_managed_edges(spec, visitor),
+            Self::InstanceFromParts { name, deps, defs } => {
+                for value in [name, deps, defs] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            Self::DictDefsBase { dict, base } => {
+                trace_compatibility_value_managed_edges(dict, visitor);
+                base.trace_managed_edges(visitor);
+            }
+            Self::DictDefsDict { base, dict } => {
+                trace_compatibility_value_managed_edges(base, visitor);
+                dict.trace_managed_edges(visitor);
+            }
+        }
     }
+}
+
+fn poll_whnf_in(
+    access: &EvaluationValueAccess<'_>,
+    computation: &mut RegionalWhnfWork,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> Result<Value, RegionalBuiltinPoll> {
+    match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
+        RegionalWhnfStatus::Ready(value) => Ok(value),
+        RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
+        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
+    }
+}
+
+fn regional_demand(
+    access: &EvaluationValueAccess<'_>,
+    value: Value,
+    source_owner: LazyId,
+) -> RegionalWhnfWork {
+    RegionalWhnfWork::from_focus(access, value).with_source_owner(source_owner)
+}
+
+fn finish_dict_defs_in(
+    access: &EvaluationValueAccess<'_>,
+    base: &Value,
+    dict: &Value,
+) -> RegionalBuiltinPoll {
+    let Value::Dict(base) = base else {
+        return failure("dictionary union requires dictionary values");
+    };
+    let Value::Dict(dict) = dict else {
+        return failure("dictionary union requires dictionary values");
+    };
+    RegionalBuiltinPoll::Ready(Value::Dict(merge_dicts_in(access.values(), base, dict)))
 }
 
 enum ObjectInstanceInput<'a> {
-    Spec(&'a RuntimeValueRoot),
+    Spec(&'a Value),
     Parts {
-        name: &'a RuntimeValueRoot,
-        deps: &'a RuntimeValueRoot,
-        defs: &'a RuntimeValueRoot,
+        name: &'a Value,
+        deps: &'a Value,
+        defs: &'a Value,
     },
 }
 
-fn root_object_instance(
-    context: &EvaluatorStepContext<'_>,
-    input: ObjectInstanceInput<'_>,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let spec = match input {
-            ObjectInstanceInput::Spec(spec) => access.clone_root(spec),
-            ObjectInstanceInput::Parts { name, deps, defs } => Value::Dict(
-                Dict::new_sync()
-                    .insert((*keys::NAME).clone(), access.clone_root(name))
-                    .insert((*keys::DEPS).clone(), access.clone_root(deps))
-                    .insert((*keys::DEFS).clone(), access.clone_root(defs)),
-            ),
-        };
-        let object = LazyValue::computed_fixpoint_in(
-            access.values(),
-            "object self",
-            FixpointComputation::ObjectInstance(spec),
-        );
-        access.values().root_runtime_value(Value::Lazy(object))
-    })
-}
-
-fn root_instance_from_plain_dict(
-    context: &EvaluatorStepContext<'_>,
-    value: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let Value::Dict(dict) = access.clone_root(value) else {
-            unreachable!("plain-dictionary conversion retains a validated dictionary")
-        };
-        let defs = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::ObjectDictDefs,
-            arguments: Arc::from([Value::Dict(dict)]),
-        });
-        let spec = Value::Dict(
+fn object_instance_in(access: &EvaluationValueAccess<'_>, input: ObjectInstanceInput<'_>) -> Value {
+    let spec = match input {
+        ObjectInstanceInput::Spec(spec) => access.values().duplicate_value(spec),
+        ObjectInstanceInput::Parts { name, deps, defs } => Value::Dict(
             Dict::new_sync()
-                .insert((*keys::NAME).clone(), Value::Dict(Dict::new_sync()))
-                .insert((*keys::DEPS).clone(), Value::List(List::empty()))
-                .insert((*keys::DEFS).clone(), defs),
-        );
-        let object = LazyValue::computed_fixpoint_in(
-            access.values(),
-            "object self",
-            FixpointComputation::ObjectInstance(spec),
-        );
-        access.values().root_runtime_value(Value::Lazy(object))
-    })
+                .insert((*keys::NAME).clone(), access.values().duplicate_value(name))
+                .insert((*keys::DEPS).clone(), access.values().duplicate_value(deps))
+                .insert((*keys::DEFS).clone(), access.values().duplicate_value(defs)),
+        ),
+    };
+    Value::Lazy(LazyValue::computed_fixpoint_in(
+        access.values(),
+        "object self",
+        FixpointComputation::ObjectInstance(spec),
+    ))
 }
 
-enum DemandResult {
-    Ready(RuntimeValueRoot),
-    Pending(BuiltinTaskPoll),
+fn instance_from_plain_dict_in(access: &EvaluationValueAccess<'_>, value: &Value) -> Value {
+    let Value::Dict(dict) = value else {
+        unreachable!("plain-dictionary conversion retains a validated dictionary")
+    };
+    let defs = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::ObjectDictDefs,
+        arguments: Arc::from([Value::Dict(dict.clone())]),
+    });
+    let spec = Value::Dict(
+        Dict::new_sync()
+            .insert((*keys::NAME).clone(), Value::Dict(Dict::new_sync()))
+            .insert((*keys::DEPS).clone(), Value::List(List::empty()))
+            .insert((*keys::DEFS).clone(), defs),
+    );
+    Value::Lazy(LazyValue::computed_fixpoint_in(
+        access.values(),
+        "object self",
+        FixpointComputation::ObjectInstance(spec),
+    ))
 }
 
-fn poll_whnf(
-    computation: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandResult {
-    match poll_whnf_computation(computation, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandResult::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => {
-            DemandResult::Pending(BuiltinTaskPoll::Pending(dependency))
-        }
-        WhnfOwnerPoll::Yielded => DemandResult::Pending(BuiltinTaskPoll::Yielded),
-        WhnfOwnerPoll::Failed(failure) => DemandResult::Pending(BuiltinTaskPoll::Failed(failure)),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("object builtin produced an external {boundary:?} boundary")
-        }
-    }
-}
-
-fn object_spec_member(
-    context: &EvaluatorStepContext<'_>,
-    object: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
-    let member = optional_spec_member(
-        context,
+fn object_spec_member_in(
+    access: &EvaluationValueAccess<'_>,
+    object: &Value,
+) -> Result<Value, Arc<EvaluationFailure>> {
+    optional_spec_member_in(
+        access,
         object,
         "object spec builtin requires an object value",
-    )?;
-    member.ok_or_else(|| {
-        root_message(
-            context,
+    )?
+    .ok_or_else(|| {
+        Arc::new(EvaluationFailure::message(
             "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
-        )
-    })
-}
-
-fn optional_spec_member(
-    context: &EvaluatorStepContext<'_>,
-    value: &RuntimeValueRoot,
-    wrong_kind_message: &'static str,
-) -> Result<Option<RuntimeValueRoot>, RuntimeFailureRoot> {
-    context.with_value_access(|access| {
-        let Value::Dict(dict) = access.clone_root(value) else {
-            return Err(root_message(context, wrong_kind_message));
-        };
-        Ok(dict.get(&*keys::SPEC).map(|spec| {
-            access
-                .values()
-                .root_runtime_value(access.values().duplicate_value(spec))
-        }))
-    })
-}
-
-fn finish_object_spec(
-    context: &EvaluatorStepContext<'_>,
-    spec: RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    context.with_value_access(|access| match access.clone_root(&spec) {
-        Value::Dict(dict) if dict.is_empty() => BuiltinTaskPoll::Failed(root_message(
-            context,
-            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
-        )),
-        Value::Dict(_) => BuiltinTaskPoll::Ready(spec),
-        _ => BuiltinTaskPoll::Failed(root_message(
-            context,
-            "object value requires a dictionary-valued `spec`",
-        )),
-    })
-}
-
-fn spec_name(
-    context: &EvaluatorStepContext<'_>,
-    spec: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
-    context.with_value_access(|access| {
-        let Value::Dict(spec) = access.clone_root(spec) else {
-            return Err(root_message(
-                context,
-                "object instance builtin requires a specification dictionary",
-            ));
-        };
-        Ok(access.values().root_runtime_value(
-            spec.get(&*keys::NAME)
-                .map(|value| access.values().duplicate_value(value))
-                .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
         ))
     })
 }
 
-fn is_undefined(context: &EvaluatorStepContext<'_>, value: &RuntimeValueRoot) -> bool {
-    context.with_value_access(
-        |access| matches!(access.clone_root(value), Value::Dict(dict) if dict.is_empty()),
-    )
+fn optional_spec_member_in(
+    access: &EvaluationValueAccess<'_>,
+    value: &Value,
+    wrong_kind_message: &'static str,
+) -> Result<Option<Value>, Arc<EvaluationFailure>> {
+    let Value::Dict(dict) = value else {
+        return Err(Arc::new(EvaluationFailure::message(wrong_kind_message)));
+    };
+    Ok(dict
+        .get(&*keys::SPEC)
+        .map(|spec| access.values().duplicate_value(spec)))
 }
 
-fn root_object_from_dict(
-    context: &EvaluatorStepContext<'_>,
-    value: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let lazy = LazyValue::from_builtin_in(
-            access.values(),
-            BuiltinCall {
-                builtin: Builtin::ObjectFromDict,
-                arguments: Arc::from([access.clone_root(value)]),
-            },
-        );
-        access.values().root_runtime_value(Value::Lazy(lazy))
-    })
+fn finish_object_spec_in(_access: &EvaluationValueAccess<'_>, spec: Value) -> RegionalBuiltinPoll {
+    match spec {
+        Value::Dict(dict) if dict.is_empty() => failure(
+            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
+        ),
+        Value::Dict(_) => RegionalBuiltinPoll::Ready(spec),
+        _ => failure("object value requires a dictionary-valued `spec`"),
+    }
 }
 
-fn root_local_name(
-    context: &EvaluatorStepContext<'_>,
-    values: &[RuntimeValueRoot],
-) -> BuiltinTaskPoll {
-    BuiltinTaskPoll::Ready(context.with_value_access(|access| {
-        let values = values
+fn spec_name_in(
+    access: &EvaluationValueAccess<'_>,
+    spec: &Value,
+) -> Result<Value, Arc<EvaluationFailure>> {
+    let Value::Dict(spec) = spec else {
+        return Err(Arc::new(EvaluationFailure::message(
+            "object instance builtin requires a specification dictionary",
+        )));
+    };
+    Ok(spec
+        .get(&*keys::NAME)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| Value::Dict(Dict::new_sync())))
+}
+
+fn is_undefined_in(_access: &EvaluationValueAccess<'_>, value: &Value) -> bool {
+    matches!(value, Value::Dict(dict) if dict.is_empty())
+}
+
+fn object_from_dict_in(access: &EvaluationValueAccess<'_>, value: &Value) -> Value {
+    Value::Lazy(LazyValue::from_builtin_in(
+        access.values(),
+        BuiltinCall {
+            builtin: Builtin::ObjectFromDict,
+            arguments: Arc::from([access.values().duplicate_value(value)]),
+        },
+    ))
+}
+
+fn local_name_in(access: &EvaluationValueAccess<'_>, values: &[Value]) -> Value {
+    Value::List(List::from_values(
+        values
             .iter()
-            .map(|value| access.clone_root(value))
-            .collect();
-        access
-            .values()
-            .root_runtime_value(Value::List(List::from_values(values)))
-    }))
+            .map(|value| access.values().duplicate_value(value))
+            .collect(),
+    ))
 }
 
-fn root_message(
-    context: &EvaluatorStepContext<'_>,
-    message: impl Into<Arc<str>>,
-) -> RuntimeFailureRoot {
-    context.root_failure(Arc::new(EvaluationFailure::message(message.into())))
+fn failure(message: impl Into<Arc<str>>) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message.into())))
 }

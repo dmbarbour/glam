@@ -311,13 +311,28 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
         vec![host, parts],
     )
     .expect("object local-name application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated object local-name builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the lazy parts tail should suspend local-name construction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the object local-name checkpoint must retain its completed prefix");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact lazy parts tail");
+    assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(2)])))
         .expect("the parts tail should accept its assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned parts tail must remain live beneath the checkpoint");
 
     let Value::List(name) =
         eval_value(&observer, &application).expect("local-name construction should resume")
@@ -329,6 +344,7 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
         [Value::binary_from_text("root"), n(1), n(2)]
     );
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]
@@ -582,10 +598,21 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
         vec![Value::Promised(dict.clone()), base, unit_value()],
     )
     .expect("dictionary object definitions should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated object dictionary-definitions builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("dictionary definitions should wait after demanding their base");
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the dictionary-definitions checkpoint must retain its completed base");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact definitions dictionary");
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     set_promise(
         &owner,
@@ -593,6 +620,10 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
         Value::Dict(Dict::new_sync().insert(Key::binary_from_text("dict"), n(42))),
     )
     .expect("the definitions dictionary should accept its assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned definitions dictionary must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
         eval_value(&observer, &application).expect("dictionary definitions should resume")
@@ -602,6 +633,7 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
     assert_eq!(result.get(&Key::binary_from_text("base")), Some(&n(19)));
     assert_eq!(result.get(&Key::binary_from_text("dict")), Some(&n(42)));
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]
@@ -634,13 +666,28 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
         vec![dictionary],
     )
     .expect("plain-dictionary conversion should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated object-from-dictionary builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the promised specification should suspend plain-dictionary conversion");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the object-from-dictionary checkpoint must retain the dictionary");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact dictionary specification");
+    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
         .expect("the specification should accept its undefined assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned object specification must remain live beneath the checkpoint");
 
     let Value::Dict(object) =
         eval_value(&observer, &application).expect("plain-dictionary conversion should resume")
@@ -650,6 +697,7 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     assert_eq!(object.get(&Key::binary_from_text("answer")), Some(&n(42)));
     assert!(matches!(object.get(&*keys::SPEC), Some(Value::Dict(_))));
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 struct DropSignal(Arc<AtomicBool>);
