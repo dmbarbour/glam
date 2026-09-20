@@ -3391,6 +3391,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn isolated_effect_api_for_test<S: TaskSpecialization>(
+    values: &CoreValueFactory,
+    specialization: &S,
+) -> Value {
+    effect_api(
+        values,
+        &Tags::new(),
+        specialization.requests(),
+        specialization.exposes_shared_heap(),
+        false,
+    )
+    .expect("test specialization should construct its isolated effect API")
+    .0
+    .clone_core_for_test()
+}
+
 fn effect_dispatch_context(stage: &str) -> Value {
     let stage_key = Key::binary_from_text("stage");
     let stage = Value::Atom(Atom::from_key(&Key::binary_from_text(stage)));

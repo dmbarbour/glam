@@ -145,10 +145,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/eval/builtins/net/construction.rs",
         0,
-        0,
+        1,
         2,
-        "interaction-net diagnostic context and completed replay publication",
-        "W6F.6-W6F.7 rooted net-construction lifecycle and context"
+        "interaction-net diagnostic context and completed replay publication plus the PNC0 deterministic route-loss fixture",
+        "W6F.6-W6F.7 rooted net-construction lifecycle and context; PNC0 test-only construction input"
     ),
     entry!(
         "src/eval/value.rs",
@@ -673,6 +673,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
     "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
+    "src/eval/builtins/net/construction.rs::tests::rooted_construction_effect#1|surface=scoped-factory|scope=test",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",

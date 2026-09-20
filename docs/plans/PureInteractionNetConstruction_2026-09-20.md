@@ -1,9 +1,9 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: planned. This is the focused W6G.1f.3h transition from the generic
-reflection-task interpreter used by `interaction_net` to ordinary pure
-evaluation composed with the existing `ListEffect` search primitives. The
-parent plan is
+Status: active; PNC0 completed on 2026-09-20. This is the focused W6G.1f.3h
+transition from the generic reflection-task interpreter used by
+`interaction_net` to ordinary pure evaluation composed with the existing
+`ListEffect` search primitives. The parent plan is
 [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md).
 
 ## Purpose
@@ -288,6 +288,8 @@ fixture demonstrates that it is necessary.
 
 ### PNC0 — Contract and behavioral baseline
 
+Status: complete on 2026-09-20.
+
 - Inventory the exact API currently visible through `ConstructionHost` and
   divide it into documented task-local behavior, construction operations, and
   incidental generic-interpreter capability.
@@ -301,6 +303,41 @@ fixture demonstrates that it is necessary.
 
 Exit: the behavior being preserved is executable and incidental reflection
 capabilities are explicitly excluded from the target.
+
+Completion record: `ConstructionHost` injects exactly this API:
+
+| Class | Members |
+| --- | --- |
+| Standard task-local | `r`, `seq`, `alt`, `fail`, `cut`, `fix`, `get`, `set`, `reset`, `shift` |
+| Interaction-net construction | `bind`, `copy`, `data`, `wire` |
+| Not injected | `heap`, `exit`, `task`, `log`, `env` |
+
+The shared-heap flag and exit-capability flag are both false. Ordinary
+language annotations, including `anno refl:`, remain ordinary evaluator
+behavior rather than members of the construction API: they may delay or
+enrich evaluation according to the general annotation contract, but they do
+not give the construction handler a reflection, heap, logging, environment,
+or task capability. A successful annotation still exposes its unchanged
+target; annotation failure and divergence retain their ordinary behavior.
+
+An executable API-shape test now prevents accidental capability growth.
+Source fixtures cover branch-local state rollback, nonempty-path preservation
+of the hidden reset stack, whole-state reset-stack capture/clear/restore,
+`shift`, and fixpoint hiding then restoring reset scope. The pre-existing
+construction fixtures remain the baseline for return/sequence,
+alternative/failure/cut, zero and ambiguous outcomes, foreign port brands,
+structured error context, lazy `.data`, invalid exposure/topology, copy
+validation, and memoization.
+
+An instrumented deterministic fixture counts completed construction
+operations and replay. An uninterrupted construction performs one `.data`
+transition and one replay. The named ignored regression
+`construction_search_survives_route_loss_without_replaying_completed_operations`
+forces route loss after that `.data` transition and currently observes the
+known legacy defect: the later route restarts isolated search and raises the
+operation count from one to two. PNC5 must make this test pass and remove its
+ignore marker; the baseline deliberately does not assert that replay is valid
+behavior.
 
 ### PNC1 — Strict semantic netlist and hidden replay
 

@@ -3,6 +3,9 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value};
 use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
@@ -32,7 +35,11 @@ impl ConstructionPortId {
     }
 }
 
-struct ConstructionBrand;
+#[derive(Default)]
+struct ConstructionBrand {
+    #[cfg(test)]
+    probe: std::sync::OnceLock<Arc<ConstructionProbe>>,
+}
 
 struct ConstructionPort {
     brand: Arc<ConstructionBrand>,
@@ -160,6 +167,33 @@ struct InteractionNetEffects {
     brand: Arc<ConstructionBrand>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ConstructionProbe {
+    completed_operations: AtomicUsize,
+    replays: AtomicUsize,
+}
+
+#[cfg(test)]
+impl ConstructionProbe {
+    fn complete_operation(&self) {
+        self.completed_operations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn record_replay(&self) {
+        self.replays.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl InteractionNetEffects {
+    #[cfg(test)]
+    fn complete_operation(&self) {
+        if let Some(probe) = self.brand.probe.get() {
+            probe.complete_operation();
+        }
+    }
+}
+
 enum InteractionNetRequestWork {
     Immediate {
         request: InteractionNetRequest,
@@ -261,6 +295,8 @@ impl SpecializationRequestWork<InteractionNetEffects> for InteractionNetRequestW
                         unreachable!("demanding net requests receive dedicated work")
                     }
                 }?;
+                #[cfg(test)]
+                specialization.complete_operation();
                 Ok(SpecializationRequestPoll::Complete(result))
             }
             Self::CopyStart(arguments) => {
@@ -278,6 +314,8 @@ impl SpecializationRequestWork<InteractionNetEffects> for InteractionNetRequestW
                     )
                 })?;
                 let result = construct_copy_count(outputs, context, &specialization.brand)?;
+                #[cfg(test)]
+                specialization.complete_operation();
                 Ok(SpecializationRequestPoll::Complete(result))
             }
             Self::WireStart(arguments) => {
@@ -302,6 +340,8 @@ impl SpecializationRequestWork<InteractionNetEffects> for InteractionNetRequestW
                     &specialization.brand,
                 )?;
                 let result = construct_wire_ports(left, right, context)?;
+                #[cfg(test)]
+                specialization.complete_operation();
                 Ok(SpecializationRequestPoll::Complete(result))
             }
             Self::Poisoned => panic!("completed net request work was polled again"),
@@ -407,7 +447,7 @@ impl NetConstructionMachine {
         context: EvalContext,
         effect: RuntimeValueRoot,
     ) -> Result<Self, EvaluationHalt> {
-        let brand = Arc::new(ConstructionBrand);
+        let brand = Arc::new(ConstructionBrand::default());
         let specialization = InteractionNetEffects {
             brand: brand.clone(),
         };
@@ -428,6 +468,21 @@ impl NetConstructionMachine {
             brand,
             state: NetConstructionState::Search(Box::new(search)),
         })
+    }
+
+    #[cfg(test)]
+    fn new_with_probe(
+        context: EvalContext,
+        effect: RuntimeValueRoot,
+        probe: Arc<ConstructionProbe>,
+    ) -> Result<Self, EvaluationHalt> {
+        let machine = Self::new(context, effect)?;
+        machine
+            .brand
+            .probe
+            .set(probe)
+            .unwrap_or_else(|_| panic!("construction probe must be installed exactly once"));
+        Ok(machine)
     }
 
     /// Advances construction without losing the freer machine or its journal.
@@ -528,7 +583,13 @@ impl NetConstructionMachine {
                             return match exposed
                                 .and_then(|exposed| replay(context, journal, exposed))
                             {
-                                Ok(value) => NetConstructionPoll::Ready(value),
+                                Ok(value) => {
+                                    #[cfg(test)]
+                                    if let Some(probe) = self.brand.probe.get() {
+                                        probe.record_replay();
+                                    }
+                                    NetConstructionPoll::Ready(value)
+                                }
                                 Err(error) => net_construction_halt(context, error),
                             };
                         }
@@ -776,10 +837,238 @@ fn mapped_port(mapped: &[Port], port: ConstructionPortId) -> Result<Port, Evalua
 mod tests {
     use super::*;
 
+    use crate::eval::test_support::{TestExpr, TestKey, closed_function_value_in};
+
+    fn apply(function: TestExpr, argument: TestExpr) -> TestExpr {
+        TestExpr::Apply(Arc::new(function), Arc::new(argument))
+    }
+
+    fn api_member(local: usize, name: &str) -> TestExpr {
+        TestExpr::Access(
+            Arc::new(TestExpr::Local(local)),
+            Arc::from([TestKey::Key(crate::core::Key::atom_from_text(name))]),
+        )
+    }
+
+    fn construction_returning_one_data_port(access: &crate::core::RuntimeValueAccess<'_>) -> Value {
+        let values = access.values();
+        let data_effect = crate::eval::application::effect_value(
+            access,
+            closed_function_value_in(
+                values,
+                1,
+                apply(
+                    api_member(0, "data"),
+                    TestExpr::Value(Value::binary_from_text("route probe")),
+                ),
+            ),
+        );
+        // `.r` itself is an applicable effect value. Applying it to the first
+        // returned construction port produces the continuation's effect.
+        let return_effect = crate::eval::application::effect_value(
+            access,
+            closed_function_value_in(values, 1, api_member(0, "r")),
+        );
+        let return_first_port = closed_function_value_in(
+            values,
+            1,
+            apply(
+                TestExpr::Value(return_effect),
+                apply(
+                    TestExpr::Value(Value::Builtin(crate::core::Builtin::ListHead)),
+                    TestExpr::Local(0),
+                ),
+            ),
+        );
+        let handler = closed_function_value_in(
+            values,
+            1,
+            apply(
+                apply(api_member(0, "seq"), TestExpr::Value(data_effect)),
+                TestExpr::Value(return_first_port),
+            ),
+        );
+        crate::eval::application::effect_value(access, handler)
+    }
+
+    fn rooted_construction_effect(
+        context: &crate::evaluation::OwnedEvalContext,
+    ) -> RuntimeValueRoot {
+        context
+            .values()
+            .construct_runtime_value_root(construction_returning_one_data_port)
+    }
+
+    fn poll_construction(
+        context: &crate::evaluation::OwnedEvalContext,
+        machine: &mut NetConstructionMachine,
+        steps: usize,
+    ) -> NetConstructionPoll {
+        let poll = EvaluationPollContext::for_context(context);
+        poll.evaluate(context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                context,
+                &mut crate::evaluation::EvaluationStepBudget::new(steps),
+            )
+        })
+    }
+
+    fn finish_construction(
+        context: &crate::evaluation::OwnedEvalContext,
+        machine: &mut NetConstructionMachine,
+    ) -> RuntimeValueRoot {
+        for _ in 0..512 {
+            match poll_construction(context, machine, 1) {
+                NetConstructionPoll::Yielded => {}
+                NetConstructionPoll::Ready(value) => return value,
+                NetConstructionPoll::Pending(WorkDependency::Wait(wait)) => {
+                    pump_construction_wait(context, &wait)
+                }
+                NetConstructionPoll::Pending(dependency) => {
+                    panic!("self-contained construction exposed {dependency:?}")
+                }
+                NetConstructionPoll::Failed(failure) => {
+                    panic!("self-contained construction failed: {failure}")
+                }
+            }
+        }
+        panic!("self-contained construction exhausted its deterministic poll bound")
+    }
+
+    fn pump_construction_wait(
+        context: &crate::evaluation::OwnedEvalContext,
+        wait: &crate::evaluation::EvaluationWaitToken,
+    ) {
+        for _ in 0..512 {
+            match context.pump_wait(wait, 32) {
+                crate::evaluation::EvaluationPumpOutcome::TargetReady => return,
+                crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
+                crate::evaluation::EvaluationPumpOutcome::Busy => std::thread::yield_now(),
+                crate::evaluation::EvaluationPumpOutcome::NoProgress => {
+                    panic!("self-contained construction wait lost its producer")
+                }
+            }
+        }
+        panic!("self-contained construction wait exhausted its deterministic pump bound")
+    }
+
+    #[test]
+    fn construction_effect_api_exposes_only_task_local_and_net_operations() {
+        let context = EvalContext::standalone();
+        let specialization = InteractionNetEffects {
+            brand: Arc::new(ConstructionBrand::default()),
+        };
+        let Value::Dict(api) =
+            crate::reflection::isolated_effect_api_for_test(context.values(), &specialization)
+        else {
+            panic!("construction effect API must be a dictionary")
+        };
+
+        let expected = [
+            "r", "seq", "alt", "fail", "cut", "fix", "get", "set", "reset", "shift", "bind",
+            "copy", "data", "wire",
+        ];
+        assert_eq!(api.iter().count(), expected.len());
+        for name in expected {
+            assert!(
+                api.get(&crate::core::Key::atom_from_text(name)).is_some(),
+                "construction effect API must expose `{name}`"
+            );
+        }
+        for name in ["heap", "exit", "task", "log", "env"] {
+            assert!(
+                api.get(&crate::core::Key::atom_from_text(name)).is_none(),
+                "construction effect API must not expose `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn uninterrupted_construction_executes_each_operation_and_replay_once() {
+        let context = EvalContext::standalone();
+        let effect = rooted_construction_effect(&context);
+        let probe = Arc::new(ConstructionProbe::default());
+        let mut machine = NetConstructionMachine::new_with_probe(
+            EvalContext::clone(&context),
+            effect,
+            probe.clone(),
+        )
+        .expect("the probed construction should initialize");
+
+        let value = finish_construction(&context, &mut machine);
+        assert!(matches!(value.clone_core_for_test(), Value::Net(_)));
+        assert_eq!(probe.completed_operations.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.replays.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[ignore = "PNC5 must move partial construction progress into ordinary managed values"]
+    fn construction_search_survives_route_loss_without_replaying_completed_operations() {
+        let context = EvalContext::standalone();
+        let effect = rooted_construction_effect(&context);
+        let probe = Arc::new(ConstructionProbe::default());
+        let mut first = NetConstructionMachine::new_with_probe(
+            EvalContext::clone(&context),
+            effect.clone(),
+            probe.clone(),
+        )
+        .expect("the first construction route should initialize");
+
+        for _ in 0..512 {
+            let poll = poll_construction(&context, &mut first, 1);
+            if probe.completed_operations.load(Ordering::SeqCst) == 1 {
+                assert!(
+                    matches!(poll, NetConstructionPoll::Yielded),
+                    "the fixture must lose its route after the operation and before replay"
+                );
+                break;
+            }
+            match poll {
+                NetConstructionPoll::Yielded => {}
+                NetConstructionPoll::Pending(WorkDependency::Wait(wait)) => {
+                    pump_construction_wait(&context, &wait)
+                }
+                NetConstructionPoll::Pending(_) => {
+                    panic!("construction route exposed a non-wait dependency")
+                }
+                NetConstructionPoll::Ready(_) => {
+                    panic!("construction route completed before its forced handoff")
+                }
+                NetConstructionPoll::Failed(failure) => {
+                    panic!("construction route failed: {failure}")
+                }
+            }
+        }
+        assert_eq!(probe.completed_operations.load(Ordering::SeqCst), 1);
+
+        drop(first);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("dropping a route must leave no managed access active");
+
+        let mut later = NetConstructionMachine::new_with_probe(
+            EvalContext::clone(&context),
+            effect,
+            probe.clone(),
+        )
+        .expect("a later construction route should initialize");
+        let value = finish_construction(&context, &mut later);
+        assert!(matches!(value.clone_core_for_test(), Value::Net(_)));
+        assert_eq!(
+            probe.completed_operations.load(Ordering::SeqCst),
+            1,
+            "a later route must resume after the completed `.data` transition"
+        );
+        assert_eq!(probe.replays.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn exposed_port_demand_suspends_without_losing_the_selected_journal() {
         let context = EvalContext::standalone();
-        let brand = Arc::new(ConstructionBrand);
+        let brand = Arc::new(ConstructionBrand::default());
         let values = Values::from_core_factory(context.values().clone());
         let mut journal = ConstructionJournal::default();
         let [port]: [ConstructionPortId; 1] = journal
@@ -846,8 +1135,8 @@ mod tests {
     fn construction_ports_are_scoped_to_one_invocation() {
         assert_construction_port_family_shape();
         let values = crate::core::test_value_factory();
-        let local = Arc::new(ConstructionBrand);
-        let foreign = Arc::new(ConstructionBrand);
+        let local = Arc::new(ConstructionBrand::default());
+        let foreign = Arc::new(ConstructionBrand::default());
         let port = OpaqueValue::new(
             &values,
             Arc::new(ConstructionPort {

@@ -6071,6 +6071,49 @@ fn interaction_net_construction_supports_local_effect_state() {
 }
 
 #[test]
+fn interaction_net_construction_preserves_standard_state_and_control_semantics() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "rollback = interaction_net (.cut (.alt ((.set ['choice] \"discarded\") =>> .data \"discarded\" >>= (\\_ports -> .fail)) (.get ['choice] >>= (\\choice -> (choice == {}) =>> .data \"clean\" >>= (\\ports -> .r (list.head ports))))))\n",
+            "preserved = interaction_net (.data \"preserved\" >>= (\\ports -> .reset \"prompt\" ((.set ['visible] \"state\") =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports)))))\n",
+            "restored = interaction_net (.data \"restored\" >>= (\\ports -> .reset \"prompt\" (.get [] >>= (\\checkpoint -> (.set [] {}) =>> (.set [] checkpoint) =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports))))))\n",
+            "after_fix = interaction_net (.data \"after fix\" >>= (\\ports -> .reset \"prompt\" ((.cut (.fix (\\_loop -> .r ()))) =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports)))))\n",
+            "cleared = interaction_net (.data \"wrong\" >>= (\\ports -> .reset \"prompt\" ((.set [] {}) =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports)))))\n",
+            "hidden_by_fix = interaction_net (.data \"wrong\" >>= (\\ports -> .reset \"prompt\" (.fix (\\_loop -> .shift \"prompt\" (\\continuation -> continuation (list.head ports))))))\n",
+            "rollback_result = net_arity 0 rollback\n",
+            "preserved_result = net_arity 0 preserved\n",
+            "restored_result = net_arity 0 restored\n",
+            "after_fix_result = net_arity 0 after_fix\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    for (name, expected) in [
+        ("rollback_result", b"clean".as_slice()),
+        ("preserved_result", b"preserved".as_slice()),
+        ("restored_result", b"restored".as_slice()),
+        ("after_fix_result", b"after fix".as_slice()),
+    ] {
+        let result = resolved_value_at_path(&definitions, &[name]);
+        assert_eq!(output_bytes(&result), expected, "unexpected `{name}`");
+    }
+
+    for name in ["cleared", "hidden_by_fix"] {
+        let value = value_at_atom_path(&definitions, &[name]).unwrap();
+        let error = fully_evaluated_error(value).to_string();
+        assert!(
+            error.contains("not in reset scope"),
+            "`{name}` should report the hidden reset scope, got: {error}"
+        );
+    }
+}
+
+#[test]
 fn interaction_net_construction_backtracks_and_requires_one_result() {
     let context = CompileContext::default();
     let lowered = lower_parsed_source(
