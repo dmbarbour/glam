@@ -15,6 +15,9 @@ of the interaction-net migration.
 - `src/g_syntax/net_lowering.rs` lowers front-end functions and applications.
 - `src/eval/builtins/net/construction.rs` interprets source construction
   effects and replays the selected journal.
+- `src/eval/builtins/net/builder.rs` owns the evaluator-private pure
+  state-over-list handler assembled by PNC2/PNC3; production construction does
+  not enter it until PNC5.
 - `src/eval/net.rs` and `src/eval/operator.rs` drive specialization work.
 
 Keep syntax and core policy out of the generic interaction-net modules.
@@ -48,8 +51,9 @@ strict ordinary-value netlist and passes that to the evaluator-private
 brands, sequential logical ports, operation shapes, and topology before
 lowering through `NetBuilder`; it performs no demand, effect dispatch,
 callback, wait, or root retention. The semantic netlist is a checked replay
-protocol, not a second mutable graph IR. PNC2-PNC5 will make the pure builder
-produce it directly and remove the legacy construction search machine.
+protocol, not a second mutable graph IR. PNC2-PNC5 make the pure builder
+produce it directly; PNC6 removes the then-unreachable legacy construction
+search machine.
 
 `interaction_net Effect` is lazy and memoized. Its isolated freer machine
 provides `.bind`, `.copy`, `.data`, and `.wire` together with the standard

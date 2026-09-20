@@ -1,6 +1,9 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0-PNC2 completed on 2026-09-20. This is the focused
+Status: active; PNC0-PNC3 completed on 2026-09-20. The
+[post-PNC3 review](../reviews/PureInteractionNetConstructionPNC3_2026-09-20.md)
+found no confirmed semantic defect. Its focused verification and reset-key
+representation remediations gate PNC4. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -198,6 +201,7 @@ reflection machine only for net construction.
   next_port: PositiveInteger,
   reverse_operations: StrictList ConstructionOperation,
   user_state: DictWithHiddenAbstractGlobalPathControlEntry,
+  sequence_stack: StrictList SequenceFrame,
 }
 ```
 
@@ -661,24 +665,74 @@ second search mechanism.
 The raw-value, durable-owner, persistent-edge, regional-constructor, and WHNF
 censuses classify the new helpers as access-bounded evaluator work. Focused
 control/fix fixtures, all source inventories, Clippy, the complete Rust suite,
-and the interaction-net profiling matrix form the PNC3 closure gate.
+and the interaction-net profiling matrix passed for the PNC3 implementation.
+The post-PNC3 review identifies the additional forced-order and malformed-key
+fixtures required before PNC4 begins; those narrower gaps supersede the
+stronger original closure claim.
 
 ### PNC4 — Pure net-builder API
 
-- Implement `.bind`, `.copy`, `.data`, and `.wire` as builder-state
-  transitions.
-- Create the brand once, allocate monotonic positive IDs, prepend strict
-  operation records, and return branded port tokens.
-- Ensure argument evaluation happens in ordinary evaluator work before the
-  state transition commits.
-- Cover port-count overflow, non-integer/negative copy counts, wrong operation
-  arities, wrong token kinds, and foreign invocation tokens.
+Status: pending the post-PNC3 review remediations. The implementation should
+use the following checkpoints rather than combining state representation,
+operand demand, and API assembly in one change.
+
+#### PNC4A — Initial state and operation schema
+
+- Define private strict operation records for bind, copy, data, and wire,
+  reusing the PNC1 tags and token codec rather than creating a second netlist
+  representation.
+- Add one initial-state encoder which receives a construction brand and emits
+  the fixed five-field builder record with port ID one, an empty reverse
+  journal, initialized user state, and an explicit empty sequence stack.
+  PNC5, not an individual operation, will allocate the brand once per public
+  `interaction_net` application.
+- Keep protected fields raw while ordinary state/control operations merely
+  transport them. Construction transitions may validate the fields they edit,
+  but must not traverse the complete reverse journal on every append.
+
+#### PNC4B — Bind and data transitions
+
+- Implement `.bind` and `.data` beneath the existing managed builder builtin
+  checkpoint. Demand and decode the builder state, allocate monotonic positive
+  IDs with checked arithmetic, prepend one strict operation record, and enter
+  the common return dispatcher.
+- Return branded port tokens as ordinary strict lists. `.data` records its
+  payload as an unforced semantic edge; only the state is demanded before the
+  transition is published.
+
+#### PNC4C — Copy and wire operand demand
+
+- Evaluate `.copy` count and `.wire` ports through resumable regional WHNF
+  work before publishing a replacement builder state. Wire evaluation remains
+  left-to-right, matching the legacy request interpreter.
+- Require a nonnegative integer copy count, check `count + 1`, target capacity,
+  and logical-port exhaustion, and reject non-port or foreign-brand wire
+  operands before journal insertion.
+- Force yield, exact dependency, failure, route-loss, and collection at each
+  operand boundary; equal terminal values are not sufficient evidence that an
+  operand or transition was not replayed.
+
+#### PNC4D — Private API assembly and closure
+
+- Assemble one private API dictionary containing the PNC2/PNC3 standard
+  task-local operations plus bind, copy, data, and wire. The builtin arities
+  are the operation-arity contract; direct malformed internal calls may fail
+  defensively, but source-visible partial application is not an arity error.
+- Cover fixed-state preservation, branch-local journal rollback, port-count
+  overflow, non-integer/negative copy counts, wrong token kinds, foreign
+  invocation tokens, and lazy data payloads.
+- Reconcile builtin, raw-value, durable-owner, persistent-edge, recursive-cell,
+  and WHNF inventories before closing the phase.
 
 Exit: running a construction program yields only ordinary list-effect
 outcomes containing strict semantic netlists.
 
 ### PNC5 — Unique selection and public composition
 
+- Allocate one construction brand and one fixed initial builder state for each
+  public `interaction_net` application. Apply the construction effect's
+  handler to the private PNC4 API, then run the returned builder operation on
+  that state.
 - Implement the first-two-outcomes uniqueness check in ordinary evaluation.
 - Validate and extract the exposed branded port from the selected outcome.
 - Change public `interaction_net` application to construct the pure runner,
@@ -686,9 +740,8 @@ outcomes containing strict semantic netlists.
 - Preserve laziness and memoization: constructing `interaction_net Effect`
   does not itself run `Effect`, and demanding the resulting lazy runs and
   replays the selected construction at most once.
-- Assemble the PNC2 hidden composition family into the reusable builder API.
-  Keep the composition evaluator-owned, independent of `g_syntax`, and
-  suitable for eventual expression in `.g`; do not introduce a cached
+- Keep the runner and selector evaluator-owned, independent of `g_syntax`,
+  and suitable for eventual expression in `.g`; do not introduce a cached
   compiler-owned semantic object merely to package the already selected
   representation.
 
