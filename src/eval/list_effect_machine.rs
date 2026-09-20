@@ -47,7 +47,14 @@ enum ListEffectState {
         continuation: Value,
         front: RegionalListFront,
     },
+    FlatMapResults {
+        continuation: Value,
+        front: RegionalListFront,
+    },
     Cut {
+        front: RegionalListFront,
+    },
+    FirstResult {
         front: RegionalListFront,
     },
     FixFunction {
@@ -90,6 +97,17 @@ impl RegionalListEffect {
                     Some(source_owner),
                 ),
             },
+            ListEffectComputation::FlatMapResults {
+                results,
+                continuation,
+            } => ListEffectState::FlatMapResults {
+                continuation: access.values().duplicate_value(continuation),
+                front: RegionalListFront::new_in(
+                    access,
+                    Value::List(results.clone()),
+                    Some(source_owner),
+                ),
+            },
             ListEffectComputation::Cut { operation } => {
                 let operation = access.values().duplicate_value(operation);
                 let results = deferred_run_list_in(access, &operation);
@@ -97,6 +115,13 @@ impl RegionalListEffect {
                     front: RegionalListFront::new_in(access, results, Some(source_owner)),
                 }
             }
+            ListEffectComputation::FirstResult { results } => ListEffectState::FirstResult {
+                front: RegionalListFront::new_in(
+                    access,
+                    Value::List(results.clone()),
+                    Some(source_owner),
+                ),
+            },
             ListEffectComputation::FixFunction { function } => ListEffectState::FixFunction {
                 function: RegionalWhnfWork::from_focus(
                     access,
@@ -181,7 +206,36 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
+            ListEffectState::FlatMapResults {
+                continuation,
+                front,
+            } => match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(None) => {
+                    RegionalListEffectPoll::Ready(Value::List(List::empty()))
+                }
+                RegionalListFrontPoll::Ready(Some((head, tail))) => RegionalListEffectPoll::Ready(
+                    flat_map_result_in(access, continuation, &head, &tail),
+                ),
+                RegionalListFrontPoll::Boundary(request) => {
+                    RegionalListEffectPoll::Boundary(request)
+                }
+                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
+            },
             ListEffectState::Cut { front } => match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(None) => {
+                    RegionalListEffectPoll::Ready(Value::List(List::empty()))
+                }
+                RegionalListFrontPoll::Ready(Some((head, _))) => {
+                    RegionalListEffectPoll::Ready(Value::List(List::from_values(vec![head])))
+                }
+                RegionalListFrontPoll::Boundary(request) => {
+                    RegionalListEffectPoll::Boundary(request)
+                }
+                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
+            },
+            ListEffectState::FirstResult { front } => match front.poll_in(access, step_budget) {
                 RegionalListFrontPoll::Ready(None) => {
                     RegionalListEffectPoll::Ready(Value::List(List::empty()))
                 }
@@ -252,11 +306,15 @@ impl ListEffectState {
             Self::Sequence {
                 continuation,
                 front,
+            }
+            | Self::FlatMapResults {
+                continuation,
+                front,
             } => {
                 trace_compatibility_value_managed_edges(continuation, visitor);
                 front.trace_managed_edges(visitor);
             }
-            Self::Cut { front } => front.trace_managed_edges(visitor),
+            Self::Cut { front } | Self::FirstResult { front } => front.trace_managed_edges(visitor),
             Self::FixFunction { function } => function.trace_managed_edges(visitor),
             Self::Fix { handle, front } => {
                 handle.trace_managed_edge(visitor);
@@ -330,6 +388,34 @@ fn sequence_result_in(
     );
     Value::List(List::concat(
         List::from_thunk(left.into()),
+        List::from_thunk(right.into()),
+    ))
+}
+
+fn flat_map_result_in(
+    access: &EvaluationValueAccess<'_>,
+    continuation: &Value,
+    head: &Value,
+    tail: &Value,
+) -> Value {
+    let application = LazyValue::from_application_in(
+        access.values(),
+        access.values().duplicate_value(continuation),
+        Arc::from([access.values().duplicate_value(head)]),
+    );
+    let Value::List(tail) = tail else {
+        unreachable!("list-effect flat-map must retain a list tail")
+    };
+    let right = LazyValue::list_effect_computation_in(
+        access.values(),
+        "direct list flat-map",
+        ListEffectComputation::FlatMapResults {
+            results: tail.clone(),
+            continuation: access.values().duplicate_value(continuation),
+        },
+    );
+    Value::List(List::concat(
+        List::from_thunk(application.into()),
         List::from_thunk(right.into()),
     ))
 }

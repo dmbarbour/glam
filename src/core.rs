@@ -1673,10 +1673,32 @@ impl SemanticComputation {
 
 #[derive(Clone)]
 pub(crate) enum ListEffectComputation {
-    Run { effect: Value },
-    Sequence { results: List, continuation: Value },
-    Cut { operation: Value },
-    FixFunction { function: Value },
+    Run {
+        effect: Value,
+    },
+    Sequence {
+        results: List,
+        continuation: Value,
+    },
+    /// Lazily flat-maps an ordinary result list with a continuation which
+    /// itself returns another ordinary result list. This is the direct-result
+    /// counterpart to `Sequence`; it shares the same ordered list reducer and
+    /// does not introduce another effect/search interpreter.
+    FlatMapResults {
+        results: List,
+        continuation: Value,
+    },
+    Cut {
+        operation: Value,
+    },
+    /// Selects the first item of an ordinary result list without first
+    /// wrapping that list in an effect dictionary.
+    FirstResult {
+        results: List,
+    },
+    FixFunction {
+        function: Value,
+    },
 }
 
 #[cfg(test)]

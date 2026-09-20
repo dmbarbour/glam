@@ -879,6 +879,69 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
 }
 
 #[test]
+fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
+    let context = isolated_context();
+    let first_chunk = PromisedValue::new(context.values(), "direct-result first chunk");
+    let _first_chunk_owner = first_chunk.root(context.values());
+    let results = List::concat(
+        List::from_thunk(ListThunk::Promised(first_chunk.clone())),
+        List::from_values(vec![number(2)]),
+    );
+    let continuation = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::List(Arc::from([Arc::new(
+            crate::eval::test_support::TestExpr::Local(0),
+        )])),
+    );
+    let (retained, machine) = retained_list_effect_machine(
+        &context,
+        "direct-result flat-map",
+        ListEffectComputation::FlatMapResults {
+            results,
+            continuation,
+        },
+    );
+    let (machine, dependency) = poll_list_effect_until_blocked(&context, &retained, machine);
+    assert!(matches!(dependency, WorkDependency::Promise(_)));
+    let machine = resume_after_list_effect_route_loss(&context, &retained, machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &first_chunk,
+        Value::List(List::from_values(vec![number(1)])),
+    )
+    .expect("the direct-result prefix should accept its assignment");
+    let mapped = drive_list_effect_after_route_loss(&context, &retained, machine);
+
+    for (index, expected) in [number(1), number(2)].into_iter().enumerate() {
+        let selected = context.values().with_runtime_value_access(|access| {
+            Value::builtin_call_in(
+                &access,
+                Builtin::ListAt,
+                vec![number(index as i64), access.duplicate_value(&mapped)],
+            )
+        });
+        assert_eq!(
+            crate::eval::eval_value(&context, &selected)
+                .expect("direct-result item should evaluate"),
+            expected
+        );
+    }
+
+    let (retained, machine) = retained_list_effect_machine(
+        &context,
+        "direct first result",
+        ListEffectComputation::FirstResult {
+            results: List::from_values(vec![number(3), number(4)]),
+        },
+    );
+    assert_eq!(
+        drive_list_effect_after_route_loss(&context, &retained, machine),
+        Value::List(List::from_values(vec![number(3)]))
+    );
+}
+
+#[test]
 fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     let context = isolated_context();
     let function_demands = Arc::new(AtomicUsize::new(0));

@@ -136,10 +136,15 @@ impl CompatibilityValueEdges for ListEffectComputation {
             Self::Sequence {
                 results,
                 continuation,
+            }
+            | Self::FlatMapResults {
+                results,
+                continuation,
             } => {
                 results.visit_compatibility_value_edges(visit);
                 visit(continuation);
             }
+            Self::FirstResult { results } => results.visit_compatibility_value_edges(visit),
         }
     }
 }

@@ -393,17 +393,45 @@ replay module.
 
 ### PNC2 — State-over-`ListEffect` foundation
 
-- Build the pure `Builder A = BuilderState -> ListEffect Outcome` composition
-  using the existing list-effect primitives.
-- Implement `.r`, `.seq`, `.alt`, `.fail`, and `.cut` by delegation to that
-  machinery rather than introducing another search engine.
-- Add branch-local state and hierarchical `.get/.set` without exposing the
-  protected construction fields.
-- Reserve the pure control key with `abstract_global_path`, store its value
-  inside `user_state`, and latch whole-state capture/replacement semantics
-  before implementing `reset/shift`.
-- Verify ordered blocking, state rollback across failed alternatives, state
-  retention through selected cut, and first-two-result observation.
+#### PNC2A — Direct-result reuse of ordered list search
+
+Completed on 2026-09-20.
+
+- Extend the existing managed list-effect recipe with direct-result flat-map
+  and first-result forms. These variants consume ordinary result lists rather
+  than wrapping each continuation in another effect dictionary, but reuse the
+  same `RegionalListFront`, suspension, and source-order machinery.
+- Verify left-to-right blocking, lazy tail retention, direct flat-map order,
+  and first-two-result observation without adding another producer route or
+  list-search reducer.
+
+#### PNC2B — Pure state-transformer composition
+
+- Represent one outcome as the strict record `[value, builder_state]` and a
+  builder operation as an ordinary callable from state to a list of those
+  records.
+- Add a small closed family of hidden evaluator builtins for `.r`, `.seq`,
+  `.alt`, `.fail`, and `.cut`. Their saturated applications only construct
+  ordinary application/list recipes; ordered search delegates to PNC2A.
+- Verify branch-local state, rollback across failed alternatives, state
+  retention through selected cut, and source-ordered blocking.
+
+This chooses the "small closed family of internal composition builtins"
+representation previously left until PNC5. The family is evaluator-owned,
+traceable, independent of `g_syntax`, and absent from `import 'std`.
+
+#### PNC2C — Protected task-local state
+
+- Add hierarchical `.get/.set` over only the `user_state` field, using the
+  existing regional key-list, WHNF, and dictionary-update machinery.
+- Reserve the pure control key with `abstract_global_path` and initialize its
+  value inside `user_state` before implementing `reset/shift`.
+- Latch that `.get []` captures and `.set []` replaces the complete
+  `user_state`, including hidden control state, while nonempty paths preserve
+  the hidden entry and cannot address protected construction fields.
+- Verify lazy paths/intermediates, missing and invalid paths, whole-state
+  replacement, and preservation of the control entry by ordinary nested
+  updates.
 
 Stop for review if this layer requires a new producer route, a root stored in
 the semantic graph, or a second implementation of ordered list search.
@@ -449,10 +477,11 @@ outcomes containing strict semantic netlists.
 - Preserve laziness and memoization: constructing `interaction_net Effect`
   does not itself run `Effect`, and demanding the resulting lazy runs and
   replays the selected construction at most once.
-- Decide at this checkpoint whether the reusable pure helper is best kept as
-  a cached semantic object or a small closed family of internal composition
-  builtins. Either choice must remain traceable, evaluator-owned, independent
-  of `g_syntax`, and suitable for eventual expression in `.g`.
+- Assemble the PNC2 hidden composition family into the reusable builder API.
+  Keep the composition evaluator-owned, independent of `g_syntax`, and
+  suitable for eventual expression in `.g`; do not introduce a cached
+  compiler-owned semantic object merely to package the already selected
+  representation.
 
 Exit: production construction no longer enters `IsolatedEffectSearch`.
 
