@@ -30,15 +30,18 @@ fn selected(
     access: &RuntimeValueAccess<'_>,
     brand: &Arc<ConstructionBrand>,
     next_port: u64,
-    mut source_operations: Vec<Value>,
+    mut source_constructors: Vec<Value>,
+    mut source_wires: Vec<Value>,
     exposed: ConstructionPortId,
 ) -> Value {
-    source_operations.reverse();
+    source_constructors.reverse();
+    source_wires.reverse();
     let state = encode_builder_state(
         access,
         brand,
         next_port,
-        source_operations,
+        source_constructors,
+        source_wires,
         Value::Dict(Dict::new_sync()),
     );
     encode_selected_netlist(access, state, brand, exposed)
@@ -51,12 +54,14 @@ fn valid_all_operations(access: &RuntimeValueAccess<'_>) -> Value {
         &brand,
         8,
         vec![
-            encode_bind(access, &brand, [port(1), port(2), port(3)]),
-            encode_data(access, &brand, port(4), access.values().unit()),
-            encode_copy(access, &brand, &[port(5), port(6), port(7)]),
-            encode_wire(access, &brand, port(1), port(4)),
-            encode_wire(access, &brand, port(2), port(5)),
-            encode_wire(access, &brand, port(3), port(6)),
+            encode_bind(access),
+            encode_data(access, access.values().unit()),
+            encode_copy(access, 2),
+        ],
+        vec![
+            encode_wire(port(1), port(4)),
+            encode_wire(port(2), port(5)),
+            encode_wire(port(3), port(6)),
         ],
         port(7),
     )
@@ -83,13 +88,19 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
     let context = EvalContext::standalone();
     with_access(&context, |access| {
         let brand = Arc::new(ConstructionBrand::default());
-        let state =
-            encode_builder_state(access, &brand, 1, Vec::new(), Value::Dict(Dict::new_sync()));
+        let state = encode_builder_state(
+            access,
+            &brand,
+            1,
+            Vec::new(),
+            Vec::new(),
+            Value::Dict(Dict::new_sync()),
+        );
         let fields = super::netlist::strict_record(access, &state, "fixture builder state")
             .expect("encoded builder state must be strict");
-        assert_eq!(fields.len(), 5, "builder state must have fixed arity");
+        assert_eq!(fields.len(), 6, "builder state must have fixed arity");
         assert!(
-            super::netlist::strict_record(access, &fields[4], "fixture sequence stack")
+            super::netlist::strict_record(access, &fields[5], "fixture sequence stack")
                 .expect("the sequence stack must be strict")
                 .is_empty(),
             "an inactive sequence must remain an explicit empty field"
@@ -104,7 +115,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
             port(1),
         );
         let error = interaction_net_from_netlist_in(access, &selected)
-            .expect_err("terminal replay must reject the old four-field shape");
+            .expect_err("terminal replay must reject the old five-field shape");
         assert!(
             error
                 .to_string()
@@ -113,7 +124,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
         );
 
         let mut active_sequence = fields;
-        active_sequence[4] = Value::List(List::from_values(vec![access.values().unit()]));
+        active_sequence[5] = Value::List(List::from_values(vec![access.values().unit()]));
         let selected = encode_selected_netlist(
             access,
             Value::List(List::from_values(active_sequence)),
@@ -132,7 +143,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
 }
 
 #[test]
-fn replay_rejects_malformed_nonsequential_foreign_and_invalid_records() {
+fn replay_rejects_malformed_compact_records() {
     let context = EvalContext::standalone();
     with_access(&context, |access| {
         let brand = Arc::new(ConstructionBrand::default());
@@ -157,24 +168,24 @@ fn replay_rejects_malformed_nonsequential_foreign_and_invalid_records() {
                     access,
                     &brand,
                     5,
-                    vec![encode_bind(access, &brand, [port(1), port(3), port(4)])],
+                    vec![encode_bind(access)],
+                    Vec::new(),
                     port(1),
                 ),
-                "nonsequential ports",
+                "next-port",
             ),
             (
-                selected(
-                    access,
-                    &brand,
-                    2,
-                    vec![encode_data(
+                {
+                    let state = encode_builder_state(
                         access,
-                        &foreign,
-                        port(1),
-                        access.values().unit(),
-                    )],
-                    port(1),
-                ),
+                        &brand,
+                        2,
+                        vec![encode_data(access, access.values().unit())],
+                        Vec::new(),
+                        Value::Dict(Dict::new_sync()),
+                    );
+                    encode_selected_netlist(access, state, &foreign, port(1))
+                },
                 "belongs to another invocation",
             ),
             (
@@ -182,7 +193,8 @@ fn replay_rejects_malformed_nonsequential_foreign_and_invalid_records() {
                     access,
                     &brand,
                     4,
-                    vec![encode_bind(access, &brand, [port(1), port(2), port(3)])],
+                    vec![encode_bind(access)],
+                    Vec::new(),
                     port(1),
                 ),
                 "unwired",
@@ -191,11 +203,23 @@ fn replay_rejects_malformed_nonsequential_foreign_and_invalid_records() {
                 selected(
                     access,
                     &brand,
+                    4,
+                    vec![encode_bind(access)],
+                    vec![encode_wire(port(1), port(4))],
+                    port(3),
+                ),
+                "out of range",
+            ),
+            (
+                selected(
+                    access,
+                    &brand,
                     1,
                     vec![encode_empty_copy_for_test(access)],
+                    Vec::new(),
                     port(1),
                 ),
-                "allocate its input port",
+                "wrong number of fields",
             ),
         ];
 
@@ -223,7 +247,8 @@ fn replay_copies_a_lazy_data_payload_without_demanding_it() {
             access,
             &brand,
             2,
-            vec![encode_data(access, &brand, port(1), payload)],
+            vec![encode_data(access, payload)],
+            Vec::new(),
             port(1),
         );
         assert!(matches!(
@@ -348,6 +373,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );
@@ -483,6 +509,7 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
             &brand,
             1,
             Vec::new(),
+            Vec::new(),
             super::builder::initial_user_state(access),
         );
         let get_all = partial_builder(
@@ -570,6 +597,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             Value::Dict(user_state.insert(outer.clone(), lazy_inner)),
         );
         let get = partial_builder(access, Builtin::InteractionNetBuilderGet, vec![lazy_path]);
@@ -601,6 +629,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             Value::Dict(user_state.insert(outer.clone(), Value::Number(42.into()))),
         );
         let get = partial_builder(
@@ -625,6 +654,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );
@@ -724,6 +754,7 @@ fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             super::builder::initial_user_state(access),
         );
         let shift = partial_builder(
@@ -762,12 +793,14 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             super::builder::initial_user_state(access),
         );
         let second_state = encode_builder_state(
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );
@@ -829,6 +862,7 @@ fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             super::builder::initial_user_state(access),
         );
         let left = partial_builder(
@@ -877,6 +911,7 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
             &Arc::new(ConstructionBrand::default()),
             1,
             Vec::new(),
+            Vec::new(),
             super::builder::initial_user_state(access),
         );
         let clear = partial_builder(
@@ -918,6 +953,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );
@@ -992,6 +1028,7 @@ fn hidden_builder_rejects_malformed_control_records() {
                 &brand,
                 1,
                 Vec::new(),
+                Vec::new(),
                 Value::Dict(Dict::new_sync().insert(
                     super::builder::control_key_for_test(),
                     Value::Number(1.into()),
@@ -1001,6 +1038,7 @@ fn hidden_builder_rejects_malformed_control_records() {
                 access,
                 &brand,
                 1,
+                Vec::new(),
                 Vec::new(),
                 Value::Dict(Dict::new_sync().insert(
                     super::builder::control_key_for_test(),
@@ -1020,11 +1058,12 @@ fn hidden_builder_rejects_malformed_control_records() {
                 &brand,
                 1,
                 Vec::new(),
+                Vec::new(),
                 super::builder::initial_user_state(access),
             );
             let mut fields = super::netlist::strict_record(access, &initial, "fixture state")
                 .expect("encoded builder state must be strict");
-            assert_eq!(fields.len(), 5, "builder state must have fixed arity");
+            assert_eq!(fields.len(), 6, "builder state must have fixed arity");
             let sequence = fields
                 .pop()
                 .expect("fixed builder state must retain its sequence stack");
@@ -1078,6 +1117,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );
@@ -1182,6 +1222,7 @@ fn hidden_builder_fix_reports_recursive_future_observation() {
             access,
             &Arc::new(ConstructionBrand::default()),
             1,
+            Vec::new(),
             Vec::new(),
             super::builder::initial_user_state(access),
         );

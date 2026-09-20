@@ -68,6 +68,7 @@ pub(in crate::eval) fn initial_state_for_test(
         &Arc::new(super::construction::ConstructionBrand::default()),
         1,
         Vec::new(),
+        Vec::new(),
         user_state,
     )
 }
@@ -352,7 +353,8 @@ enum BuilderStateOperation {
 struct DecodedBuilderState {
     brand: Value,
     next_port: Value,
-    reverse_operations: Value,
+    reverse_constructors: Value,
+    reverse_wires: Value,
     user_state: Value,
     sequence: Vec<BuilderSequenceFrame>,
 }
@@ -846,7 +848,8 @@ impl DecodedBuilderState {
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         trace_compatibility_value_managed_edges(&self.brand, visitor);
         trace_compatibility_value_managed_edges(&self.next_port, visitor);
-        trace_compatibility_value_managed_edges(&self.reverse_operations, visitor);
+        trace_compatibility_value_managed_edges(&self.reverse_constructors, visitor);
+        trace_compatibility_value_managed_edges(&self.reverse_wires, visitor);
         trace_compatibility_value_managed_edges(&self.user_state, visitor);
         for frame in &self.sequence {
             frame.trace_managed_edges(visitor);
@@ -968,14 +971,16 @@ fn encode_builder_state(access: &RuntimeValueAccess<'_>, state: DecodedBuilderSt
     let DecodedBuilderState {
         brand,
         next_port,
-        reverse_operations,
+        reverse_constructors,
+        reverse_wires,
         user_state,
         sequence,
     } = state;
     Value::List(List::from_values(vec![
         brand,
         next_port,
-        reverse_operations,
+        reverse_constructors,
+        reverse_wires,
         user_state,
         encode_sequence_stack(access, sequence),
     ]))
@@ -1134,7 +1139,14 @@ fn decode_builder_state(
     state: &Value,
 ) -> Result<DecodedBuilderState, EvaluationHalt> {
     let fields = super::netlist::strict_record(access, state, "builder state")?;
-    let [brand, next_port, reverse_operations, user_state, sequence]: [Value; 5] = fields
+    let [
+        brand,
+        next_port,
+        reverse_constructors,
+        reverse_wires,
+        user_state,
+        sequence,
+    ]: [Value; 6] = fields
         .try_into()
         .map_err(|_| EvaluationHalt::new("builder state has the wrong number of fields"))?;
     let sequence = decode_sequence_stack(access, &sequence)?;
@@ -1146,7 +1158,8 @@ fn decode_builder_state(
     Ok(DecodedBuilderState {
         brand,
         next_port,
-        reverse_operations,
+        reverse_constructors,
+        reverse_wires,
         user_state,
         sequence,
     })

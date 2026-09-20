@@ -27,9 +27,12 @@ use super::super::super::whnf::WhnfComputation;
 pub(super) struct ConstructionPortId(NonZeroU64);
 
 impl ConstructionPortId {
-    #[cfg(test)]
     pub(super) fn new(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(Self)
+    }
+
+    pub(super) fn get(self) -> u64 {
+        self.0.get()
     }
 
     pub(super) fn index(self) -> Result<usize, EvaluationHalt> {
@@ -77,14 +80,11 @@ unsafe impl OpaquePayloadFamily for ConstructionToken {
 }
 
 enum ConstructionOp {
-    Bind {
-        ports: [ConstructionPortId; 3],
-    },
+    Bind,
     Copy {
-        ports: Arc<[ConstructionPortId]>,
+        output_count: usize,
     },
     Data {
-        port: ConstructionPortId,
         value: PublicValue,
     },
     Wire {
@@ -384,7 +384,7 @@ fn construct_copy_count(
     let (_, journal) = transaction.parts();
     let ports = journal.allocate_ports(port_count)?;
     journal.append(ConstructionOp::Copy {
-        ports: Arc::from(ports.clone()),
+        output_count: outputs,
     });
     Ok(RequestResult::Return(port_list(
         &context.values(),
@@ -651,7 +651,7 @@ fn construct_bind(
         .allocate_ports(3)?
         .try_into()
         .expect("three allocated ports must form a triple");
-    journal.append(ConstructionOp::Bind { ports });
+    journal.append(ConstructionOp::Bind);
     Ok(RequestResult::Return(port_list(
         &context.values(),
         brand,
@@ -671,7 +671,7 @@ fn construct_data(
         .allocate_ports(1)?
         .try_into()
         .expect("one allocated port must form a singleton");
-    journal.append(ConstructionOp::Data { port, value });
+    journal.append(ConstructionOp::Data { value });
     Ok(RequestResult::Return(port_list(
         &context.values(),
         brand,
@@ -801,33 +801,36 @@ fn replay(
     exposed: ConstructionPortId,
 ) -> Result<RuntimeValueRoot, EvaluationHalt> {
     context.with_value_access(|access| {
-        let reverse_operations = journal
-            .operations()
-            .into_iter()
-            .rev()
-            .map(|operation| match operation {
-                ConstructionOp::Bind { ports } => {
-                    super::netlist::encode_bind(access.values(), brand, *ports)
+        let mut reverse_constructors = Vec::new();
+        let mut reverse_wires = Vec::new();
+        for operation in journal.operations() {
+            match operation {
+                ConstructionOp::Bind => {
+                    reverse_constructors.push(super::netlist::encode_bind(access.values()));
                 }
-                ConstructionOp::Copy { ports } => {
-                    super::netlist::encode_copy(access.values(), brand, ports)
+                ConstructionOp::Copy { output_count } => {
+                    reverse_constructors
+                        .push(super::netlist::encode_copy(access.values(), *output_count));
                 }
-                ConstructionOp::Data { port, value } => super::netlist::encode_data(
-                    access.values(),
-                    brand,
-                    *port,
-                    access.clone_root(&value.clone().into_runtime_root()),
-                ),
+                ConstructionOp::Data { value } => {
+                    reverse_constructors.push(super::netlist::encode_data(
+                        access.values(),
+                        access.clone_root(&value.clone().into_runtime_root()),
+                    ));
+                }
                 ConstructionOp::Wire { left, right } => {
-                    super::netlist::encode_wire(access.values(), brand, *left, *right)
+                    reverse_wires.push(super::netlist::encode_wire(*left, *right));
                 }
-            })
-            .collect();
+            }
+        }
+        reverse_constructors.reverse();
+        reverse_wires.reverse();
         let state = super::netlist::encode_builder_state(
             access.values(),
             brand,
             journal.next_port,
-            reverse_operations,
+            reverse_constructors,
+            reverse_wires,
             Value::Dict(Dict::new_sync()),
         );
         let selected =
@@ -1081,7 +1084,6 @@ mod tests {
             .try_into()
             .expect("one allocated port should form a singleton");
         journal.append(ConstructionOp::Data {
-            port,
             value: values.wrap(Value::Number(42.into())),
         });
 

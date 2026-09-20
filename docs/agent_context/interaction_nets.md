@@ -48,12 +48,13 @@ builder. Source `interaction_net` still searches with a branch-local
 write-only transaction journal. After selecting one branch, it encodes a
 strict ordinary-value netlist and passes that to the evaluator-private
 `InteractionNetFromNetlist` builtin. That synchronous boundary validates
-brands, sequential logical ports, operation shapes, and topology before
-lowering through `NetBuilder`; it performs no demand, effect dispatch,
-callback, wait, or root retention. The semantic netlist is a checked replay
-protocol, not a second mutable graph IR. PNC2-PNC5 make the pure builder
-produce it directly; PNC6 removes the then-unreachable legacy construction
-search machine.
+brands, a derived monotonic port cursor, compact constructor and wire journal
+shapes, and topology before lowering through `NetBuilder`; it performs no
+demand, effect dispatch, callback, wait, or root retention. Constructor
+records omit their derivable ports and wire records contain only logical ID
+pairs. The semantic netlist is a checked replay protocol, not a second mutable
+graph IR. PNC2-PNC5 make the pure builder produce it directly; PNC6 removes
+the then-unreachable legacy construction search machine.
 
 `interaction_net Effect` is lazy and memoized. Its isolated freer machine
 provides `.bind`, `.copy`, `.data`, and `.wire` together with the standard

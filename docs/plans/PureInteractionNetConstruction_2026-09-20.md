@@ -747,6 +747,8 @@ representation, operand demand, and API assembly in one change.
 
 ##### PNC4A.1 — Compact state and replay migration
 
+Status: complete on 2026-09-20.
+
 - Replace PNC1's port-explicit operation list with
   `reverse_constructors` and `reverse_wires`. Reuse the PNC1 bind, copy, and
   data tags, but remove the wire tag and every derived allocation-port field.
@@ -767,6 +769,14 @@ representation, operand demand, and API assembly in one change.
 - Replace PNC1's derivable-port fixtures with malformed-descriptor,
   inconsistent-`next_port`, malformed/out-of-range-wire, exposed-brand, and
   topology fixtures. Keep the lazy-data and replay-boundary source proofs.
+
+Completion record: builder state is now the single six-field compact record.
+Constructors and wires occupy separate reverse journals; constructors derive
+logical port IDs during source-order replay, and wires retain only ID pairs.
+The legacy construction adapter emits the same representation. Focused replay,
+malformed-state, bounded-mutator, durable-owner, registered-root, and
+persistent-edge checks pass without a compatibility decoder for the former
+five-field shape.
 
 ##### PNC4A.2 — Initial pure-builder state
 

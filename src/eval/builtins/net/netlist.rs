@@ -22,23 +22,23 @@ static COPY_TAG: LazyLock<crate::core::Key> = LazyLock::new(|| {
 static DATA_TAG: LazyLock<crate::core::Key> = LazyLock::new(|| {
     crate::core::Key::abstract_global_path(["builtin", "interaction_net", "netlist", "data"])
 });
-static WIRE_TAG: LazyLock<crate::core::Key> = LazyLock::new(|| {
-    crate::core::Key::abstract_global_path(["builtin", "interaction_net", "netlist", "wire"])
-});
 
 /// Encodes the protected builder state as one strict semantic record:
-/// `[brand, next_port, reverse_operations, user_state, sequence_stack]`.
+/// `[brand, next_port, reverse_constructors, reverse_wires, user_state,
+/// sequence_stack]`.
 pub(super) fn encode_builder_state(
     access: &RuntimeValueAccess<'_>,
     brand: &Arc<ConstructionBrand>,
     next_port: u64,
-    reverse_operations: Vec<Value>,
+    reverse_constructors: Vec<Value>,
+    reverse_wires: Vec<Value>,
     user_state: Value,
 ) -> Value {
     Value::List(List::from_values(vec![
         encode_brand(access, brand),
         Value::Number(Number::from_u64(next_port)),
-        Value::List(List::from_values(reverse_operations)),
+        Value::List(List::from_values(reverse_constructors)),
+        Value::List(List::from_values(reverse_wires)),
         user_state,
         Value::List(List::from_values(Vec::new())),
     ]))
@@ -57,58 +57,32 @@ pub(super) fn encode_selected_netlist(
     ]))
 }
 
-pub(super) fn encode_bind(
-    access: &RuntimeValueAccess<'_>,
-    brand: &Arc<ConstructionBrand>,
-    ports: [ConstructionPortId; 3],
-) -> Value {
-    operation(
-        access,
-        &BIND_TAG,
-        ports
-            .into_iter()
-            .map(|port| encode_port(access, brand, port)),
-    )
+pub(super) fn encode_bind(access: &RuntimeValueAccess<'_>) -> Value {
+    access.values().key_value(&BIND_TAG)
 }
 
-pub(super) fn encode_copy(
-    access: &RuntimeValueAccess<'_>,
-    brand: &Arc<ConstructionBrand>,
-    ports: &[ConstructionPortId],
-) -> Value {
+pub(super) fn encode_copy(access: &RuntimeValueAccess<'_>, output_count: usize) -> Value {
     operation(
         access,
         &COPY_TAG,
-        ports
-            .iter()
-            .copied()
-            .map(|port| encode_port(access, brand, port)),
+        [Value::Number(Number::from_usize(output_count))],
     )
 }
 
-pub(super) fn encode_data(
-    access: &RuntimeValueAccess<'_>,
-    brand: &Arc<ConstructionBrand>,
-    port: ConstructionPortId,
-    value: Value,
-) -> Value {
-    operation(access, &DATA_TAG, [encode_port(access, brand, port), value])
+pub(super) fn encode_data(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
+    operation(access, &DATA_TAG, [value])
 }
 
-pub(super) fn encode_wire(
-    access: &RuntimeValueAccess<'_>,
-    brand: &Arc<ConstructionBrand>,
-    left: ConstructionPortId,
-    right: ConstructionPortId,
-) -> Value {
-    operation(
-        access,
-        &WIRE_TAG,
-        [
-            encode_port(access, brand, left),
-            encode_port(access, brand, right),
-        ],
-    )
+pub(super) fn encode_wire(left: ConstructionPortId, right: ConstructionPortId) -> Value {
+    Value::List(List::from_values(vec![
+        Value::Number(Number::from_u64(left.get())),
+        Value::Number(Number::from_u64(right.get())),
+    ]))
+}
+
+#[cfg(test)]
+pub(super) fn encode_empty_copy_for_test(access: &RuntimeValueAccess<'_>) -> Value {
+    operation(access, &COPY_TAG, [])
 }
 
 fn operation(
@@ -121,11 +95,6 @@ fn operation(
             .chain(fields)
             .collect(),
     ))
-}
-
-#[cfg(test)]
-pub(super) fn encode_empty_copy_for_test(access: &RuntimeValueAccess<'_>) -> Value {
-    operation(access, &COPY_TAG, [])
 }
 
 fn encode_brand(access: &RuntimeValueAccess<'_>, brand: &Arc<ConstructionBrand>) -> Value {
@@ -155,10 +124,11 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
     let [
         brand,
         next_port,
-        reverse_operations,
+        reverse_constructors,
+        reverse_wires,
         user_state,
         sequence_stack,
-    ]: [Value; 5] = exact_record(access, state, "builder state")?;
+    ]: [Value; 6] = exact_record(access, state, "builder state")?;
 
     let brand = decode_brand(access, &brand)?;
     let Value::Number(next_port) = next_port else {
@@ -177,7 +147,8 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
         ));
     }
 
-    let reverse_operations = strict_record(access, &reverse_operations, "operation journal")?;
+    let reverse_constructors = strict_record(access, &reverse_constructors, "constructor journal")?;
+    let reverse_wires = strict_record(access, &reverse_wires, "wire journal")?;
     let capacity =
         usize::try_from(next_port - 1).map_err(|_| malformed("port count exceeds this target"))?;
     let mut mapped = Vec::new();
@@ -186,13 +157,17 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
         .map_err(|_| malformed("replay allocation is too large"))?;
     let mut builder = NetBuilder::<CoreSpecialization>::new();
 
-    for operation in reverse_operations.iter().rev() {
-        replay_operation(access, &brand, operation, &mut mapped, &mut builder)?;
+    for constructor in reverse_constructors.iter().rev() {
+        replay_constructor(access, constructor, capacity, &mut mapped, &mut builder)?;
     }
     if mapped.len() != capacity {
         return Err(malformed(
-            "builder next-port does not follow the allocated port sequence",
+            "builder next-port does not match the constructor program",
         ));
+    }
+
+    for wire in reverse_wires.iter().rev() {
+        replay_wire(access, wire, &mapped, &mut builder)?;
     }
 
     let exposed = decode_port_value(access, &exposed, &brand)?;
@@ -206,67 +181,84 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
     Ok(Value::Net(NetValue::new(runtime)))
 }
 
-fn replay_operation(
+fn replay_constructor(
     access: &RuntimeValueAccess<'_>,
-    brand: &Arc<ConstructionBrand>,
-    operation: &Value,
+    constructor: &Value,
+    capacity: usize,
     mapped: &mut Vec<Port>,
     builder: &mut NetBuilder<CoreSpecialization>,
 ) -> Result<(), EvaluationHalt> {
-    let operation = strict_record(access, operation, "operation")?;
-    let Some((tag, fields)) = operation.split_first() else {
-        return Err(malformed("operation record is empty"));
+    if matches!(constructor, Value::Atom(tag) if tag.key() == &*BIND_TAG) {
+        validate_constructor_capacity(mapped.len(), 3, capacity)?;
+        mapped.extend(builder.bind());
+        return Ok(());
+    }
+
+    let descriptor = strict_record(access, constructor, "constructor descriptor")?;
+    let Some((tag, fields)) = descriptor.split_first() else {
+        return Err(malformed("constructor descriptor is empty"));
     };
     let Value::Atom(tag) = tag else {
-        return Err(malformed("operation tag must be an atom"));
+        return Err(malformed("constructor descriptor tag must be an atom"));
     };
 
     match tag.key() {
-        key if key == &*BIND_TAG => {
-            let [first, second, third]: [Value; 3] =
-                exact_record(access, fields.to_vec(), "bind operation")?;
-            let logical = [first, second, third]
-                .iter()
-                .map(|port| decode_port_value(access, port, brand))
-                .collect::<Result<Vec<_>, _>>()?;
-            append_ports(mapped, logical, builder.bind())
-        }
         key if key == &*COPY_TAG => {
-            if fields.is_empty() {
-                return Err(malformed("copy operation must allocate its input port"));
-            }
-            let logical = fields
-                .iter()
-                .map(|port| decode_port_value(access, port, brand))
-                .collect::<Result<Vec<_>, _>>()?;
-            let copy = builder.copy(logical.len() - 1);
-            append_ports(
-                mapped,
-                logical,
-                std::iter::once(copy.input).chain(copy.outputs),
-            )
+            let [output_count]: [Value; 1] =
+                exact_record(access, fields.to_vec(), "copy descriptor")?;
+            let Value::Number(output_count) = output_count else {
+                return Err(malformed("copy output count must be a number"));
+            };
+            let output_count = output_count
+                .to_usize_if_integer()
+                .ok_or_else(|| malformed("copy output count must be a nonnegative integer"))?;
+            let port_count = output_count
+                .checked_add(1)
+                .ok_or_else(|| malformed("copy output count is too large"))?;
+            validate_constructor_capacity(mapped.len(), port_count, capacity)?;
+            let copy = builder.copy(output_count);
+            mapped.extend(std::iter::once(copy.input).chain(copy.outputs));
+            Ok(())
         }
         key if key == &*DATA_TAG => {
-            let [port, value]: [Value; 2] =
-                exact_record(access, fields.to_vec(), "data operation")?;
-            let port = decode_port_value(access, &port, brand)?;
-            append_ports(
-                mapped,
-                [port],
-                [builder.data(access.duplicate_value(&value))],
-            )
+            let [value]: [Value; 1] = exact_record(access, fields.to_vec(), "data descriptor")?;
+            validate_constructor_capacity(mapped.len(), 1, capacity)?;
+            mapped.push(builder.data(access.duplicate_value(&value)));
+            Ok(())
         }
-        key if key == &*WIRE_TAG => {
-            let [left, right]: [Value; 2] =
-                exact_record(access, fields.to_vec(), "wire operation")?;
-            let left = decode_port_value(access, &left, brand)?;
-            let right = decode_port_value(access, &right, brand)?;
-            builder
-                .try_wire(mapped_port(mapped, left)?, mapped_port(mapped, right)?)
-                .map_err(|error| malformed(error.to_string()))
-        }
-        _ => Err(malformed("operation tag is not recognized")),
+        _ => Err(malformed("constructor descriptor tag is not recognized")),
     }
+}
+
+fn validate_constructor_capacity(
+    allocated: usize,
+    additional: usize,
+    capacity: usize,
+) -> Result<(), EvaluationHalt> {
+    if allocated
+        .checked_add(additional)
+        .is_none_or(|next| next > capacity)
+    {
+        return Err(malformed(
+            "constructor program allocates beyond builder next-port",
+        ));
+    }
+    Ok(())
+}
+
+fn replay_wire(
+    access: &RuntimeValueAccess<'_>,
+    wire: &Value,
+    mapped: &[Port],
+    builder: &mut NetBuilder<CoreSpecialization>,
+) -> Result<(), EvaluationHalt> {
+    let wire = strict_record(access, wire, "wire pair")?;
+    let [left, right]: [Value; 2] = exact_record(access, wire, "wire pair")?;
+    let left = decode_wire_port_id(&left)?;
+    let right = decode_wire_port_id(&right)?;
+    builder
+        .try_wire(mapped_port(mapped, left)?, mapped_port(mapped, right)?)
+        .map_err(|error| malformed(error.to_string()))
 }
 
 pub(super) fn strict_record(
@@ -330,32 +322,22 @@ fn decode_port_value(
         .map_err(|error| malformed(error.to_string()))
 }
 
-fn append_ports(
-    mapped: &mut Vec<Port>,
-    logical: impl IntoIterator<Item = ConstructionPortId>,
-    actual: impl IntoIterator<Item = Port>,
-) -> Result<(), EvaluationHalt> {
-    let mut logical = logical.into_iter();
-    let mut actual = actual.into_iter();
-    loop {
-        match (logical.next(), actual.next()) {
-            (Some(logical), Some(actual)) => {
-                if logical.index()? != mapped.len() {
-                    return Err(malformed("operation journal has nonsequential ports"));
-                }
-                mapped.push(actual);
-            }
-            (None, None) => return Ok(()),
-            _ => return Err(malformed("operation journal port arity mismatch")),
-        }
-    }
+fn decode_wire_port_id(value: &Value) -> Result<ConstructionPortId, EvaluationHalt> {
+    let Value::Number(id) = value else {
+        return Err(malformed("wire port ID must be a number"));
+    };
+    let id = id
+        .to_u64_if_integer()
+        .and_then(ConstructionPortId::new)
+        .ok_or_else(|| malformed("wire port ID must be a positive integer"))?;
+    Ok(id)
 }
 
 fn mapped_port(mapped: &[Port], port: ConstructionPortId) -> Result<Port, EvaluationHalt> {
     mapped
         .get(port.index()?)
         .copied()
-        .ok_or_else(|| malformed("operation journal refers to an unknown port"))
+        .ok_or_else(|| malformed("wire or exposed port ID is out of range"))
 }
 
 fn malformed(message: impl Into<String>) -> EvaluationHalt {
