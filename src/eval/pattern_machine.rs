@@ -21,8 +21,7 @@ use super::access_machine::{
 };
 use super::builtin_machine::{BuiltinTaskPoll, RegionalBuiltinPoll};
 use super::list_machine::{
-    ListFrontMachine, ListFrontPoll, RegionalListBack, RegionalListBackPoll, RegionalListFront,
-    RegionalListFrontPoll,
+    RegionalListBack, RegionalListBackPoll, RegionalListFront, RegionalListFrontPoll,
 };
 use super::tagged_machine::{SemanticUndefinedMachine, SemanticUndefinedPoll};
 use super::whnf::{
@@ -74,13 +73,16 @@ pub(crate) struct PatternDictTakeMachine {
     undefined: Option<SemanticUndefinedMachine>,
 }
 
-pub(crate) struct PatternEqualMachine {
-    expected: Option<WhnfComputation>,
+pub(in crate::eval) struct RegionalPatternEqualMachine {
+    expected: Option<Value>,
+    expected_demand: Option<RegionalWhnfWork>,
     expected_literal: Option<PatternLiteral>,
-    actual: Option<WhnfComputation>,
-    list: Option<ListFrontMachine>,
-    item: Option<WhnfComputation>,
+    actual: Option<Value>,
+    actual_demand: Option<RegionalWhnfWork>,
+    list: Option<RegionalListFront>,
+    item: Option<RegionalWhnfWork>,
     byte_index: usize,
+    source_owner: LazyId,
 }
 
 enum PatternLiteral {
@@ -386,138 +388,169 @@ impl PatternDictTakeMachine {
     }
 }
 
-impl PatternEqualMachine {
-    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [expected, actual]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("pattern literal equality retains two operands");
+impl RegionalPatternEqualMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [expected, actual] = arguments else {
+            panic!("pattern literal equality retains two operands")
+        };
         Self {
-            expected: Some(WhnfComputation::from_root(expected)),
+            expected: Some(access.values().duplicate_value(expected)),
+            expected_demand: None,
             expected_literal: None,
-            actual: Some(WhnfComputation::from_root(actual)),
+            actual: Some(access.values().duplicate_value(actual)),
+            actual_demand: None,
             list: None,
             item: None,
             byte_index: 0,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        if let Some(expected) = &mut self.expected {
-            let expected =
-                match poll_whnf_computation(expected, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(expected) => expected,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("pattern literal produced an external {boundary:?} boundary")
-                    }
-                };
-            self.expected = None;
-            self.expected_literal =
-                Some(
-                    context.with_value_access(|access| match access.clone_root(&expected) {
-                        Value::Atom(atom) => PatternLiteral::Atom(atom),
-                        Value::Number(number) => PatternLiteral::Number(number),
-                        Value::Binary(bytes) => PatternLiteral::Binary(bytes),
-                        other => PatternLiteral::Unsupported(format!("{other:?}")),
-                    }),
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if self.expected_literal.is_none() {
+            if self.expected_demand.is_none() {
+                let expected = self
+                    .expected
+                    .take()
+                    .expect("pattern equality must retain its expected literal");
+                self.expected_demand = Some(
+                    RegionalWhnfWork::from_focus(access, expected)
+                        .with_source_owner(self.source_owner),
                 );
-            return BuiltinTaskPoll::Yielded;
+            }
+            let expected = match drive_regional_in_place(
+                access,
+                self.expected_demand
+                    .as_mut()
+                    .expect("pattern literal demand must be installed"),
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(expected) => expected,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            self.expected_demand = None;
+            self.expected_literal = Some(match expected {
+                Value::Atom(atom) => PatternLiteral::Atom(atom),
+                Value::Number(number) => PatternLiteral::Number(number),
+                Value::Binary(bytes) => PatternLiteral::Binary(bytes),
+                other => PatternLiteral::Unsupported(format!("{other:?}")),
+            });
+            return RegionalBuiltinPoll::Yielded;
         }
 
-        if let Some(actual) = &mut self.actual {
-            let actual =
-                match poll_whnf_computation(actual, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(actual) => actual,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("pattern subject produced an external {boundary:?} boundary")
-                    }
-                };
+        if self.actual.is_some() || self.actual_demand.is_some() {
+            if self.actual_demand.is_none() {
+                let actual = self
+                    .actual
+                    .take()
+                    .expect("pattern equality must retain its subject");
+                self.actual_demand = Some(
+                    RegionalWhnfWork::from_focus(access, actual)
+                        .with_source_owner(self.source_owner),
+                );
+            }
+            let actual = match drive_regional_in_place(
+                access,
+                self.actual_demand
+                    .as_mut()
+                    .expect("pattern subject demand must be installed"),
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(actual) => actual,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            self.actual_demand = None;
             self.actual = None;
             let literal = self
                 .expected_literal
                 .as_ref()
                 .expect("pattern equality must retain its expected literal");
             if let PatternLiteral::Unsupported(expected) = literal {
-                return BuiltinTaskPoll::Failed(context.root_failure(Arc::new(
+                return RegionalBuiltinPoll::Failed(Arc::new(
                     crate::core::EvaluationFailure::message(format!(
                         "pattern-equal received unsupported compiler literal {expected}"
                     )),
-                )));
+                ));
             }
-            let comparison = context.with_value_access(|access| {
-                let actual_value = access.clone_root(&actual);
-                match (literal, actual_value) {
-                    (PatternLiteral::Atom(expected), Value::Atom(actual)) => {
-                        PatternLiteralComparison::Ready(*expected == actual)
-                    }
-                    (PatternLiteral::Number(expected), Value::Number(actual)) => {
-                        PatternLiteralComparison::Ready(expected == &actual)
-                    }
-                    (PatternLiteral::Binary(expected), Value::Binary(actual)) => {
-                        PatternLiteralComparison::Ready(expected == &actual)
-                    }
-                    (PatternLiteral::Binary(_), Value::List(_)) => PatternLiteralComparison::List,
-                    (
-                        PatternLiteral::Atom(_)
-                        | PatternLiteral::Number(_)
-                        | PatternLiteral::Binary(_),
-                        _,
-                    ) => PatternLiteralComparison::Ready(false),
-                    (PatternLiteral::Unsupported(_), _) => {
-                        unreachable!("unsupported literals are rejected before comparison")
-                    }
+            let comparison = match (literal, actual) {
+                (PatternLiteral::Atom(expected), Value::Atom(actual)) => {
+                    PatternLiteralComparison::Ready(*expected == actual)
                 }
-            });
+                (PatternLiteral::Number(expected), Value::Number(actual)) => {
+                    PatternLiteralComparison::Ready(expected == &actual)
+                }
+                (PatternLiteral::Binary(expected), Value::Binary(actual)) => {
+                    PatternLiteralComparison::Ready(expected == &actual)
+                }
+                (PatternLiteral::Binary(_), actual @ Value::List(_)) => {
+                    PatternLiteralComparison::List(actual)
+                }
+                (
+                    PatternLiteral::Atom(_) | PatternLiteral::Number(_) | PatternLiteral::Binary(_),
+                    _,
+                ) => PatternLiteralComparison::Ready(false),
+                (PatternLiteral::Unsupported(_), _) => {
+                    unreachable!("unsupported literals are rejected before comparison")
+                }
+            };
             return match comparison {
-                PatternLiteralComparison::Ready(equal) => rooted_pattern_predicate(context, equal),
-                PatternLiteralComparison::List => {
-                    self.list = Some(ListFrontMachine::unowned(actual));
-                    BuiltinTaskPoll::Yielded
+                PatternLiteralComparison::Ready(equal) => pattern_predicate_in(access, equal),
+                PatternLiteralComparison::List(actual) => {
+                    self.list = Some(RegionalListFront::new_in(
+                        access,
+                        actual,
+                        Some(self.source_owner),
+                    ));
+                    RegionalBuiltinPoll::Yielded
                 }
             };
         }
 
         if let Some(item) = &mut self.item {
-            let item = match poll_whnf_computation(item, poll_context, durable_context, step_budget)
-            {
-                WhnfOwnerPoll::Ready(item) => item,
-                WhnfOwnerPoll::Pending(dependency) => {
-                    return BuiltinTaskPoll::Pending(dependency);
-                }
-                WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("pattern list item produced an external {boundary:?} boundary")
-                }
-            };
+            let item =
+                match drive_regional_in_place(access, item, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(item) => item,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
             self.item = None;
             let expected = self.expected_bytes()[self.byte_index];
-            let matches = context.with_value_access(|access| {
-                matches!(
-                    access.clone_root(&item),
-                    Value::Number(number) if number == Number::from_u8(expected)
-                )
-            });
+            let matches = matches!(
+                item,
+                Value::Number(number) if number == Number::from_u8(expected)
+            );
             if !matches {
-                return rooted_pattern_failure(context);
+                return pattern_failure_in(access);
             }
             self.byte_index += 1;
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         let expected_len = self.expected_bytes().len();
@@ -525,22 +558,51 @@ impl PatternEqualMachine {
             .list
             .as_mut()
             .expect("binary/list pattern equality must retain list traversal")
-            .poll(poll_context, context, durable_context, step_budget);
+            .poll_in(access, step_budget);
         match list_poll {
-            ListFrontPoll::Ready(None) => {
-                rooted_pattern_predicate(context, self.byte_index == expected_len)
+            RegionalListFrontPoll::Ready(None) => {
+                pattern_predicate_in(access, self.byte_index == expected_len)
             }
-            ListFrontPoll::Ready(Some((_item, _tail))) if self.byte_index == expected_len => {
-                rooted_pattern_failure(context)
+            RegionalListFrontPoll::Ready(Some((_item, _tail)))
+                if self.byte_index == expected_len =>
+            {
+                pattern_failure_in(access)
             }
-            ListFrontPoll::Ready(Some((item, tail))) => {
-                self.list = Some(ListFrontMachine::unowned(tail));
-                self.item = Some(WhnfComputation::from_root(item));
-                BuiltinTaskPoll::Yielded
+            RegionalListFrontPoll::Ready(Some((item, tail))) => {
+                self.list = Some(RegionalListFront::new_in(
+                    access,
+                    tail,
+                    Some(self.source_owner),
+                ));
+                self.item = Some(
+                    RegionalWhnfWork::from_focus(access, item).with_source_owner(self.source_owner),
+                );
+                RegionalBuiltinPoll::Yielded
             }
-            ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-            ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(expected) = &self.expected {
+            trace_compatibility_value_managed_edges(expected, visitor);
+        }
+        if let Some(expected_demand) = &self.expected_demand {
+            expected_demand.trace_managed_edges(visitor);
+        }
+        if let Some(actual) = &self.actual {
+            trace_compatibility_value_managed_edges(actual, visitor);
+        }
+        if let Some(actual_demand) = &self.actual_demand {
+            actual_demand.trace_managed_edges(visitor);
+        }
+        if let Some(list) = &self.list {
+            list.trace_managed_edges(visitor);
+        }
+        if let Some(item) = &self.item {
+            item.trace_managed_edges(visitor);
         }
     }
 
@@ -554,7 +616,7 @@ impl PatternEqualMachine {
 
 enum PatternLiteralComparison {
     Ready(bool),
-    List,
+    List(Value),
 }
 
 impl RegionalPatternPathMachine {

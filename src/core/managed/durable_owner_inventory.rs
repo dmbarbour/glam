@@ -1000,10 +1000,12 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.3e.2a replaces the rooted pattern-path machine with raw expected
 // and actual converter state; its explicit list-shaped path classification
 // makes the second raw carrier visible to this declaration census.
-const DECLARATION_BASELINE_COUNT: usize = 242;
+// W6G.1f.3g.3e.2b replaces the rooted literal-equality owner with raw operand,
+// list-front, and item state beneath the shared builtin checkpoint.
+const DECLARATION_BASELINE_COUNT: usize = 244;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([209, 203, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_669_525_353_174_811_700;
+    DeclarationSignals::new([212, 203, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_815_207_526_808_322_615;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

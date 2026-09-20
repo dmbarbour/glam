@@ -3638,13 +3638,28 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         ],
     )
     .expect("pattern equality application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated pattern equality builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved list item should suspend pattern equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the pattern-equality checkpoint must trace its literal and list state");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised list item");
+    assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &item, n(i64::from(b'A')))
         .expect("the owner should resolve the promised list item");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned pattern-equality checkpoint must remain live");
 
     let effect = eval_value(&observer, &application)
         .expect("pattern equality should resume from the list item");
@@ -3659,6 +3674,7 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         [unit_value()]
     );
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]

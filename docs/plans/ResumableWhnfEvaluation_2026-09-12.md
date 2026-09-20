@@ -6163,10 +6163,23 @@ for it:
            assignment, and proves the compiler path thunk is evaluated once;
            exact owner, access, root-publication, checkpoint, edge,
            raw-value, and WHNF inventories record the cutover.
-         - **W6G.1f.3g.3e.2b — literal equality.** Move expected/actual WHNF,
+         - **W6G.1f.3g.3e.2b — Complete (2026-09-20): literal equality.** Move expected/actual WHNF,
            literal classification, and binary-versus-logical-list traversal
            beneath the checkpoint. Preserve unsupported-literal diagnostics,
            exact item failures, and accepted byte prefixes across collection.
+           Completion record: expected and actual demand, literal
+           classification, logical-list traversal, and the current byte item
+           now remain raw traced state beneath the owning lazy's typed builtin
+           checkpoint. Unsupported compiler literals are still diagnosed only
+           after the subject is demanded, while scalar/binary mismatches and
+           wrong list bytes remain ordinary pattern fallthrough. A
+           deterministic promised-item schedule roots the application,
+           collects and re-enters before and after assignment, and proves the
+           expected literal thunk is evaluated once. The rooted literal
+           equality owner is gone; the general durable list-front bridge stays
+           until its reflection, effect, object, and annotation clients move.
+           Exact owner, access, root-publication, checkpoint, edge, raw-value,
+           and WHNF inventories record the cutover.
        - **W6G.1f.3g.3e.3 — dictionary predicates and extraction.** Move
          is-dict, logical emptiness, required/optional recursive take, parent
          frames, selected values, and remainder rebuilding as raw traced

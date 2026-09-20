@@ -30,7 +30,7 @@ use super::list_transform_machine::{
 use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
 use super::pattern_machine::{
-    PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine,
+    PatternDictPredicateMachine, PatternDictTakeMachine, RegionalPatternEqualMachine,
     RegionalPatternListMachine, RegionalPatternPathMachine,
 };
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
@@ -69,6 +69,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     ListConcat(RegionalListConcatMachine),
     ListMap(RegionalListMapMachine),
     ListObservation(Box<RegionalListObservationMachine>),
+    PatternEqual(Box<RegionalPatternEqualMachine>),
     PatternList(RegionalPatternListMachine),
     PatternPath(Box<RegionalPatternPathMachine>),
     TextLines(RegionalTextLinesMachine),
@@ -182,6 +183,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::PatternListTryUncons
                 | Builtin::PatternListTryUnsnoc
                 | Builtin::PatternListIsEmpty
+                | Builtin::PatternEqual
                 | Builtin::PatternPathEqual
         )
     }
@@ -318,6 +320,9 @@ impl RegionalBuiltinMachine {
             builtin if RegionalPatternListMachine::supports(builtin) => Self::PatternList(
                 RegionalPatternListMachine::new_in(access, source_owner, builtin, arguments),
             ),
+            Builtin::PatternEqual => Self::PatternEqual(Box::new(
+                RegionalPatternEqualMachine::new_in(access, source_owner, arguments),
+            )),
             Builtin::PatternPathEqual => Self::PatternPath(Box::new(
                 RegionalPatternPathMachine::new_in(access, source_owner, arguments),
             )),
@@ -348,6 +353,7 @@ impl RegionalBuiltinMachine {
             Self::ListConcat(machine) => machine.poll_in(access, step_budget),
             Self::ListMap(machine) => machine.poll_in(access, step_budget),
             Self::ListObservation(machine) => machine.poll_in(access, step_budget),
+            Self::PatternEqual(machine) => machine.poll_in(access, step_budget),
             Self::PatternList(machine) => machine.poll_in(access, step_budget),
             Self::PatternPath(machine) => machine.poll_in(access, step_budget),
             Self::TextLines(machine) => machine.poll_in(access, step_budget),
@@ -367,6 +373,7 @@ impl RegionalBuiltinMachine {
             Self::ListConcat(machine) => machine.trace_managed_edges(visitor),
             Self::ListMap(machine) => machine.trace_managed_edges(visitor),
             Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
+            Self::PatternEqual(machine) => machine.trace_managed_edges(visitor),
             Self::PatternList(machine) => machine.trace_managed_edges(visitor),
             Self::PatternPath(machine) => machine.trace_managed_edges(visitor),
             Self::TextLines(machine) => machine.trace_managed_edges(visitor),
@@ -819,7 +826,6 @@ pub(crate) enum BuiltinTaskMachine {
     ObjectComposition(Box<ObjectCompositionMachine>),
     PatternDictPredicate(PatternDictPredicateMachine),
     PatternDictTake(Box<PatternDictTakeMachine>),
-    PatternEqual(Box<PatternEqualMachine>),
 }
 
 impl BuiltinTaskMachine {
@@ -915,9 +921,6 @@ impl BuiltinTaskMachine {
             Builtin::PatternDictTryTake | Builtin::PatternDictTryTakeOptional => {
                 Self::PatternDictTake(Box::new(PatternDictTakeMachine::new(builtin, arguments)))
             }
-            Builtin::PatternEqual => {
-                Self::PatternEqual(Box::new(PatternEqualMachine::new(arguments)))
-            }
             _ => unreachable!("migrated builtin family must install its managed checkpoint"),
         }
     }
@@ -946,9 +949,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternDictTake(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::PatternEqual(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
         }
