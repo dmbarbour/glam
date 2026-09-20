@@ -40,12 +40,27 @@ static RESUME_TAG: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["builtin", "interaction_net", "builder", "resume"])
 });
 
-#[allow(
-    dead_code,
-    reason = "PNC2C establishes the initial state before PNC4 constructs it in production"
-)]
 pub(super) fn initial_user_state(_access: &RuntimeValueAccess<'_>) -> Value {
     Value::Dict(Dict::new_sync().insert(CONTROL_KEY.clone(), Value::List(List::empty())))
+}
+
+/// Constructs the one fixed initial state for a pure builder invocation.
+///
+/// Brand allocation belongs to the public runner in PNC5. Individual builder
+/// operations receive and preserve this state; they never allocate a new
+/// construction identity.
+pub(super) fn initial_builder_state(
+    access: &RuntimeValueAccess<'_>,
+    brand: &Arc<super::construction::ConstructionBrand>,
+) -> Value {
+    super::netlist::encode_builder_state(
+        access,
+        brand,
+        1,
+        Vec::new(),
+        Vec::new(),
+        initial_user_state(access),
+    )
 }
 
 #[cfg(test)]

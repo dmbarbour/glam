@@ -780,6 +780,8 @@ five-field shape.
 
 ##### PNC4A.2 — Initial pure-builder state
 
+Status: complete on 2026-09-20.
+
 - Add one initial-state encoder which receives a construction brand and emits
   port ID one, two empty reverse journals, initialized user state, and an
   explicit empty sequence stack. PNC5, not an individual operation, will
@@ -787,6 +789,12 @@ five-field shape.
 - Keep protected fields raw while ordinary state/control operations merely
   transport both journals. Construction transitions may validate the fields
   they edit, but must not traverse either complete reverse journal on append.
+
+Completion record: `initial_builder_state` receives the runner-owned brand and
+constructs port ID one, empty constructor and wire journals, the initialized
+hidden user-state dictionary, and an explicit empty sequence stack. Its
+structural fixture verifies the brand identity and all six fields; production
+brand allocation remains deliberately deferred to PNC5.
 
 #### PNC4B — Bind and data transitions
 

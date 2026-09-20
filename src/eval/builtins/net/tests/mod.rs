@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crate::core::{Builtin, BuiltinCall, Dict, LazyValue, List, RuntimeValueAccess, Value};
 use crate::evaluation::EvalContext;
 
-use super::construction::{ConstructionBrand, ConstructionPortId};
+use super::construction::{ConstructionBrand, ConstructionPortId, decode_construction_brand};
 use super::netlist::{
     encode_bind, encode_builder_state, encode_copy, encode_data, encode_empty_copy_for_test,
     encode_selected_netlist, encode_wire, interaction_net_from_netlist_in,
@@ -65,6 +65,50 @@ fn valid_all_operations(access: &RuntimeValueAccess<'_>) -> Value {
         ],
         port(7),
     )
+}
+
+#[test]
+fn initial_pure_builder_state_has_one_brand_and_empty_journals() {
+    let context = EvalContext::standalone();
+    with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        let state = super::builder::initial_builder_state(access, &brand);
+        let [
+            encoded_brand,
+            next_port,
+            constructors,
+            wires,
+            user_state,
+            sequence,
+        ]: [Value; 6] = super::netlist::strict_record(access, &state, "initial builder state")
+            .expect("initial builder state must be strict")
+            .try_into()
+            .expect("initial builder state must retain fixed arity");
+
+        let Value::Opaque(encoded_brand) = encoded_brand else {
+            panic!("initial builder brand must be opaque")
+        };
+        let decoded_brand = decode_construction_brand(access.values(), &encoded_brand)
+            .expect("initial builder brand must decode");
+        assert!(Arc::ptr_eq(&decoded_brand, &brand));
+        assert!(
+            matches!(next_port, Value::Number(number) if number.to_u64_if_integer() == Some(1))
+        );
+        for (name, journal) in [("constructor", constructors), ("wire", wires)] {
+            assert!(
+                super::netlist::strict_record(access, &journal, name)
+                    .expect("initial journal must be strict")
+                    .is_empty(),
+                "initial {name} journal must be empty"
+            );
+        }
+        assert!(matches!(user_state, Value::Dict(_)));
+        assert!(
+            super::netlist::strict_record(access, &sequence, "initial sequence")
+                .expect("initial sequence must be strict")
+                .is_empty()
+        );
+    });
 }
 
 #[test]
