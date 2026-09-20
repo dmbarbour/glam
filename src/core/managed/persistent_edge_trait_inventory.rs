@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        810,
+        813,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -851,9 +851,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // duplicates used for exactly-once fixpoint publication. Its forced
     // sequence/cut schedule adds two test-only promise roots so their deferred
     // inputs remain valid across deliberate collections.
+    // W6G.1f.3g.1a gives back-oriented list projection the same temporary
+    // managed bridge as front projection, adding its typed root field, root
+    // creation, and access-qualified projection. The logical list, prefix,
+    // and regional WHNF child remain beneath the cell's trace visitor.
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_665_115_543_033_129_922,
+        9_683_386_540_411_165_120,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -898,7 +902,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 202),
+            ((SourceScope::Production, EdgeSurface::Typed), 205),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 558),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

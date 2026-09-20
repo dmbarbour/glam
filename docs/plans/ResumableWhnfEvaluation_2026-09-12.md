@@ -5932,6 +5932,23 @@ for it:
      only the pattern list/path *child support* formerly left vaguely in
      W6G.1f.3i into the checkpoint that requires it; W6G.1f.3i retains the
      route/family closure audit.
+     - **W6G.1f.3g.1a — Complete (2026-09-20): regional back-list
+       projection.** Add `RegionalListBack` with raw current, prefix, and WHNF
+       child edges, then reduce the durable compatibility machine to one
+       temporary managed root. A forced promise-backed suffix fixture loses
+       the active poll route, collects before and after the exact dependency,
+       and resumes the same checkpoint without replay. The durable-owner,
+       root-publication, and persistent-edge inventories record the reviewed
+       exchange of three registered-root fields for one traced cell.
+     - **W6G.1f.3g.1b — regional key-list and path conversion.** Expose one
+       callback-free raw child form for recursive key lists and pattern paths,
+       preserving source-owner diagnostics and exact dependency boundaries.
+       Keep any durable compatibility caller behind one temporary managed root
+       until its builtin parent migrates; do not rebuild a vector of roots.
+     - **W6G.1f.3g.1c — regional builtin poll vocabulary.** Define the common
+       raw ready/failure, scheduler-boundary, yield, and spark-intent result
+       shape at the first production family which consumes it. Avoid a dead
+       staging enum merely to complete this prerequisite checkpoint.
    - **W6G.1f.3g.2 — scalar and direct families.** Regionalize numeric,
      assertion, conditional, provenance, net, and strategy state. Strategy
      records `SparkRequested` beneath the lazy before returning a spark intent;

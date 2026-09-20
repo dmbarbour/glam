@@ -958,10 +958,15 @@ fn is_production_source(relative: &Path) -> bool {
 // checkpoint and eliminates the temporary registered root and wrapper state.
 // W6G.1f.3f then moves list-effect recipe progress and its fixpoint promise
 // from registered roots into one exhaustively traced lazy-owned checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 237;
+// W6G.1f.3g.1a gives back-oriented list projection the same temporary
+// one-root regional bridge as front-oriented projection. The two regional
+// declarations add four raw values and one raw failure edge while replacing
+// three registered-root fields; the bridge itself remains assigned to the
+// existing logical-list projection owner until builtin parents embed it.
+const DECLARATION_BASELINE_COUNT: usize = 239;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([160, 246, 5, 23, 13, 10, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_472_045_949_481_295_083;
+    DeclarationSignals::new([164, 243, 5, 24, 13, 10, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 16_683_253_145_549_125_843;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
