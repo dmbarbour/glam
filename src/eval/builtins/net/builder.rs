@@ -945,11 +945,13 @@ fn encode_builder_state(access: &RuntimeValueAccess<'_>, state: DecodedBuilderSt
         user_state,
         sequence,
     } = state;
-    let mut fields = vec![brand, next_port, reverse_operations, user_state];
-    if !sequence.is_empty() {
-        fields.push(encode_sequence_stack(access, sequence));
-    }
-    Value::List(List::from_values(fields))
+    Value::List(List::from_values(vec![
+        brand,
+        next_port,
+        reverse_operations,
+        user_state,
+        encode_sequence_stack(access, sequence),
+    ]))
 }
 
 fn encode_sequence_stack(
@@ -1102,24 +1104,11 @@ fn decode_builder_state(
     access: &RuntimeValueAccess<'_>,
     state: &Value,
 ) -> Result<DecodedBuilderState, EvaluationHalt> {
-    let mut fields = super::netlist::strict_record(access, state, "builder state")?;
-    let sequence = match fields.len() {
-        4 => Vec::new(),
-        5 => decode_sequence_stack(
-            access,
-            &fields
-                .pop()
-                .expect("five-field builder state must retain its sequence"),
-        )?,
-        _ => {
-            return Err(EvaluationHalt::new(
-                "builder state has the wrong number of fields",
-            ));
-        }
-    };
-    let [brand, next_port, reverse_operations, user_state]: [Value; 4] = fields
+    let fields = super::netlist::strict_record(access, state, "builder state")?;
+    let [brand, next_port, reverse_operations, user_state, sequence]: [Value; 5] = fields
         .try_into()
         .map_err(|_| EvaluationHalt::new("builder state has the wrong number of fields"))?;
+    let sequence = decode_sequence_stack(access, &sequence)?;
     if !matches!(user_state, Value::Dict(_)) {
         return Err(EvaluationHalt::new(
             "interaction-net builder user state must be a dictionary",

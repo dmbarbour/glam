@@ -469,8 +469,7 @@ protected active sequence from the reset state which `.get []` and `.set []`
 must capture and replace:
 
 ```text
-builder_state = [brand, next_port, reverse_operations, user_state]
-              | [brand, next_port, reverse_operations, user_state,
+builder_state = [brand, next_port, reverse_operations, user_state,
                  sequence_stack]
 
 sequence_stack = StrictList SequenceFrame     # head is the next frame
@@ -487,9 +486,10 @@ The tags are implementation-owned abstract global paths. Continuations and
 saved stacks are normal traced value edges. Missing `CONTROL_KEY` means an
 empty reset stack, so `.set [] {}` clears active reset scope without erasing
 the monadic continuation currently executing `.set`. The fifth builder-state
-field is protected from `.get/.set`; it is omitted whenever empty, and a
-selected terminal netlist therefore retains PNC1's canonical four-field
-schema. Both stacks are strict while continuation values remain lazy. The
+field is protected from `.get/.set` and always present, using the empty strict
+list when there is no active sequence. Builder state is therefore one
+fixed-arity private record rather than a sum of four- and five-field shapes.
+Both stacks are strict while continuation values remain lazy. The
 construction brand already present in `BuilderState` is the invocation
 identity and therefore need not be duplicated in every frame.
 
@@ -505,10 +505,10 @@ without cancelling the operation which performs that update.
   builder transitions before changing composition: normal and missing shift,
   nested keys, cut inside reset, reset inside alternatives, complete-state
   clear/restore, cross-invocation continuation use, and fix/reset hiding.
-- Add strict sequence/reset frame encode/decode helpers and accept builder
-  state arity four (empty protected sequence) or five (active sequence).
-  Reject malformed hidden control records at the evaluator boundary. Do not
-  demand continuation fields while decoding the structural stacks.
+- Add strict sequence/reset frame encode/decode helpers and require the
+  fixed five-field builder-state record, including an explicit empty sequence
+  stack. Reject malformed hidden control records at the evaluator boundary.
+  Do not demand continuation fields while decoding the structural stacks.
 - Keep the control representation private to the evaluator. It is ordinary
   traceable data under the hidden key, not a Rust opaque payload or root.
 
@@ -624,7 +624,8 @@ sequence/cut stack, while the implementation-owned `CONTROL_KEY` entry in
 which preserves both reference rules: `.get []` and `.set []` can capture,
 clear, and restore reset scope, but the `.set` operation cannot erase the
 sequence which is currently executing it. Empty protected sequence state is
-canonicalized back to the PNC1 four-field builder record.
+represented by an explicit empty strict list, keeping the private builder
+record fixed-width and leaving optionality inside the field it describes.
 
 The executable reference matrix is:
 

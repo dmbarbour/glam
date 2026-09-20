@@ -27,7 +27,7 @@ static WIRE_TAG: LazyLock<crate::core::Key> = LazyLock::new(|| {
 });
 
 /// Encodes the protected builder state as one strict semantic record:
-/// `[brand, next_port, reverse_operations, user_state]`.
+/// `[brand, next_port, reverse_operations, user_state, sequence_stack]`.
 pub(super) fn encode_builder_state(
     access: &RuntimeValueAccess<'_>,
     brand: &Arc<ConstructionBrand>,
@@ -40,6 +40,7 @@ pub(super) fn encode_builder_state(
         Value::Number(Number::from_u64(next_port)),
         Value::List(List::from_values(reverse_operations)),
         user_state,
+        Value::List(List::from_values(Vec::new())),
     ]))
 }
 
@@ -151,8 +152,13 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
     let selected = strict_record(access, selected, "selected netlist")?;
     let [state, exposed]: [Value; 2] = exact_record(access, selected, "selected netlist")?;
     let state = strict_record(access, &state, "builder state")?;
-    let [brand, next_port, reverse_operations, user_state]: [Value; 4] =
-        exact_record(access, state, "builder state")?;
+    let [
+        brand,
+        next_port,
+        reverse_operations,
+        user_state,
+        sequence_stack,
+    ]: [Value; 5] = exact_record(access, state, "builder state")?;
 
     let brand = decode_brand(access, &brand)?;
     let Value::Number(next_port) = next_port else {
@@ -164,6 +170,11 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
         .ok_or_else(|| malformed("builder next-port must be a positive integer"))?;
     if !matches!(user_state, Value::Dict(_)) {
         return Err(malformed("builder user state must be a dictionary"));
+    }
+    if !strict_record(access, &sequence_stack, "builder sequence stack")?.is_empty() {
+        return Err(malformed(
+            "selected netlist retains an active builder sequence",
+        ));
     }
 
     let reverse_operations = strict_record(access, &reverse_operations, "operation journal")?;

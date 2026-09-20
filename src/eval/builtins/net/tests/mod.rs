@@ -79,6 +79,59 @@ fn hidden_builtin_replays_all_strict_operation_forms() {
 }
 
 #[test]
+fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence() {
+    let context = EvalContext::standalone();
+    with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        let state =
+            encode_builder_state(access, &brand, 1, Vec::new(), Value::Dict(Dict::new_sync()));
+        let fields = super::netlist::strict_record(access, &state, "fixture builder state")
+            .expect("encoded builder state must be strict");
+        assert_eq!(fields.len(), 5, "builder state must have fixed arity");
+        assert!(
+            super::netlist::strict_record(access, &fields[4], "fixture sequence stack")
+                .expect("the sequence stack must be strict")
+                .is_empty(),
+            "an inactive sequence must remain an explicit empty field"
+        );
+
+        let mut missing_sequence = fields.clone();
+        missing_sequence.pop();
+        let selected = encode_selected_netlist(
+            access,
+            Value::List(List::from_values(missing_sequence)),
+            &brand,
+            port(1),
+        );
+        let error = interaction_net_from_netlist_in(access, &selected)
+            .expect_err("terminal replay must reject the old four-field shape");
+        assert!(
+            error
+                .to_string()
+                .contains("builder state has the wrong number of fields"),
+            "{error}"
+        );
+
+        let mut active_sequence = fields;
+        active_sequence[4] = Value::List(List::from_values(vec![access.values().unit()]));
+        let selected = encode_selected_netlist(
+            access,
+            Value::List(List::from_values(active_sequence)),
+            &brand,
+            port(1),
+        );
+        let error = interaction_net_from_netlist_in(access, &selected)
+            .expect_err("terminal replay must reject unfinished builder control");
+        assert!(
+            error
+                .to_string()
+                .contains("selected netlist retains an active builder sequence"),
+            "{error}"
+        );
+    });
+}
+
+#[test]
 fn replay_rejects_malformed_nonsequential_foreign_and_invalid_records() {
     let context = EvalContext::standalone();
     with_access(&context, |access| {
@@ -872,42 +925,63 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
 #[test]
 fn hidden_builder_rejects_malformed_control_records() {
     let context = EvalContext::standalone();
-    let (malformed_reset, malformed_sequence, returned) = with_access(&context, |access| {
-        let brand = Arc::new(ConstructionBrand::default());
-        let malformed_reset = encode_builder_state(
-            access,
-            &brand,
-            1,
-            Vec::new(),
-            Value::Dict(Dict::new_sync().insert(
-                super::builder::control_key_for_test(),
-                Value::Number(1.into()),
-            )),
-        );
-        let initial = encode_builder_state(
-            access,
-            &brand,
-            1,
-            Vec::new(),
-            super::builder::initial_user_state(access),
-        );
-        let mut fields = super::netlist::strict_record(access, &initial, "fixture state")
-            .expect("encoded builder state must be strict");
-        fields.push(Value::Number(2.into()));
-        let malformed_sequence = Value::List(List::from_values(fields));
-        let returned = partial_builder(
-            access,
-            Builtin::InteractionNetBuilderReturn,
-            vec![access.values().unit()],
-        );
-        (malformed_reset, malformed_sequence, returned)
-    });
+    let (malformed_reset, malformed_sequence, missing_sequence, returned) =
+        with_access(&context, |access| {
+            let brand = Arc::new(ConstructionBrand::default());
+            let malformed_reset = encode_builder_state(
+                access,
+                &brand,
+                1,
+                Vec::new(),
+                Value::Dict(Dict::new_sync().insert(
+                    super::builder::control_key_for_test(),
+                    Value::Number(1.into()),
+                )),
+            );
+            let initial = encode_builder_state(
+                access,
+                &brand,
+                1,
+                Vec::new(),
+                super::builder::initial_user_state(access),
+            );
+            let mut fields = super::netlist::strict_record(access, &initial, "fixture state")
+                .expect("encoded builder state must be strict");
+            assert_eq!(fields.len(), 5, "builder state must have fixed arity");
+            let sequence = fields
+                .pop()
+                .expect("fixed builder state must retain its sequence stack");
+            assert_eq!(
+                super::netlist::strict_record(access, &sequence, "fixture sequence")
+                    .expect("initial sequence stack must be strict"),
+                Vec::<Value>::new(),
+                "initial sequence stack must be represented explicitly"
+            );
+            let missing_sequence = Value::List(List::from_values(fields.clone()));
+            fields.push(Value::Number(2.into()));
+            let malformed_sequence = Value::List(List::from_values(fields));
+            let returned = partial_builder(
+                access,
+                Builtin::InteractionNetBuilderReturn,
+                vec![access.values().unit()],
+            );
+            (
+                malformed_reset,
+                malformed_sequence,
+                missing_sequence,
+                returned,
+            )
+        });
 
     for (state, expected) in [
         (malformed_reset, "builder reset stack must be a strict list"),
         (
             malformed_sequence,
             "builder sequence stack must be a strict list",
+        ),
+        (
+            missing_sequence,
+            "builder state has the wrong number of fields",
         ),
     ] {
         let error = builder_result_at(&context, returned.clone(), state, 0)
