@@ -5729,6 +5729,50 @@ for it:
 6. **W6G.1f.3e — object-fixpoint checkpoint.** Convert linearization and mix
    stacks after their shared key/list/WHNF child forms have an edge-owned
    representation. Do not duplicate object traversal state in a sidecar.
+
+   The post-access review found one previously implicit prerequisite:
+   `ObjectLinearizationMachine` owns a `ListFrontMachine` while reading lazy
+   dependency lists. That shared list projection still stores registered roots
+   and a rooted `WhnfComputation`; it cannot be nested in a traced object cell.
+   An object-private traversal would duplicate logical-list semantics. Use the
+   same regional-state bridge established for key conversion instead.
+
+   Partition the transition:
+
+   - **W6G.1f.3e.0 — object and list-front ownership census.** **Complete.**
+     Record every object field, child owner, result/failure boundary, and
+     `ListFrontMachine` parent. The list-front parents are object
+     linearization plus three list-effect states. Object work also owns the
+     temporary key-conversion wrapper and ordinary rooted WHNF computations.
+     Select one canonical raw-edge list-front reducer with a temporary
+     one-root adapter for the unmigrated list-effect family.
+   - **W6G.1f.3e.1 — canonical regional list-front state.** Split
+     `ListFrontMachine` into raw current/chunk/suffix state using
+     `RegionalWhnfWork`, plus a temporary managed-cell/root adapter for current
+     parents. Preserve byte projection, deferred binary/list chunk semantics,
+     exact suffix ownership, source-owner diagnostics, and all failure text.
+     Force collection between deferred-chunk transitions and latch the
+     one-root bound. Do not regionalize back projection before a checkpoint
+     needs it.
+   - **W6G.1f.3e.2 — regional object representation.** Convert original spec,
+     self marker, linearization frames, seen specs, dependency sequences,
+     definitions stack, accumulated base, and application state to raw traced
+     edges. Use regional WHNF, key conversion, and list-front children. Add one
+     exhaustive visitor over the complete state and preserve C3 ordering,
+     anonymous-name identity, duplicate-name identity checks, and mix order.
+   - **W6G.1f.3e.3 — managed checkpoint and source cutover.** Add the typed
+     object-fixpoint arm beneath `ManagedLazyCheckpointEdge`, install it from
+     `FixpointComputation::ObjectInstance`, and replace
+     `LazyTaskWork::ObjectFixpoint` with a state-free marker. Keep boundary
+     translation and terminal root publication outside the managed transition;
+     adopt the exact winning family or cache on stale routes.
+   - **W6G.1f.3e.4 — forced schedules and bridge ledger.** Force route loss and
+     collection at spec demand, name conversion, deferred dependency chunks,
+     nested dependency return, definitions demand, base application, self
+     application, and terminal object publication. Count mixin applications
+     and completed dependency prefixes. Assign the remaining temporary
+     list-front adapter to W6G.1f.3f and the remaining key-conversion adapters
+     to W6G.1f.3g, then close the object-family inventories.
 7. **W6G.1f.3f — list-effect checkpoint.** Preserve sequence/cut/fix progress
    and convert the fix promise root to a managed promise edge. Prove that
    route loss cannot manufacture another promise or repeat an assignment.
