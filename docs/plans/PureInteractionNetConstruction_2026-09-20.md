@@ -1,9 +1,10 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
 Status: active; PNC0-PNC4 completed on 2026-09-20. The
-[post-PNC3 review](../reviews/PureInteractionNetConstructionPNC3_2026-09-20.md)
-found no semantic defect, and its focused verification and reset-key
-representation remediations are complete. PNC4 is next. This is the focused
+[post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
+found no demonstrated result defect, but its diagnostic-parity, no-replay,
+and focused verification remediations remain open. PNC5 follows those
+remediations. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -864,8 +865,10 @@ by their caller. Builtin compilation and the raw-value, durable-owner,
 persistent-edge, recursive-identity, bounded-access, registered-root, and WHNF
 censuses are reconciled with the new regional operand queue.
 
-Exit: running a construction program yields only ordinary list-effect
-outcomes containing strict semantic netlists.
+Exit: every private construction operation maps one builder state to ordinary
+list-effect outcomes carrying the fixed protected state and compact journals.
+Applying a complete construction program to the private API and initial state
+remains PNC5 work.
 
 ### PNC5 — Unique selection and public composition
 
