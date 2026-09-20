@@ -322,7 +322,8 @@ fn api_counts(occurrences: &[Occurrence]) -> BTreeMap<CheckpointApi, usize> {
 }
 
 const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
-    (CheckpointApi::FromRoot, 81),
+    // W6G.1f.3g.1a removes the two rooted list-back child projections.
+    (CheckpointApi::FromRoot, 79),
     (CheckpointApi::FromLazySource, 1),
     (CheckpointApi::FromApplicationCheckpoint, 4),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
@@ -331,10 +332,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::InstallSourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
-    (CheckpointApi::WithSourceOwner, 1),
+    // W6G.1f.3g.2a gives regional numeric demand the same exact lazy owner as
+    // the outer managed builtin checkpoint transition.
+    (CheckpointApi::WithSourceOwner, 2),
 ];
-const EXPECTED_OCCURRENCES: usize = 95;
-const EXPECTED_FINGERPRINT: u64 = 3_566_409_168_076_173_231;
+const EXPECTED_OCCURRENCES: usize = 94;
+const EXPECTED_FINGERPRINT: u64 = 13_777_866_463_336_483_502;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

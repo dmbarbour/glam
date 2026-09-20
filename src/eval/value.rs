@@ -19,7 +19,9 @@ use crate::list::ListItem;
 use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessRegionalPoll};
-use super::builtin_machine::{BuiltinTaskMachine, BuiltinTaskPoll};
+use super::builtin_machine::{
+    BuiltinTaskMachine, BuiltinTaskPoll, RegionalBuiltinMachine, RegionalBuiltinPoll,
+};
 use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
 use super::lazy_checkpoint::{
     HostCallCheckpointObservation, ManagedLazyCheckpointEdge, ManagedLazyCheckpointKindTag,
@@ -204,6 +206,7 @@ enum LazyTaskWork {
     AccessCheckpoint,
     ObjectFixpointCheckpoint,
     ListEffectCheckpoint,
+    BuiltinCheckpoint,
     Builtin(Box<BuiltinTaskMachine>),
     /// Transient one-shot authority held only by the route which installed an
     /// `Invoking` host-call checkpoint.
@@ -227,6 +230,7 @@ impl LazyTaskMachine {
             ManagedLazyCheckpointKindTag::Access => LazyTaskWork::AccessCheckpoint,
             ManagedLazyCheckpointKindTag::ObjectFixpoint => LazyTaskWork::ObjectFixpointCheckpoint,
             ManagedLazyCheckpointKindTag::ListEffect => LazyTaskWork::ListEffectCheckpoint,
+            ManagedLazyCheckpointKindTag::Builtin => LazyTaskWork::BuiltinCheckpoint,
         }
     }
 
@@ -731,6 +735,108 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a list-effect boundary cannot produce an immediate value")
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_builtin_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Whnf,
+            Failed(crate::runtime::RuntimeFailureRoot),
+            Terminal,
+            Boundary(super::whnf::RegionalBoundaryRequest),
+            Yielded,
+            Replaced(ManagedLazyCheckpointKindTag),
+        }
+
+        let transition = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            let checkpoint = lazy
+                .checkpoint_snapshot()
+                .expect("builtin route must retain its managed checkpoint");
+            if checkpoint.kind() != ManagedLazyCheckpointKindTag::Builtin {
+                return Transition::Replaced(checkpoint.kind());
+            }
+            match checkpoint.with_builtin_transition_in(&access, step_budget) {
+                RegionalBuiltinPoll::Ready(value) => {
+                    let work = super::whnf::RegionalWhnfWork::from_focus(&access, value)
+                        .with_source_owner(self.lazy.id());
+                    let next = ManagedLazyCheckpointEdge::allocate_regional_in(&access, work)
+                        .expect("canonical WHNF state must fit its reviewed managed slot");
+                    match lazy.replace_checkpoint(&checkpoint, next) {
+                        Ok(()) => Transition::Whnf,
+                        Err(_) => {
+                            if lazy.cached().is_some() {
+                                Transition::Terminal
+                            } else {
+                                match lazy.checkpoint_snapshot() {
+                                    Some(current) => Transition::Replaced(current.kind()),
+                                    None => unreachable!(
+                                        "a rejected builtin handoff must find a checkpoint or cache"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+                RegionalBuiltinPoll::Boundary(request) => Transition::Boundary(request),
+                RegionalBuiltinPoll::Yielded => Transition::Yielded,
+                RegionalBuiltinPoll::Failed(failure) => {
+                    match self.lazy.cache(access.values(), Err(failure)) {
+                        Ok(_) => Transition::Terminal,
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    }
+                }
+            }
+        });
+
+        match transition {
+            Transition::Whnf => {
+                self.work = LazyTaskWork::WhnfCheckpoint;
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            Transition::Terminal => self.cached_poll(context),
+            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Replaced(kind) => {
+                self.work = Self::work_for_checkpoint_kind(kind);
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Boundary(request) => {
+                let poll = match request {
+                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
+                        super::whnf::WhnfPoll::Pending(dependency)
+                    }
+                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
+                        super::whnf::WhnfPoll::Deferred(deferred)
+                    }
+                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
+                        super::whnf::WhnfPoll::External(boundary)
+                    }
+                };
+                match interpret_whnf_poll(poll, context.context()) {
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!("builtin operand produced an external {boundary:?} boundary")
+                    }
+                    WhnfOwnerPoll::Ready(_) => {
+                        unreachable!("a builtin boundary cannot produce an immediate value")
                     }
                 }
             }
@@ -1255,6 +1361,33 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 return self.cached_poll(context);
                             }
                         }
+                        LazySource::Builtin(call)
+                            if RegionalBuiltinMachine::supports(call.builtin) =>
+                        {
+                            let installed = context.with_value_access(|access| {
+                                let machine = RegionalBuiltinMachine::new_in(
+                                    &access,
+                                    self.lazy.id(),
+                                    call.builtin,
+                                    &call.arguments,
+                                );
+                                let checkpoint = ManagedLazyCheckpointEdge::allocate_builtin_in(
+                                    &access, machine,
+                                )
+                                .expect("managed builtin state must fit its reviewed slot");
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
+                            });
+                            if installed {
+                                LazyTaskWork::BuiltinCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
+                        }
                         LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
                             let arguments = context.with_value_access(|access| {
                                 call.arguments
@@ -1323,6 +1456,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if matches!(self.work, LazyTaskWork::ListEffectCheckpoint) {
                 return self.poll_list_effect_checkpoint(context, step_budget);
+            }
+
+            if matches!(self.work, LazyTaskWork::BuiltinCheckpoint) {
+                return self.poll_builtin_checkpoint(context, step_budget);
             }
 
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
@@ -1854,6 +1991,7 @@ mod ownership_tests {
             LazyTaskWork::AccessCheckpoint => {}
             LazyTaskWork::ObjectFixpointCheckpoint => {}
             LazyTaskWork::ListEffectCheckpoint => {}
+            LazyTaskWork::BuiltinCheckpoint => {}
             LazyTaskWork::Builtin(machine) => {
                 let _: &BuiltinTaskMachine = machine;
             }

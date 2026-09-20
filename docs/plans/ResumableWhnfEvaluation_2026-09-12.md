@@ -5949,14 +5949,41 @@ for it:
        a forced deferred-chunk fixture collects after promotion, at the exact
        promise wait, and after every resumed yield without rebuilding a vector
        of roots.
-     - **W6G.1f.3g.1c — regional builtin poll vocabulary.** Define the common
-       raw ready/failure, scheduler-boundary, yield, and spark-intent result
-       shape at the first production family which consumes it. Avoid a dead
-       staging enum merely to complete this prerequisite checkpoint.
+     - **W6G.1f.3g.1c — Complete (2026-09-20): regional builtin poll
+       vocabulary.** Define the common raw ready/failure,
+       scheduler-boundary, and yield result shape with the first production
+       numeric consumer. The spark-intent arm remains deliberately absent
+       until .3g.2d consumes it; this keeps the vocabulary compile-exhaustive
+       without staging a dead variant.
    - **W6G.1f.3g.2 — scalar and direct families.** Regionalize numeric,
-     assertion, conditional, provenance, net, and strategy state. Strategy
-     records `SparkRequested` beneath the lazy before returning a spark intent;
-     the outer route roots and submits it only after managed access closes.
+     assertion, conditional, provenance, net, and strategy state. The original
+     wording placed the typed cell in .3g.5 but left no safe poll-spanning home
+     for raw state during .3g.2-.4. Introduce the concrete builtin checkpoint
+     incrementally here: migrated families install it beneath the lazy while
+     unmigrated families continue using the durable compatibility sum. Each
+     later family group extends the compile-exhaustive regional sum; .3g.5
+     closes the source cutover and deletes the compatibility sum rather than
+     introducing a second cell. Strategy records `SparkRequested` beneath the
+     lazy before returning a spark intent; the outer route roots and submits
+     it only after managed access closes.
+     - **W6G.1f.3g.2a — Complete (2026-09-20): numeric foundation.** Introduce
+       the common regional builtin poll vocabulary and typed lazy checkpoint
+       with the numeric family as its first immediately exercised arm.
+       Numeric sources now install the checkpoint directly from raw arguments;
+       completed operands and the exact WHNF child remain exhaustively traced.
+       A deterministic two-operand fixture destroys the first route, collects
+       before and after the second-operand promise boundary, and proves the
+       completed first operand is demanded once.
+     - **W6G.1f.3g.2b — assertion, conditional, and provenance.** Move the
+       remaining direct value-demand families, reusing regional list-front
+       state for conditional result selection and preserving diagnostic
+       context.
+     - **W6G.1f.3g.2c — net operations.** Separate immediate construction from
+       arity/net demand while retaining net/application semantics and failure
+       context beneath the typed checkpoint.
+     - **W6G.1f.3g.2d — strategy and spark boundary.** Regionalize `seq` and
+       metadata demand, then record at-most-once spark admission state before
+       returning the raw post-access spark intent.
    - **W6G.1f.3g.3 — structural families.** Regionalize comparison,
      dictionary, list observation/transformation, pattern, and annotation
      state using the shared child reducers. Preserve exact traversal prefixes,
@@ -5965,12 +5992,13 @@ for it:
      object-builtin, and object-composition state. Reuse application
      checkpoints and regional child forms rather than embedding a registered
      root or reconstructing a completed prefix.
-   - **W6G.1f.3g.5 — typed checkpoint and source cutover.** Introduce one
-     compile-exhaustive `ManagedBuiltinCheckpointCell`, allocate the selected
-     regional family directly from the source's raw arguments, and replace
-     `LazyTaskWork::Builtin(Box<_>)` with a state-free checkpoint marker.
-     Translate raw ready/failure/spark results into temporary roots only after
-     the managed transition closes. Remove the old rooted family sum and its
+   - **W6G.1f.3g.5 — typed checkpoint and source cutover closure.** Complete
+     the incrementally introduced compile-exhaustive
+     `ManagedBuiltinCheckpointCell`, allocate every selected regional family
+     directly from the source's raw arguments, and remove
+     `LazyTaskWork::Builtin(Box<_>)` once no legacy family remains. Translate
+     raw ready/failure/spark results into temporary roots only after the
+     managed transition closes. Remove the old rooted family sum and its
      temporary list/conversion adapters.
    - **W6G.1f.3g.6 — forced schedules and family closure.** Force yield,
      dependency suspension, route loss, and collection in every family group.

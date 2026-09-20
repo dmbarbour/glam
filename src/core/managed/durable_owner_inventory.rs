@@ -504,6 +504,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         CompatibilityPayload,
         "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph; list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand, list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss, and list_effect_fix_checkpoint_constructs_and_assigns_one_promise force route loss and collection across every recipe family"
     ),
+    exact_managed!(
+        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs",
+        "managed builtin checkpoint cell",
+        "raw builtin arguments, completed scalar prefixes, and regional WHNF child state behind one representation mutex",
+        "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
+        CompatibilityPayload,
+        "W6G.1f.3g.2a introduces the numeric arm and forces route loss plus collection at its exact second-operand dependency"
+    ),
     closed_durable!(
         "src/reflection/requests.rs",
         "ReflectionJournal / QueryRead / decoded standard requests",
@@ -963,10 +971,15 @@ fn is_production_source(relative: &Path) -> bool {
 // declarations add four raw values and one raw failure edge while replacing
 // three registered-root fields; the bridge itself remains assigned to the
 // existing logical-list projection owner until builtin parents embed it.
-const DECLARATION_BASELINE_COUNT: usize = 239;
+// W6G.1f.3g.2a introduces the lazy-owned builtin checkpoint and moves numeric
+// arguments/progress from the rooted compatibility machine into one raw
+// regional family. The concrete cell contributes one typed edge; the regional
+// state contributes two raw values and one raw failure while retiring one
+// registered-root field.
+const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([164, 243, 5, 24, 13, 10, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 16_683_253_145_549_125_843;
+    DeclarationSignals::new([166, 242, 5, 25, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_563_008_602_039_060_376;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1089,6 +1102,8 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         || declaration.starts_with("src/eval/list_effect_machine.rs::")
     {
         "managed list-effect checkpoint cell"
+    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedBuiltinCheckpointCell" {
+        "managed builtin checkpoint cell"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"

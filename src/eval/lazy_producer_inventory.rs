@@ -12,6 +12,9 @@ const EXPECTED_VARIANTS: &[&str] = &[
     // retained directly beneath the managed lazy.
     "AccessCheckpoint",
     "Builtin",
+    // Migrated builtin families retain raw progress beneath the typed managed
+    // checkpoint; this marker carries no duplicate producer state.
+    "BuiltinCheckpoint",
     // Only the installer receives one transient invocation permit. Durable
     // before/after state belongs to the managed checkpoint.
     "HostCallCheckpoint",

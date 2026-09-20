@@ -131,8 +131,8 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/access_machine.rs",
-        [5, 7],
-        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter"
+        [5, 8],
+        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter; W6G.1f.3g.1b exposes required and optional key-list conversion through that shared regional child"
     ),
     context_entry!(
         "src/eval/annotation_machine.rs",
@@ -161,8 +161,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [8, 8],
-        "W6C.2-W6C.6 and W6F.5 durable scalar, strategy, and net-builtin owners with callback-free regional result projection"
+        [7, 7],
+        "W6C.2-W6C.6 and W6F.5 durable strategy and net-builtin owners; W6G.1f.3g.2a moves numeric state beneath caller-supplied regional access"
     ),
     context_entry!(
         "src/eval/comparison_machine.rs",
@@ -186,8 +186,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_machine.rs",
-        [3, 4],
-        "W6G.1f.3e.1 regional logical-list front bridge and W6D.3 rooted back owner"
+        [2, 6],
+        "W6G.1f.3e.1 and W6G.1f.3g.1a expose regional logical-list front/back bridges while retaining the compatibility owners until parent-family cutover"
     ),
     context_entry!(
         "src/eval/list_observation_machine.rs",
@@ -226,8 +226,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [20, 8],
-        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints"
+        [21, 8],
+        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints; W6G.1f.3g.2a polls the numeric checkpoint under bounded access"
     ),
 ];
 

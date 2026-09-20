@@ -6,12 +6,15 @@
 
 use std::sync::Arc;
 
+use glam_gc::Visitor;
+
 use crate::core::{
-    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyValue, Value,
+    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyId, LazyValue,
+    Value, trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
+    WorkDependency, poll_whnf_computation,
 };
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -31,7 +34,10 @@ use super::pattern_machine::{
 };
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation,
+    drive_regional_in_place, reduce_semantic_shell,
+};
 
 pub(crate) enum BuiltinTaskPoll {
     Ready(RuntimeValueRoot),
@@ -39,6 +45,140 @@ pub(crate) enum BuiltinTaskPoll {
     Pending(WorkDependency),
     Yielded,
     Failed(RuntimeFailureRoot),
+}
+
+/// Callback-free result of one regional builtin transition.
+///
+/// Values and failures remain raw while the managed checkpoint is protected
+/// by one value-access region. Scheduler boundaries and best-effort spark
+/// intents are interpreted only after that region closes.
+pub(in crate::eval) enum RegionalBuiltinPoll {
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
+/// Compile-exhaustive regional state for builtin families migrated beneath
+/// the lazy-owned checkpoint.
+pub(in crate::eval) enum RegionalBuiltinMachine {
+    Numeric(RegionalNumericMachine),
+}
+
+pub(in crate::eval) struct RegionalNumericMachine {
+    builtin: Builtin,
+    arguments: Vec<Value>,
+    next: usize,
+    demand: Option<RegionalWhnfWork>,
+    numbers: Vec<Number>,
+    source_owner: LazyId,
+}
+
+impl RegionalBuiltinMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
+        matches!(
+            builtin,
+            Builtin::Add
+                | Builtin::Subtract
+                | Builtin::Multiply
+                | Builtin::Divide
+                | Builtin::Floor
+                | Builtin::Mod
+        )
+    }
+
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        assert!(Self::supports(builtin));
+        assert_eq!(arguments.len(), builtin.arity());
+        Self::Numeric(RegionalNumericMachine {
+            builtin,
+            arguments: arguments
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect(),
+            next: 0,
+            demand: None,
+            numbers: Vec::with_capacity(arguments.len()),
+            source_owner,
+        })
+    }
+
+    pub(in crate::eval) fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        match self {
+            Self::Numeric(machine) => machine.poll_in(access, step_budget),
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Numeric(machine) => machine.trace_managed_edges(visitor),
+        }
+    }
+}
+
+impl RegionalNumericMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        while self.next < self.arguments.len() {
+            let demand = self.demand.get_or_insert_with(|| {
+                RegionalWhnfWork::from_focus(
+                    access,
+                    access.values().duplicate_value(&self.arguments[self.next]),
+                )
+                .with_source_owner(self.source_owner)
+            });
+            let value =
+                match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
+            let value =
+                EvaluatedValue::try_from(value).expect("numeric operand demand must reach WHNF");
+            let number = match number_from_evaluated(value, numeric_name(self.builtin)) {
+                Ok(number) => number,
+                Err(error) => {
+                    return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+                }
+            };
+            self.numbers.push(number);
+            self.next += 1;
+            self.demand = None;
+        }
+
+        match numeric_result(self.builtin, &self.numbers) {
+            Ok(result) => RegionalBuiltinPoll::Ready(Value::Number(result)),
+            Err(message) => {
+                RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message)))
+            }
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for argument in &self.arguments {
+            trace_compatibility_value_managed_edges(argument, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+    }
 }
 
 pub(crate) enum BuiltinTaskMachine {
@@ -53,7 +193,6 @@ pub(crate) enum BuiltinTaskMachine {
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
     Net(NetBuiltinMachine),
-    Numeric(NumericBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
     PatternList(PatternListMachine),
@@ -196,7 +335,7 @@ impl BuiltinTaskMachine {
             Builtin::Seq | Builtin::Spark => {
                 Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
             }
-            _ => Self::Numeric(NumericBuiltinMachine::new(builtin, arguments)),
+            _ => unreachable!("migrated builtin family must install its managed checkpoint"),
         }
     }
 
@@ -246,9 +385,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Net(machine) => machine.poll(poll_context, context, durable_context, step_budget),
-            Self::Numeric(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
             Self::Object(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
@@ -725,73 +861,6 @@ fn conditional_name(builtin: Builtin) -> &'static str {
     }
 }
 
-pub(crate) struct NumericBuiltinMachine {
-    builtin: Builtin,
-    arguments: Vec<RuntimeValueRoot>,
-    next: usize,
-    demand: Option<WhnfComputation>,
-    numbers: Vec<Number>,
-}
-
-impl NumericBuiltinMachine {
-    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let argument_count = arguments.len();
-        Self {
-            builtin,
-            arguments,
-            next: 0,
-            demand: None,
-            numbers: Vec::with_capacity(argument_count),
-        }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        while self.next < self.arguments.len() {
-            let demand = self.demand.get_or_insert_with(|| {
-                WhnfComputation::from_root(self.arguments[self.next].clone())
-            });
-            let value =
-                match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
-                    WhnfOwnerPoll::Ready(value) => value,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("numeric demand produced an external {boundary:?} boundary")
-                    }
-                };
-            let value = EvaluatedValue::try_from(context.project_root(&value))
-                .expect("numeric operand demand must reach WHNF");
-            let number = match number_from_evaluated(value, numeric_name(self.builtin)) {
-                Ok(number) => number,
-                Err(error) => {
-                    return BuiltinTaskPoll::Failed(
-                        context.root_failure(error.into_permanent_failure()),
-                    );
-                }
-            };
-            self.numbers.push(number);
-            self.next += 1;
-            self.demand = None;
-        }
-
-        match numeric_result(self.builtin, &self.numbers) {
-            Ok(result) => BuiltinTaskPoll::Ready(context.root_value(Value::Number(result))),
-            Err(message) => BuiltinTaskPoll::Failed(
-                context.root_failure(Arc::new(EvaluationFailure::message(message))),
-            ),
-        }
-    }
-}
-
 fn numeric_name(builtin: Builtin) -> &'static str {
     match builtin {
         Builtin::Add => "add",
@@ -851,19 +920,35 @@ mod tests {
             Builtin::Add,
             vec![first, Value::Promised(second.clone())],
         );
+        let Value::Lazy(sum_lazy) = &sum else {
+            unreachable!("a saturated numeric builtin must remain lazy")
+        };
+        let sum_root = sum_lazy.root(context.values());
 
         let blocked = crate::eval::eval_value(&context, &sum)
             .expect_err("the second operand must remain an exact suspension boundary");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the numeric checkpoint must survive loss of its first poll route");
+        crate::eval::eval_value(&context, &sum)
+            .expect_err("a later route must resume the same second-operand dependency");
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(context.values(), &second, Value::Number(2.into()))
             .expect("the second operand should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned numeric checkpoint must retain its completed prefix");
         assert_eq!(
             crate::eval::eval_value(&context, &sum).expect("numeric work must resume"),
             Value::Number(3.into())
         );
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        drop(sum_root);
     }
 
     #[test]

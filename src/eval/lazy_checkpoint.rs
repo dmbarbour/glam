@@ -17,6 +17,7 @@ use crate::core::{
 };
 
 use super::access_machine::AccessMachine;
+use super::builtin_machine::{RegionalBuiltinMachine, RegionalBuiltinPoll};
 use super::list_effect_machine::{RegionalListEffect, RegionalListEffectPoll};
 use super::net::NetWhnfMachine;
 use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
@@ -36,6 +37,10 @@ pub(in crate::eval) struct ManagedObjectFixpointCheckpointCell {
 
 pub(in crate::eval) struct ManagedListEffectCheckpointCell {
     state: Mutex<RegionalListEffect>,
+}
+
+pub(in crate::eval) struct ManagedBuiltinCheckpointCell {
+    state: Mutex<RegionalBuiltinMachine>,
 }
 
 struct ManagedNetWhnfCheckpointState {
@@ -68,6 +73,7 @@ pub(in crate::eval) enum ManagedLazyCheckpointKindTag {
     Access,
     ObjectFixpoint,
     ListEffect,
+    Builtin,
 }
 
 pub(crate) struct ManagedLazyCheckpointEdge(ManagedLazyCheckpointKind);
@@ -79,6 +85,7 @@ enum ManagedLazyCheckpointKind {
     Access(Gc<ManagedAccessCheckpointCell>),
     ObjectFixpoint(Gc<ManagedObjectFixpointCheckpointCell>),
     ListEffect(Gc<ManagedListEffectCheckpointCell>),
+    Builtin(Gc<ManagedBuiltinCheckpointCell>),
 }
 
 impl ManagedLazyCheckpointEdge {
@@ -104,6 +111,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::ListEffect(_) => {
                 panic!("a list-effect checkpoint cannot be projected as ordinary WHNF state")
             }
+            ManagedLazyCheckpointKind::Builtin(_) => {
+                panic!("a builtin checkpoint cannot be projected as ordinary WHNF state")
+            }
         }
     }
 
@@ -117,6 +127,7 @@ impl ManagedLazyCheckpointEdge {
                 ManagedLazyCheckpointKindTag::ObjectFixpoint
             }
             ManagedLazyCheckpointKind::ListEffect(_) => ManagedLazyCheckpointKindTag::ListEffect,
+            ManagedLazyCheckpointKind::Builtin(_) => ManagedLazyCheckpointKindTag::Builtin,
         }
     }
 
@@ -148,6 +159,10 @@ impl ManagedLazyCheckpointEdge {
                 ManagedLazyCheckpointKind::ListEffect(left),
                 ManagedLazyCheckpointKind::ListEffect(right),
             ) => authority.same_edge(left, right),
+            (
+                ManagedLazyCheckpointKind::Builtin(left),
+                ManagedLazyCheckpointKind::Builtin(right),
+            ) => authority.same_edge(left, right),
             _ => false,
         }
     }
@@ -163,6 +178,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Access(_) => None,
             ManagedLazyCheckpointKind::ObjectFixpoint(_) => None,
             ManagedLazyCheckpointKind::ListEffect(_) => None,
+            ManagedLazyCheckpointKind::Builtin(_) => None,
         }
     }
 
@@ -235,6 +251,20 @@ impl ManagedLazyCheckpointEdge {
                 state: Mutex::new(state),
             }),
         )))
+    }
+
+    pub(in crate::eval) fn allocate_builtin_in(
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        state: RegionalBuiltinMachine,
+    ) -> Result<Self, UnsupportedLayout> {
+        let allocator = authority
+            .values()
+            .allocator::<ManagedBuiltinCheckpointCell>()?;
+        Ok(Self(ManagedLazyCheckpointKind::Builtin(allocator.alloc(
+            ManagedBuiltinCheckpointCell {
+                state: Mutex::new(state),
+            },
+        ))))
     }
 
     pub(in crate::eval) fn with_access_transition_in<R>(
@@ -324,6 +354,38 @@ impl ManagedLazyCheckpointEdge {
                 &mut *state,
                 RegionalListEffect::trace_managed_edges,
                 RegionalListEffect::trace_managed_edges,
+                |state| state.poll_in(authority, step_budget),
+            )
+        }
+    }
+
+    pub(in crate::eval) fn with_builtin_transition_in(
+        &self,
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        let ManagedLazyCheckpointKind::Builtin(edge) = &self.0 else {
+            panic!("only a builtin checkpoint has regional builtin state")
+        };
+        let cell = authority.values().get_edge(edge);
+        let mut state = match cell.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                    "managed builtin state was poisoned by an earlier unwind",
+                )));
+            }
+        };
+        // SAFETY: the owning lazy retains this exact checkpoint edge. The
+        // representation mutex excludes another regional transition, and the
+        // compile-exhaustive builtin visitor reports every semantic edge
+        // before and after mutation.
+        unsafe {
+            authority.values().with_managed_edge_state_transition(
+                edge,
+                &mut *state,
+                RegionalBuiltinMachine::trace_managed_edges,
+                RegionalBuiltinMachine::trace_managed_edges,
                 |state| state.poll_in(authority, step_budget),
             )
         }
@@ -460,6 +522,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Access(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::ObjectFixpoint(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::ListEffect(edge) => visitor.visit(edge),
+            ManagedLazyCheckpointKind::Builtin(edge) => visitor.visit(edge),
         }
     }
 
@@ -483,6 +546,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::ListEffect(edge) => Self(
                 ManagedLazyCheckpointKind::ListEffect(authority.duplicate_edge(edge)),
             ),
+            ManagedLazyCheckpointKind::Builtin(edge) => Self(ManagedLazyCheckpointKind::Builtin(
+                authority.duplicate_edge(edge),
+            )),
         }
     }
 }
@@ -662,5 +728,36 @@ unsafe impl ManagedFamily for ManagedListEffectCheckpointCell {
         "src/eval/lazy_checkpoint.rs",
         "no direct Drop implementation",
         "regional list-effect and child state destroy passively",
+    );
+}
+
+// SAFETY: the regional builtin visitor is compile-exhaustive over every raw
+// argument and WHNF child retained by the currently migrated families.
+// Collection runs only after mutator quiescence, so an unpoisoned busy mutex
+// is an invariant failure.
+unsafe impl Trace for ManagedBuiltinCheckpointCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed builtin state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional WHNF state, numbers, and ordinary vectors. It invokes no runtime,
+// evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedBuiltinCheckpointCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "managed builtin checkpoint cell",
+        "src/eval/lazy_checkpoint.rs",
+        "no direct Drop implementation",
+        "regional builtin state and child state destroy passively",
     );
 }

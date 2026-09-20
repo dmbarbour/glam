@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        813,
+        816,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -855,9 +855,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // managed bridge as front projection, adding its typed root field, root
     // creation, and access-qualified projection. The logical list, prefix,
     // and regional WHNF child remain beneath the cell's trace visitor.
+    // W6G.1f.3g.2a adds the builtin checkpoint's stored typed edge,
+    // allocation, and trace arm while numeric sources stop projecting one
+    // registered operand root. The forced route-loss fixture contributes one
+    // test-only root for the owning lazy.
     assert_eq!(
         occurrence_fingerprint(actual),
-        9_683_386_540_411_165_120,
+        2_226_218_680_889_876_810,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -902,9 +906,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 205),
+            ((SourceScope::Production, EdgeSurface::Typed), 207),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 558),
+            ((SourceScope::Test, EdgeSurface::Typed), 559),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
