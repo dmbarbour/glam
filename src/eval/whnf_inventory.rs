@@ -673,8 +673,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6G.1f.3g.2b replaces three rooted assertion, provenance, and conditional
 // poll helpers with regional state transitions beneath that checkpoint.
 // W6G.1f.3g.2c replaces the rooted net helper with one regional phase machine.
-const EXPECTED_OCCURRENCES: usize = 191;
-const EXPECTED_FINGERPRINT: u64 = 14_584_632_097_337_844_312;
+// W6G.1f.3g.2d removes the two durable strategy forwarding helpers; regional
+// seq demand remains explicit beneath the builtin checkpoint while spark
+// admission returns a post-access scheduling intent without inline demand.
+const EXPECTED_OCCURRENCES: usize = 189;
+const EXPECTED_FINGERPRINT: u64 = 9_946_766_878_375_035_066;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -687,12 +690,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 66),
+    (Signal::StructuralRecursion, 64),
     (Signal::UserSizedLoop, 58),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 110),
+    (WorkShape::DemandThenInspect, 108),
     (WorkShape::OrderedOperands, 7),
     (WorkShape::CollectionWalk, 11),
     (WorkShape::KeyConversion, 2),

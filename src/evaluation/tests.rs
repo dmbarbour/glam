@@ -7194,7 +7194,7 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
     });
     assert!(matches!(
         poll,
-        crate::eval::strategy_machine::StrategyDemandPoll::Failed(_)
+        crate::eval::strategy_machine::StrategyDemandPoll::Failed
     ));
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
 

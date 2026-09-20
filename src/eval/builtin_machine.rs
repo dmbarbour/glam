@@ -31,7 +31,6 @@ use super::pattern_machine::{
     PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine, PatternListMachine,
     PatternPathMachine,
 };
-use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
@@ -40,7 +39,6 @@ use super::whnf::{
 
 pub(crate) enum BuiltinTaskPoll {
     Ready(RuntimeValueRoot),
-    ScheduleSpark(RuntimeValueRoot),
     Pending(WorkDependency),
     Yielded,
     Failed(RuntimeFailureRoot),
@@ -53,6 +51,7 @@ pub(crate) enum BuiltinTaskPoll {
 /// intents are interpreted only after that region closes.
 pub(in crate::eval) enum RegionalBuiltinPoll {
     Ready(Value),
+    SparkIntent(Value),
     Boundary(RegionalBoundaryRequest),
     Yielded,
     Failed(Arc<EvaluationFailure>),
@@ -66,6 +65,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Provenance(RegionalProvenanceMachine),
+    Strategy(RegionalStrategyMachine),
 }
 
 enum RegionalAssertionPhase {
@@ -114,6 +114,22 @@ pub(in crate::eval) struct RegionalProvenanceMachine {
     demand: RegionalWhnfWork,
 }
 
+enum RegionalStrategyPhase {
+    First,
+    Metadata,
+    Complete,
+    SparkRequested,
+}
+
+pub(in crate::eval) struct RegionalStrategyMachine {
+    builtin: Builtin,
+    source: Value,
+    target: Value,
+    demand: Option<RegionalWhnfWork>,
+    phase: RegionalStrategyPhase,
+    source_owner: LazyId,
+}
+
 impl RegionalBuiltinMachine {
     pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
@@ -130,6 +146,8 @@ impl RegionalBuiltinMachine {
                 | Builtin::InspectOrigin
                 | Builtin::InteractionNet
                 | Builtin::NetArity
+                | Builtin::Seq
+                | Builtin::Spark
         )
     }
 
@@ -206,6 +224,19 @@ impl RegionalBuiltinMachine {
                     source_owner,
                 })
             }
+            Builtin::Seq | Builtin::Spark => {
+                let [source, target] = arguments else {
+                    unreachable!("a strategy source must retain two operands")
+                };
+                Self::Strategy(RegionalStrategyMachine {
+                    builtin,
+                    source: access.values().duplicate_value(source),
+                    target: access.values().duplicate_value(target),
+                    demand: None,
+                    phase: RegionalStrategyPhase::First,
+                    source_owner,
+                })
+            }
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -231,6 +262,7 @@ impl RegionalBuiltinMachine {
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
+            Self::Strategy(machine) => machine.poll_in(access, step_budget),
         }
     }
 
@@ -241,6 +273,7 @@ impl RegionalBuiltinMachine {
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
+            Self::Strategy(machine) => machine.trace_managed_edges(visitor),
         }
     }
 }
@@ -598,6 +631,87 @@ impl RegionalProvenanceMachine {
     }
 }
 
+impl RegionalStrategyMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if self.builtin == Builtin::Spark {
+            return match self.phase {
+                RegionalStrategyPhase::First => {
+                    if matches!(
+                        self.source,
+                        Value::Lazy(_) | Value::Promised(_) | Value::Metadata(_)
+                    ) {
+                        // Record the intent beneath the traced checkpoint
+                        // before the caller roots and submits it outside this
+                        // managed transition.
+                        self.phase = RegionalStrategyPhase::SparkRequested;
+                        RegionalBuiltinPoll::SparkIntent(
+                            access.values().duplicate_value(&self.source),
+                        )
+                    } else {
+                        RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.target))
+                    }
+                }
+                RegionalStrategyPhase::SparkRequested => {
+                    RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.target))
+                }
+                RegionalStrategyPhase::Metadata | RegionalStrategyPhase::Complete => {
+                    unreachable!("spark does not perform inline strategy demand")
+                }
+            };
+        }
+
+        if matches!(self.phase, RegionalStrategyPhase::Complete) {
+            return RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.target));
+        }
+        let demand = self.demand.get_or_insert_with(|| {
+            RegionalWhnfWork::from_focus(access, access.values().duplicate_value(&self.source))
+                .with_source_owner(self.source_owner)
+        });
+        let ready =
+            match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                RegionalWhnfStatus::Ready(value) => value,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+
+        if matches!(self.phase, RegionalStrategyPhase::First) {
+            let metadata = EvaluatedValue::try_from(ready)
+                .expect("strategy demand must produce WHNF")
+                .into_value()
+                .associated_metadata();
+            if let Some(metadata) = metadata {
+                self.demand = Some(
+                    RegionalWhnfWork::from_focus(access, metadata)
+                        .with_source_owner(self.source_owner),
+                );
+                self.phase = RegionalStrategyPhase::Metadata;
+                return RegionalBuiltinPoll::Yielded;
+            }
+        }
+
+        self.demand = None;
+        self.phase = RegionalStrategyPhase::Complete;
+        RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.target))
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.source, visitor);
+        trace_compatibility_value_managed_edges(&self.target, visitor);
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+    }
+}
+
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
     Comparison(ComparisonBuiltinMachine),
@@ -614,7 +728,6 @@ pub(crate) enum BuiltinTaskMachine {
     PatternDictPredicate(PatternDictPredicateMachine),
     PatternDictTake(Box<PatternDictTakeMachine>),
     PatternEqual(Box<PatternEqualMachine>),
-    Strategy(StrategyBuiltinMachine),
 }
 
 impl BuiltinTaskMachine {
@@ -737,9 +850,6 @@ impl BuiltinTaskMachine {
             Builtin::PatternEqual => {
                 Self::PatternEqual(Box::new(PatternEqualMachine::new(arguments)))
             }
-            Builtin::Seq | Builtin::Spark => {
-                Self::Strategy(StrategyBuiltinMachine::new(builtin, arguments))
-            }
             _ => unreachable!("migrated builtin family must install its managed checkpoint"),
         }
     }
@@ -804,68 +914,6 @@ impl BuiltinTaskMachine {
             Self::PatternEqual(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
-            Self::Strategy(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-        }
-    }
-}
-
-enum StrategyPhase {
-    First,
-    SparkRequested,
-}
-
-pub(crate) struct StrategyBuiltinMachine {
-    builtin: Builtin,
-    demand: StrategyDemandMachine,
-    target: RuntimeValueRoot,
-    phase: StrategyPhase,
-}
-
-impl StrategyBuiltinMachine {
-    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [first, target]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("a strategy source retains two operands");
-        Self {
-            builtin,
-            demand: StrategyDemandMachine::new(first),
-            target,
-            phase: StrategyPhase::First,
-        }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        if self.builtin == Builtin::Spark {
-            return match self.phase {
-                StrategyPhase::First => {
-                    let useful = self.demand.is_useful_spark(context);
-                    if useful {
-                        self.phase = StrategyPhase::SparkRequested;
-                        BuiltinTaskPoll::ScheduleSpark(self.demand.source().clone())
-                    } else {
-                        BuiltinTaskPoll::Ready(self.target.clone())
-                    }
-                }
-                StrategyPhase::SparkRequested => BuiltinTaskPoll::Ready(self.target.clone()),
-            };
-        }
-
-        match self
-            .demand
-            .poll(poll_context, context, durable_context, step_budget)
-        {
-            StrategyDemandPoll::Ready => BuiltinTaskPoll::Ready(self.target.clone()),
-            StrategyDemandPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            StrategyDemandPoll::Yielded => BuiltinTaskPoll::Yielded,
-            StrategyDemandPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
         }
     }
 }

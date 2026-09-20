@@ -717,7 +717,7 @@ impl EvaluationWorkCoordinator {
         });
         let poll = match result {
             crate::eval::strategy_machine::StrategyDemandPoll::Ready
-            | crate::eval::strategy_machine::StrategyDemandPoll::Failed(_) => {
+            | crate::eval::strategy_machine::StrategyDemandPoll::Failed => {
                 coordinator::SparkWorkPoll::Complete
             }
             crate::eval::strategy_machine::StrategyDemandPoll::Pending(dependency) => {

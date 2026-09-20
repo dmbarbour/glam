@@ -748,6 +748,7 @@ impl LazyTaskMachine {
     ) -> EvaluationMachinePoll {
         enum Transition {
             Whnf,
+            Spark(crate::runtime::RuntimeValueRoot),
             Failed(crate::runtime::RuntimeFailureRoot),
             Terminal,
             Boundary(super::whnf::RegionalBoundaryRequest),
@@ -785,6 +786,9 @@ impl LazyTaskMachine {
                         }
                     }
                 }
+                RegionalBuiltinPoll::SparkIntent(value) => {
+                    Transition::Spark(access.values().root_runtime_value(value))
+                }
                 RegionalBuiltinPoll::Boundary(request) => Transition::Boundary(request),
                 RegionalBuiltinPoll::Yielded => Transition::Yielded,
                 RegionalBuiltinPoll::Failed(failure) => {
@@ -803,6 +807,7 @@ impl LazyTaskMachine {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 EvaluationMachinePoll::Yielded
             }
+            Transition::Spark(value) => EvaluationMachinePoll::ScheduleSpark(value),
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Terminal => self.cached_poll(context),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
@@ -1482,9 +1487,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             if let LazyTaskWork::Builtin(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     BuiltinTaskPoll::Ready(value) => self.follow_value(value),
-                    BuiltinTaskPoll::ScheduleSpark(value) => {
-                        EvaluationMachinePoll::ScheduleSpark(value)
-                    }
                     BuiltinTaskPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),

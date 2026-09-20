@@ -234,9 +234,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        9,
-        "computed-access, object-fixpoint, and list-effect terminal publication plus resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
-        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f source or terminal handoff"
+        10,
+        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
+        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d source or terminal handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -551,6 +551,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
+                | "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint"
                 | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
@@ -876,6 +877,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#1|surface=access-publication|scope=production",

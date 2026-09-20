@@ -1,11 +1,11 @@
 //! Resumable demand shared by `seq` and best-effort spark workers.
 
-use crate::core::{EvaluatedValue, Value};
+use crate::core::EvaluatedValue;
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluationStepBudget, EvaluatorStepContext, WhnfOwnerPoll,
     WorkDependency, poll_whnf_computation,
 };
-use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 use super::whnf::WhnfComputation;
 
@@ -13,7 +13,7 @@ pub(crate) enum StrategyDemandPoll {
     Ready,
     Pending(WorkDependency),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed,
 }
 
 enum StrategyDemandPhase {
@@ -42,6 +42,7 @@ impl StrategyDemandMachine {
         self.source.runtime_id()
     }
 
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &RuntimeValueRoot {
         &self.source
     }
@@ -65,7 +66,7 @@ impl StrategyDemandMachine {
             WhnfOwnerPoll::Ready(value) => value,
             WhnfOwnerPoll::Pending(dependency) => return StrategyDemandPoll::Pending(dependency),
             WhnfOwnerPoll::Yielded => return StrategyDemandPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return StrategyDemandPoll::Failed(failure),
+            WhnfOwnerPoll::Failed(_) => return StrategyDemandPoll::Failed,
             WhnfOwnerPoll::External(boundary) => {
                 unreachable!("strategy demand produced an external {boundary:?} boundary")
             }
@@ -88,14 +89,5 @@ impl StrategyDemandMachine {
 
         self.phase = StrategyDemandPhase::Complete;
         StrategyDemandPoll::Ready
-    }
-
-    pub(crate) fn is_useful_spark(&self, context: &EvaluatorStepContext<'_>) -> bool {
-        context.with_value_access(|access| {
-            matches!(
-                access.clone_root(&self.source),
-                Value::Lazy(_) | Value::Promised(_) | Value::Metadata(_)
-            )
-        })
     }
 }

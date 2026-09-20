@@ -982,10 +982,13 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.2c removes the separate net machine declaration. Two raw net
 // phase fields replace three registered-root declarations; the regional net
 // and WHNF edges remain nested beneath the shared checkpoint.
+// W6G.1f.3g.2d moves seq and spark source/target/metadata progress into the
+// shared checkpoint. Three raw values and two nested regional WHNF edges
+// replace the durable strategy machine's two registered child roots.
 const DECLARATION_BASELINE_COUNT: usize = 239;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([172, 237, 5, 25, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_962_071_395_664_667_010;
+    DeclarationSignals::new([175, 235, 5, 25, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_146_427_873_735_280_271;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

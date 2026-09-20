@@ -5997,9 +5997,16 @@ for it:
        completed arity is not replayed. The collection fixture uses a private
        value heap; collecting the shared test factory would invalidate raw
        values held concurrently by unrelated fixtures.
-     - **W6G.1f.3g.2d — strategy and spark boundary.** Regionalize `seq` and
-       metadata demand, then record at-most-once spark admission state before
-       returning the raw post-access spark intent.
+     - **W6G.1f.3g.2d — Complete (2026-09-20): strategy and spark boundary.**
+       Regionalize `seq` plus its one associated-metadata demand beneath the
+       typed checkpoint. Spark performs no inline demand: it records
+       `SparkRequested` before returning a raw intent, and the lazy route roots
+       and submits that intent only after managed access closes. The detached
+       worker retains the durable strategy machine solely to drive admitted
+       sparks; because detached spark failures are intentionally discarded,
+       that worker poll no longer constructs an unused failure root. Exact
+       access, owner, checkpoint, and WHNF inventories latch the two removed
+       durable child demands and the one deliberate post-access publication.
    - **W6G.1f.3g.3 — structural families.** Regionalize comparison,
      dictionary, list observation/transformation, pattern, and annotation
      state using the shared child reducers. Preserve exact traversal prefixes,

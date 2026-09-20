@@ -161,8 +161,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [2, 2],
-        "W6C.2-W6C.6 and W6F.5 retain the durable strategy owner; W6G.1f.3g.2a-.2c move numeric, assertion, provenance, conditional, and net state beneath caller-supplied regional access"
+        [1, 1],
+        "W6F.5 retains the builtin compatibility owner; W6G.1f.3g.2a-.2d move numeric, assertion, provenance, conditional, net, seq, and spark state beneath caller-supplied regional access"
     ),
     context_entry!(
         "src/eval/comparison_machine.rs",
@@ -216,8 +216,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/strategy_machine.rs",
-        [2, 1],
-        "W6C.6 shared resumable seq and best-effort spark demand"
+        [1, 1],
+        "W6G.1f.3g.2d leaves only the detached spark worker's durable demand owner; seq and spark admission are regional builtin state"
     ),
     context_entry!(
         "src/eval/tagged_machine.rs",
