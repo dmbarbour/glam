@@ -5,56 +5,27 @@
 //! survives beneath that state.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::Arc;
 
-use glam_gc::{Root, Trace, Visitor};
+use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, ManagedDropRecord,
-    ManagedFamily, Value, keys, managed_slot_extent, trace_compatibility_value_managed_edges,
+    Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, Value, keys,
+    trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
-    interpret_whnf_poll,
-};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::evaluation::EvaluationValueAccess;
+
+#[cfg(test)]
+use crate::evaluation::EvalContext;
 
 use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion};
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::whnf::{
-    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
-    drive_regional_in_place, reduce_semantic_shell,
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
+    reduce_semantic_shell,
 };
 
-pub(super) enum ObjectFixpointPoll {
-    Ready(RuntimeValueRoot),
-    Pending(crate::evaluation::WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-pub(super) struct ObjectFixpointMachine {
-    checkpoint: DurableObjectFixpointCheckpoint,
-}
-
-enum DurableObjectFixpointCheckpoint {
-    Seed {
-        source_owner: LazyId,
-        spec: RuntimeValueRoot,
-        self_marker: RuntimeValueRoot,
-    },
-    Managed(ManagedObjectFixpointRoot),
-}
-
-struct ManagedObjectFixpointRoot {
-    root: Root<ManagedObjectFixpointCell>,
-}
-
-struct ManagedObjectFixpointCell {
-    state: Mutex<RegionalObjectFixpoint>,
-}
-
-struct RegionalObjectFixpoint {
+pub(in crate::eval) struct RegionalObjectFixpoint {
     source_owner: LazyId,
     original_spec: Value,
     self_marker: Value,
@@ -119,18 +90,11 @@ struct ObjectMixMachine {
     application: Option<RegionalWhnfWork>,
 }
 
-enum RegionalObjectFixpointPoll {
+pub(in crate::eval) enum RegionalObjectFixpointPoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
     Yielded,
     Failed(Arc<EvaluationFailure>),
-}
-
-enum DurableObjectFixpointPoll {
-    Ready(RuntimeValueRoot),
-    Boundary(RegionalBoundaryRequest),
-    Yielded,
-    Failed(RuntimeFailureRoot),
 }
 
 #[derive(Clone, Copy)]
@@ -141,61 +105,8 @@ enum MixPhase {
     ApplySelf,
 }
 
-impl ObjectFixpointMachine {
-    pub(super) fn new(
-        source_owner: LazyId,
-        spec: RuntimeValueRoot,
-        self_marker: RuntimeValueRoot,
-    ) -> Self {
-        Self {
-            checkpoint: DurableObjectFixpointCheckpoint::Seed {
-                source_owner,
-                spec,
-                self_marker,
-            },
-        }
-    }
-
-    pub(super) fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        _context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> ObjectFixpointPoll {
-        let result = poll_context.with_value_access(durable_context, |access| {
-            self.promote_in(&access);
-            let DurableObjectFixpointCheckpoint::Managed(root) = &self.checkpoint else {
-                unreachable!("object-fixpoint seed must promote under access")
-            };
-            root.poll_in(&access, step_budget)
-        });
-        interpret_durable_object_poll(result, durable_context)
-    }
-
-    fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
-        let DurableObjectFixpointCheckpoint::Seed {
-            source_owner,
-            spec,
-            self_marker,
-        } = &self.checkpoint
-        else {
-            return;
-        };
-        let state = RegionalObjectFixpoint::new_in(
-            access,
-            *source_owner,
-            access.clone_root(spec),
-            access.clone_root(self_marker),
-        );
-        self.checkpoint = DurableObjectFixpointCheckpoint::Managed(
-            ManagedObjectFixpointRoot::new_in(access, state),
-        );
-    }
-}
-
 impl RegionalObjectFixpoint {
-    fn new_in(
+    pub(in crate::eval) fn new_in(
         access: &EvaluationValueAccess<'_>,
         source_owner: LazyId,
         spec: Value,
@@ -214,7 +125,7 @@ impl RegionalObjectFixpoint {
         }
     }
 
-    fn poll_in(
+    pub(in crate::eval) fn poll_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
@@ -251,7 +162,7 @@ impl RegionalObjectFixpoint {
         }
     }
 
-    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         trace_compatibility_value_managed_edges(&self.original_spec, visitor);
         trace_compatibility_value_managed_edges(&self.self_marker, visitor);
         self.state.trace_managed_edges(visitor);
@@ -842,98 +753,6 @@ fn finish_object_in(
     )))
 }
 
-impl ManagedObjectFixpointRoot {
-    fn new_in(access: &EvaluationValueAccess<'_>, state: RegionalObjectFixpoint) -> Self {
-        let edge = access
-            .values()
-            .allocator::<ManagedObjectFixpointCell>()
-            .expect("managed object-fixpoint representation must fit one collector run")
-            .alloc(ManagedObjectFixpointCell {
-                state: Mutex::new(state),
-            });
-        Self {
-            root: access.values().root(edge),
-        }
-    }
-
-    fn poll_in(
-        &self,
-        access: &EvaluationValueAccess<'_>,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> DurableObjectFixpointPoll {
-        assert!(
-            access.values().admits_root(&self.root),
-            "object-fixpoint checkpoint must share the evaluator value domain"
-        );
-        let owner = access.values().project_root(&self.root);
-        let cell = access.values().get(&self.root);
-        let mut state = match cell.state.lock() {
-            Ok(state) => state,
-            Err(_) => {
-                return DurableObjectFixpointPoll::Failed(access.values().root_runtime_failure(
-                    Arc::new(EvaluationFailure::message(
-                        "managed object-fixpoint state was poisoned by an earlier unwind",
-                    )),
-                ));
-            }
-        };
-        // SAFETY: the registered wrapper root keeps `owner` live in this
-        // exact access region. The cell mutex excludes another transition,
-        // and the same compile-exhaustive visitor reports every raw edge
-        // before and after mutation.
-        let result = unsafe {
-            access.values().with_managed_edge_state_transition(
-                &owner,
-                &mut *state,
-                RegionalObjectFixpoint::trace_managed_edges,
-                RegionalObjectFixpoint::trace_managed_edges,
-                |state| state.poll_in(access, step_budget),
-            )
-        };
-        match result {
-            RegionalObjectFixpointPoll::Ready(value) => {
-                DurableObjectFixpointPoll::Ready(access.values().root_runtime_value(value))
-            }
-            RegionalObjectFixpointPoll::Boundary(request) => {
-                DurableObjectFixpointPoll::Boundary(request)
-            }
-            RegionalObjectFixpointPoll::Yielded => DurableObjectFixpointPoll::Yielded,
-            RegionalObjectFixpointPoll::Failed(failure) => {
-                DurableObjectFixpointPoll::Failed(access.values().root_runtime_failure(failure))
-            }
-        }
-    }
-}
-
-fn interpret_durable_object_poll(
-    result: DurableObjectFixpointPoll,
-    context: &EvalContext,
-) -> ObjectFixpointPoll {
-    match result {
-        DurableObjectFixpointPoll::Ready(value) => ObjectFixpointPoll::Ready(value),
-        DurableObjectFixpointPoll::Boundary(request) => {
-            let poll = match request {
-                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-            };
-            match interpret_whnf_poll(poll, context) {
-                WhnfOwnerPoll::Pending(dependency) => ObjectFixpointPoll::Pending(dependency),
-                WhnfOwnerPoll::Yielded => ObjectFixpointPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => ObjectFixpointPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("object fixpoint produced an external {boundary:?} boundary")
-                }
-                WhnfOwnerPoll::Ready(_) => {
-                    unreachable!("a semantic boundary cannot produce an immediate value")
-                }
-            }
-        }
-        DurableObjectFixpointPoll::Yielded => ObjectFixpointPoll::Yielded,
-        DurableObjectFixpointPoll::Failed(failure) => ObjectFixpointPoll::Failed(failure),
-    }
-}
-
 impl ObjectState {
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match self {
@@ -1021,37 +840,6 @@ fn trace_object_values(values: &[Value], visitor: &mut Visitor<'_>) {
     for value in values {
         trace_compatibility_value_managed_edges(value, visitor);
     }
-}
-
-// SAFETY: the state visitor is compile-exhaustive over the original spec,
-// self marker, every C3 frame/container, the mix stack, and each regional
-// child. Collection runs only after mutator quiescence, so an unpoisoned busy
-// mutex is an invariant failure.
-unsafe impl Trace for ManagedObjectFixpointCell {
-    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
-
-    fn trace(&self, visitor: &mut Visitor<'_>) {
-        let state = match self.state.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                panic!("managed object-fixpoint state must be quiescent during tracing")
-            }
-        };
-        state.trace_managed_edges(visitor);
-    }
-}
-
-// SAFETY: direct destruction releases only passive compatibility values,
-// regional reducer state, scalar keys/identities, and ordinary collections.
-// It invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
-unsafe impl ManagedFamily for ManagedObjectFixpointCell {
-    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-        "temporary managed object-fixpoint checkpoint",
-        "src/eval/object_machine.rs",
-        "no direct Drop implementation",
-        "regional object construction and child state destroy passively",
-    );
 }
 
 #[cfg(test)]

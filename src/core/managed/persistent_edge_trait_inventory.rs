@@ -845,7 +845,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // object/spec/mixin and child-machine values stay below one trace visitor.
     assert_eq!(
         occurrence_fingerprint(actual),
-        12_845_200_786_174_979_374,
+        10_273_774_888_926_855_149,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );

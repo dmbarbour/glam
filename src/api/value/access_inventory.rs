@@ -215,14 +215,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6F.3 resumable object composition ownership"
     ),
     entry!(
-        "src/eval/object_machine.rs",
-        0,
-        0,
-        1,
-        "temporary managed object-fixpoint checkpoint publication",
-        "W6G.1f.3e.2b regional object state behind one compatibility owner"
-    ),
-    entry!(
         "src/eval/pattern_machine.rs",
         0,
         0,
@@ -574,7 +566,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_composition_machine.rs::next_override_step"
                 | "src/eval/object_composition_machine.rs::root_application"
                 | "src/eval/object_composition_machine.rs::root_plain_extension_in"
-                | "src/eval/object_machine.rs::impl ManagedObjectFixpointRoot::poll_in"
                 | "src/eval/pattern_machine.rs::pattern_effect_in"
                 | "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
@@ -582,6 +573,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
+                | "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint"
                 | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::regional_status_poll"
@@ -902,7 +894,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_composition_machine.rs::next_override_step#3|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_application#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_plain_extension_in#1|surface=access-publication|scope=production",
-    "src/eval/object_machine.rs::impl ManagedObjectFixpointRoot::poll_in#1|surface=access-publication|scope=production",
     "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/pattern_machine.rs::pattern_effect_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
@@ -918,10 +909,10 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#4|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#5|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#1|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=compatibility-new|scope=test",
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=access-publication|scope=test",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",

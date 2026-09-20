@@ -5803,12 +5803,25 @@ for it:
       and three durable contexts to one scoped acquisition and two durable
       contexts. The temporary root is deliberately assigned to the direct
       lazy checkpoint cutover in W6G.1f.3e.3.
-   - **W6G.1f.3e.3 — managed checkpoint and source cutover.** Add the typed
+   - **W6G.1f.3e.3 — managed checkpoint and source cutover.** **Complete
+     (2026-09-20).** Add the typed
      object-fixpoint arm beneath `ManagedLazyCheckpointEdge`, install it from
      `FixpointComputation::ObjectInstance`, and replace
      `LazyTaskWork::ObjectFixpoint` with a state-free marker. Keep boundary
      translation and terminal root publication outside the managed transition;
      adopt the exact winning family or cache on stale routes.
+
+     `ManagedLazyCheckpointEdge` now has a concrete object-fixpoint arm whose
+     cell owns the exact `RegionalObjectFixpoint` introduced by .3e.2. Source
+     admission constructs the self marker and regional state under one access,
+     installs that typed edge directly beneath the lazy, and leaves only a
+     state-free `ObjectFixpointCheckpoint` route marker. Polling locks and
+     mutates the checkpoint through the collector transition API, then
+     translates dependency/deferred boundaries or publishes the terminal
+     value/failure only after the managed transition closes. The former
+     temporary root/cell and rooted object machine are removed. Exact owner,
+     root-publication, persistent-edge, evaluator-access, and lazy-family
+     inventories latch the cutover.
    - **W6G.1f.3e.4 — forced schedules and bridge ledger.** Force route loss and
      collection at spec demand, name conversion, deferred dependency chunks,
      nested dependency return, definitions demand, base application, self

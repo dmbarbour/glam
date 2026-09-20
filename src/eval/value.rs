@@ -26,7 +26,7 @@ use super::lazy_checkpoint::{
 };
 use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
 use super::net::*;
-use super::object_machine::{ObjectFixpointMachine, ObjectFixpointPoll};
+use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
 
 pub(crate) fn failure_diagnostic_value_in(
     access: &RuntimeValueAccess<'_>,
@@ -200,8 +200,8 @@ enum LazyTaskWork {
     WhnfCheckpoint,
     NetWhnfCheckpoint,
     AccessCheckpoint,
+    ObjectFixpointCheckpoint,
     Builtin(Box<BuiltinTaskMachine>),
-    ObjectFixpoint(Box<ObjectFixpointMachine>),
     ListEffect(Box<ListEffectSourceMachine>),
     /// Transient one-shot authority held only by the route which installed an
     /// `Invoking` host-call checkpoint.
@@ -223,6 +223,7 @@ impl LazyTaskMachine {
             ManagedLazyCheckpointKindTag::HostCall => LazyTaskWork::HostCallCheckpoint,
             ManagedLazyCheckpointKindTag::NetWhnf => LazyTaskWork::NetWhnfCheckpoint,
             ManagedLazyCheckpointKindTag::Access => LazyTaskWork::AccessCheckpoint,
+            ManagedLazyCheckpointKindTag::ObjectFixpoint => LazyTaskWork::ObjectFixpointCheckpoint,
         }
     }
 
@@ -525,6 +526,96 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an access boundary cannot produce an immediate value")
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_object_fixpoint_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Complete(crate::runtime::RuntimeValueRoot),
+            Failed(crate::runtime::RuntimeFailureRoot),
+            Boundary(super::whnf::RegionalBoundaryRequest),
+            Yielded,
+            Replaced(ManagedLazyCheckpointKindTag),
+        }
+
+        let transition = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            let checkpoint = lazy
+                .checkpoint_snapshot()
+                .expect("object-fixpoint route must retain its managed checkpoint");
+            if checkpoint.kind() != ManagedLazyCheckpointKindTag::ObjectFixpoint {
+                return Transition::Replaced(checkpoint.kind());
+            }
+            match checkpoint.with_object_fixpoint_transition_in(&access, step_budget) {
+                RegionalObjectFixpointPoll::Ready(value) => {
+                    let evaluated = EvaluatedValue::try_from(value)
+                        .expect("object construction must produce a WHNF object value");
+                    match self.lazy.cache(access.values(), Ok(evaluated)) {
+                        Ok(value) => Transition::Complete(
+                            access.values().root_runtime_value(value.into_value()),
+                        ),
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    }
+                }
+                RegionalObjectFixpointPoll::Boundary(request) => Transition::Boundary(request),
+                RegionalObjectFixpointPoll::Yielded => Transition::Yielded,
+                RegionalObjectFixpointPoll::Failed(failure) => {
+                    match self.lazy.cache(access.values(), Err(failure)) {
+                        Ok(value) => Transition::Complete(
+                            access.values().root_runtime_value(value.into_value()),
+                        ),
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    }
+                }
+            }
+        });
+
+        match transition {
+            Transition::Complete(value) => EvaluationMachinePoll::Complete(value),
+            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Replaced(kind) => {
+                self.work = Self::work_for_checkpoint_kind(kind);
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Boundary(request) => {
+                let poll = match request {
+                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
+                        super::whnf::WhnfPoll::Pending(dependency)
+                    }
+                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
+                        super::whnf::WhnfPoll::Deferred(deferred)
+                    }
+                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
+                        super::whnf::WhnfPoll::External(boundary)
+                    }
+                };
+                match interpret_whnf_poll(poll, context.context()) {
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!("object fixpoint produced an external {boundary:?} boundary")
+                    }
+                    WhnfOwnerPoll::Ready(_) => {
+                        unreachable!("an object boundary cannot produce an immediate value")
                     }
                 }
             }
@@ -876,19 +967,37 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     LazyTaskWork::Whnf(computation)
                                 }
                                 FixpointComputation::ObjectInstance(spec) => {
-                                    let (spec, marker) = context.with_value_access(|access| {
-                                        let spec = access.values().root_runtime_value(
-                                            access.values().duplicate_value(spec),
+                                    let installed = context.with_value_access(|access| {
+                                        let spec = access.values().duplicate_value(spec);
+                                        let marker = Value::Lazy(LazyValue::from_root(
+                                            &self.lazy,
+                                            access.values(),
+                                        ));
+                                        let state = RegionalObjectFixpoint::new_in(
+                                            &access,
+                                            self.lazy.id(),
+                                            spec,
+                                            marker,
                                         );
-                                        let marker =
-                                            access.values().root_runtime_value(Value::Lazy(
-                                                LazyValue::from_root(&self.lazy, access.values()),
-                                            ));
-                                        (spec, marker)
+                                        let checkpoint = ManagedLazyCheckpointEdge::allocate_object_fixpoint_in(
+                                            &access,
+                                            state,
+                                        )
+                                        .expect(
+                                            "managed object-fixpoint state must fit its reviewed slot",
+                                        );
+                                        access
+                                            .lazy_root(&self.lazy)
+                                            .install_checkpoint(checkpoint)
+                                            .is_ok()
                                     });
-                                    LazyTaskWork::ObjectFixpoint(Box::new(
-                                        ObjectFixpointMachine::new(self.lazy.id(), spec, marker),
-                                    ))
+                                    if installed {
+                                        LazyTaskWork::ObjectFixpointCheckpoint
+                                    } else if let Some(work) = self.checkpoint_work(context) {
+                                        work
+                                    } else {
+                                        return self.cached_poll(context);
+                                    }
                                 }
                             }
                         }
@@ -1073,6 +1182,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_access_checkpoint(context, step_budget);
             }
 
+            if matches!(self.work, LazyTaskWork::ObjectFixpointCheckpoint) {
+                return self.poll_object_fixpoint_checkpoint(context, step_budget);
+            }
+
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
@@ -1105,23 +1218,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     }
                     BuiltinTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
                     BuiltinTaskPoll::Failed(failure) => {
-                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
-            }
-
-            if let LazyTaskWork::ObjectFixpoint(machine) = &mut self.work {
-                return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    ObjectFixpointPoll::Ready(value) => self.complete_root(context, &value),
-                    ObjectFixpointPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    ObjectFixpointPoll::Yielded => EvaluationMachinePoll::Yielded,
-                    ObjectFixpointPoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
                     }
                 };
@@ -1634,11 +1730,9 @@ mod ownership_tests {
             LazyTaskWork::WhnfCheckpoint => {}
             LazyTaskWork::NetWhnfCheckpoint => {}
             LazyTaskWork::AccessCheckpoint => {}
+            LazyTaskWork::ObjectFixpointCheckpoint => {}
             LazyTaskWork::Builtin(machine) => {
                 let _: &BuiltinTaskMachine = machine;
-            }
-            LazyTaskWork::ObjectFixpoint(machine) => {
-                let _: &ObjectFixpointMachine = machine;
             }
             LazyTaskWork::ListEffect(machine) => {
                 let _: &ListEffectSourceMachine = machine;

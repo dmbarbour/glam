@@ -18,6 +18,7 @@ use crate::core::{
 
 use super::access_machine::AccessMachine;
 use super::net::NetWhnfMachine;
+use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
 use super::whnf::managed_state::ManagedLazyCheckpointCell;
 
 pub(in crate::eval) struct ManagedNetWhnfCheckpointCell {
@@ -26,6 +27,10 @@ pub(in crate::eval) struct ManagedNetWhnfCheckpointCell {
 
 pub(in crate::eval) struct ManagedAccessCheckpointCell {
     state: Mutex<AccessMachine>,
+}
+
+pub(in crate::eval) struct ManagedObjectFixpointCheckpointCell {
+    state: Mutex<RegionalObjectFixpoint>,
 }
 
 struct ManagedNetWhnfCheckpointState {
@@ -56,6 +61,7 @@ pub(in crate::eval) enum ManagedLazyCheckpointKindTag {
     HostCall,
     NetWhnf,
     Access,
+    ObjectFixpoint,
 }
 
 pub(crate) struct ManagedLazyCheckpointEdge(ManagedLazyCheckpointKind);
@@ -65,6 +71,7 @@ enum ManagedLazyCheckpointKind {
     HostCall(Gc<ManagedHostCallCheckpointCell>),
     NetWhnf(Gc<ManagedNetWhnfCheckpointCell>),
     Access(Gc<ManagedAccessCheckpointCell>),
+    ObjectFixpoint(Gc<ManagedObjectFixpointCheckpointCell>),
 }
 
 impl ManagedLazyCheckpointEdge {
@@ -84,6 +91,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Access(_) => {
                 panic!("an access checkpoint cannot be projected as ordinary WHNF state")
             }
+            ManagedLazyCheckpointKind::ObjectFixpoint(_) => {
+                panic!("an object-fixpoint checkpoint cannot be projected as ordinary WHNF state")
+            }
         }
     }
 
@@ -93,6 +103,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::HostCall(_) => ManagedLazyCheckpointKindTag::HostCall,
             ManagedLazyCheckpointKind::NetWhnf(_) => ManagedLazyCheckpointKindTag::NetWhnf,
             ManagedLazyCheckpointKind::Access(_) => ManagedLazyCheckpointKindTag::Access,
+            ManagedLazyCheckpointKind::ObjectFixpoint(_) => {
+                ManagedLazyCheckpointKindTag::ObjectFixpoint
+            }
         }
     }
 
@@ -116,6 +129,10 @@ impl ManagedLazyCheckpointEdge {
             (ManagedLazyCheckpointKind::Access(left), ManagedLazyCheckpointKind::Access(right)) => {
                 authority.same_edge(left, right)
             }
+            (
+                ManagedLazyCheckpointKind::ObjectFixpoint(left),
+                ManagedLazyCheckpointKind::ObjectFixpoint(right),
+            ) => authority.same_edge(left, right),
             _ => false,
         }
     }
@@ -129,6 +146,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::HostCall(_) => None,
             ManagedLazyCheckpointKind::NetWhnf(_) => None,
             ManagedLazyCheckpointKind::Access(_) => None,
+            ManagedLazyCheckpointKind::ObjectFixpoint(_) => None,
         }
     }
 
@@ -175,6 +193,20 @@ impl ManagedLazyCheckpointEdge {
         ))))
     }
 
+    pub(in crate::eval) fn allocate_object_fixpoint_in(
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        state: RegionalObjectFixpoint,
+    ) -> Result<Self, UnsupportedLayout> {
+        let allocator = authority
+            .values()
+            .allocator::<ManagedObjectFixpointCheckpointCell>()?;
+        Ok(Self(ManagedLazyCheckpointKind::ObjectFixpoint(
+            allocator.alloc(ManagedObjectFixpointCheckpointCell {
+                state: Mutex::new(state),
+            }),
+        )))
+    }
+
     pub(in crate::eval) fn with_access_transition_in<R>(
         &self,
         authority: &crate::evaluation::EvaluationValueAccess<'_>,
@@ -199,6 +231,38 @@ impl ManagedLazyCheckpointEdge {
                 AccessMachine::trace_managed_edges,
                 AccessMachine::trace_managed_edges,
                 transition,
+            )
+        }
+    }
+
+    pub(in crate::eval) fn with_object_fixpoint_transition_in(
+        &self,
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalObjectFixpointPoll {
+        let ManagedLazyCheckpointKind::ObjectFixpoint(edge) = &self.0 else {
+            panic!("only an object-fixpoint checkpoint has object construction state")
+        };
+        let cell = authority.values().get_edge(edge);
+        let mut state = match cell.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return RegionalObjectFixpointPoll::Failed(Arc::new(EvaluationFailure::message(
+                    "managed object-fixpoint state was poisoned by an earlier unwind",
+                )));
+            }
+        };
+        // SAFETY: the owning lazy retains this exact checkpoint edge. The
+        // representation mutex excludes another regional transition, and the
+        // same compile-exhaustive visitor reports every object edge before and
+        // after mutation.
+        unsafe {
+            authority.values().with_managed_edge_state_transition(
+                edge,
+                &mut *state,
+                RegionalObjectFixpoint::trace_managed_edges,
+                RegionalObjectFixpoint::trace_managed_edges,
+                |state| state.poll_in(authority, step_budget),
             )
         }
     }
@@ -332,6 +396,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::HostCall(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::NetWhnf(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::Access(edge) => visitor.visit(edge),
+            ManagedLazyCheckpointKind::ObjectFixpoint(edge) => visitor.visit(edge),
         }
     }
 
@@ -349,6 +414,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::Access(edge) => Self(ManagedLazyCheckpointKind::Access(
                 authority.duplicate_edge(edge),
             )),
+            ManagedLazyCheckpointKind::ObjectFixpoint(edge) => Self(
+                ManagedLazyCheckpointKind::ObjectFixpoint(authority.duplicate_edge(edge)),
+            ),
         }
     }
 }
@@ -466,5 +534,36 @@ unsafe impl ManagedFamily for ManagedAccessCheckpointCell {
         "src/eval/lazy_checkpoint.rs",
         "no direct Drop implementation",
         "mutex and edge-owned access state destroy passively",
+    );
+}
+
+// SAFETY: the regional object visitor is compile-exhaustive over the original
+// spec, self marker, every C3 frame/container, the mix stack, and each child
+// reducer. Collection runs only after mutator quiescence, so an unpoisoned
+// busy mutex is an invariant failure.
+unsafe impl Trace for ManagedObjectFixpointCheckpointCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed object-fixpoint state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional reducer state, scalar keys/identities, and ordinary collections.
+// It invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedObjectFixpointCheckpointCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "managed object-fixpoint checkpoint cell",
+        "src/eval/lazy_checkpoint.rs",
+        "no direct Drop implementation",
+        "regional object construction and child state destroy passively",
     );
 }

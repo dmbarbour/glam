@@ -405,17 +405,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6D.5"
     ),
     closed_durable!(
-        "src/eval/object_machine.rs",
-        "object-fixpoint, C3-linearization, and mix progress",
-        "raw regional object/spec/mixin fields plus regional WHNF, key-conversion, and list-front child state beneath one temporary managed owner",
-        "yielded or dependency-blocked object source evaluation",
-        "object recipe admission and bounded child-result publication",
-        "object completion, failure, cancellation, or lazy-owner retirement",
-        ManagedRootSurface,
-        RootSurface,
-        "W6G.1f.3e.2a-.2b"
-    ),
-    closed_durable!(
         "src/eval/object_builtin_machine.rs",
         "object specification, diagnostic normalization, local-name, instance-construction, definition-adapter, and plain-dictionary conversion progress",
         "canonical RuntimeValueRoot object/spec/name/parts/definition/base/dictionary fields plus child WHNF and list-front machines",
@@ -509,6 +498,14 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "one concrete typed arm beneath a managed lazy producer edge; scheduler boundary translation occurs after the transition closes",
         CompatibilityPayload,
         "W6G.1f.3d.2-.4 survives forced route loss and collection, then atomically replaces itself with canonical final-result WHNF state"
+    ),
+    exact_managed!(
+        "src/eval/lazy_checkpoint.rs; src/eval/object_machine.rs",
+        "managed object-fixpoint checkpoint cell",
+        "raw original spec, self marker, C3 frames and seen specs, dependency-list progress, mix state, and regional child reducers behind one representation mutex",
+        "one concrete typed arm beneath a managed lazy producer edge; scheduler boundary translation and terminal publication occur after its transition closes",
+        CompatibilityPayload,
+        "W6G.1f.3e.2-.3 moves the exhaustive regional object graph from one temporary registered root into the owning lazy's exact typed checkpoint"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -960,10 +957,12 @@ fn is_production_source(relative: &Path) -> bool {
 // for raw managed values plus one exact typed edge. W6G.1f.3e.2a-.2b then
 // regionalize object-fixpoint child state and place its complete raw edge graph
 // beneath one temporary managed owner pending direct lazy ownership in .3e.3.
-const DECLARATION_BASELINE_COUNT: usize = 240;
+// W6G.1f.3e.3 moves that exact regional graph into the lazy-owned typed
+// checkpoint and eliminates the temporary registered root and wrapper state.
+const DECLARATION_BASELINE_COUNT: usize = 237;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([156, 252, 5, 22, 13, 8, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_316_785_419_754_961_193;
+    DeclarationSignals::new([156, 248, 5, 22, 13, 9, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_716_381_025_124_722_649;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1078,6 +1077,10 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "managed net-WHNF checkpoint cell"
     } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedAccessCheckpointCell" {
         "managed computed-access checkpoint cell"
+    } else if declaration == "src/eval/lazy_checkpoint.rs::ManagedObjectFixpointCheckpointCell"
+        || declaration.starts_with("src/eval/object_machine.rs::")
+    {
+        "managed object-fixpoint checkpoint cell"
     } else if matches!(
         declaration,
         "src/core.rs::HostCallOperation"
@@ -1126,8 +1129,6 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "object specification, diagnostic normalization, local-name, instance-construction, definition-adapter, and plain-dictionary conversion progress"
     } else if declaration.starts_with("src/eval/object_composition_machine.rs::") {
         "ordinary object extension, composed-definition, and recursive override progress"
-    } else if declaration.starts_with("src/eval/object_machine.rs::") {
-        "object-fixpoint, C3-linearization, and mix progress"
     } else if declaration.starts_with("src/eval/list_effect_machine.rs::") {
         "list-effect recipe progress"
     } else if declaration.starts_with("src/eval/builtin_machine.rs::")

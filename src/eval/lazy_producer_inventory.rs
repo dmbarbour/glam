@@ -20,7 +20,8 @@ const EXPECTED_VARIANTS: &[&str] = &[
     "NetConstruction",
     // W6G.1f.3c retains the complete driver beneath the managed lazy.
     "NetWhnfCheckpoint",
-    "ObjectFixpoint",
+    // W6G.1f.3e retains complete C3 and mix progress beneath the lazy.
+    "ObjectFixpointCheckpoint",
     "Produce",
     "Whnf",
     // W6G.1f.2a carries no producer state: it marks that the canonical WHNF
