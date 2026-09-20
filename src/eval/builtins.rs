@@ -172,6 +172,17 @@ pub(super) fn apply_builtin_in(
         Builtin::InteractionNet | Builtin::InteractionNetFromNetlist | Builtin::NetArity => {
             Ok(deferred(arguments))
         }
+        Builtin::InteractionNetBuilderReturn
+        | Builtin::InteractionNetBuilderSeq
+        | Builtin::InteractionNetBuilderContinue
+        | Builtin::InteractionNetBuilderAlt
+        | Builtin::InteractionNetBuilderFail
+        | Builtin::InteractionNetBuilderCut => {
+            net::apply_builder_builtin_in(access.values(), builtin, arguments)
+        }
+        Builtin::InteractionNetBuilderGet | Builtin::InteractionNetBuilderSet => {
+            Ok(deferred(arguments))
+        }
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),

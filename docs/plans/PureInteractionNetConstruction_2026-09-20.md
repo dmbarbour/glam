@@ -407,6 +407,8 @@ Completed on 2026-09-20.
 
 #### PNC2B — Pure state-transformer composition
 
+Completed on 2026-09-20.
+
 - Represent one outcome as the strict record `[value, builder_state]` and a
   builder operation as an ordinary callable from state to a list of those
   records.

@@ -232,6 +232,30 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetFromNetlist) => {
             "interaction_net_from_netlist"
         }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderReturn) => {
+            "interaction_net_builder_return"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderSeq) => {
+            "interaction_net_builder_seq"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderContinue) => {
+            "interaction_net_builder_continue"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderAlt) => {
+            "interaction_net_builder_alt"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderFail) => {
+            "interaction_net_builder_fail"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderCut) => {
+            "interaction_net_builder_cut"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderGet) => {
+            "interaction_net_builder_get"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderSet) => {
+            "interaction_net_builder_set"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::NetArity) => "net_arity",
         SyntaxOperator::Builtin(crate::core::Builtin::InspectOrigin) => "inspect_origin",
         SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",

@@ -258,7 +258,7 @@ fn replay_operation(
     }
 }
 
-fn strict_record(
+pub(super) fn strict_record(
     access: &RuntimeValueAccess<'_>,
     value: &Value,
     role: &str,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Builtin, Dict, LazyValue, RuntimeValueAccess, Value};
+use crate::core::{Builtin, Dict, LazyValue, List, RuntimeValueAccess, Value};
 use crate::evaluation::EvalContext;
 
 use super::construction::{ConstructionBrand, ConstructionPortId};
@@ -179,4 +179,136 @@ fn replay_copies_a_lazy_data_payload_without_demanding_it() {
             Value::Net(_)
         ));
     });
+}
+
+fn partial_builder(
+    access: &RuntimeValueAccess<'_>,
+    builtin: Builtin,
+    arguments: Vec<Value>,
+) -> Value {
+    Value::builtin_call_in(access, builtin, arguments)
+}
+
+fn constant_builder(access: &RuntimeValueAccess<'_>, value: Value, state: Value) -> Value {
+    crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![
+            super::builder::outcome(value, state),
+        ]))),
+    )
+}
+
+fn constant_builder_continuation(access: &RuntimeValueAccess<'_>, builder: Value) -> Value {
+    crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(builder),
+    )
+}
+
+fn run_builder_at(
+    context: &EvalContext,
+    operation: Value,
+    state: Value,
+    index: usize,
+) -> [Value; 2] {
+    let selected = with_access(context, |access| {
+        let results = Value::Lazy(LazyValue::from_application_in(
+            access,
+            operation,
+            Arc::from([state]),
+        ));
+        Value::builtin_call_in(
+            access,
+            Builtin::ListAt,
+            vec![Value::Number((index as i64).into()), results],
+        )
+    });
+    let outcome = crate::eval::eval_value(context, &selected)
+        .expect("builder outcome should evaluate at the requested index");
+    with_access(context, |access| {
+        super::builder::decode_outcome(access, &outcome)
+            .expect("builder outcome should use the strict record schema")
+    })
+}
+
+#[test]
+fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
+    let context = EvalContext::standalone();
+    let (returned, initial) = with_access(&context, |access| {
+        let initial = Value::Number(10.into());
+        let returned = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReturn,
+            vec![Value::binary_from_text("returned")],
+        );
+        (returned, initial)
+    });
+    assert_eq!(
+        run_builder_at(&context, returned, initial.clone(), 0),
+        [Value::binary_from_text("returned"), initial.clone()]
+    );
+
+    let choice = with_access(&context, |access| {
+        let bad_state = Value::Number(99.into());
+        let mutate_then_fail = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![
+                constant_builder(access, access.values().unit(), bad_state),
+                constant_builder_continuation(
+                    access,
+                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                ),
+            ],
+        );
+        let right = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReturn,
+            vec![Value::binary_from_text("right")],
+        );
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderAlt,
+            vec![mutate_then_fail, right],
+        )
+    });
+    assert_eq!(
+        run_builder_at(&context, choice, initial.clone(), 0),
+        [Value::binary_from_text("right"), initial.clone()],
+        "a failed left alternative must not leak its branch state"
+    );
+
+    let (cut, selected_state) = with_access(&context, |access| {
+        let selected_state = Value::Number(20.into());
+        let discarded_state = Value::Number(30.into());
+        let alternatives = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderAlt,
+            vec![
+                constant_builder(
+                    access,
+                    Value::binary_from_text("selected"),
+                    access.duplicate_value(&selected_state),
+                ),
+                constant_builder(
+                    access,
+                    Value::binary_from_text("discarded"),
+                    discarded_state,
+                ),
+            ],
+        );
+        let cut = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderCut,
+            vec![alternatives],
+        );
+        (cut, selected_state)
+    });
+    assert_eq!(
+        run_builder_at(&context, cut, initial, 0),
+        [Value::binary_from_text("selected"), selected_state],
+        "cut must retain the selected alternative's state"
+    );
 }

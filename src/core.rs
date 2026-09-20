@@ -2106,6 +2106,48 @@ pub enum Builtin {
         reason = "PNC1 establishes hidden replay before PNC5 composes the pure public runner"
     )]
     InteractionNetFromNetlist,
+    /// Evaluator-private state-over-list composition used while lowering
+    /// interaction-net construction away from the reflection task runner.
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderReturn,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderSeq,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderContinue,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderAlt,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderFail,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderCut,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderGet,
+    #[allow(
+        dead_code,
+        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
+    )]
+    InteractionNetBuilderSet,
     NetArity,
     /// Host-provided capability for inspecting opaque compilation origins.
     /// The constructor is exposed only through the reflection environment.
@@ -2192,6 +2234,14 @@ impl Builtin {
             Self::Spark => 2,
             Self::InteractionNet => 1,
             Self::InteractionNetFromNetlist => 1,
+            Self::InteractionNetBuilderReturn => 2,
+            Self::InteractionNetBuilderSeq => 3,
+            Self::InteractionNetBuilderContinue => 2,
+            Self::InteractionNetBuilderAlt => 3,
+            Self::InteractionNetBuilderFail => 1,
+            Self::InteractionNetBuilderCut => 2,
+            Self::InteractionNetBuilderGet => 2,
+            Self::InteractionNetBuilderSet => 3,
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,
