@@ -449,6 +449,8 @@ the semantic graph, or a second implementation of ordered list search.
 
 ### PNC3 — Fixpoint and delimited-control parity
 
+Status: complete on 2026-09-20.
+
 The reference monolith in `docs/Design.md` and the current reflection handler
 agree on three details which the PNC2 flat-map representation does not yet
 make explicit:
@@ -615,6 +617,51 @@ per alternative, and hide then restore reset scope.
 Exit: the documented standard task-local API has behavioral parity without a
 reflection machine.
 
+Completion record: the pure builder now uses two deliberately distinct
+control stores. A protected fifth builder-state field holds the active
+sequence/cut stack, while the implementation-owned `CONTROL_KEY` entry in
+`user_state` holds reset/resume frames. This is the smallest representation
+which preserves both reference rules: `.get []` and `.set []` can capture,
+clear, and restore reset scope, but the `.set` operation cannot erase the
+sequence which is currently executing it. Empty protected sequence state is
+canonicalized back to the PNC1 four-field builder record.
+
+The executable reference matrix is:
+
+| Reference behavior | Pure representation | Direct latch |
+| --- | --- | --- |
+| normal/nested/missing shift | nearest matching `Reset` frame in `CONTROL_KEY` | `hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope` |
+| lazy prompt conversion | `RegionalKeyConversion` before frame inspection | `hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut` |
+| cut captured by shift | strict `Cut` frame plus reconstructed `FirstResult` stage | `hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut` |
+| reusable same-invocation continuation | branded partial `Resume` builtin | `hidden_builder_captured_continuation_is_reusable_only_with_its_invocation` |
+| foreign invocation rejection | decoded construction-brand identity | `hidden_builder_captured_continuation_is_reusable_only_with_its_invocation` |
+| whole-state clear | replace `user_state`; preserve protected sequence | `hidden_builder_whole_state_clear_does_not_erase_the_active_sequence` |
+| whole-state restore | reset frames are ordinary traced data below `CONTROL_KEY` | `hidden_builder_whole_state_checkpoint_restores_reset_scope` |
+| malformed hidden state | strict frame decoders at the evaluator boundary | `hidden_builder_rejects_malformed_control_records` |
+| one future per alternative | indexed managed `ListEffectFix` recipe | `list_effect_fix_allocates_one_future_for_each_observed_alternative` |
+| fix hides/restores reset scope | clear before body; per-outcome restore adapter | `hidden_builder_fix_uses_independent_alternatives_and_restores_control` |
+| recursive fix observation | lazy value projection from the complete promised outcome | `hidden_builder_fix_reports_recursive_future_observation` |
+
+`.r`, successful state operations, reset return, resume return, and fixed
+outcome restoration all converge on one return dispatcher. `.cut` stops that
+dispatcher at a strict delimiter, delegates selection to the canonical
+list-effect first-result recipe, and only then resumes the outer sequence.
+No new producer route, task, reflection callback, host root, or independent
+list walker was introduced.
+
+Generic list-effect fixpoints now carry an alternative index. Observing
+alternative `N` creates one managed promise, reevaluates the function with
+that promise, skips exactly `N` ordered outcomes through `RegionalListFront`,
+publishes the selected outcome, and exposes a lazy `N + 1` recipe. This is
+intentionally simple and may revisit earlier alternatives; it preserves the
+one-future-per-choice contract and exact suspension behavior without adding a
+second search mechanism.
+
+The raw-value, durable-owner, persistent-edge, regional-constructor, and WHNF
+censuses classify the new helpers as access-bounded evaluator work. Focused
+control/fix fixtures, all source inventories, Clippy, the complete Rust suite,
+and the interaction-net profiling matrix form the PNC3 closure gate.
+
 ### PNC4 — Pure net-builder API
 
 - Implement `.bind`, `.copy`, `.data`, and `.wire` as builder-state
@@ -691,7 +738,7 @@ Then run:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test -q
-./scripts/test_interaction_net_profiling.sh
+./scripts/check-interaction-net-profiling.sh
 ```
 
 Exit: W6G.1f.3h is complete and W6G.1f.3i can close the remaining

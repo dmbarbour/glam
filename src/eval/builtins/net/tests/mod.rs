@@ -646,6 +646,60 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
 }
 
 #[test]
+fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("lazy prompt");
+    let reset_key = {
+        let prompt = prompt.clone();
+        Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "lazy reset key",
+            move |_| Ok(prompt.clone()),
+        ))
+    };
+    let shift_key = {
+        let prompt = prompt.clone();
+        Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "lazy shift key",
+            move |_| Ok(prompt.clone()),
+        ))
+    };
+    let (state, capture) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![shift_key, return_continuation(access)],
+        );
+        let cut = partial_builder(access, Builtin::InteractionNetBuilderCut, vec![shift]);
+        let capture = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![reset_key, cut],
+        );
+        (state, capture)
+    });
+
+    let [continuation, state] = run_builder_at(&context, capture, state, 0);
+    let resumed = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        continuation,
+        Arc::from([Value::binary_from_text("captured cut resumed")]),
+    ));
+    assert_eq!(
+        run_builder_at(&context, resumed, state, 0)[0],
+        Value::binary_from_text("captured cut resumed")
+    );
+}
+
+#[test]
 fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
     let context = EvalContext::standalone();
     let prompt = Value::binary_from_text("prompt");
@@ -741,4 +795,259 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
     let error = builder_result_at(&context, operation, state, 0)
         .expect_err("clearing whole state must clear reset scope but retain sequence execution");
     assert!(error.to_string().contains("not in reset scope"), "{error}");
+}
+
+#[test]
+fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("prompt");
+    let (state, capture) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let capture = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![
+                prompt.clone(),
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderGet,
+                    vec![path(access.values(), [])],
+                ),
+            ],
+        );
+        (state, capture)
+    });
+    let [checkpoint, state] = run_builder_at(&context, capture, state, 0);
+
+    let restore = with_access(&context, |access| {
+        let clear = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+        );
+        let shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("restored checkpoint")),
+            ],
+        );
+        let restore = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderSet,
+                    vec![path(access.values(), []), checkpoint],
+                ),
+                constant_builder_continuation(access, shift),
+            ],
+        );
+        let clear_then_restore = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![clear, constant_builder_continuation(access, restore)],
+        );
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![prompt, clear_then_restore],
+        )
+    });
+
+    assert_eq!(
+        run_builder_at(&context, restore, state, 0)[0],
+        Value::binary_from_text("restored checkpoint")
+    );
+}
+
+#[test]
+fn hidden_builder_rejects_malformed_control_records() {
+    let context = EvalContext::standalone();
+    let (malformed_reset, malformed_sequence, returned) = with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        let malformed_reset = encode_builder_state(
+            access,
+            &brand,
+            1,
+            Vec::new(),
+            Value::Dict(Dict::new_sync().insert(
+                super::builder::control_key_for_test(),
+                Value::Number(1.into()),
+            )),
+        );
+        let initial = encode_builder_state(
+            access,
+            &brand,
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let mut fields = super::netlist::strict_record(access, &initial, "fixture state")
+            .expect("encoded builder state must be strict");
+        fields.push(Value::Number(2.into()));
+        let malformed_sequence = Value::List(List::from_values(fields));
+        let returned = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReturn,
+            vec![access.values().unit()],
+        );
+        (malformed_reset, malformed_sequence, returned)
+    });
+
+    for (state, expected) in [
+        (malformed_reset, "builder reset stack must be a strict list"),
+        (
+            malformed_sequence,
+            "builder sequence stack must be a strict list",
+        ),
+    ] {
+        let error = builder_result_at(&context, returned.clone(), state, 0)
+            .expect_err("malformed hidden control state must fail at the evaluator boundary");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("fix prompt");
+    let (state, alternatives, restored, hidden) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let choices = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderAlt,
+            vec![
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderReturn,
+                    vec![Value::Number(61.into())],
+                ),
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderReturn,
+                    vec![Value::Number(62.into())],
+                ),
+            ],
+        );
+        let alternatives = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderFix,
+            vec![constant_builder_continuation(access, choices)],
+        );
+
+        let fixed_unit = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderFix,
+            vec![constant_builder_continuation(
+                access,
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderReturn,
+                    vec![access.values().unit()],
+                ),
+            )],
+        );
+        let shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("restored")),
+            ],
+        );
+        let restored = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![
+                prompt.clone(),
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderSeq,
+                    vec![fixed_unit, constant_builder_continuation(access, shift)],
+                ),
+            ],
+        );
+
+        let hidden_shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("wrong")),
+            ],
+        );
+        let hidden_fix = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderFix,
+            vec![constant_builder_continuation(access, hidden_shift)],
+        );
+        let hidden = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![prompt, hidden_fix],
+        );
+        (state, alternatives, restored, hidden)
+    });
+
+    assert_eq!(
+        run_builder_at(&context, alternatives.clone(), state.clone(), 0)[0],
+        Value::Number(61.into())
+    );
+    assert_eq!(
+        run_builder_at(&context, alternatives, state.clone(), 1)[0],
+        Value::Number(62.into())
+    );
+    assert_eq!(
+        run_builder_at(&context, restored, state.clone(), 0)[0],
+        Value::binary_from_text("restored")
+    );
+    let error = builder_result_at(&context, hidden, state, 0)
+        .expect_err("a builder fix body must not inherit its caller's reset scope");
+    assert!(error.to_string().contains("not in reset scope"), "{error}");
+}
+
+#[test]
+fn hidden_builder_fix_reports_recursive_future_observation() {
+    let context = EvalContext::standalone();
+    let (state, fixed) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let function = crate::eval::test_support::closed_function_value_in(
+            access.values(),
+            1,
+            apply_expr(
+                crate::eval::test_support::TestExpr::Value(Value::Builtin(
+                    Builtin::InteractionNetBuilderReturn,
+                )),
+                crate::eval::test_support::TestExpr::Local(0),
+            ),
+        );
+        let fixed = partial_builder(access, Builtin::InteractionNetBuilderFix, vec![function]);
+        (state, fixed)
+    });
+
+    let [future, _state] = run_builder_at(&context, fixed, state, 0);
+    let error = crate::eval::eval_value(&context, &future)
+        .expect_err("strictly observing a fixpoint's own value must report a cycle");
+    assert!(error.to_string().contains("cycle"), "{error}");
 }

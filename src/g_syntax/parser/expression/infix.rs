@@ -265,6 +265,18 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderResume) => {
             "interaction_net_builder_resume"
         }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderFix) => {
+            "interaction_net_builder_fix"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderFixApply) => {
+            "interaction_net_builder_fix_apply"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderFixRun) => {
+            "interaction_net_builder_fix_run"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderFixRestore) => {
+            "interaction_net_builder_fix_restore"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::NetArity) => "net_arity",
         SyntaxOperator::Builtin(crate::core::Builtin::InspectOrigin) => "inspect_origin",
         SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",

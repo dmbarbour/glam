@@ -2164,6 +2164,26 @@ pub enum Builtin {
         reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
     )]
     InteractionNetBuilderResume,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderFix,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderFixApply,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderFixRun,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderFixRestore,
     NetArity,
     /// Host-provided capability for inspecting opaque compilation origins.
     /// The constructor is exposed only through the reflection environment.
@@ -2261,6 +2281,10 @@ impl Builtin {
             Self::InteractionNetBuilderReset => 3,
             Self::InteractionNetBuilderShift => 3,
             Self::InteractionNetBuilderResume => 5,
+            Self::InteractionNetBuilderFix => 2,
+            Self::InteractionNetBuilderFixApply => 3,
+            Self::InteractionNetBuilderFixRun => 4,
+            Self::InteractionNetBuilderFixRestore => 3,
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,

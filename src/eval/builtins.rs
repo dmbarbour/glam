@@ -182,7 +182,11 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderAlt
         | Builtin::InteractionNetBuilderFail
         | Builtin::InteractionNetBuilderCut
-        | Builtin::InteractionNetBuilderResume => {
+        | Builtin::InteractionNetBuilderResume
+        | Builtin::InteractionNetBuilderFix
+        | Builtin::InteractionNetBuilderFixApply
+        | Builtin::InteractionNetBuilderFixRun
+        | Builtin::InteractionNetBuilderFixRestore => {
             net::apply_builder_builtin_in(access.values(), builtin, arguments)
         }
         Builtin::InteractionNetBuilderGet

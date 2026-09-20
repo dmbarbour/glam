@@ -696,8 +696,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC1 moves the two strict semantic replay loops from the construction host
 // into `netlist.rs`; their reviewed shape is now a collection walk rather
 // than generic construction demand-and-inspect work.
-const EXPECTED_OCCURRENCES: usize = 207;
-const EXPECTED_FINGERPRINT: u64 = 15_649_953_041_697_268_275;
+// PNC3 adds one bounded strict scan of the reset stack to locate the nearest
+// matching delimiter. The key conversion itself remains resumable regional
+// work; only the already-decoded in-memory frame vector is searched here.
+const EXPECTED_OCCURRENCES: usize = 208;
+const EXPECTED_FINGERPRINT: u64 = 1_471_399_140_820_704_322;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -711,11 +714,11 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 54),
-    (Signal::UserSizedLoop, 86),
+    (Signal::UserSizedLoop, 87),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 118),
+    (WorkShape::DemandThenInspect, 119),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),

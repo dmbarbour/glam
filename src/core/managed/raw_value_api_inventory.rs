@@ -1380,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        570,
+        583,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        1_460_344_258_240_023_203,
+        7_811_172_532_825_391_546,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1405,8 +1405,11 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC1 adds seventeen access-qualified helpers which encode, validate,
         // and replay the strict semantic interaction-net record. PNC2 adds
         // eleven access-qualified state/list composition and path adapters.
+        // PNC3 adds thirteen access-qualified control/fix composition and
+        // strict hidden-frame adapters. Their values remain within the same
+        // caller-owned evaluator region.
         // Raw values never cross the caller-owned evaluator region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 274),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 287),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

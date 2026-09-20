@@ -10,7 +10,7 @@ use glam_gc::Visitor;
 
 use crate::core::{
     Builtin, BuiltinCall, Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, Key, LazyId,
-    LazyValue, List, ListEffectComputation, RuntimeValueAccess, Value,
+    LazyValue, List, ListEffectComputation, RuntimeValueAccess, Value, keys,
     trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
@@ -125,8 +125,98 @@ pub(in crate::eval) fn apply_builder_builtin_in(
                 exact(access, arguments, "builder continuation invocation")?;
             resume_continuation(access, brand, sequence, resets, value, state)
         }
+        Builtin::InteractionNetBuilderFix => {
+            let [function, state] = exact(access, arguments, "builder fix")?;
+            builder_fix(access, function, state)
+        }
+        Builtin::InteractionNetBuilderFixApply => {
+            let [function, state, future] = exact(access, arguments, "builder fix adapter")?;
+            let handler = Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::InteractionNetBuilderFixRun,
+                arguments: Arc::from([function, state, future]),
+            });
+            Ok(Value::Dict(
+                Dict::new_sync().insert((*keys::EFF).clone(), handler),
+            ))
+        }
+        Builtin::InteractionNetBuilderFixRun => {
+            let [function, state, future, _api] =
+                exact(access, arguments, "builder fix operation")?;
+            let projected = Value::builtin_call_in(
+                access,
+                Builtin::ListAt,
+                vec![Value::Number(0.into()), future],
+            );
+            let operation = Value::Lazy(LazyValue::from_application_in(
+                access,
+                function,
+                Arc::from([projected]),
+            ));
+            Ok(Value::List(application_list(access, operation, [state])))
+        }
+        Builtin::InteractionNetBuilderFixRestore => {
+            let [sequence, resets, outcome] = exact(access, arguments, "builder fix restoration")?;
+            restore_fixed_outcome(access, sequence, resets, outcome)
+        }
         _ => unreachable!("builder composition received another builtin"),
     }
+}
+
+fn builder_fix(
+    access: &RuntimeValueAccess<'_>,
+    function: Value,
+    state: Value,
+) -> Result<Value, EvaluationHalt> {
+    let mut state = decode_builder_state(access, &state)?;
+    let saved_sequence = encode_sequence_stack(access, std::mem::take(&mut state.sequence));
+    let saved_resets = encode_reset_stack(access, decode_reset_stack(access, &state.user_state)?);
+    state.user_state = replace_reset_stack(access, state.user_state, Vec::new())?;
+    let state = encode_builder_state(access, state);
+    let adapter = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::InteractionNetBuilderFixApply,
+        arguments: Arc::from([function, state]),
+    });
+    let fixed = deferred_results(
+        access,
+        "builder fix",
+        ListEffectComputation::FixFunction {
+            function: adapter,
+            alternative: 0,
+        },
+    );
+    let Value::List(fixed) = fixed else {
+        unreachable!("builder fix recipe must produce a list")
+    };
+    let restore = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::InteractionNetBuilderFixRestore,
+        arguments: Arc::from([saved_sequence, saved_resets]),
+    });
+    Ok(deferred_results(
+        access,
+        "builder fix restoration",
+        ListEffectComputation::FlatMapResults {
+            results: fixed,
+            continuation: restore,
+        },
+    ))
+}
+
+fn restore_fixed_outcome(
+    access: &RuntimeValueAccess<'_>,
+    sequence: Value,
+    resets: Value,
+    outcome: Value,
+) -> Result<Value, EvaluationHalt> {
+    let [value, state] = decode_outcome(access, &outcome)?;
+    let mut state = decode_builder_state(access, &state)?;
+    state.sequence = decode_sequence_stack(access, &sequence)?;
+    state.user_state = replace_reset_stack(
+        access,
+        state.user_state,
+        decode_reset_stack_value(access, &resets)?,
+    )?;
+    let state = encode_builder_state(access, state);
+    Ok(control_stage(access, 0, value, state))
 }
 
 pub(super) fn outcome(_access: &RuntimeValueAccess<'_>, value: Value, state: Value) -> Value {

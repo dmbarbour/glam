@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        839,
+        840,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -904,9 +904,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // composition progress remains raw beneath that same checkpoint.
     // PNC2A adds one test-only promise edge whose forced prefix proves that
     // direct-result list flat-map remains source ordered across suspension.
+    // PNC3D adds one test-only promise working duplicate while forcing two
+    // ordered fix alternatives and proving that each receives its own future.
     assert_eq!(
         occurrence_fingerprint(actual),
-        4_633_276_981_585_855_870,
+        15_225_425_590_203_497_707,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -951,7 +953,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 201),
+            ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 588),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
