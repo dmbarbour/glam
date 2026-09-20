@@ -186,8 +186,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [6, 2],
-        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1-.2b regional list/path/literal pattern state"
+        [4, 1],
+        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1-.3a regional list/path/literal/dictionary-predicate state"
     ),
     context_entry!(
         "src/eval/sequence.rs",

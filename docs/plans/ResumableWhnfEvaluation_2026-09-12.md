@@ -6184,6 +6184,31 @@ for it:
          is-dict, logical emptiness, required/optional recursive take, parent
          frames, selected values, and remainder rebuilding as raw traced
          state. Reuse regional semantic-undefined traversal and key lists.
+         - **W6G.1f.3g.3e.3a — Complete (2026-09-20): dictionary predicates.** Move is-dict source
+           demand and logical-emptiness traversal beneath the typed builtin
+           checkpoint. Force collection while emptiness is blocked after a
+           completed member and prove that member is not replayed.
+           Completion record: dictionary-kind source demand and recursive
+           semantic-undefined traversal now remain raw traced state beneath
+           the owning lazy's typed checkpoint. A deterministic two-member
+           emptiness schedule roots the application, completes the first
+           member, blocks on the second, collects and re-enters before and
+           after assignment, and proves the completed member is evaluated
+           once. Exact owner, access, root-publication, checkpoint, edge,
+           raw-value, and WHNF inventories record removal of the rooted
+           predicate owner. The full parallel gate also exposed an older
+           evaluator fixture embedding an unrooted lazy in a process-global
+           test heap before lowering; that fixture now constructs, lowers, and
+           evaluates in one private value domain, making parallel forced
+           collection structurally irrelevant. The gate then reached the
+           separately tracked CLI prepared-session deadlock assigned to
+           W6G.1f.2b.
+         - **W6G.1f.3g.3e.3b — dictionary extraction.** Move required and
+           optional path conversion, source/member demand, parent frames,
+           selected leaf, semantic-undefined traversal, and remainder
+           rebuilding beneath the checkpoint. Force collection after a
+           completed path prefix and preserve exact required/optional
+           fallthrough, failure, and empty-compiler-path behavior.
        - **W6G.1f.3g.3e.4 — effect and family closure.** Construct raw pattern
          success/failure effects under caller access, remove the five durable
          pattern owners plus the now-unused durable semantic-undefined owner,

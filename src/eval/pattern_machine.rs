@@ -55,8 +55,9 @@ pub(in crate::eval) struct RegionalPatternPathMachine {
     source_owner: LazyId,
 }
 
-pub(crate) struct PatternDictPredicateMachine {
-    state: PatternDictPredicateState,
+pub(in crate::eval) struct RegionalPatternDictPredicateMachine {
+    state: RegionalPatternDictPredicateState,
+    source_owner: LazyId,
 }
 
 pub(crate) struct PatternDictTakeMachine {
@@ -102,71 +103,110 @@ enum PatternDictSelection {
     Present(RuntimeValueRoot),
 }
 
-enum PatternDictPredicateState {
-    IsDict(WhnfComputation),
-    IsEmpty(SemanticUndefinedMachine),
+enum RegionalPatternDictPredicateState {
+    IsDict {
+        source: Option<Value>,
+        demand: Option<RegionalWhnfWork>,
+    },
+    IsEmpty(super::tagged_machine::RegionalSemanticUndefined),
 }
 
-impl PatternDictPredicateMachine {
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [source]: [RuntimeValueRoot; 1] = arguments
-            .try_into()
-            .expect("a dictionary pattern predicate retains one source");
+impl RegionalPatternDictPredicateMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let [source] = arguments else {
+            panic!("a dictionary pattern predicate retains one source")
+        };
         let state = match builtin {
-            Builtin::PatternIsDict => {
-                PatternDictPredicateState::IsDict(WhnfComputation::from_root(source))
-            }
-            Builtin::PatternDictIsEmpty => {
-                PatternDictPredicateState::IsEmpty(SemanticUndefinedMachine::new(source))
-            }
+            Builtin::PatternIsDict => RegionalPatternDictPredicateState::IsDict {
+                source: Some(access.values().duplicate_value(source)),
+                demand: None,
+            },
+            Builtin::PatternDictIsEmpty => RegionalPatternDictPredicateState::IsEmpty(
+                super::tagged_machine::RegionalSemanticUndefined::new_in(
+                    access,
+                    access.values().duplicate_value(source),
+                    source_owner,
+                ),
+            ),
             _ => unreachable!("dictionary predicate machine received another builtin"),
         };
-        Self { state }
+        Self {
+            state,
+            source_owner,
+        }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         match &mut self.state {
-            PatternDictPredicateState::IsDict(source) => {
-                let source = match poll_whnf_computation(
-                    source,
-                    poll_context,
-                    durable_context,
+            RegionalPatternDictPredicateState::IsDict { source, demand } => {
+                if demand.is_none() {
+                    let source = source
+                        .take()
+                        .expect("dictionary kind pattern must retain its source");
+                    *demand = Some(
+                        RegionalWhnfWork::from_focus(access, source)
+                            .with_source_owner(self.source_owner),
+                    );
+                }
+                let source = match drive_regional_in_place(
+                    access,
+                    demand
+                        .as_mut()
+                        .expect("dictionary kind-pattern demand must be installed"),
                     step_budget,
+                    reduce_semantic_shell,
                 ) {
-                    WhnfOwnerPoll::Ready(source) => source,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
+                    RegionalWhnfStatus::Ready(source) => source,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
                     }
-                    WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => {
-                        return BuiltinTaskPoll::Failed(failure);
-                    }
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!(
-                            "dictionary pattern predicate produced an external {boundary:?} boundary"
-                        )
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-                let is_dict = context.with_value_access(|access| {
-                    matches!(access.clone_root(&source), Value::Dict(_))
-                });
-                rooted_pattern_predicate(context, is_dict)
+                pattern_predicate_in(access, matches!(source, Value::Dict(_)))
             }
-            PatternDictPredicateState::IsEmpty(undefined) => {
-                match undefined.poll(poll_context, context, durable_context, step_budget) {
-                    SemanticUndefinedPoll::Ready(empty) => rooted_pattern_predicate(context, empty),
-                    SemanticUndefinedPoll::Pending(dependency) => {
-                        BuiltinTaskPoll::Pending(dependency)
+            RegionalPatternDictPredicateState::IsEmpty(undefined) => {
+                match undefined.poll_in(access, step_budget) {
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(empty) => {
+                        pattern_predicate_in(access, empty)
                     }
-                    SemanticUndefinedPoll::Yielded => BuiltinTaskPoll::Yielded,
-                    SemanticUndefinedPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
+                        RegionalBuiltinPoll::Boundary(request)
+                    }
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::Yielded => {
+                        RegionalBuiltinPoll::Yielded
+                    }
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
+                        RegionalBuiltinPoll::Failed(failure)
+                    }
                 }
+            }
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match &self.state {
+            RegionalPatternDictPredicateState::IsDict { source, demand } => {
+                if let Some(source) = source {
+                    trace_compatibility_value_managed_edges(source, visitor);
+                }
+                if let Some(demand) = demand {
+                    demand.trace_managed_edges(visitor);
+                }
+            }
+            RegionalPatternDictPredicateState::IsEmpty(undefined) => {
+                undefined.trace_managed_edges(visitor);
             }
         }
     }
@@ -946,19 +986,6 @@ impl RegionalPatternListMachine {
         if let Some(back) = &self.back {
             back.trace_managed_edges(visitor);
         }
-    }
-}
-
-fn rooted_pattern_predicate(context: &EvaluatorStepContext<'_>, passes: bool) -> BuiltinTaskPoll {
-    if passes {
-        context.with_value_access(|access| {
-            BuiltinTaskPoll::Ready(pattern_success_in(
-                access.values(),
-                Value::Atom(Atom::from_key(&keys::UNIT)),
-            ))
-        })
-    } else {
-        rooted_pattern_failure(context)
     }
 }
 

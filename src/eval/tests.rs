@@ -2598,7 +2598,11 @@ fn ready_lazy_errors_fail_when_observed() {
 }
 
 fn function_expr(arity: usize, body: TestExpr) -> TestExpr {
-    let code = Arc::new(lower_test_function_code(arity, body));
+    function_expr_in(&crate::core::test_value_factory(), arity, body)
+}
+
+fn function_expr_in(values: &CoreValueFactory, arity: usize, body: TestExpr) -> TestExpr {
+    let code = Arc::new(lower_test_function_code_in(values, arity, body));
     let captures = (0..code.capture_count())
         .map(TestExpr::Local)
         .map(Arc::new)
@@ -3160,10 +3164,14 @@ fn evaluates_arithmetic_builtins() {
 
 #[test]
 fn lazy_arguments_share_forced_values() {
+    // The expression embeds a managed lazy before lowering it into the net.
+    // Keep that construction and evaluation on a private heap so forced-GC
+    // fixtures running in parallel cannot collect the pre-lowering value.
+    let context = isolated_test_context();
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
     let counted = TestExpr::Value(Value::semantic_thunk(
-        &crate::core::test_value_factory(),
+        context.values(),
         "counted",
         move |_| {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3171,14 +3179,20 @@ fn lazy_arguments_share_forced_values() {
         },
     ));
     let expr = TestExpr::Apply(
-        Arc::new(function_expr(
+        Arc::new(function_expr_in(
+            context.values(),
             1,
             builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Local(0)),
         )),
         Arc::new(counted),
     );
 
-    let value = eval_closed_expr(&expr).expect("lambda body should evaluate");
+    let code = lower_test_function_code_in(context.values(), 0, expr);
+    let computation = Value::Lazy(LazyValue::from_net_computation(
+        context.values(),
+        NetValue::new(code.runtime().duplicate_for_test(context.values())),
+    ));
+    let value = eval_value(&context, &computation).expect("lambda body should evaluate");
 
     assert_eq!(value, n(4));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3972,13 +3986,28 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
         vec![source],
     )
     .expect("dictionary emptiness application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated dictionary-emptiness builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved second member should suspend emptiness traversal");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the dictionary-emptiness checkpoint must trace completed members");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised member");
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
         .expect("the owner should resolve the second dictionary member");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned dictionary-emptiness checkpoint must remain live");
 
     let effect = eval_value(&observer, &application)
         .expect("dictionary emptiness should resume from the second member");
@@ -3993,6 +4022,7 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
         [unit_value()]
     );
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]
