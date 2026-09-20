@@ -3737,13 +3737,28 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         ],
     )
     .expect("pattern path equality application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated pattern path builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved subject item should suspend path equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the path-pattern checkpoint must trace its completed expected path");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised subject item");
+    assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &actual_item, n(42))
         .expect("the owner should resolve the promised subject item");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned path-pattern checkpoint must remain live");
 
     let effect = eval_value(&observer, &application)
         .expect("path equality should resume from the subject item");
@@ -3758,6 +3773,7 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         [unit_value()]
     );
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]

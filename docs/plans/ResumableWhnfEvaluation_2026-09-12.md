@@ -6147,6 +6147,26 @@ for it:
          conversion and list-front/item work, preserving directional invalid
          path policy, unsupported-literal diagnostics, and binary/list byte
          comparison without replay.
+         - **W6G.1f.3g.3e.2a — Complete (2026-09-20): path equality.** Move expected and actual path
+           conversion, binary byte keys, and wrong-kind fallthrough beneath
+           the builtin checkpoint. Preserve the asymmetry whereby an invalid
+           compiler-provided expected path is a permanent failure while an
+           unkeyable actual path is a pattern mismatch.
+           Completion record: expected and actual path demand, key-list
+           conversion, and binary-byte projection now remain beneath the
+           owning lazy's typed checkpoint. The actual operand still uses the
+           optional conversion path, so a wrong-kind or invalid user value
+           falls through while an invalid compiler path fails permanently.
+           The obsolete optional durable key-list adapter and rooted path
+           owner are gone. A deterministic promised-actual schedule roots the
+           owning application, collects and re-enters before and after
+           assignment, and proves the compiler path thunk is evaluated once;
+           exact owner, access, root-publication, checkpoint, edge,
+           raw-value, and WHNF inventories record the cutover.
+         - **W6G.1f.3g.3e.2b — literal equality.** Move expected/actual WHNF,
+           literal classification, and binary-versus-logical-list traversal
+           beneath the checkpoint. Preserve unsupported-literal diagnostics,
+           exact item failures, and accepted byte prefixes across collection.
        - **W6G.1f.3g.3e.3 — dictionary predicates and extraction.** Move
          is-dict, logical emptiness, required/optional recursive take, parent
          frames, selected values, and remainder rebuilding as raw traced

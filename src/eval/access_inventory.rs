@@ -131,8 +131,8 @@ macro_rules! context_entry {
 const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     context_entry!(
         "src/eval/access_machine.rs",
-        [5, 8],
-        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter; W6G.1f.3g.1b exposes required and optional key-list conversion through that shared regional child"
+        [4, 7],
+        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter; W6G.1f.3g.1b exposes required key-list conversion through that shared regional child; W6G.1f.3g.3e.2a removes the optional durable adapter"
     ),
     context_entry!(
         "src/eval/annotation_machine.rs",
@@ -186,8 +186,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [8, 4],
-        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1 regional list-pattern state"
+        [7, 3],
+        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1-.2a regional list/path pattern state"
     ),
     context_entry!(
         "src/eval/sequence.rs",

@@ -30,8 +30,8 @@ use super::list_transform_machine::{
 use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
 use super::pattern_machine::{
-    PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine, PatternPathMachine,
-    RegionalPatternListMachine,
+    PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine,
+    RegionalPatternListMachine, RegionalPatternPathMachine,
 };
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
 use super::whnf::{
@@ -70,6 +70,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     ListMap(RegionalListMapMachine),
     ListObservation(Box<RegionalListObservationMachine>),
     PatternList(RegionalPatternListMachine),
+    PatternPath(Box<RegionalPatternPathMachine>),
     TextLines(RegionalTextLinesMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
@@ -181,6 +182,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::PatternListTryUncons
                 | Builtin::PatternListTryUnsnoc
                 | Builtin::PatternListIsEmpty
+                | Builtin::PatternPathEqual
         )
     }
 
@@ -316,6 +318,9 @@ impl RegionalBuiltinMachine {
             builtin if RegionalPatternListMachine::supports(builtin) => Self::PatternList(
                 RegionalPatternListMachine::new_in(access, source_owner, builtin, arguments),
             ),
+            Builtin::PatternPathEqual => Self::PatternPath(Box::new(
+                RegionalPatternPathMachine::new_in(access, source_owner, arguments),
+            )),
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -344,6 +349,7 @@ impl RegionalBuiltinMachine {
             Self::ListMap(machine) => machine.poll_in(access, step_budget),
             Self::ListObservation(machine) => machine.poll_in(access, step_budget),
             Self::PatternList(machine) => machine.poll_in(access, step_budget),
+            Self::PatternPath(machine) => machine.poll_in(access, step_budget),
             Self::TextLines(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
@@ -362,6 +368,7 @@ impl RegionalBuiltinMachine {
             Self::ListMap(machine) => machine.trace_managed_edges(visitor),
             Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
             Self::PatternList(machine) => machine.trace_managed_edges(visitor),
+            Self::PatternPath(machine) => machine.trace_managed_edges(visitor),
             Self::TextLines(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
@@ -810,7 +817,6 @@ pub(crate) enum BuiltinTaskMachine {
     Effect(EffectBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
-    PatternPath(Box<PatternPathMachine>),
     PatternDictPredicate(PatternDictPredicateMachine),
     PatternDictTake(Box<PatternDictTakeMachine>),
     PatternEqual(Box<PatternEqualMachine>),
@@ -903,9 +909,6 @@ impl BuiltinTaskMachine {
             builtin if ObjectCompositionMachine::supports(builtin) => {
                 Self::ObjectComposition(Box::new(ObjectCompositionMachine::new(builtin, arguments)))
             }
-            Builtin::PatternPathEqual => {
-                Self::PatternPath(Box::new(PatternPathMachine::new(arguments)))
-            }
             Builtin::PatternIsDict | Builtin::PatternDictIsEmpty => {
                 Self::PatternDictPredicate(PatternDictPredicateMachine::new(builtin, arguments))
             }
@@ -937,9 +940,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::ObjectComposition(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::PatternPath(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternDictPredicate(machine) => {

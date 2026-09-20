@@ -682,8 +682,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // regional frame work beneath the shared builtin checkpoint.
 // W6G.1f.3g.3e.1 replaces rooted pattern-list and list-back helpers with one
 // regional source demand and explicit front/back traversal state.
-const EXPECTED_OCCURRENCES: usize = 194;
-const EXPECTED_FINGERPRINT: u64 = 2_478_387_991_928_396_487;
+// W6G.1f.3g.3e.2a replaces rooted pattern-path and optional key-conversion
+// helpers with regional expected/actual path state under the builtin owner.
+const EXPECTED_OCCURRENCES: usize = 193;
+const EXPECTED_FINGERPRINT: u64 = 12_332_802_613_662_370_043;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -696,12 +698,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 59),
+    (Signal::StructuralRecursion, 58),
     (Signal::UserSizedLoop, 68),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 109),
+    (WorkShape::DemandThenInspect, 108),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 12),
     (WorkShape::KeyConversion, 2),

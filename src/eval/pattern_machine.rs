@@ -16,7 +16,9 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
 
-use super::access_machine::{ConversionPoll, KeyListMachine};
+use super::access_machine::{
+    ConversionPoll, KeyListMachine, RegionalConversionPoll, RegionalKeyList,
+};
 use super::builtin_machine::{BuiltinTaskPoll, RegionalBuiltinPoll};
 use super::list_machine::{
     ListFrontMachine, ListFrontPoll, RegionalListBack, RegionalListBackPoll, RegionalListFront,
@@ -45,11 +47,13 @@ pub(in crate::eval) struct RegionalPatternListMachine {
     source_owner: LazyId,
 }
 
-pub(crate) struct PatternPathMachine {
-    expected: KeyListMachine,
+pub(in crate::eval) struct RegionalPatternPathMachine {
+    expected: RegionalKeyList,
     expected_keys: Option<Vec<Key>>,
-    actual: Option<WhnfComputation>,
-    actual_keys: Option<KeyListMachine>,
+    actual: Option<Value>,
+    actual_demand: Option<RegionalWhnfWork>,
+    actual_keys: Option<RegionalKeyList>,
+    source_owner: LazyId,
 }
 
 pub(crate) struct PatternDictPredicateMachine {
@@ -553,102 +557,127 @@ enum PatternLiteralComparison {
     List,
 }
 
-impl PatternPathMachine {
-    pub(crate) fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [expected, actual]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("pattern path equality retains two operands");
+impl RegionalPatternPathMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [expected, actual] = arguments else {
+            panic!("pattern path equality retains two operands")
+        };
         Self {
-            expected: KeyListMachine::unowned(expected),
+            expected: RegionalKeyList::new(
+                access,
+                access.values().duplicate_value(expected),
+                Some(source_owner),
+            ),
             expected_keys: None,
-            actual: Some(WhnfComputation::from_root(actual)),
+            actual: Some(access.values().duplicate_value(actual)),
+            actual_demand: None,
             actual_keys: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         if self.expected_keys.is_none() {
-            return match self
-                .expected
-                .poll(poll_context, context, durable_context, step_budget)
-            {
-                ConversionPoll::Ready(keys) => {
+            return match self.expected.poll_in(access, step_budget) {
+                RegionalConversionPoll::Ready(keys) => {
                     self.expected_keys = Some(keys);
-                    BuiltinTaskPoll::Yielded
+                    RegionalBuiltinPoll::Yielded
                 }
-                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
 
         if let Some(actual_keys) = &mut self.actual_keys {
-            return match actual_keys.poll_optional(
-                poll_context,
-                context,
-                durable_context,
-                step_budget,
-            ) {
-                ConversionPoll::Ready(Some(keys)) => {
-                    rooted_pattern_predicate(context, self.expected_keys.as_ref() == Some(&keys))
+            return match actual_keys.poll_optional_in(access, step_budget) {
+                RegionalConversionPoll::Ready(Some(keys)) => {
+                    pattern_predicate_in(access, self.expected_keys.as_ref() == Some(&keys))
                 }
-                ConversionPoll::Ready(None) => rooted_pattern_failure(context),
-                ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalConversionPoll::Ready(None) => pattern_failure_in(access),
+                RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
 
-        let actual = match poll_whnf_computation(
-            self.actual
+        if self.actual_demand.is_none() {
+            let actual = self
+                .actual
+                .take()
+                .expect("pattern path subject must remain available until demanded");
+            self.actual_demand = Some(
+                RegionalWhnfWork::from_focus(access, actual).with_source_owner(self.source_owner),
+            );
+        }
+        let actual = match drive_regional_in_place(
+            access,
+            self.actual_demand
                 .as_mut()
-                .expect("pattern path subject must retain demand until ready"),
-            poll_context,
-            durable_context,
+                .expect("pattern path subject demand must be installed"),
             step_budget,
+            reduce_semantic_shell,
         ) {
-            WhnfOwnerPoll::Ready(actual) => actual,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return BuiltinTaskPoll::Pending(dependency);
+            RegionalWhnfStatus::Ready(actual) => actual,
+            RegionalWhnfStatus::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
             }
-            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("pattern path subject produced an external {boundary:?} boundary")
+            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => {
+                return RegionalBuiltinPoll::Failed(failure);
             }
         };
-        self.actual = None;
-        let shape = context.with_value_access(|access| match access.clone_root(&actual) {
+        self.actual_demand = None;
+        let shape = match actual {
             Value::Binary(bytes) => PatternPathShape::Binary(bytes),
-            Value::List(_) => PatternPathShape::List,
+            actual @ Value::List(_) => PatternPathShape::List(actual),
             _ => PatternPathShape::Other,
-        });
+        };
         match shape {
             PatternPathShape::Binary(bytes) => {
                 let keys = bytes
                     .iter()
                     .map(|byte| Key::Number(Number::from_u8(*byte)))
                     .collect::<Vec<_>>();
-                rooted_pattern_predicate(context, self.expected_keys.as_ref() == Some(&keys))
+                pattern_predicate_in(access, self.expected_keys.as_ref() == Some(&keys))
             }
-            PatternPathShape::List => {
-                self.actual_keys = Some(KeyListMachine::from_ready_unowned(actual));
-                BuiltinTaskPoll::Yielded
+            PatternPathShape::List(actual) => {
+                self.actual_keys = Some(RegionalKeyList::from_ready(
+                    access,
+                    actual,
+                    Some(self.source_owner),
+                ));
+                RegionalBuiltinPoll::Yielded
             }
-            PatternPathShape::Other => rooted_pattern_failure(context),
+            PatternPathShape::Other => pattern_failure_in(access),
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.expected.trace_managed_edges(visitor);
+        if let Some(actual) = &self.actual {
+            trace_compatibility_value_managed_edges(actual, visitor);
+        }
+        if let Some(actual) = &self.actual_demand {
+            actual.trace_managed_edges(visitor);
+        }
+        if let Some(actual) = &self.actual_keys {
+            actual.trace_managed_edges(visitor);
         }
     }
 }
 
 enum PatternPathShape {
     Binary(Bytes),
-    List,
+    List(Value),
     Other,
 }
 

@@ -997,10 +997,13 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.3e.1 replaces the rooted pattern-list machine and the final
 // durable list-back adapter with raw pattern source, regional WHNF, and
 // regional front/back traversal state beneath that same checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 240;
+// W6G.1f.3g.3e.2a replaces the rooted pattern-path machine with raw expected
+// and actual converter state; its explicit list-shaped path classification
+// makes the second raw carrier visible to this declaration census.
+const DECLARATION_BASELINE_COUNT: usize = 242;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([207, 203, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_738_044_759_467_156_921;
+    DeclarationSignals::new([209, 203, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_669_525_353_174_811_700;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

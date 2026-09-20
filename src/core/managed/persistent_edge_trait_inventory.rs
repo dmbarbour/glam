@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        822,
+        823,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -882,9 +882,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // one owning-lazy root without changing the aggregate test-root count.
     // The full gate then exposed a stale net route racing terminal publication;
     // its deterministic ordering fixture contributes one test-only lazy root.
+    // W6G.1f.3g.3e.2a adds one owning-lazy root to the path-pattern forced
+    // collection schedule; all production path progress remains raw state.
     assert_eq!(
         occurrence_fingerprint(actual),
-        4_687_336_487_735_347_365,
+        14_799_401_517_865_691_946,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -931,7 +933,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 571),
+            ((SourceScope::Test, EdgeSurface::Typed), 572),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

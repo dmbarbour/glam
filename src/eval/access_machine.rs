@@ -80,7 +80,6 @@ enum DurableKeyConversionCheckpoint {
 enum DurableKeyListCheckpoint {
     Seed {
         value: RuntimeValueRoot,
-        ready: bool,
         source_owner: Option<LazyId>,
     },
     Managed(ManagedKeyConversionRoot),
@@ -403,17 +402,6 @@ impl KeyListMachine {
         Self {
             checkpoint: DurableKeyListCheckpoint::Seed {
                 value,
-                ready: false,
-                source_owner,
-            },
-        }
-    }
-
-    fn from_ready(value: RuntimeValueRoot, source_owner: Option<LazyId>) -> Self {
-        Self {
-            checkpoint: DurableKeyListCheckpoint::Seed {
-                value,
-                ready: true,
                 source_owner,
             },
         }
@@ -421,10 +409,6 @@ impl KeyListMachine {
 
     pub(crate) fn unowned(value: RuntimeValueRoot) -> Self {
         Self::new(value, None)
-    }
-
-    pub(crate) fn from_ready_unowned(value: RuntimeValueRoot) -> Self {
-        Self::from_ready(value, None)
     }
 
     pub(crate) fn poll(
@@ -444,38 +428,16 @@ impl KeyListMachine {
         interpret_durable_conversion(result, durable_context)
     }
 
-    pub(crate) fn poll_optional(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        _context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> ConversionPoll<Option<Vec<Key>>> {
-        let result = poll_context.with_value_access(durable_context, |access| {
-            self.promote_in(&access);
-            let DurableKeyListCheckpoint::Managed(root) = &self.checkpoint else {
-                unreachable!("key-list seed must promote under access")
-            };
-            root.poll_list_optional_in(&access, step_budget)
-        });
-        interpret_durable_conversion(result, durable_context)
-    }
-
     fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
         let DurableKeyListCheckpoint::Seed {
             value,
-            ready,
             source_owner,
         } = &self.checkpoint
         else {
             return;
         };
         let value = access.clone_root(value);
-        let state = if *ready {
-            RegionalKeyList::from_ready(access, value, *source_owner)
-        } else {
-            RegionalKeyList::new(access, value, *source_owner)
-        };
+        let state = RegionalKeyList::new(access, value, *source_owner);
         self.checkpoint = DurableKeyListCheckpoint::Managed(ManagedKeyConversionRoot::new_in(
             access,
             ManagedKeyConversionState::List(Box::new(state)),
@@ -520,19 +482,6 @@ impl ManagedKeyConversionRoot {
                 panic!("key-list wrapper retained scalar conversion state")
             };
             state.poll_in(access, step_budget)
-        })
-    }
-
-    fn poll_list_optional_in(
-        &self,
-        access: &EvaluationValueAccess<'_>,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> DurableConversionPoll<Option<Vec<Key>>> {
-        self.with_state_transition(access, |state| {
-            let ManagedKeyConversionState::List(state) = state else {
-                panic!("key-list wrapper retained scalar conversion state")
-            };
-            state.poll_optional_in(access, step_budget)
         })
     }
 
