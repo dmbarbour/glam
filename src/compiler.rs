@@ -681,17 +681,23 @@ mod tests {
             &source,
             Arc::from(["root".to_owned(), "module".to_owned()]),
         ));
-        let context = CompileContext::from_module_path(["root", "module"])
-            .with_compilation_trace(trace.clone())
-            .with_local_module_loader(Arc::new(move |args| {
-                *captured
-                    .lock()
-                    .expect("loader mutex should not be poisoned") = Some(args);
-                Ok(RuntimeValueRoot::new(
-                    &test_value_factory(),
-                    Value::Dict(Dict::new_sync()),
-                ))
-            }));
+        let loader_values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        );
+        let callback_values = loader_values.clone();
+        let context =
+            CompileContext::from_module_path_with_values(loader_values, ["root", "module"])
+                .with_compilation_trace(trace.clone())
+                .with_local_module_loader(Arc::new(move |args| {
+                    *captured
+                        .lock()
+                        .expect("loader mutex should not be poisoned") = Some(args);
+                    Ok(RuntimeValueRoot::new(
+                        &callback_values,
+                        Value::Dict(Dict::new_sync()),
+                    ))
+                }));
 
         let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
         eval_context
