@@ -256,6 +256,15 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderSet) => {
             "interaction_net_builder_set"
         }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderReset) => {
+            "interaction_net_builder_reset"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderShift) => {
+            "interaction_net_builder_shift"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderResume) => {
+            "interaction_net_builder_resume"
+        }
         SyntaxOperator::Builtin(crate::core::Builtin::NetArity) => "net_arity",
         SyntaxOperator::Builtin(crate::core::Builtin::InspectOrigin) => "inspect_origin",
         SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",

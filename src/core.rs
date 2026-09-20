@@ -1698,6 +1698,7 @@ pub(crate) enum ListEffectComputation {
     },
     FixFunction {
         function: Value,
+        alternative: usize,
     },
 }
 
@@ -2148,6 +2149,21 @@ pub enum Builtin {
         reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
     )]
     InteractionNetBuilderSet,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderReset,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderShift,
+    #[allow(
+        dead_code,
+        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
+    )]
+    InteractionNetBuilderResume,
     NetArity,
     /// Host-provided capability for inspecting opaque compilation origins.
     /// The constructor is exposed only through the reflection environment.
@@ -2242,6 +2258,9 @@ impl Builtin {
             Self::InteractionNetBuilderCut => 2,
             Self::InteractionNetBuilderGet => 2,
             Self::InteractionNetBuilderSet => 3,
+            Self::InteractionNetBuilderReset => 3,
+            Self::InteractionNetBuilderShift => 3,
+            Self::InteractionNetBuilderResume => 5,
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,

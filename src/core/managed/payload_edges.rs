@@ -132,7 +132,9 @@ impl CompatibilityValueEdges for ListEffectComputation {
         match self {
             Self::Run { effect }
             | Self::Cut { operation: effect }
-            | Self::FixFunction { function: effect } => visit(effect),
+            | Self::FixFunction {
+                function: effect, ..
+            } => visit(effect),
             Self::Sequence {
                 results,
                 continuation,

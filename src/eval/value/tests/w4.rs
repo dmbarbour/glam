@@ -974,13 +974,17 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
         "retained list-effect fix",
         ListEffectComputation::FixFunction {
             function: counted_function,
+            alternative: 0,
         },
     );
     let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
 
+    let fixed = drive_list_effect_after_route_loss(&context, &retained, machine);
+    let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
     assert_eq!(
-        drive_list_effect_after_route_loss(&context, &retained, machine),
-        Value::List(List::from_values(vec![number(44)]))
+        crate::eval::eval_value(&context, &first)
+            .expect("the first fixed alternative should evaluate"),
+        number(44)
     );
     assert_eq!(function_demands.load(Ordering::SeqCst), 1);
     assert_eq!(operation_demands.load(Ordering::SeqCst), 1);
@@ -991,15 +995,59 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     let cached = context.values().with_runtime_value_access(|access| {
         lazy_machine(&context, LazyValue::from_root(&retained, &access))
     });
+    let fixed = drive_list_effect_after_route_loss(&context, &retained, cached);
+    let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
     assert_eq!(
-        drive_list_effect_after_route_loss(&context, &retained, cached),
-        Value::List(List::from_values(vec![number(44)]))
+        crate::eval::eval_value(&context, &first)
+            .expect("the cached fixed alternative should evaluate"),
+        number(44)
     );
     assert_eq!(
         context.values().managed_promise_lifecycle_counts_for_test(),
         lifecycle_after,
         "a later route must not manufacture or assign another fix promise"
     );
+}
+
+#[test]
+fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
+    let context = isolated_context();
+    let handler = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![
+            number(51),
+            number(52),
+        ]))),
+    );
+    let effect = list_effect_value(handler);
+    let function = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(effect),
+    );
+    let fixed = crate::eval::eval_value(
+        &context,
+        &Value::builtin_call(context.values(), Builtin::ListEffectFix, vec![function]),
+    )
+    .expect("list-effect fix construction should evaluate");
+    let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
+
+    for (index, expected_count) in [(0, 1), (1, 2)] {
+        let selected = Value::builtin_call(
+            context.values(),
+            Builtin::ListAt,
+            vec![number(index), fixed.clone()],
+        );
+        assert_eq!(
+            crate::eval::eval_value(&context, &selected)
+                .expect("the selected fixed alternative should evaluate"),
+            number(51 + index)
+        );
+        let lifecycle = context.values().managed_promise_lifecycle_counts_for_test();
+        assert_eq!(lifecycle.0 - lifecycle_before.0, expected_count);
+        assert_eq!(lifecycle.1 - lifecycle_before.1, expected_count);
+    }
 }
 
 #[test]

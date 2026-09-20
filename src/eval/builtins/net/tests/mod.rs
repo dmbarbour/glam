@@ -193,16 +193,6 @@ fn partial_builder(
     })
 }
 
-fn constant_builder(access: &RuntimeValueAccess<'_>, value: Value, state: Value) -> Value {
-    crate::eval::test_support::closed_function_value_in(
-        access.values(),
-        1,
-        crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![
-            super::builder::outcome(access, value, state),
-        ]))),
-    )
-}
-
 fn constant_builder_continuation(access: &RuntimeValueAccess<'_>, builder: Value) -> Value {
     crate::eval::test_support::closed_function_value_in(
         access.values(),
@@ -265,11 +255,49 @@ fn path(
     ))
 }
 
+fn apply_expr(
+    function: crate::eval::test_support::TestExpr,
+    argument: crate::eval::test_support::TestExpr,
+) -> crate::eval::test_support::TestExpr {
+    crate::eval::test_support::TestExpr::Apply(Arc::new(function), Arc::new(argument))
+}
+
+fn invoke_continuation_with(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
+    crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        1,
+        apply_expr(
+            crate::eval::test_support::TestExpr::Local(0),
+            crate::eval::test_support::TestExpr::Value(value),
+        ),
+    )
+}
+
+fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
+    crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        1,
+        apply_expr(
+            crate::eval::test_support::TestExpr::Value(Value::Builtin(
+                Builtin::InteractionNetBuilderReturn,
+            )),
+            crate::eval::test_support::TestExpr::Local(0),
+        ),
+    )
+}
+
 #[test]
 fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
     let context = EvalContext::standalone();
+    let visible = crate::core::Key::atom_from_text("visible");
     let (returned, initial) = with_access(&context, |access| {
-        let initial = Value::Number(10.into());
+        let initial = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
         let returned = partial_builder(
             access,
             Builtin::InteractionNetBuilderReturn,
@@ -283,12 +311,19 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
     );
 
     let choice = with_access(&context, |access| {
-        let bad_state = Value::Number(99.into());
+        let mutate = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![
+                path(access.values(), [visible.clone()]),
+                Value::Number(99.into()),
+            ],
+        );
         let mutate_then_fail = partial_builder(
             access,
             Builtin::InteractionNetBuilderSeq,
             vec![
-                constant_builder(access, access.values().unit(), bad_state),
+                mutate,
                 constant_builder_continuation(
                     access,
                     Value::Builtin(Builtin::InteractionNetBuilderFail),
@@ -312,35 +347,74 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         "a failed left alternative must not leak its branch state"
     );
 
-    let (cut, selected_state) = with_access(&context, |access| {
-        let selected_state = Value::Number(20.into());
-        let discarded_state = Value::Number(30.into());
-        let alternatives = partial_builder(
+    let cut = with_access(&context, |access| {
+        let selected = partial_builder(
             access,
-            Builtin::InteractionNetBuilderAlt,
+            Builtin::InteractionNetBuilderSeq,
             vec![
-                constant_builder(
+                partial_builder(
                     access,
-                    Value::binary_from_text("selected"),
-                    access.duplicate_value(&selected_state),
+                    Builtin::InteractionNetBuilderSet,
+                    vec![
+                        path(access.values(), [visible.clone()]),
+                        Value::Number(20.into()),
+                    ],
                 ),
-                constant_builder(
+                constant_builder_continuation(
                     access,
-                    Value::binary_from_text("discarded"),
-                    discarded_state,
+                    partial_builder(
+                        access,
+                        Builtin::InteractionNetBuilderReturn,
+                        vec![Value::binary_from_text("selected")],
+                    ),
                 ),
             ],
         );
-        let cut = partial_builder(
+        let discarded = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderSet,
+                    vec![
+                        path(access.values(), [visible.clone()]),
+                        Value::Number(30.into()),
+                    ],
+                ),
+                constant_builder_continuation(
+                    access,
+                    partial_builder(
+                        access,
+                        Builtin::InteractionNetBuilderReturn,
+                        vec![Value::binary_from_text("discarded")],
+                    ),
+                ),
+            ],
+        );
+        let alternatives = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderAlt,
+            vec![selected, discarded],
+        );
+        partial_builder(
             access,
             Builtin::InteractionNetBuilderCut,
             vec![alternatives],
-        );
-        (cut, selected_state)
+        )
+    });
+    let [selected, selected_state] = run_builder_at(&context, cut, initial, 0);
+    assert_eq!(selected, Value::binary_from_text("selected"));
+    let get_visible = with_access(&context, |access| {
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderGet,
+            vec![path(access.values(), [visible])],
+        )
     });
     assert_eq!(
-        run_builder_at(&context, cut, initial, 0),
-        [Value::binary_from_text("selected"), selected_state],
+        run_builder_at(&context, get_visible, selected_state, 0)[0],
+        Value::Number(20.into()),
         "cut must retain the selected alternative's state"
     );
 }
@@ -486,4 +560,185 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
     let error = builder_result_at(&context, invalid_get, invalid_state, 0)
         .expect_err("a non-dictionary path intermediate must fail");
     assert!(error.to_string().contains("not a dictionary"), "{error}");
+}
+
+#[test]
+fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
+    let context = EvalContext::standalone();
+    let outer = Value::binary_from_text("outer");
+    let inner = Value::binary_from_text("inner");
+    let (state, nested, cut_then_shift, missing) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let shift_outer = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                outer.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("nested resumed")),
+            ],
+        );
+        let reset_inner = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![inner, shift_outer],
+        );
+        let nested = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![outer.clone(), reset_inner],
+        );
+
+        let cut = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderCut,
+            vec![partial_builder(
+                access,
+                Builtin::InteractionNetBuilderReturn,
+                vec![access.values().unit()],
+            )],
+        );
+        let shift_after_cut = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                outer.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("after cut")),
+            ],
+        );
+        let cut_then_shift_body = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![cut, constant_builder_continuation(access, shift_after_cut)],
+        );
+        let cut_then_shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![outer.clone(), cut_then_shift_body],
+        );
+        let missing = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                outer,
+                invoke_continuation_with(access, Value::binary_from_text("wrong")),
+            ],
+        );
+        (state, nested, cut_then_shift, missing)
+    });
+
+    assert_eq!(
+        run_builder_at(&context, nested, state.clone(), 0)[0],
+        Value::binary_from_text("nested resumed")
+    );
+    assert_eq!(
+        run_builder_at(&context, cut_then_shift, state.clone(), 0)[0],
+        Value::binary_from_text("after cut")
+    );
+    let error =
+        builder_result_at(&context, missing, state, 0).expect_err("shift outside reset must fail");
+    assert!(error.to_string().contains("not in reset scope"), "{error}");
+}
+
+#[test]
+fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("prompt");
+    let (first_state, second_state, capture) = with_access(&context, |access| {
+        let first_state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let second_state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![prompt.clone(), return_continuation(access)],
+        );
+        let capture = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![prompt, shift],
+        );
+        (first_state, second_state, capture)
+    });
+
+    let [continuation, first_state] = run_builder_at(&context, capture, first_state, 0);
+    let resumed = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        continuation.clone(),
+        Arc::from([Value::binary_from_text("same invocation")]),
+    ));
+    assert_eq!(
+        run_builder_at(&context, resumed, first_state, 0)[0],
+        Value::binary_from_text("same invocation")
+    );
+
+    let foreign = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        continuation,
+        Arc::from([Value::binary_from_text("foreign")]),
+    ));
+    let error = builder_result_at(&context, foreign, second_state, 0)
+        .expect_err("captured continuation must reject another builder invocation");
+    assert!(
+        error.to_string().contains("belongs to another invocation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("prompt");
+    let (state, operation) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let clear = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSet,
+            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+        );
+        let shift = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("wrong")),
+            ],
+        );
+        let body = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![clear, constant_builder_continuation(access, shift)],
+        );
+        let operation = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![prompt, body],
+        );
+        (state, operation)
+    });
+    let error = builder_result_at(&context, operation, state, 0)
+        .expect_err("clearing whole state must clear reset scope but retain sequence execution");
+    assert!(error.to_string().contains("not in reset scope"), "{error}");
 }

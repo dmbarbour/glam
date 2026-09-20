@@ -165,6 +165,8 @@ impl RegionalBuiltinMachine {
                 | Builtin::InteractionNetFromNetlist
                 | Builtin::InteractionNetBuilderGet
                 | Builtin::InteractionNetBuilderSet
+                | Builtin::InteractionNetBuilderReset
+                | Builtin::InteractionNetBuilderShift
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
@@ -299,14 +301,12 @@ impl RegionalBuiltinMachine {
                     source_owner,
                 })
             }
-            Builtin::InteractionNetBuilderGet | Builtin::InteractionNetBuilderSet => {
-                Self::Builder(Box::new(RegionalBuilderBuiltinMachine::new_in(
-                    access,
-                    source_owner,
-                    builtin,
-                    arguments,
-                )))
-            }
+            Builtin::InteractionNetBuilderGet
+            | Builtin::InteractionNetBuilderSet
+            | Builtin::InteractionNetBuilderReset
+            | Builtin::InteractionNetBuilderShift => Self::Builder(Box::new(
+                RegionalBuilderBuiltinMachine::new_in(access, source_owner, builtin, arguments),
+            )),
             Builtin::NetArity => {
                 let [arity, net] = arguments else {
                     unreachable!("net arity must retain its arity and net operands")

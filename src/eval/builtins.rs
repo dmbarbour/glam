@@ -142,7 +142,10 @@ pub(super) fn apply_builtin_in(
                     let [function] = exact(arguments, "list effect fix")?;
                     Ok(Value::List(deferred_list(
                         "list effect fix",
-                        ListEffectComputation::FixFunction { function },
+                        ListEffectComputation::FixFunction {
+                            function,
+                            alternative: 0,
+                        },
                     )))
                 }
                 _ => unreachable!("list-effect branch received another builtin"),
@@ -178,12 +181,14 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderContinue
         | Builtin::InteractionNetBuilderAlt
         | Builtin::InteractionNetBuilderFail
-        | Builtin::InteractionNetBuilderCut => {
+        | Builtin::InteractionNetBuilderCut
+        | Builtin::InteractionNetBuilderResume => {
             net::apply_builder_builtin_in(access.values(), builtin, arguments)
         }
-        Builtin::InteractionNetBuilderGet | Builtin::InteractionNetBuilderSet => {
-            Ok(deferred(arguments))
-        }
+        Builtin::InteractionNetBuilderGet
+        | Builtin::InteractionNetBuilderSet
+        | Builtin::InteractionNetBuilderReset
+        | Builtin::InteractionNetBuilderShift => Ok(deferred(arguments)),
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),

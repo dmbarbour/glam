@@ -59,8 +59,12 @@ enum ListEffectState {
     },
     FixFunction {
         function: RegionalWhnfWork,
+        alternative: usize,
     },
     Fix {
+        function: Value,
+        alternative: usize,
+        skipped: usize,
         handle: PromisedValue,
         front: RegionalListFront,
     },
@@ -122,12 +126,16 @@ impl RegionalListEffect {
                     Some(source_owner),
                 ),
             },
-            ListEffectComputation::FixFunction { function } => ListEffectState::FixFunction {
+            ListEffectComputation::FixFunction {
+                function,
+                alternative,
+            } => ListEffectState::FixFunction {
                 function: RegionalWhnfWork::from_focus(
                     access,
                     access.values().duplicate_value(function),
                 )
                 .with_source_owner(source_owner),
+                alternative: *alternative,
             },
         };
         Self {
@@ -248,7 +256,10 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
-            ListEffectState::FixFunction { function } => {
+            ListEffectState::FixFunction {
+                function,
+                alternative,
+            } => {
                 let function = match drive_regional_in_place(
                     access,
                     function,
@@ -270,20 +281,61 @@ impl RegionalListEffect {
                     .expect("managed promise representation must fit one collector run");
                 let operation = LazyValue::from_application_in(
                     access.values(),
-                    function,
+                    access.values().duplicate_value(&function),
                     Arc::from([Value::Promised(handle.duplicate_in(access.values()))]),
                 );
                 let results = deferred_run_list_in(access, &Value::Lazy(operation));
                 self.state = ListEffectState::Fix {
+                    function,
+                    alternative: *alternative,
+                    skipped: 0,
                     handle,
                     front: RegionalListFront::new_in(access, results, Some(self.source_owner)),
                 };
                 RegionalListEffectPoll::Yielded
             }
-            ListEffectState::Fix { handle, front } => match front.poll_in(access, step_budget) {
-                RegionalListFrontPoll::Ready(result) => RegionalListEffectPoll::FixReady {
+            ListEffectState::Fix {
+                function,
+                alternative,
+                skipped,
+                handle,
+                front,
+            } => match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some((_head, tail))) if *skipped < *alternative => {
+                    *skipped += 1;
+                    *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                    RegionalListEffectPoll::Yielded
+                }
+                RegionalListFrontPoll::Ready(Some((head, _tail))) => {
+                    let next_alternative = match alternative.checked_add(1) {
+                        Some(next) => next,
+                        None => {
+                            return RegionalListEffectPoll::Failed(Arc::new(
+                                EvaluationFailure::message(
+                                    "list effect fix alternative count exhausted",
+                                ),
+                            ));
+                        }
+                    };
+                    let tail = List::from_thunk(
+                        LazyValue::list_effect_computation_in(
+                            access.values(),
+                            "list effect fix alternative",
+                            ListEffectComputation::FixFunction {
+                                function: access.values().duplicate_value(function),
+                                alternative: next_alternative,
+                            },
+                        )
+                        .into(),
+                    );
+                    RegionalListEffectPoll::FixReady {
+                        handle: handle.duplicate_in(access.values()),
+                        result: Some((head, Value::List(tail))),
+                    }
+                }
+                RegionalListFrontPoll::Ready(None) => RegionalListEffectPoll::FixReady {
                     handle: handle.duplicate_in(access.values()),
-                    result,
+                    result: None,
                 },
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
@@ -315,8 +367,14 @@ impl ListEffectState {
                 front.trace_managed_edges(visitor);
             }
             Self::Cut { front } | Self::FirstResult { front } => front.trace_managed_edges(visitor),
-            Self::FixFunction { function } => function.trace_managed_edges(visitor),
-            Self::Fix { handle, front } => {
+            Self::FixFunction { function, .. } => function.trace_managed_edges(visitor),
+            Self::Fix {
+                function,
+                handle,
+                front,
+                ..
+            } => {
+                trace_compatibility_value_managed_edges(function, visitor);
                 handle.trace_managed_edge(visitor);
                 front.trace_managed_edges(visitor);
             }
