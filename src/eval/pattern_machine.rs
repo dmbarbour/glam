@@ -3,19 +3,30 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use glam_gc::Visitor;
 
-use crate::core::{Atom, Builtin, BuiltinCall, Dict, Key, List, RuntimeValueAccess, Value, keys};
+use crate::core::{
+    Atom, Builtin, BuiltinCall, Dict, Key, LazyId, List, RuntimeValueAccess, Value, keys,
+    trace_compatibility_value_managed_edges,
+};
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationStepBudget, EvaluationValueAccess,
+    EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
 };
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
 
 use super::access_machine::{ConversionPoll, KeyListMachine};
-use super::builtin_machine::BuiltinTaskPoll;
-use super::list_machine::{ListBackMachine, ListBackPoll, ListFrontMachine, ListFrontPoll};
+use super::builtin_machine::{BuiltinTaskPoll, RegionalBuiltinPoll};
+use super::list_machine::{
+    ListFrontMachine, ListFrontPoll, RegionalListBack, RegionalListBackPoll, RegionalListFront,
+    RegionalListFrontPoll,
+};
 use super::tagged_machine::{SemanticUndefinedMachine, SemanticUndefinedPoll};
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation, drive_regional_in_place,
+    reduce_semantic_shell,
+};
 
 #[derive(Clone, Copy)]
 enum PatternListOperation {
@@ -25,11 +36,13 @@ enum PatternListOperation {
     IsEmpty,
 }
 
-pub(crate) struct PatternListMachine {
+pub(in crate::eval) struct RegionalPatternListMachine {
     operation: PatternListOperation,
-    source: WhnfComputation,
-    front: Option<ListFrontMachine>,
-    back: Option<ListBackMachine>,
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    back: Option<RegionalListBack>,
+    source_owner: LazyId,
 }
 
 pub(crate) struct PatternPathMachine {
@@ -639,8 +652,8 @@ enum PatternPathShape {
     Other,
 }
 
-impl PatternListMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
+impl RegionalPatternListMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
             Builtin::PatternIsList
@@ -650,7 +663,12 @@ impl PatternListMachine {
         )
     }
 
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
         let operation = match builtin {
             Builtin::PatternIsList => PatternListOperation::IsList,
             Builtin::PatternListTryUncons => PatternListOperation::TryUncons,
@@ -658,143 +676,147 @@ impl PatternListMachine {
             Builtin::PatternListIsEmpty => PatternListOperation::IsEmpty,
             _ => unreachable!("pattern-list machine received another builtin"),
         };
-        let [source]: [RuntimeValueRoot; 1] = arguments
-            .try_into()
-            .expect("a pattern-list observation retains one source");
+        let [source] = arguments else {
+            panic!("a pattern-list observation retains one source")
+        };
         Self {
             operation,
-            source: WhnfComputation::from_root(source),
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
             front: None,
             back: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         if let Some(front) = &mut self.front {
-            return match front.poll(poll_context, context, durable_context, step_budget) {
-                ListFrontPoll::Ready(item) => self.finish_front(context, item),
-                ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            return match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(item) => self.finish_front(access, item),
+                RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
         if let Some(back) = &mut self.back {
-            return match back.poll(poll_context, context, durable_context, step_budget) {
-                ListBackPoll::Ready(item) => self.finish_back(context, item),
-                ListBackPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListBackPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListBackPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            return match back.poll_in(access, step_budget) {
+                RegionalListBackPoll::Ready(item) => self.finish_back(access, item),
+                RegionalListBackPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListBackPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListBackPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
 
-        let source = match poll_whnf_computation(
-            &mut self.source,
-            poll_context,
-            durable_context,
+        if self.source_demand.is_none() {
+            let source = self
+                .source
+                .take()
+                .expect("pattern-list observation must retain its source");
+            self.source_demand = Some(
+                RegionalWhnfWork::from_focus(access, source).with_source_owner(self.source_owner),
+            );
+        }
+        let source = match drive_regional_in_place(
+            access,
+            self.source_demand
+                .as_mut()
+                .expect("pattern-list source demand must be installed"),
             step_budget,
+            reduce_semantic_shell,
         ) {
-            WhnfOwnerPoll::Ready(source) => source,
-            WhnfOwnerPoll::Pending(dependency) => {
-                return BuiltinTaskPoll::Pending(dependency);
+            RegionalWhnfStatus::Ready(source) => source,
+            RegionalWhnfStatus::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
             }
-            WhnfOwnerPoll::Yielded => return BuiltinTaskPoll::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("pattern-list source produced an external {boundary:?} boundary")
-            }
+            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
-        let shape = context.with_value_access(|access| match access.clone_root(&source) {
-            Value::Binary(bytes) => PatternListShape::Binary(bytes),
-            Value::List(_) => PatternListShape::List,
-            _ => PatternListShape::Other,
-        });
-        match shape {
-            PatternListShape::Binary(bytes) => self.finish_binary(context, bytes),
-            PatternListShape::List => match self.operation {
-                PatternListOperation::IsList => rooted_pattern_predicate(context, true),
+        self.source_demand = None;
+        match source {
+            Value::Binary(bytes) => self.finish_binary(access, bytes),
+            source @ Value::List(_) => match self.operation {
+                PatternListOperation::IsList => pattern_predicate_in(access, true),
                 PatternListOperation::TryUncons | PatternListOperation::IsEmpty => {
-                    self.front = Some(ListFrontMachine::unowned(source));
-                    BuiltinTaskPoll::Yielded
+                    self.front = Some(RegionalListFront::new_in(
+                        access,
+                        source,
+                        Some(self.source_owner),
+                    ));
+                    RegionalBuiltinPoll::Yielded
                 }
                 PatternListOperation::TryUnsnoc => {
-                    self.back = Some(ListBackMachine::new(source));
-                    BuiltinTaskPoll::Yielded
+                    self.back = Some(RegionalListBack::new_in(
+                        access,
+                        source,
+                        Some(self.source_owner),
+                    ));
+                    RegionalBuiltinPoll::Yielded
                 }
             },
-            PatternListShape::Other => rooted_pattern_failure(context),
+            _ => pattern_failure_in(access),
         }
     }
 
-    fn finish_binary(&self, context: &EvaluatorStepContext<'_>, bytes: Bytes) -> BuiltinTaskPoll {
+    fn finish_binary(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        bytes: Bytes,
+    ) -> RegionalBuiltinPoll {
         match self.operation {
-            PatternListOperation::IsList => rooted_pattern_predicate(context, true),
-            PatternListOperation::IsEmpty => rooted_pattern_predicate(context, bytes.is_empty()),
+            PatternListOperation::IsList => pattern_predicate_in(access, true),
+            PatternListOperation::IsEmpty => pattern_predicate_in(access, bytes.is_empty()),
             PatternListOperation::TryUncons => match bytes.first() {
-                Some(byte) => context.with_value_access(|access| {
-                    BuiltinTaskPoll::Ready(pattern_success_in(
-                        access.values(),
-                        Value::Dict(
-                            Dict::new_sync()
-                                .insert(
-                                    (*keys::HEAD).clone(),
-                                    Value::Number(Number::from_u8(*byte)),
-                                )
-                                .insert(
-                                    (*keys::TAIL).clone(),
-                                    Value::Binary(bytes.slice(1..bytes.len())),
-                                ),
-                        ),
-                    ))
-                }),
-                None => rooted_pattern_failure(context),
+                Some(byte) => RegionalBuiltinPoll::Ready(pattern_success_value_in(
+                    access.values(),
+                    Value::Dict(
+                        Dict::new_sync()
+                            .insert((*keys::HEAD).clone(), Value::Number(Number::from_u8(*byte)))
+                            .insert(
+                                (*keys::TAIL).clone(),
+                                Value::Binary(bytes.slice(1..bytes.len())),
+                            ),
+                    ),
+                )),
+                None => pattern_failure_in(access),
             },
             PatternListOperation::TryUnsnoc => match bytes.last() {
-                Some(byte) => context.with_value_access(|access| {
-                    BuiltinTaskPoll::Ready(pattern_success_in(
-                        access.values(),
-                        Value::Dict(
-                            Dict::new_sync()
-                                .insert(
-                                    (*keys::INIT).clone(),
-                                    Value::Binary(bytes.slice(0..bytes.len() - 1)),
-                                )
-                                .insert(
-                                    (*keys::LAST).clone(),
-                                    Value::Number(Number::from_u8(*byte)),
-                                ),
-                        ),
-                    ))
-                }),
-                None => rooted_pattern_failure(context),
+                Some(byte) => RegionalBuiltinPoll::Ready(pattern_success_value_in(
+                    access.values(),
+                    Value::Dict(
+                        Dict::new_sync()
+                            .insert(
+                                (*keys::INIT).clone(),
+                                Value::Binary(bytes.slice(0..bytes.len() - 1)),
+                            )
+                            .insert((*keys::LAST).clone(), Value::Number(Number::from_u8(*byte))),
+                    ),
+                )),
+                None => pattern_failure_in(access),
             },
         }
     }
 
     fn finish_front(
         &self,
-        context: &EvaluatorStepContext<'_>,
-        item: Option<(RuntimeValueRoot, RuntimeValueRoot)>,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        item: Option<(Value, Value)>,
+    ) -> RegionalBuiltinPoll {
         match self.operation {
-            PatternListOperation::IsEmpty => rooted_pattern_predicate(context, item.is_none()),
+            PatternListOperation::IsEmpty => pattern_predicate_in(access, item.is_none()),
             PatternListOperation::TryUncons => match item {
-                Some((head, tail)) => context.with_value_access(|access| {
-                    BuiltinTaskPoll::Ready(pattern_success_in(
-                        access.values(),
-                        Value::Dict(
-                            Dict::new_sync()
-                                .insert((*keys::HEAD).clone(), access.clone_root(&head))
-                                .insert((*keys::TAIL).clone(), access.clone_root(&tail)),
-                        ),
-                    ))
-                }),
-                None => rooted_pattern_failure(context),
+                Some((head, tail)) => RegionalBuiltinPoll::Ready(pattern_success_value_in(
+                    access.values(),
+                    Value::Dict(
+                        Dict::new_sync()
+                            .insert((*keys::HEAD).clone(), head)
+                            .insert((*keys::TAIL).clone(), tail),
+                    ),
+                )),
+                None => pattern_failure_in(access),
             },
             PatternListOperation::IsList | PatternListOperation::TryUnsnoc => {
                 unreachable!("this pattern-list operation does not use front traversal")
@@ -804,29 +826,36 @@ impl PatternListMachine {
 
     fn finish_back(
         &self,
-        context: &EvaluatorStepContext<'_>,
-        item: Option<(RuntimeValueRoot, RuntimeValueRoot)>,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        item: Option<(Value, Value)>,
+    ) -> RegionalBuiltinPoll {
         match item {
-            Some((init, last)) => context.with_value_access(|access| {
-                BuiltinTaskPoll::Ready(pattern_success_in(
-                    access.values(),
-                    Value::Dict(
-                        Dict::new_sync()
-                            .insert((*keys::INIT).clone(), access.clone_root(&init))
-                            .insert((*keys::LAST).clone(), access.clone_root(&last)),
-                    ),
-                ))
-            }),
-            None => rooted_pattern_failure(context),
+            Some((init, last)) => RegionalBuiltinPoll::Ready(pattern_success_value_in(
+                access.values(),
+                Value::Dict(
+                    Dict::new_sync()
+                        .insert((*keys::INIT).clone(), init)
+                        .insert((*keys::LAST).clone(), last),
+                ),
+            )),
+            None => pattern_failure_in(access),
         }
     }
-}
 
-enum PatternListShape {
-    Binary(Bytes),
-    List,
-    Other,
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(source) = &self.source {
+            trace_compatibility_value_managed_edges(source, visitor);
+        }
+        if let Some(demand) = &self.source_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+        if let Some(back) = &self.back {
+            back.trace_managed_edges(visitor);
+        }
+    }
 }
 
 fn rooted_pattern_predicate(context: &EvaluatorStepContext<'_>, passes: bool) -> BuiltinTaskPoll {
@@ -840,6 +869,29 @@ fn rooted_pattern_predicate(context: &EvaluatorStepContext<'_>, passes: bool) ->
     } else {
         rooted_pattern_failure(context)
     }
+}
+
+fn pattern_predicate_in(access: &EvaluationValueAccess<'_>, passes: bool) -> RegionalBuiltinPoll {
+    if passes {
+        RegionalBuiltinPoll::Ready(pattern_success_value_in(
+            access.values(),
+            Value::Atom(Atom::from_key(&keys::UNIT)),
+        ))
+    } else {
+        pattern_failure_in(access)
+    }
+}
+
+fn pattern_failure_in(access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Ready(pattern_effect_value_in(
+        access.values(),
+        &keys::FAIL,
+        vec![],
+    ))
+}
+
+fn pattern_success_value_in(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
+    pattern_effect_value_in(access, &keys::R, vec![value])
 }
 
 fn pattern_success_in(access: &RuntimeValueAccess<'_>, value: Value) -> RuntimeValueRoot {
@@ -857,10 +909,18 @@ fn pattern_effect_in(
     name: &crate::core::Key,
     arguments: Vec<Value>,
 ) -> RuntimeValueRoot {
+    access.root_runtime_value(pattern_effect_value_in(access, name, arguments))
+}
+
+fn pattern_effect_value_in(
+    access: &RuntimeValueAccess<'_>,
+    name: &crate::core::Key,
+    arguments: Vec<Value>,
+) -> Value {
     let crate::core::Key::Atom(name) = name else {
         unreachable!("standard effect request names are atom keys")
     };
-    access.root_runtime_value(super::application::effect_value(
+    super::application::effect_value(
         access,
         Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::EffectCall,
@@ -869,5 +929,5 @@ fn pattern_effect_in(
                 Value::List(List::from_values(arguments)),
             ]),
         }),
-    ))
+    )
 }

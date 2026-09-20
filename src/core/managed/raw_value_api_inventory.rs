@@ -1360,13 +1360,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        500,
+        505,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        13_621_762_753_957_260_880,
+        14_342_360_797_978_757_760,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1377,10 +1377,10 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        // W6G.1f.3g.1a-.3b expose the regional list/key constructors and
-        // builtin family entry points through comparison migration. Each raw
+        // W6G.1f.3g.1a-.3e.1 expose the regional list/key constructors and
+        // builtin family entry points through pattern-list migration. Each raw
         // value handoff remains tied to caller-supplied value access.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 203),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 208),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 257),
         (

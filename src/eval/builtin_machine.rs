@@ -30,8 +30,8 @@ use super::list_transform_machine::{
 use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
 use super::pattern_machine::{
-    PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine, PatternListMachine,
-    PatternPathMachine,
+    PatternDictPredicateMachine, PatternDictTakeMachine, PatternEqualMachine, PatternPathMachine,
+    RegionalPatternListMachine,
 };
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
 use super::whnf::{
@@ -69,6 +69,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     ListConcat(RegionalListConcatMachine),
     ListMap(RegionalListMapMachine),
     ListObservation(Box<RegionalListObservationMachine>),
+    PatternList(RegionalPatternListMachine),
     TextLines(RegionalTextLinesMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
@@ -176,6 +177,10 @@ impl RegionalBuiltinMachine {
                 | Builtin::Map
                 | Builtin::ListConcat
                 | Builtin::TextLines
+                | Builtin::PatternIsList
+                | Builtin::PatternListTryUncons
+                | Builtin::PatternListTryUnsnoc
+                | Builtin::PatternListIsEmpty
         )
     }
 
@@ -308,6 +313,9 @@ impl RegionalBuiltinMachine {
                 source_owner,
                 arguments,
             )),
+            builtin if RegionalPatternListMachine::supports(builtin) => Self::PatternList(
+                RegionalPatternListMachine::new_in(access, source_owner, builtin, arguments),
+            ),
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -335,6 +343,7 @@ impl RegionalBuiltinMachine {
             Self::ListConcat(machine) => machine.poll_in(access, step_budget),
             Self::ListMap(machine) => machine.poll_in(access, step_budget),
             Self::ListObservation(machine) => machine.poll_in(access, step_budget),
+            Self::PatternList(machine) => machine.poll_in(access, step_budget),
             Self::TextLines(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
@@ -352,6 +361,7 @@ impl RegionalBuiltinMachine {
             Self::ListConcat(machine) => machine.trace_managed_edges(visitor),
             Self::ListMap(machine) => machine.trace_managed_edges(visitor),
             Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
+            Self::PatternList(machine) => machine.trace_managed_edges(visitor),
             Self::TextLines(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
@@ -800,7 +810,6 @@ pub(crate) enum BuiltinTaskMachine {
     Effect(EffectBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
-    PatternList(PatternListMachine),
     PatternPath(Box<PatternPathMachine>),
     PatternDictPredicate(PatternDictPredicateMachine),
     PatternDictTake(Box<PatternDictTakeMachine>),
@@ -894,9 +903,6 @@ impl BuiltinTaskMachine {
             builtin if ObjectCompositionMachine::supports(builtin) => {
                 Self::ObjectComposition(Box::new(ObjectCompositionMachine::new(builtin, arguments)))
             }
-            builtin if PatternListMachine::supports(builtin) => {
-                Self::PatternList(PatternListMachine::new(builtin, arguments))
-            }
             Builtin::PatternPathEqual => {
                 Self::PatternPath(Box::new(PatternPathMachine::new(arguments)))
             }
@@ -931,9 +937,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::ObjectComposition(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::PatternList(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternPath(machine) => {
@@ -1539,6 +1542,59 @@ mod tests {
         crate::eval::eval_value(&context, &observation).expect("back list observation must resume");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
         drop(observation_root);
+    }
+
+    #[test]
+    fn pattern_unsnoc_retains_a_completed_suffix_across_collection() {
+        let context = context();
+        let prefix = PromisedValue::new(context.values(), "pattern unsnoc collected prefix");
+        let suffix_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&suffix_demands);
+        let suffix = LazyValue::semantic_thunk(
+            context.values(),
+            "pattern unsnoc collected suffix",
+            move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::List(crate::core::List::empty()))
+            },
+        );
+        let list = Value::List(crate::core::List::concat(
+            crate::core::List::from_thunk(ListThunk::Promised(prefix.clone())),
+            crate::core::List::from_thunk(suffix.into()),
+        ));
+        let pattern =
+            Value::builtin_call(context.values(), Builtin::PatternListTryUnsnoc, vec![list]);
+        let Value::Lazy(pattern_lazy) = &pattern else {
+            unreachable!("a saturated pattern-list builtin must remain lazy")
+        };
+        let pattern_root = pattern_lazy.root(context.values());
+
+        crate::eval::eval_value(&context, &pattern)
+            .expect_err("the deferred list prefix must suspend pattern unsnoc");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the pattern-list checkpoint must trace its completed suffix");
+        crate::eval::eval_value(&context, &pattern)
+            .expect_err("a later route must retain the exact deferred prefix");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &prefix,
+            Value::List(crate::core::List::from_values(vec![Value::Number(
+                42.into(),
+            )])),
+        )
+        .expect("the deferred prefix should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned pattern-list checkpoint must remain live");
+        crate::eval::eval_value(&context, &pattern).expect("pattern unsnoc must resume");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+        drop(pattern_root);
     }
 
     #[test]

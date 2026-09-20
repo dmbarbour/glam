@@ -994,10 +994,13 @@ fn is_production_source(relative: &Path) -> bool {
 // subject, front/back traversal, and result state beneath the checkpoint.
 // W6G.1f.3g.3d replaces three durable list-transform owners with raw callable,
 // source, list-front, item, and accepted-byte state beneath that checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 242;
+// W6G.1f.3g.3e.1 replaces the rooted pattern-list machine and the final
+// durable list-back adapter with raw pattern source, regional WHNF, and
+// regional front/back traversal state beneath that same checkpoint.
+const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([206, 208, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_435_273_185_333_944_082;
+    DeclarationSignals::new([207, 203, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_738_044_759_467_156_921;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

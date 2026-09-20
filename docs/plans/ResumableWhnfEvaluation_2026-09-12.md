@@ -6122,6 +6122,40 @@ for it:
      - **W6G.1f.3g.3e — patterns.** Move list, path, dictionary predicate/take,
        and equality patterns after their comparison and list/key dependencies
        are regional. Preserve fallthrough versus permanent failure exactly.
+       - **W6G.1f.3g.3e.1 — Complete (2026-09-20): list structure.** Move is-list, empty, uncons, and
+         unsnoc through the regional source/front/back reducers. Produce raw
+         pass/fail effects and preserve compact binary remainders.
+         Completion record: all four list-pattern operations now run as one
+         compile-exhaustive regional builtin variant. Source WHNF, front/back
+         traversal, and raw pass/fail effect construction remain beneath the
+         owning lazy's typed checkpoint; compact binary slicing remains an
+         allocation-free `Bytes` view. The final durable list-back adapter and
+         its registered root are gone. A deterministic unsnoc schedule first
+         traverses an empty lazy suffix, blocks on the promised prefix,
+         collects and re-enters before and after assignment, and proves that
+         the completed suffix is never replayed. Existing list-pattern shape,
+         decomposition, delayed-failure, prefix-laziness, and promised-suffix
+         suites remain green, while exact root-publication, durable-owner,
+         raw-value, persistent-edge, checkpoint, and WHNF ledgers record the
+         boundary change.
+         The full parallel gate also exposed a separate stale net-WHNF route
+         losing its checkpoint after another route published the terminal
+         cache. A direct ordering fixture now terminalizes that stale route
+         through the winning cache instead of panicking; this is deterministic
+         coverage of the observed race rather than repetition-based evidence.
+       - **W6G.1f.3g.3e.2 — path and literal equality.** Reuse regional key-list
+         conversion and list-front/item work, preserving directional invalid
+         path policy, unsupported-literal diagnostics, and binary/list byte
+         comparison without replay.
+       - **W6G.1f.3g.3e.3 — dictionary predicates and extraction.** Move
+         is-dict, logical emptiness, required/optional recursive take, parent
+         frames, selected values, and remainder rebuilding as raw traced
+         state. Reuse regional semantic-undefined traversal and key lists.
+       - **W6G.1f.3g.3e.4 — effect and family closure.** Construct raw pattern
+         success/failure effects under caller access, remove the five durable
+         pattern owners plus the now-unused durable semantic-undefined owner,
+         force collection on the existing promised path/dictionary/list
+         schedules, and reconcile every exact inventory.
      - **W6G.1f.3g.3f — annotations.** Move annotation recognition and its
        pure, metadata, reflection, and diagnostic-context phases last. Return
        reflection scheduling only as a post-access boundary intent; never

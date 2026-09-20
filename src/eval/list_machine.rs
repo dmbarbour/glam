@@ -32,13 +32,6 @@ pub(crate) enum ListFrontPoll {
     Failed(RuntimeFailureRoot),
 }
 
-pub(crate) enum ListBackPoll {
-    Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
-    Pending(crate::evaluation::WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
 pub(crate) struct ListFrontMachine {
     checkpoint: DurableListFrontCheckpoint,
 }
@@ -98,33 +91,6 @@ pub(in crate::eval) enum RegionalListBackPoll {
 }
 
 enum DurableListFrontPoll {
-    Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
-    Boundary(RegionalBoundaryRequest),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-pub(crate) struct ListBackMachine {
-    checkpoint: DurableListBackCheckpoint,
-}
-
-enum DurableListBackCheckpoint {
-    Seed {
-        list: RuntimeValueRoot,
-        source_owner: Option<LazyId>,
-    },
-    Managed(ManagedListBackRoot),
-}
-
-struct ManagedListBackRoot {
-    root: Root<ManagedListBackCell>,
-}
-
-struct ManagedListBackCell {
-    state: Mutex<RegionalListBack>,
-}
-
-enum DurableListBackPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Boundary(RegionalBoundaryRequest),
     Yielded,
@@ -426,132 +392,6 @@ fn interpret_durable_list_front(
     }
 }
 
-impl ListBackMachine {
-    pub(crate) fn new(list: RuntimeValueRoot) -> Self {
-        Self {
-            checkpoint: DurableListBackCheckpoint::Seed {
-                list,
-                source_owner: None,
-            },
-        }
-    }
-
-    pub(crate) fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        _context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> ListBackPoll {
-        let result = poll_context.with_value_access(durable_context, |access| {
-            self.promote_in(&access);
-            let DurableListBackCheckpoint::Managed(root) = &self.checkpoint else {
-                unreachable!("list-back seed must promote under access")
-            };
-            root.poll_in(&access, step_budget)
-        });
-        interpret_durable_list_back(result, durable_context)
-    }
-
-    fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
-        let DurableListBackCheckpoint::Seed { list, source_owner } = &self.checkpoint else {
-            return;
-        };
-        let state = RegionalListBack::new_in(access, access.clone_root(list), *source_owner);
-        self.checkpoint =
-            DurableListBackCheckpoint::Managed(ManagedListBackRoot::new_in(access, state));
-    }
-}
-
-impl ManagedListBackRoot {
-    fn new_in(access: &EvaluationValueAccess<'_>, state: RegionalListBack) -> Self {
-        let edge = access
-            .values()
-            .allocator::<ManagedListBackCell>()
-            .expect("managed list-back representation must fit one collector run")
-            .alloc(ManagedListBackCell {
-                state: Mutex::new(state),
-            });
-        Self {
-            root: access.values().root(edge),
-        }
-    }
-
-    fn poll_in(
-        &self,
-        access: &EvaluationValueAccess<'_>,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> DurableListBackPoll {
-        assert!(
-            access.values().admits_root(&self.root),
-            "list-back checkpoint must share the evaluator value domain"
-        );
-        let owner = access.values().project_root(&self.root);
-        let cell = access.values().get(&self.root);
-        let mut state = match cell.state.lock() {
-            Ok(state) => state,
-            Err(_) => {
-                return DurableListBackPoll::Failed(access.values().root_runtime_failure(
-                    Arc::new(EvaluationFailure::message(
-                        "managed list-back state was poisoned by an earlier unwind",
-                    )),
-                ));
-            }
-        };
-        // SAFETY: the registered wrapper root keeps `owner` live in this
-        // exact access region. The cell mutex excludes another transition,
-        // and the same compile-exhaustive visitor reports every raw edge
-        // before and after mutation.
-        let result = unsafe {
-            access.values().with_managed_edge_state_transition(
-                &owner,
-                &mut *state,
-                RegionalListBack::trace_managed_edges,
-                RegionalListBack::trace_managed_edges,
-                |state| state.poll_in(access, step_budget),
-            )
-        };
-        match result {
-            RegionalListBackPoll::Ready(Some((init, item))) => DurableListBackPoll::Ready(Some((
-                access.values().root_runtime_value(init),
-                access.values().root_runtime_value(item),
-            ))),
-            RegionalListBackPoll::Ready(None) => DurableListBackPoll::Ready(None),
-            RegionalListBackPoll::Boundary(request) => DurableListBackPoll::Boundary(request),
-            RegionalListBackPoll::Yielded => DurableListBackPoll::Yielded,
-            RegionalListBackPoll::Failed(failure) => {
-                DurableListBackPoll::Failed(access.values().root_runtime_failure(failure))
-            }
-        }
-    }
-}
-
-fn interpret_durable_list_back(result: DurableListBackPoll, context: &EvalContext) -> ListBackPoll {
-    match result {
-        DurableListBackPoll::Ready(value) => ListBackPoll::Ready(value),
-        DurableListBackPoll::Boundary(request) => {
-            let poll = match request {
-                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-            };
-            match interpret_whnf_poll(poll, context) {
-                WhnfOwnerPoll::Pending(dependency) => ListBackPoll::Pending(dependency),
-                WhnfOwnerPoll::Yielded => ListBackPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => ListBackPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("lazy list chunk produced an external {boundary:?} boundary")
-                }
-                WhnfOwnerPoll::Ready(_) => {
-                    unreachable!("a semantic boundary cannot produce an immediate value")
-                }
-            }
-        }
-        DurableListBackPoll::Yielded => ListBackPoll::Yielded,
-        DurableListBackPoll::Failed(failure) => ListBackPoll::Failed(failure),
-    }
-}
-
 fn combine_regional_chunk_and_suffix(
     _access: &EvaluationValueAccess<'_>,
     chunk: Value,
@@ -624,36 +464,6 @@ unsafe impl ManagedFamily for ManagedListFrontCell {
     );
 }
 
-// SAFETY: the state visitor is compile-exhaustive over the current logical
-// list, deferred WHNF child, and exact prefix. Collection runs only after
-// mutator quiescence, so an unpoisoned busy mutex is an invariant failure.
-unsafe impl Trace for ManagedListBackCell {
-    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
-
-    fn trace(&self, visitor: &mut Visitor<'_>) {
-        let state = match self.state.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                panic!("managed list-back state must be quiescent during tracing")
-            }
-        };
-        state.trace_managed_edges(visitor);
-    }
-}
-
-// SAFETY: direct destruction releases only passive compatibility values,
-// regional WHNF state, and scalar identities. It invokes no runtime,
-// evaluator, scheduler, host, or diagnostic capability.
-unsafe impl ManagedFamily for ManagedListBackCell {
-    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-        "temporary managed list-back checkpoint",
-        "src/eval/list_machine.rs",
-        "no direct Drop implementation",
-        "regional list projection and WHNF state destroy passively",
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,22 +482,6 @@ mod tests {
         context: &EvalContext,
         allowance: usize,
     ) -> ListFrontPoll {
-        let poll = EvaluationPollContext::for_context(context);
-        poll.evaluate(context, |evaluator| {
-            machine.poll(
-                &poll,
-                evaluator,
-                context,
-                &mut crate::evaluation::EvaluationStepBudget::new(allowance),
-            )
-        })
-    }
-
-    fn poll_back(
-        machine: &mut ListBackMachine,
-        context: &EvalContext,
-        allowance: usize,
-    ) -> ListBackPoll {
         let poll = EvaluationPollContext::for_context(context);
         poll.evaluate(context, |evaluator| {
             machine.poll(
@@ -766,77 +560,6 @@ mod tests {
             Value::List(List::concat(
                 List::from_bytes(bytes::Bytes::from_static(&[3_u8])),
                 List::from_values(vec![Value::Number(4.into())]),
-            ))
-        );
-    }
-
-    #[test]
-    fn back_projection_uses_one_managed_root_and_survives_deferred_collection() {
-        let context = context();
-        let chunk = PromisedValue::new(context.values(), "regional list-back chunk");
-        let list = context.values().construct_runtime_value_root(|_| {
-            Value::List(List::concat(
-                List::from_values(vec![Value::Number(1.into())]),
-                List::from_thunk(ListThunk::Promised(chunk.clone())),
-            ))
-        });
-        let registrations = context.values().managed_root_registrations_for_test();
-        let mut machine = ListBackMachine::new(list);
-
-        assert!(matches!(
-            poll_back(&mut machine, &context, 1),
-            ListBackPoll::Yielded
-        ));
-        assert_eq!(
-            context.values().managed_root_registrations_for_test(),
-            registrations + 1,
-            "promotion must install one managed list-back owner"
-        );
-        context
-            .values()
-            .collect_managed_for_test()
-            .expect("the deferred chunk and prefix must remain traced after promotion");
-
-        assert!(matches!(
-            poll_back(&mut machine, &context, 1),
-            ListBackPoll::Pending(_)
-        ));
-        context
-            .values()
-            .collect_managed_for_test()
-            .expect("the exact promise wait must remain traced across collection");
-        crate::core::set_test_promise(
-            context.values(),
-            &chunk,
-            Value::Binary(bytes::Bytes::from_static(&[2_u8, 3_u8])),
-        )
-        .expect("the deferred binary chunk should accept its assignment");
-
-        let (init, item) = loop {
-            match poll_back(&mut machine, &context, 1) {
-                ListBackPoll::Ready(Some(result)) => break result,
-                ListBackPoll::Yielded => {
-                    context
-                        .values()
-                        .collect_managed_for_test()
-                        .expect("every yielded regional transition must retain its edges");
-                }
-                ListBackPoll::Pending(_) => {
-                    panic!("an assigned chunk must not return to a promise wait")
-                }
-                ListBackPoll::Ready(None) => panic!("the resumed list must not be empty"),
-                ListBackPoll::Failed(failure) => {
-                    panic!("the deferred binary chunk failed: {failure:?}")
-                }
-            }
-        };
-
-        assert_eq!(item.clone_core_for_test(), Value::Number(3.into()));
-        assert_eq!(
-            init.clone_core_for_test(),
-            Value::List(List::concat(
-                List::from_values(vec![Value::Number(1.into())]),
-                List::from_bytes(bytes::Bytes::from_static(&[2_u8])),
             ))
         );
     }

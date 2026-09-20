@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        823,
+        822,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -876,9 +876,15 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // keeping production traversal as raw traced checkpoint state.
     // W6G.1f.3g.3d adds one owning-lazy root for the forced text-lines
     // collection schedule; production transform state remains raw and traced.
+    // W6G.1f.3g.3e.1 removes the final durable list-back root carrier and its
+    // dedicated fixture. Pattern-list front/back progress is raw traced state
+    // beneath the existing builtin checkpoint; its forced schedule contributes
+    // one owning-lazy root without changing the aggregate test-root count.
+    // The full gate then exposed a stale net route racing terminal publication;
+    // its deterministic ordering fixture contributes one test-only lazy root.
     assert_eq!(
         occurrence_fingerprint(actual),
-        1_686_012_915_186_220_137,
+        4_687_336_487_735_347_365,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -923,9 +929,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 204),
+            ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 569),
+            ((SourceScope::Test, EdgeSurface::Typed), 571),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

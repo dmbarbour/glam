@@ -6496,7 +6496,17 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
 
 #[test]
 fn list_annotations_rebalance_and_flatten_lists() {
-    let deque = eval_closed_expr(&builtin2_expr(
+    let context = isolated_test_context();
+    let eval = |expression: TestExpr| {
+        let code = lower_test_function_code_in(context.values(), 0, expression);
+        let computation = Value::Lazy(LazyValue::from_net_computation(
+            context.values(),
+            NetValue::new(code.runtime().duplicate_for_test(context.values())),
+        ));
+        eval_value(&context, &computation)
+    };
+
+    let deque = eval(builtin2_expr(
         Builtin::Anno,
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("deque"),
@@ -6512,7 +6522,7 @@ fn list_annotations_rebalance_and_flatten_lists() {
     };
     assert_eq!(deque.len(), 6);
 
-    let binary = eval_closed_expr(&builtin2_expr(
+    let binary = eval(builtin2_expr(
         Builtin::Anno,
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("binary"),
@@ -6525,7 +6535,7 @@ fn list_annotations_rebalance_and_flatten_lists() {
     .expect("binary annotation should evaluate");
     assert_eq!(binary, Value::binary_from_text("Hi!"));
 
-    let array = eval_closed_expr(&builtin2_expr(
+    let array = eval(builtin2_expr(
         Builtin::Anno,
         TestExpr::Value(Value::Atom(crate::core::Atom::from_key(
             &Key::binary_from_text("array"),
@@ -6537,7 +6547,7 @@ fn list_annotations_rebalance_and_flatten_lists() {
         panic!("array annotation should produce a list");
     };
     assert_eq!(
-        list_to_value_items(&test_context(), &array).unwrap(),
+        list_to_value_items(&context, &array).unwrap(),
         vec![n(72), n(105)]
     );
 }

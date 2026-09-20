@@ -332,7 +332,9 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // W6G.1f.3g.3b removes the two comparison/tagged-payload root children.
     // W6G.1f.3g.3c removes the list-observation source root.
     // W6G.1f.3g.3d removes the map callable plus three transform source roots.
-    (CheckpointApi::FromRoot, 66),
+    // W6G.1f.3g.3e.1 replaces the rooted pattern-list source with regional
+    // source ownership beneath the managed builtin checkpoint.
+    (CheckpointApi::FromRoot, 65),
     (CheckpointApi::FromLazySource, 1),
     (CheckpointApi::FromApplicationCheckpoint, 4),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
@@ -343,10 +345,10 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::RuntimeId, 1),
     // Fully regional source scanning latches exact source ownership across
     // access, builtin, list, list-effect, and object child reducers.
-    (CheckpointApi::WithSourceOwner, 26),
+    (CheckpointApi::WithSourceOwner, 27),
 ];
 const EXPECTED_OCCURRENCES: usize = 105;
-const EXPECTED_FINGERPRINT: u64 = 13_206_258_480_922_714_474;
+const EXPECTED_FINGERPRINT: u64 = 15_192_683_850_915_996_468;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

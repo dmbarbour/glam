@@ -176,8 +176,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/list_machine.rs",
-        [2, 6],
-        "W6G.1f.3e.1 and W6G.1f.3g.1a expose regional logical-list front/back bridges while retaining the compatibility owners until parent-family cutover"
+        [1, 3],
+        "W6G.1f.3e.1 retains the regional logical-list front bridge while W6G.1f.3g.3e.1 removes the final durable back owner after pattern-list embedding"
     ),
     context_entry!(
         "src/eval/net.rs",
@@ -186,8 +186,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
-        [12, 5],
-        "W6D.5 resumable compiler-pattern observations"
+        [8, 4],
+        "W6D.5 resumable compiler-pattern observations; W6G.1f.3g.3e.1 regional list-pattern state"
     ),
     context_entry!(
         "src/eval/sequence.rs",

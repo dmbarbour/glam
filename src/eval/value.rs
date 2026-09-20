@@ -868,9 +868,13 @@ impl LazyTaskMachine {
         loop {
             let (transition, failure_context) = context.with_value_access(|access| {
                 let lazy = access.lazy_root(&self.lazy);
-                let checkpoint = lazy
-                    .checkpoint_snapshot()
-                    .expect("net-WHNF route must retain its managed checkpoint");
+                let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                    assert!(
+                        lazy.cached().is_some(),
+                        "a net-WHNF route may lose its checkpoint only to terminal publication"
+                    );
+                    return (Transition::Terminal, None);
+                };
                 if checkpoint.kind() != ManagedLazyCheckpointKindTag::NetWhnf {
                     return (Transition::Replaced(checkpoint.kind()), None);
                 }
@@ -2141,6 +2145,41 @@ mod ownership_tests {
             }
         };
         assert_eq!(completed.clone_core_for_test(), Value::Number(91.into()));
+    }
+
+    #[test]
+    fn stale_net_route_observes_terminal_cache_after_checkpoint_loss() {
+        let context = EvalContext::standalone();
+        let mut builder =
+            crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
+        let exposed = builder.data(Value::Number(0.into()));
+        let runtime = context
+            .values()
+            .instantiate_core_net(&builder.finish(exposed));
+        let source =
+            LazyValue::from_net_computation(context.values(), crate::core::NetValue::new(runtime));
+        let mut machine = LazyTaskMachine {
+            context: (*context).clone(),
+            lazy: source.root(context.values()),
+            work: LazyTaskWork::NetWhnfCheckpoint,
+        };
+        let result = crate::core::cache_test_lazy(
+            context.values(),
+            &source,
+            Ok(EvaluatedValue::try_from(Value::Number(97.into()))
+                .expect("a number is already in WHNF")),
+        );
+        assert!(result.is_ok(), "the fixture lazy should cache a number");
+
+        crate::eval::with_direct_evaluator(&context, |evaluator| {
+            let EvaluationMachinePoll::Complete(value) = machine.poll_net_whnf_checkpoint(
+                evaluator,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            ) else {
+                panic!("the stale net route must observe the winning terminal cache")
+            };
+            assert_eq!(value.clone_core_for_test(), Value::Number(97.into()));
+        });
     }
 }
 

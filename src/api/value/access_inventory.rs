@@ -145,10 +145,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/eval/list_machine.rs",
         0,
+        1,
         2,
-        4,
-        "forced-collection fixtures plus shared managed front/back list reconstruction",
-        "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge"
+        "forced-collection fixture plus shared managed front-list reconstruction; back traversal is regional beneath builtin checkpoints",
+        "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge / W6G.1f.3g.3e.1 pattern-list embedding"
     ),
     entry!(
         "src/eval/object_builtin_machine.rs",
@@ -481,7 +481,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/effect_machine.rs::root_effect_map"
                 | "src/eval/effect_machine.rs::root_effect_map_continuation"
                 | "src/eval/effect_machine.rs::root_effect_map_sequence"
-                | "src/eval/list_machine.rs::impl ManagedListBackRoot::poll_in"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
                 | "src/eval/object_builtin_machine.rs::optional_spec_member"
                 | "src/eval/object_builtin_machine.rs::finish_dict_defs"
@@ -768,11 +767,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/effect_machine.rs::root_effect_map#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_map_continuation#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_map_sequence#1|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ManagedListBackRoot::poll_in#1|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ManagedListBackRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::tests::back_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
     "src/eval/object_builtin_machine.rs::finish_dict_defs#1|surface=access-publication|scope=production",
