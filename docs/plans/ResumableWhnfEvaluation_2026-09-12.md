@@ -5974,10 +5974,21 @@ for it:
        A deterministic two-operand fixture destroys the first route, collects
        before and after the second-operand promise boundary, and proves the
        completed first operand is demanded once.
-     - **W6G.1f.3g.2b — assertion, conditional, and provenance.** Move the
-       remaining direct value-demand families, reusing regional list-front
-       state for conditional result selection and preserving diagnostic
-       context.
+     - **W6G.1f.3g.2b — Complete (2026-09-20): assertion, conditional, and
+       provenance.** Move the remaining direct value-demand families, reusing
+       regional list-front state for conditional result selection and
+       preserving diagnostic context. Forced assertion and origin fixtures
+       collect on both sides of their exact promise dependency; the
+       conditional fixture additionally collects while a deferred list-front
+       chunk is suspended and proves the result-list source runs once.
+       - **W6G.1f.3g.2b.1 — Complete (2026-09-20): assertion and provenance.**
+         Move the direct scalar demand families first, retaining assertion
+         phase/context and origin failure enrichment beneath the typed
+         checkpoint.
+       - **W6G.1f.3g.2b.2 — Complete (2026-09-20): conditional.** Reuse
+         `RegionalListFront` after the result-list shell is demanded,
+         preserving deferred-chunk progress and exhaustion diagnostics
+         without a compatibility root projection.
      - **W6G.1f.3g.2c — net operations.** Separate immediate construction from
        arity/net demand while retaining net/application semantics and failure
        context beneath the typed checkpoint.

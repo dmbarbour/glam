@@ -9,8 +9,8 @@ use std::sync::Arc;
 use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyId, LazyValue,
-    Value, trace_compatibility_value_managed_edges,
+    Atom, Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyId,
+    LazyValue, Value, keys, trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
@@ -23,7 +23,7 @@ use super::annotation_machine::AnnotationBuiltinMachine;
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
 use super::dict_machine::DictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
 use super::object_builtin_machine::ObjectBuiltinMachine;
@@ -62,7 +62,32 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 /// Compile-exhaustive regional state for builtin families migrated beneath
 /// the lazy-owned checkpoint.
 pub(in crate::eval) enum RegionalBuiltinMachine {
+    Assertion(RegionalAssertionMachine),
+    Conditional(RegionalConditionalMachine),
     Numeric(RegionalNumericMachine),
+    Provenance(RegionalProvenanceMachine),
+}
+
+enum RegionalAssertionPhase {
+    Value,
+    DiagnosticContext { received: &'static str },
+}
+
+pub(in crate::eval) struct RegionalAssertionMachine {
+    diagnostic_context: Value,
+    value: Value,
+    result: Value,
+    phase: RegionalAssertionPhase,
+    demand: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
+}
+
+pub(in crate::eval) struct RegionalConditionalMachine {
+    builtin: Builtin,
+    results: Option<Value>,
+    demand: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    source_owner: LazyId,
 }
 
 pub(in crate::eval) struct RegionalNumericMachine {
@@ -74,16 +99,24 @@ pub(in crate::eval) struct RegionalNumericMachine {
     source_owner: LazyId,
 }
 
+pub(in crate::eval) struct RegionalProvenanceMachine {
+    demand: RegionalWhnfWork,
+}
+
 impl RegionalBuiltinMachine {
     pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
-            Builtin::Add
+            Builtin::AssertUnit
+                | Builtin::IfResult
+                | Builtin::MatchResult
+                | Builtin::Add
                 | Builtin::Subtract
                 | Builtin::Multiply
                 | Builtin::Divide
                 | Builtin::Floor
                 | Builtin::Mod
+                | Builtin::InspectOrigin
         )
     }
 
@@ -95,17 +128,56 @@ impl RegionalBuiltinMachine {
     ) -> Self {
         assert!(Self::supports(builtin));
         assert_eq!(arguments.len(), builtin.arity());
-        Self::Numeric(RegionalNumericMachine {
-            builtin,
-            arguments: arguments
-                .iter()
-                .map(|value| access.values().duplicate_value(value))
-                .collect(),
-            next: 0,
-            demand: None,
-            numbers: Vec::with_capacity(arguments.len()),
-            source_owner,
-        })
+        match builtin {
+            Builtin::AssertUnit => {
+                let [diagnostic_context, value, result] = arguments else {
+                    unreachable!("unit assertion must retain three operands")
+                };
+                Self::Assertion(RegionalAssertionMachine {
+                    diagnostic_context: access.values().duplicate_value(diagnostic_context),
+                    value: access.values().duplicate_value(value),
+                    result: access.values().duplicate_value(result),
+                    phase: RegionalAssertionPhase::Value,
+                    demand: None,
+                    source_owner,
+                })
+            }
+            Builtin::InspectOrigin => {
+                let [origin] = arguments else {
+                    unreachable!("origin inspection must retain one operand")
+                };
+                Self::Provenance(RegionalProvenanceMachine {
+                    demand: RegionalWhnfWork::from_focus(
+                        access,
+                        access.values().duplicate_value(origin),
+                    )
+                    .with_source_owner(source_owner),
+                })
+            }
+            Builtin::IfResult | Builtin::MatchResult => {
+                let [results] = arguments else {
+                    unreachable!("a conditional source must retain one result list")
+                };
+                Self::Conditional(RegionalConditionalMachine {
+                    builtin,
+                    results: Some(access.values().duplicate_value(results)),
+                    demand: None,
+                    front: None,
+                    source_owner,
+                })
+            }
+            _ => Self::Numeric(RegionalNumericMachine {
+                builtin,
+                arguments: arguments
+                    .iter()
+                    .map(|value| access.values().duplicate_value(value))
+                    .collect(),
+                next: 0,
+                demand: None,
+                numbers: Vec::with_capacity(arguments.len()),
+                source_owner,
+            }),
+        }
     }
 
     pub(in crate::eval) fn poll_in(
@@ -114,13 +186,173 @@ impl RegionalBuiltinMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         match self {
+            Self::Assertion(machine) => machine.poll_in(access, step_budget),
+            Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
+            Self::Provenance(machine) => machine.poll_in(access, step_budget),
         }
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match self {
+            Self::Assertion(machine) => machine.trace_managed_edges(visitor),
+            Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
+            Self::Provenance(machine) => machine.trace_managed_edges(visitor),
+        }
+    }
+}
+
+impl RegionalConditionalMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if self.front.is_none() {
+            let demand = self.demand.get_or_insert_with(|| {
+                RegionalWhnfWork::from_focus(
+                    access,
+                    access.values().duplicate_value(
+                        self.results
+                            .as_ref()
+                            .expect("conditional result-list demand must retain its operand"),
+                    ),
+                )
+                .with_source_owner(self.source_owner)
+            });
+            let results =
+                match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
+            let results = EvaluatedValue::try_from(results)
+                .expect("conditional result-list demand must reach WHNF")
+                .into_value();
+            if !matches!(results, Value::List(_)) {
+                return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(format!(
+                    "{} search did not produce a result list",
+                    conditional_name(self.builtin)
+                ))));
+            }
+            self.results = None;
+            self.demand = None;
+            self.front = Some(RegionalListFront::new_in(
+                access,
+                results,
+                Some(self.source_owner),
+            ));
+        }
+
+        match self
+            .front
+            .as_mut()
+            .expect("conditional list-front work must be installed")
+            .poll_in(access, step_budget)
+        {
+            RegionalListFrontPoll::Ready(Some((result, _tail))) => {
+                RegionalBuiltinPoll::Ready(result)
+            }
+            RegionalListFrontPoll::Ready(None) => RegionalBuiltinPoll::Failed(Arc::new(
+                EvaluationFailure::message(match self.builtin {
+                    Builtin::IfResult => "if search exhausted despite its required `else` branch",
+                    Builtin::MatchResult => {
+                        "match search exhausted despite its compiler-provided fallback"
+                    }
+                    _ => unreachable!(),
+                }),
+            )),
+            RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(results) = &self.results {
+            trace_compatibility_value_managed_edges(results, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+    }
+}
+
+impl RegionalAssertionMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        let argument = match self.phase {
+            RegionalAssertionPhase::Value => &self.value,
+            RegionalAssertionPhase::DiagnosticContext { .. } => &self.diagnostic_context,
+        };
+        let demand = self.demand.get_or_insert_with(|| {
+            RegionalWhnfWork::from_focus(access, access.values().duplicate_value(argument))
+                .with_source_owner(self.source_owner)
+        });
+        let value =
+            match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                RegionalWhnfStatus::Ready(value) => value,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+        self.demand = None;
+        let value = EvaluatedValue::try_from(value)
+            .expect("assertion operand demand must reach WHNF")
+            .into_value();
+
+        match self.phase {
+            RegionalAssertionPhase::Value => {
+                let is_unit = matches!(
+                    &value,
+                    Value::Atom(atom) if *atom == Atom::from_key(&keys::UNIT)
+                );
+                if is_unit {
+                    return RegionalBuiltinPoll::Ready(
+                        access.values().duplicate_value(&self.result),
+                    );
+                }
+                self.phase = RegionalAssertionPhase::DiagnosticContext {
+                    received: value.diagnostic_kind_name(),
+                };
+                RegionalBuiltinPoll::Yielded
+            }
+            RegionalAssertionPhase::DiagnosticContext { received } => {
+                let Value::Binary(diagnostic_context) = value else {
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                        "unit assertion diagnostic context must be text",
+                    )));
+                };
+                RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(format!(
+                    "{}: unit expected, received {received}",
+                    String::from_utf8_lossy(&diagnostic_context)
+                ))))
+            }
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.diagnostic_context, visitor);
+        trace_compatibility_value_managed_edges(&self.value, visitor);
+        trace_compatibility_value_managed_edges(&self.result, visitor);
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
         }
     }
 }
@@ -181,10 +413,54 @@ impl RegionalNumericMachine {
     }
 }
 
+impl RegionalProvenanceMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        let origin = match drive_regional_in_place(
+            access,
+            &mut self.demand,
+            step_budget,
+            reduce_semantic_shell,
+        ) {
+            RegionalWhnfStatus::Ready(value) => value,
+            RegionalWhnfStatus::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
+            }
+            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => {
+                let failure = EvaluationHalt::failure(failure).with_context(
+                    access.values(),
+                    evaluation_context_frame_in(access.values(), "compilation_origin"),
+                );
+                return RegionalBuiltinPoll::Failed(failure.into_permanent_failure());
+            }
+        };
+        let origin = EvaluatedValue::try_from(origin)
+            .expect("origin demand must reach WHNF")
+            .into_value();
+        let Value::Opaque(origin) = origin else {
+            return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                "origin inspection requires an opaque compilation origin",
+            )));
+        };
+        match crate::diagnostic::inspect_compilation_origin(access.values().values(), &origin) {
+            Some(origin) => RegionalBuiltinPoll::Ready(origin),
+            None => RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                "origin inspection requires an opaque compilation origin",
+            ))),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.demand.trace_managed_edges(visitor);
+    }
+}
+
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
-    Assertion(AssertionBuiltinMachine),
-    Conditional(ConditionalBuiltinMachine),
     Comparison(ComparisonBuiltinMachine),
     Dictionary(DictBuiltinMachine),
     Effect(EffectBuiltinMachine),
@@ -200,7 +476,6 @@ pub(crate) enum BuiltinTaskMachine {
     PatternDictPredicate(PatternDictPredicateMachine),
     PatternDictTake(Box<PatternDictTakeMachine>),
     PatternEqual(Box<PatternEqualMachine>),
-    Provenance(ProvenanceBuiltinMachine),
     Strategy(StrategyBuiltinMachine),
 }
 
@@ -285,17 +560,12 @@ impl BuiltinTaskMachine {
             builtin if EffectBuiltinMachine::supports(builtin) => {
                 Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
             }
-            Builtin::AssertUnit => Self::Assertion(AssertionBuiltinMachine::new(arguments)),
-            Builtin::IfResult | Builtin::MatchResult => {
-                Self::Conditional(ConditionalBuiltinMachine::new(builtin, arguments))
-            }
             Builtin::Greater
             | Builtin::GreaterEqual
             | Builtin::Equal
             | Builtin::NotEqual
             | Builtin::LessEqual
             | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
-            Builtin::InspectOrigin => Self::Provenance(ProvenanceBuiltinMachine::new(arguments)),
             Builtin::DictSingleton
             | Builtin::DictUnion
             | Builtin::DictUpdate
@@ -350,12 +620,6 @@ impl BuiltinTaskMachine {
             Self::Annotation(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
-            Self::Assertion(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::Conditional(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
             Self::Comparison(machine) => {
                 match machine.poll(poll_context, context, durable_context, step_budget) {
                     ComparisonBuiltinPoll::Ready(value) => BuiltinTaskPoll::Ready(value),
@@ -404,9 +668,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::PatternEqual(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::Provenance(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Strategy(machine) => {
@@ -594,217 +855,6 @@ impl StrategyBuiltinMachine {
             StrategyDemandPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
             StrategyDemandPoll::Yielded => BuiltinTaskPoll::Yielded,
             StrategyDemandPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
-        }
-    }
-}
-
-pub(crate) struct ProvenanceBuiltinMachine {
-    demand: WhnfComputation,
-}
-
-impl ProvenanceBuiltinMachine {
-    fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [origin]: [RuntimeValueRoot; 1] = arguments
-            .try_into()
-            .expect("origin inspection retains one operand");
-        Self {
-            demand: WhnfComputation::from_root(origin),
-        }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        let origin = match poll_demand(&mut self.demand, poll_context, durable_context, step_budget)
-        {
-            DemandPoll::Ready(value) => value,
-            DemandPoll::Failed(failure) => {
-                let failure = context.with_value_access(|access| {
-                    EvaluationHalt::failure(failure.into_failure()).with_context(
-                        access.values(),
-                        super::value::evaluation_context_frame_in(
-                            access.values(),
-                            "compilation_origin",
-                        ),
-                    )
-                });
-                return BuiltinTaskPoll::Failed(
-                    context.root_failure(failure.into_permanent_failure()),
-                );
-            }
-            other => return other.into_builtin_poll(),
-        };
-        let origin = EvaluatedValue::try_from(context.project_root(&origin))
-            .expect("origin demand must reach WHNF")
-            .into_value();
-        let Value::Opaque(origin) = origin else {
-            return permanent_failure(
-                context,
-                "origin inspection requires an opaque compilation origin",
-            );
-        };
-        match crate::diagnostic::inspect_compilation_origin(durable_context.values(), &origin) {
-            Some(origin) => BuiltinTaskPoll::Ready(context.root_value(origin)),
-            None => permanent_failure(
-                context,
-                "origin inspection requires an opaque compilation origin",
-            ),
-        }
-    }
-}
-
-enum AssertionPhase {
-    Value,
-    DiagnosticContext { received: &'static str },
-}
-
-pub(crate) struct AssertionBuiltinMachine {
-    arguments: Vec<RuntimeValueRoot>,
-    phase: AssertionPhase,
-    demand: Option<WhnfComputation>,
-}
-
-impl AssertionBuiltinMachine {
-    fn new(arguments: Vec<RuntimeValueRoot>) -> Self {
-        Self {
-            arguments,
-            phase: AssertionPhase::Value,
-            demand: None,
-        }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        let argument = match self.phase {
-            AssertionPhase::Value => &self.arguments[1],
-            AssertionPhase::DiagnosticContext { .. } => &self.arguments[0],
-        };
-        let demand = self
-            .demand
-            .get_or_insert_with(|| WhnfComputation::from_root(argument.clone()));
-        let value = match poll_demand(demand, poll_context, durable_context, step_budget) {
-            DemandPoll::Ready(value) => value,
-            other => return other.into_builtin_poll(),
-        };
-        self.demand = None;
-        let value = EvaluatedValue::try_from(context.project_root(&value))
-            .expect("assertion operand demand must reach WHNF")
-            .into_value();
-
-        match self.phase {
-            AssertionPhase::Value => {
-                let is_unit = context.with_value_access(|access| {
-                    access
-                        .values()
-                        .same_representation(&value, &durable_context.values().unit())
-                });
-                if is_unit {
-                    return BuiltinTaskPoll::Ready(self.arguments[2].clone());
-                }
-                self.phase = AssertionPhase::DiagnosticContext {
-                    received: value.diagnostic_kind_name(),
-                };
-                BuiltinTaskPoll::Yielded
-            }
-            AssertionPhase::DiagnosticContext { received } => {
-                let Value::Binary(diagnostic_context) = value else {
-                    return permanent_failure(
-                        context,
-                        "unit assertion diagnostic context must be text",
-                    );
-                };
-                permanent_failure(
-                    context,
-                    format!(
-                        "{}: unit expected, received {received}",
-                        String::from_utf8_lossy(&diagnostic_context)
-                    ),
-                )
-            }
-        }
-    }
-}
-
-pub(crate) struct ConditionalBuiltinMachine {
-    builtin: Builtin,
-    results: RuntimeValueRoot,
-    demand: Option<WhnfComputation>,
-    front: Option<ListFrontMachine>,
-}
-
-impl ConditionalBuiltinMachine {
-    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [results]: [RuntimeValueRoot; 1] = arguments
-            .try_into()
-            .expect("a conditional source retains one result list");
-        Self {
-            builtin,
-            results,
-            demand: None,
-            front: None,
-        }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        if self.front.is_none() {
-            let demand = self
-                .demand
-                .get_or_insert_with(|| WhnfComputation::from_root(self.results.clone()));
-            let results = match poll_demand(demand, poll_context, durable_context, step_budget) {
-                DemandPoll::Ready(value) => value,
-                other => return other.into_builtin_poll(),
-            };
-            let value = EvaluatedValue::try_from(context.project_root(&results))
-                .expect("conditional result-list demand must reach WHNF")
-                .into_value();
-            if !matches!(value, Value::List(_)) {
-                return permanent_failure(
-                    context,
-                    format!(
-                        "{} search did not produce a result list",
-                        conditional_name(self.builtin)
-                    ),
-                );
-            }
-            self.demand = None;
-            self.front = Some(ListFrontMachine::unowned(results));
-        }
-
-        match self
-            .front
-            .as_mut()
-            .expect("conditional list-front owner must be installed")
-            .poll(poll_context, context, durable_context, step_budget)
-        {
-            ListFrontPoll::Ready(Some((result, _tail))) => BuiltinTaskPoll::Ready(result),
-            ListFrontPoll::Ready(None) => permanent_failure(
-                context,
-                match self.builtin {
-                    Builtin::IfResult => "if search exhausted despite its required `else` branch",
-                    Builtin::MatchResult => {
-                        "match search exhausted despite its compiler-provided fallback"
-                    }
-                    _ => unreachable!(),
-                },
-            ),
-            ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-            ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
         }
     }
 }
@@ -999,10 +1049,21 @@ mod tests {
                 Value::Number(99.into()),
             ],
         );
+        let Value::Lazy(assertion_lazy) = &assertion else {
+            unreachable!("a saturated assertion builtin must remain lazy")
+        };
+        let assertion_root = assertion_lazy.root(context.values());
 
         let blocked = crate::eval::eval_value(&context, &assertion)
             .expect_err("assertion failure should suspend on its diagnostic context");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        assert_eq!(value_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assertion checkpoint must survive route loss");
+        crate::eval::eval_value(&context, &assertion)
+            .expect_err("a later route must resume the diagnostic-context dependency");
         assert_eq!(value_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1011,6 +1072,10 @@ mod tests {
             Value::binary_from_text("definition foo"),
         )
         .expect("the diagnostic context should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned assertion checkpoint must retain its diagnostic phase");
         assert_eq!(
             crate::eval::eval_value(&context, &assertion)
                 .expect_err("the resumed assertion must report its failure")
@@ -1018,6 +1083,7 @@ mod tests {
             "definition foo: unit expected, received Number"
         );
         assert_eq!(value_demands.load(Ordering::Relaxed), 1);
+        drop(assertion_root);
     }
 
     #[test]
@@ -1065,6 +1131,58 @@ mod tests {
     }
 
     #[test]
+    fn conditional_machine_retains_deferred_front_without_replaying_result_list() {
+        let context = context();
+        let result_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&result_demands);
+        let front = PromisedValue::new(context.values(), "conditional deferred front");
+        let deferred_front = front.clone();
+        let results = Value::semantic_thunk(context.values(), "conditional results", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::List(crate::core::List::from_thunk(
+                ListThunk::Promised(deferred_front.clone()),
+            )))
+        });
+        let selection = Value::builtin_call(context.values(), Builtin::IfResult, vec![results]);
+        let Value::Lazy(selection_lazy) = &selection else {
+            unreachable!("a saturated conditional builtin must remain lazy")
+        };
+        let selection_root = selection_lazy.root(context.values());
+
+        let blocked = crate::eval::eval_value(&context, &selection)
+            .expect_err("the deferred list front must suspend selection");
+        assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        assert_eq!(result_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the conditional checkpoint must trace its deferred list-front work");
+        crate::eval::eval_value(&context, &selection)
+            .expect_err("a later route must resume the exact deferred front");
+        assert_eq!(result_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &front,
+            Value::List(crate::core::List::from_values(vec![Value::Number(
+                42.into(),
+            )])),
+        )
+        .expect("the deferred front should accept its result list");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned front must remain live beneath the checkpoint");
+        assert_eq!(
+            crate::eval::eval_value(&context, &selection)
+                .expect("conditional selection must resume"),
+            Value::Number(42.into())
+        );
+        assert_eq!(result_demands.load(Ordering::Relaxed), 1);
+        drop(selection_root);
+    }
+
+    #[test]
     fn provenance_machine_suspends_then_preserves_its_demand_context() {
         let context = context();
         let origin = PromisedValue::new(context.values(), "origin operand");
@@ -1073,16 +1191,30 @@ mod tests {
             Builtin::InspectOrigin,
             vec![Value::Promised(origin.clone())],
         );
+        let Value::Lazy(inspection_lazy) = &inspection else {
+            unreachable!("a saturated origin builtin must remain lazy")
+        };
+        let inspection_root = inspection_lazy.root(context.values());
 
         let blocked = crate::eval::eval_value(&context, &inspection)
             .expect_err("unassigned origin demand must remain resumable");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the provenance checkpoint must survive route loss");
+        crate::eval::eval_value(&context, &inspection)
+            .expect_err("a later route must resume the exact origin dependency");
 
         let failed = Value::semantic_thunk(context.values(), "failed origin", |_| {
             Err(EvaluationHalt::new("origin production failed"))
         });
         crate::core::set_test_promise(context.values(), &origin, failed)
             .expect("the origin operand should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the provenance checkpoint must retain its assigned origin");
         let failure = crate::eval::eval_value(&context, &inspection)
             .expect_err("origin demand failure must propagate")
             .into_permanent_failure();
@@ -1093,6 +1225,7 @@ mod tests {
                 "compilation_origin"
             )]
         );
+        drop(inspection_root);
     }
 
     #[test]

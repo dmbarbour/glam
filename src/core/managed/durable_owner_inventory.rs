@@ -510,7 +510,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "raw builtin arguments, completed scalar prefixes, and regional WHNF child state behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
         CompatibilityPayload,
-        "W6G.1f.3g.2a introduces the numeric arm and forces route loss plus collection at its exact second-operand dependency"
+        "W6G.1f.3g.2a-.2b introduce numeric, assertion, provenance, and conditional arms; forced fixtures collect across their exact dependencies, diagnostic phase, and deferred list-front state"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -976,10 +976,13 @@ fn is_production_source(relative: &Path) -> bool {
 // regional family. The concrete cell contributes one typed edge; the regional
 // state contributes two raw values and one raw failure while retiring one
 // registered-root field.
+// W6G.1f.3g.2b moves assertion, provenance, and conditional state into the
+// same cell. Four additional raw value fields replace two registered-root
+// declarations; child WHNF and list-front state remain nested regional owners.
 const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([166, 242, 5, 25, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_563_008_602_039_060_376;
+    DeclarationSignals::new([170, 240, 5, 25, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 408_261_840_549_648_810;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

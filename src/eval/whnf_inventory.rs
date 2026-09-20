@@ -670,8 +670,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // the census while one obsolete recursive helper disappears.
 // W6G.1f.3g.2a replaces the rooted numeric operand helper with one explicit
 // regional operand loop beneath the managed builtin checkpoint.
-const EXPECTED_OCCURRENCES: usize = 195;
-const EXPECTED_FINGERPRINT: u64 = 13_617_254_150_348_895_420;
+// W6G.1f.3g.2b replaces three rooted assertion, provenance, and conditional
+// poll helpers with regional state transitions beneath that checkpoint.
+const EXPECTED_OCCURRENCES: usize = 192;
+const EXPECTED_FINGERPRINT: u64 = 10_619_655_389_274_924_729;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -684,12 +686,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 70),
+    (Signal::StructuralRecursion, 67),
     (Signal::UserSizedLoop, 58),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 114),
+    (WorkShape::DemandThenInspect, 111),
     (WorkShape::OrderedOperands, 7),
     (WorkShape::CollectionWalk, 11),
     (WorkShape::KeyConversion, 2),

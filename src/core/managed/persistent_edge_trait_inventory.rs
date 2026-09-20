@@ -859,9 +859,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // allocation, and trace arm while numeric sources stop projecting one
     // registered operand root. The forced route-loss fixture contributes one
     // test-only root for the owning lazy.
+    // W6G.1f.3g.2b retires three production registered-root projections for
+    // assertion, provenance, and conditional work. Their forced fixtures add
+    // three test-only owning-lazy roots; raw progress remains traced beneath
+    // the existing typed checkpoint edge.
     assert_eq!(
         occurrence_fingerprint(actual),
-        2_226_218_680_889_876_810,
+        3_542_973_783_164_843_309,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -906,9 +910,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 207),
+            ((SourceScope::Production, EdgeSurface::Typed), 204),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 559),
+            ((SourceScope::Test, EdgeSurface::Typed), 562),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
