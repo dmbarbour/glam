@@ -161,8 +161,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/builtin_machine.rs",
-        [4, 4],
-        "W6C.2-W6C.6 and W6F.5 durable strategy and net-builtin owners; W6G.1f.3g.2a-.2b move numeric, assertion, provenance, and conditional state beneath caller-supplied regional access"
+        [2, 2],
+        "W6C.2-W6C.6 and W6F.5 retain the durable strategy owner; W6G.1f.3g.2a-.2c move numeric, assertion, provenance, conditional, and net state beneath caller-supplied regional access"
     ),
     context_entry!(
         "src/eval/comparison_machine.rs",

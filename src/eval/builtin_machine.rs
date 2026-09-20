@@ -13,8 +13,7 @@ use crate::core::{
     LazyValue, Value, keys, trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
-    WorkDependency, poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WorkDependency,
 };
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -35,8 +34,8 @@ use super::pattern_machine::{
 use super::strategy_machine::{StrategyDemandMachine, StrategyDemandPoll};
 use super::value::{evaluation_context_frame_in, index_from_evaluated, number_from_evaluated};
 use super::whnf::{
-    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation,
-    drive_regional_in_place, reduce_semantic_shell,
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
+    reduce_semantic_shell,
 };
 
 pub(crate) enum BuiltinTaskPoll {
@@ -65,6 +64,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
     Numeric(RegionalNumericMachine),
+    Net(RegionalNetMachine),
     Provenance(RegionalProvenanceMachine),
 }
 
@@ -99,6 +99,17 @@ pub(in crate::eval) struct RegionalNumericMachine {
     source_owner: LazyId,
 }
 
+enum RegionalNetPhase {
+    Construction { effect: Value },
+    Arity { arity: RegionalWhnfWork, net: Value },
+    Net { arity: usize, net: RegionalWhnfWork },
+}
+
+pub(in crate::eval) struct RegionalNetMachine {
+    phase: RegionalNetPhase,
+    source_owner: LazyId,
+}
+
 pub(in crate::eval) struct RegionalProvenanceMachine {
     demand: RegionalWhnfWork,
 }
@@ -117,6 +128,8 @@ impl RegionalBuiltinMachine {
                 | Builtin::Floor
                 | Builtin::Mod
                 | Builtin::InspectOrigin
+                | Builtin::InteractionNet
+                | Builtin::NetArity
         )
     }
 
@@ -166,6 +179,33 @@ impl RegionalBuiltinMachine {
                     source_owner,
                 })
             }
+            Builtin::InteractionNet => {
+                let [effect] = arguments else {
+                    unreachable!("interaction-net construction must retain one effect")
+                };
+                Self::Net(RegionalNetMachine {
+                    phase: RegionalNetPhase::Construction {
+                        effect: access.values().duplicate_value(effect),
+                    },
+                    source_owner,
+                })
+            }
+            Builtin::NetArity => {
+                let [arity, net] = arguments else {
+                    unreachable!("net arity must retain its arity and net operands")
+                };
+                Self::Net(RegionalNetMachine {
+                    phase: RegionalNetPhase::Arity {
+                        arity: RegionalWhnfWork::from_focus(
+                            access,
+                            access.values().duplicate_value(arity),
+                        )
+                        .with_source_owner(source_owner),
+                        net: access.values().duplicate_value(net),
+                    },
+                    source_owner,
+                })
+            }
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -189,6 +229,7 @@ impl RegionalBuiltinMachine {
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
+            Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
         }
     }
@@ -198,6 +239,7 @@ impl RegionalBuiltinMachine {
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
+            Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
         }
     }
@@ -413,6 +455,103 @@ impl RegionalNumericMachine {
     }
 }
 
+impl RegionalNetMachine {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        match &mut self.phase {
+            RegionalNetPhase::Construction { effect } => {
+                RegionalBuiltinPoll::Ready(Value::Lazy(LazyValue::from_net_construction_in(
+                    access.values(),
+                    access.values().duplicate_value(effect),
+                )))
+            }
+            RegionalNetPhase::Arity { arity, net } => {
+                let arity = match drive_regional_in_place(
+                    access,
+                    arity,
+                    step_budget,
+                    reduce_semantic_shell,
+                ) {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        let failure = EvaluationHalt::failure(failure).with_context(
+                            access.values(),
+                            evaluation_context_frame_in(access.values(), "net_arity"),
+                        );
+                        return RegionalBuiltinPoll::Failed(failure.into_permanent_failure());
+                    }
+                };
+                let arity = match index_from_evaluated(
+                    EvaluatedValue::try_from(arity).expect("net arity demand must reach WHNF"),
+                    "net_arity",
+                ) {
+                    Ok(arity) => arity,
+                    Err(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure.into_permanent_failure());
+                    }
+                };
+                self.phase = RegionalNetPhase::Net {
+                    arity,
+                    net: RegionalWhnfWork::from_focus(access, access.values().duplicate_value(net))
+                        .with_source_owner(self.source_owner),
+                };
+                RegionalBuiltinPoll::Yielded
+            }
+            RegionalNetPhase::Net { arity, net } => {
+                let net = match drive_regional_in_place(
+                    access,
+                    net,
+                    step_budget,
+                    reduce_semantic_shell,
+                ) {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
+                let net = EvaluatedValue::try_from(net)
+                    .expect("net operand demand must reach WHNF")
+                    .into_value();
+                let Value::Net(net) = net else {
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                        "net_arity builtin requires an interaction-net value",
+                    )));
+                };
+                let value = if *arity == 0 {
+                    Value::Lazy(LazyValue::from_net_computation_in(access.values(), net))
+                } else {
+                    Value::Function(FunctionValue::new(net, *arity))
+                };
+                RegionalBuiltinPoll::Ready(value)
+            }
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match &self.phase {
+            RegionalNetPhase::Construction { effect } => {
+                trace_compatibility_value_managed_edges(effect, visitor);
+            }
+            RegionalNetPhase::Arity { arity, net } => {
+                arity.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(net, visitor);
+            }
+            RegionalNetPhase::Net { net, .. } => net.trace_managed_edges(visitor),
+        }
+    }
+}
+
 impl RegionalProvenanceMachine {
     fn poll_in(
         &mut self,
@@ -468,7 +607,6 @@ pub(crate) enum BuiltinTaskMachine {
     ListMap(ListMapMachine),
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
-    Net(NetBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
     PatternList(PatternListMachine),
@@ -578,9 +716,6 @@ impl BuiltinTaskMachine {
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
             Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
-            Builtin::InteractionNet | Builtin::NetArity => {
-                Self::Net(NetBuiltinMachine::new(builtin, arguments))
-            }
             builtin if ObjectBuiltinMachine::supports(builtin) => {
                 Self::Object(Box::new(ObjectBuiltinMachine::new(builtin, arguments)))
             }
@@ -648,7 +783,6 @@ impl BuiltinTaskMachine {
             Self::TextLines(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
-            Self::Net(machine) => machine.poll(poll_context, context, durable_context, step_budget),
             Self::Object(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
@@ -672,129 +806,6 @@ impl BuiltinTaskMachine {
             }
             Self::Strategy(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
-            }
-        }
-    }
-}
-
-enum NetBuiltinPhase {
-    Construction {
-        effect: RuntimeValueRoot,
-    },
-    Arity {
-        arity: WhnfComputation,
-        net: RuntimeValueRoot,
-    },
-    Net {
-        arity: usize,
-        net: WhnfComputation,
-    },
-}
-
-pub(crate) struct NetBuiltinMachine {
-    phase: NetBuiltinPhase,
-}
-
-impl NetBuiltinMachine {
-    fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let phase = match builtin {
-            Builtin::InteractionNet => {
-                let [effect]: [RuntimeValueRoot; 1] = arguments
-                    .try_into()
-                    .expect("interaction-net construction retains one effect");
-                NetBuiltinPhase::Construction { effect }
-            }
-            Builtin::NetArity => {
-                let [arity, net]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("net arity retains its arity and net operands");
-                NetBuiltinPhase::Arity {
-                    arity: WhnfComputation::from_root(arity),
-                    net,
-                }
-            }
-            _ => unreachable!("net builtin machine received another builtin"),
-        };
-        Self { phase }
-    }
-
-    fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        match &mut self.phase {
-            NetBuiltinPhase::Construction { effect } => {
-                let result = context.with_value_access(|access| {
-                    let effect = access.clone_root(effect);
-                    access.values().root_runtime_value(Value::Lazy(
-                        LazyValue::from_net_construction_in(access.values(), effect),
-                    ))
-                });
-                BuiltinTaskPoll::Ready(result)
-            }
-            NetBuiltinPhase::Arity { arity, net } => {
-                let arity = match poll_demand(arity, poll_context, durable_context, step_budget) {
-                    DemandPoll::Ready(value) => value,
-                    DemandPoll::Failed(failure) => {
-                        let failure = context.with_value_access(|access| {
-                            EvaluationHalt::failure(failure.into_failure()).with_context(
-                                access.values(),
-                                evaluation_context_frame_in(access.values(), "net_arity"),
-                            )
-                        });
-                        return BuiltinTaskPoll::Failed(
-                            context.root_failure(failure.into_permanent_failure()),
-                        );
-                    }
-                    other => return other.into_builtin_poll(),
-                };
-                let arity = context.with_value_access(|access| {
-                    index_from_evaluated(
-                        EvaluatedValue::try_from(access.clone_root(&arity))
-                            .expect("net arity demand must reach WHNF"),
-                        "net_arity",
-                    )
-                });
-                let arity = match arity {
-                    Ok(arity) => arity,
-                    Err(failure) => {
-                        return BuiltinTaskPoll::Failed(
-                            context.root_failure(failure.into_permanent_failure()),
-                        );
-                    }
-                };
-                self.phase = NetBuiltinPhase::Net {
-                    arity,
-                    net: WhnfComputation::from_root(net.clone()),
-                };
-                BuiltinTaskPoll::Yielded
-            }
-            NetBuiltinPhase::Net { arity, net } => {
-                let net = match poll_demand(net, poll_context, durable_context, step_budget) {
-                    DemandPoll::Ready(value) => value,
-                    other => return other.into_builtin_poll(),
-                };
-                let result = context.with_value_access(|access| {
-                    let Value::Net(net) = access.clone_root(&net) else {
-                        return None;
-                    };
-                    let value = if *arity == 0 {
-                        Value::Lazy(LazyValue::from_net_computation_in(access.values(), net))
-                    } else {
-                        Value::Function(FunctionValue::new(net, *arity))
-                    };
-                    Some(access.values().root_runtime_value(value))
-                });
-                match result {
-                    Some(result) => BuiltinTaskPoll::Ready(result),
-                    None => permanent_failure(
-                        context,
-                        "net_arity builtin requires an interaction-net value",
-                    ),
-                }
             }
         }
     }
@@ -857,50 +868,6 @@ impl StrategyBuiltinMachine {
             StrategyDemandPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
         }
     }
-}
-
-enum DemandPoll {
-    Ready(RuntimeValueRoot),
-    Pending(WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-impl DemandPoll {
-    fn into_builtin_poll(self) -> BuiltinTaskPoll {
-        match self {
-            Self::Ready(_) => unreachable!("ready demand must be consumed by its family owner"),
-            Self::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            Self::Yielded => BuiltinTaskPoll::Yielded,
-            Self::Failed(failure) => BuiltinTaskPoll::Failed(failure),
-        }
-    }
-}
-
-fn poll_demand(
-    demand: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandPoll {
-    match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandPoll::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => DemandPoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => DemandPoll::Yielded,
-        WhnfOwnerPoll::Failed(failure) => DemandPoll::Failed(failure),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("builtin operand demand produced an external {boundary:?} boundary")
-        }
-    }
-}
-
-fn permanent_failure(
-    context: &EvaluatorStepContext<'_>,
-    message: impl Into<String>,
-) -> BuiltinTaskPoll {
-    BuiltinTaskPoll::Failed(
-        context.root_failure(Arc::new(EvaluationFailure::message(message.into()))),
-    )
 }
 
 fn conditional_name(builtin: Builtin) -> &'static str {

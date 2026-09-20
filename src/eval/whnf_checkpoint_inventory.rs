@@ -279,7 +279,11 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     let mut occurrences = Vec::new();
     for path in sources {
         let source = fs::read_to_string(&path).expect("checkpoint source should be readable");
-        if !source.contains("WhnfComputation") {
+        // W6G.1f.3g.2c removed the last legacy computation from
+        // `builtin_machine.rs`, exposing that a legacy-only prefilter silently
+        // omitted fully regional checkpoint owners. Both representations are
+        // part of this transition boundary until the compatibility form dies.
+        if !source.contains("WhnfComputation") && !source.contains("RegionalWhnfWork") {
             continue;
         }
         let relative = path
@@ -323,8 +327,9 @@ fn api_counts(occurrences: &[Occurrence]) -> BTreeMap<CheckpointApi, usize> {
 
 const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // W6G.1f.3g.1a removes the two rooted list-back child projections;
-    // W6G.1f.3g.2b removes assertion, provenance, and conditional projections.
-    (CheckpointApi::FromRoot, 76),
+    // W6G.1f.3g.2b-.2c remove assertion, provenance, conditional, and net
+    // projections.
+    (CheckpointApi::FromRoot, 74),
     (CheckpointApi::FromLazySource, 1),
     (CheckpointApi::FromApplicationCheckpoint, 4),
     (CheckpointApi::FromStaticAccessCheckpoint, 1),
@@ -333,12 +338,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     (CheckpointApi::InstallSourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
-    // W6G.1f.3g.2a-.2b give every regional scalar/direct demand the same exact
-    // lazy owner as the outer managed builtin checkpoint transition.
-    (CheckpointApi::WithSourceOwner, 5),
+    // Fully regional source scanning latches exact source ownership across
+    // access, builtin, list, list-effect, and object child reducers.
+    (CheckpointApi::WithSourceOwner, 15),
 ];
-const EXPECTED_OCCURRENCES: usize = 94;
-const EXPECTED_FINGERPRINT: u64 = 17_073_741_932_416_319_276;
+const EXPECTED_OCCURRENCES: usize = 102;
+const EXPECTED_FINGERPRINT: u64 = 12_660_859_097_616_709_955;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

@@ -5989,9 +5989,14 @@ for it:
          `RegionalListFront` after the result-list shell is demanded,
          preserving deferred-chunk progress and exhaustion diagnostics
          without a compatibility root projection.
-     - **W6G.1f.3g.2c — net operations.** Separate immediate construction from
-       arity/net demand while retaining net/application semantics and failure
-       context beneath the typed checkpoint.
+     - **W6G.1f.3g.2c — Complete (2026-09-20): net operations.** Separate
+       immediate construction from arity/net demand while retaining
+       net/application semantics and failure context beneath the typed
+       checkpoint. The existing source-order fixture now roots the owning
+       lazy, collects before and after the exact net dependency, and proves a
+       completed arity is not replayed. The collection fixture uses a private
+       value heap; collecting the shared test factory would invalidate raw
+       values held concurrently by unrelated fixtures.
      - **W6G.1f.3g.2d — strategy and spark boundary.** Regionalize `seq` and
        metadata demand, then record at-most-once spark admission state before
        returning the raw post-access spark intent.

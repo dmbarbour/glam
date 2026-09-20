@@ -45,10 +45,17 @@ fn initial_metadata() -> Value {
 }
 
 fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
+    closed_net_in(&crate::core::test_value_factory(), build)
+}
+
+fn closed_net_in(
+    values: &CoreValueFactory,
+    build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port,
+) -> NetValue {
     let mut builder = NetBuilder::new();
     let exposed = build(&mut builder);
     let template = builder.finish(exposed);
-    NetValue::new(crate::core::test_value_factory().instantiate_core_net(&template))
+    NetValue::new(values.instantiate_core_net(&template))
 }
 
 fn fixture_computation(expr: TestExpr) -> Value {
@@ -122,7 +129,7 @@ fn wrapper_returning_function_computation(context: &EvalContext) -> LazyValue {
     )
 }
 
-fn isolated_w4e_context() -> OwnedEvalContext {
+fn isolated_test_context() -> OwnedEvalContext {
     EvalContext::isolated(CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -139,7 +146,7 @@ fn net_computation_runtime(lazy: &LazyValue, context: &EvalContext) -> CoreRunti
 
 #[test]
 fn wrapper_returning_function_then_accepts_remaining_application() {
-    let context = isolated_w4e_context();
+    let context = isolated_test_context();
     let computation_lazy = wrapper_returning_function_computation(&context);
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
     let computation = Value::Lazy(computation_lazy.clone());
@@ -228,7 +235,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
 #[cfg(feature = "interaction-net-profiling")]
 #[test]
 fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
-    let context = isolated_w4e_context();
+    let context = isolated_test_context();
     let computation_lazy = wrapper_returning_function_computation(&context);
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
     let computation = Value::Lazy(computation_lazy.clone());
@@ -966,7 +973,6 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
         vec![Value::Promised(arity.clone()), net],
     )
     .expect("net-arity application should build");
-
     let blocked = eval_value(&context, &application)
         .expect_err("net arity must suspend at its first operand");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
@@ -982,7 +988,9 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
 
 #[test]
 fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
-    let context = test_context();
+    // This fixture performs explicit collection. Keep its heap private so it
+    // cannot collect raw values held by another parallel shared-fixture test.
+    let context = isolated_test_context();
     let arity_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&arity_demands);
     let arity = Value::semantic_thunk(context.values(), "instrumented arity", move |_| {
@@ -996,19 +1004,34 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
         vec![arity, Value::Promised(net.clone())],
     )
     .expect("net-arity application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        unreachable!("a saturated net-arity builtin must remain lazy")
+    };
+    let application_root = application_lazy.root(context.values());
 
     let blocked = eval_value(&context, &application)
         .expect_err("net arity must suspend at its unresolved net");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the net checkpoint must retain its completed arity and pending net demand");
+    eval_value(&context, &application)
+        .expect_err("a later route must resume the same net dependency");
+    assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
 
-    let identity = closed_net(|builder| {
+    let identity = closed_net_in(context.values(), |builder| {
         let [application, argument, result] = builder.bind();
         builder.wire(argument, result);
         application
     });
     set_promise(&context, &net, Value::Net(identity))
         .expect("the net operand should accept its assignment");
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned net must remain live beneath the checkpoint");
     let Value::Function(function) =
         eval_value(&context, &application).expect("net arity should resume at its net")
     else {
@@ -1016,6 +1039,7 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
     };
     assert_eq!(function.remaining_arity(), 1);
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]

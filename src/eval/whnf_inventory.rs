@@ -672,8 +672,9 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // regional operand loop beneath the managed builtin checkpoint.
 // W6G.1f.3g.2b replaces three rooted assertion, provenance, and conditional
 // poll helpers with regional state transitions beneath that checkpoint.
-const EXPECTED_OCCURRENCES: usize = 192;
-const EXPECTED_FINGERPRINT: u64 = 10_619_655_389_274_924_729;
+// W6G.1f.3g.2c replaces the rooted net helper with one regional phase machine.
+const EXPECTED_OCCURRENCES: usize = 191;
+const EXPECTED_FINGERPRINT: u64 = 14_584_632_097_337_844_312;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -686,12 +687,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 67),
+    (Signal::StructuralRecursion, 66),
     (Signal::UserSizedLoop, 58),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 111),
+    (WorkShape::DemandThenInspect, 110),
     (WorkShape::OrderedOperands, 7),
     (WorkShape::CollectionWalk, 11),
     (WorkShape::KeyConversion, 2),
