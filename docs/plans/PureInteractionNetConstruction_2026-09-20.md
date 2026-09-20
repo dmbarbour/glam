@@ -144,6 +144,33 @@ task-local operations:
 Construction internals such as the next port and operation journal are in a
 separate protected component and cannot be addressed through user paths.
 
+Delimited-control state is deliberately different: it lives *inside*
+`user_state`, beneath an implementation-owned `abstract_global_path` key. The
+handler has authority for that key; ordinary source cannot forge it, name it,
+or directly inspect the stored reset frames. Nevertheless, the hidden entry
+is part of the dictionary returned by `.get []`. Saving that whole value and
+later passing it to `.set []` therefore checkpoints and restores both visible
+user state and the current reset stack.
+
+This is intentional, not a representation accident. It lets advanced pure
+programs checkpoint a complete local computation state for coroutine-like
+control or effectful backtracking without gaining the ability to interpret or
+edit the hidden continuation data. The ordinary state operations consequently
+have these rules:
+
+- `.get []` returns the complete state dictionary, including the inaccessible
+  control entry;
+- `.set [] State` replaces the complete state, so a newly written dictionary
+  without that entry also clears the active reset stack;
+- nonempty user paths cannot address the hidden entry and otherwise preserve
+  it; and
+- restoring a checkpoint does not relax task/handler-invocation identity:
+  captured continuations remain invalid outside their owning invocation.
+
+Do not split control into a sibling `BuilderState::control` field. Doing so
+would make `.get []`/`.set []` incomplete and lose this deliberate composition
+between state and delimited control.
+
 The pure-handler model in `docs/Design.md` is the semantic reference for
 state and delimited control. The existing task interpreter remains the
 behavioral oracle during migration. In particular:
@@ -170,8 +197,7 @@ reflection machine only for net construction.
   brand: ConstructionBrand,
   next_port: PositiveInteger,
   reverse_operations: StrictList ConstructionOperation,
-  user_state: Dict,
-  control: PureControlState,
+  user_state: DictWithHiddenAbstractGlobalPathControlEntry,
 }
 ```
 
@@ -299,6 +325,9 @@ construction search machine.
   machinery rather than introducing another search engine.
 - Add branch-local state and hierarchical `.get/.set` without exposing the
   protected construction fields.
+- Reserve the pure control key with `abstract_global_path`, store its value
+  inside `user_state`, and latch whole-state capture/replacement semantics
+  before implementing `reset/shift`.
 - Verify ordered blocking, state rollback across failed alternatives, state
   retention through selected cut, and first-two-result observation.
 
@@ -312,8 +341,10 @@ the semantic graph, or a second implementation of ordered list search.
 - Implement `.reset/.shift` as pure task-local control over the builder state
   and continuation, guided by the existing interpreter oracle and the pure
   handler model in `docs/Design.md`.
-- Cover nested and missing keys, continuation invocation, state restoration,
-  cut inside reset, reset inside alternatives, and fix/reset interaction.
+- Cover nested and missing keys, continuation invocation, hidden-state
+  preservation under nonempty paths, whole-state clearing and restoration,
+  cut inside reset, reset inside alternatives, cross-invocation rejection,
+  and fix/reset interaction.
 - Keep the pure control helper general enough for other pure handlers, but do
   not turn this checkpoint into a replacement for the effectful reflection
   task interpreter.
@@ -415,4 +446,3 @@ state-bearing lazy-producer inventory.
 
 These are not reasons to preserve the generic reflection machine in the
 construction path.
-

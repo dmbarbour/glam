@@ -307,6 +307,17 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
             ((_,k):cc') -> run (s with { .[CC] := cc' }) (k r)
             [] -> [(r,s)]
 
+`CC` is deliberately an unforgeable key *within* the ordinary state, not a
+sibling handler field. In Glam this can be an `abstract_global_path` owned by
+the handler. A user cannot name or inspect the reset stack directly, but
+`.get []` still captures it as part of the complete state dictionary and
+`.set [] checkpoint` restores it. Replacing the complete state with a value
+that lacks `CC` clears the reset scope. This makes complete local-state
+checkpoints useful for coroutine-like control and effectful backtracking while
+keeping the continuation representation abstract. Nonempty user paths cannot
+forge `CC`, and captured continuations remain local to the task or handler
+invocation which created them.
+
 Unfortunately, fixpoint is not fully compatible with continuations. The essential issue is the continuation may be invoked any number of times, but we're only permitted exactly one fixpoint value. We can shift where reset is scoped within the fixpoint. We can support Alt and Fix together, i.e. exactly one fixpoint future per alt choice.
 
 *Note:* I might review [Delimited Control in OCaml, Abstractly and Concretely](https://okmij.org/ftp/continuations/caml-shift.pdf) or [A Monadic Framework for Delimited Continuations](https://www.microsoft.com/en-us/research/wp-content/uploads/2005/01/jfp-revised.pdf) for a better alternative to shift-reset. A `pushSubCont` variation requires abstracting continuations as something more structured than functions.
