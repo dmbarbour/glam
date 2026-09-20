@@ -124,7 +124,12 @@ struct RegionalDictConversion {
     child: Option<Box<RegionalKeyConversion>>,
 }
 
-struct RegionalKeyList {
+/// Callback-free conversion of one logical list into dictionary keys.
+///
+/// The list spine, deferred chunks, recursive item conversion, and completed
+/// prefix remain raw managed edges beneath one caller-owned checkpoint. This
+/// is also the shared child representation for compiler paths.
+pub(in crate::eval) struct RegionalKeyList {
     source: Option<RegionalWhnfWork>,
     lists: Vec<Value>,
     chunk: Option<RegionalWhnfWork>,
@@ -425,20 +430,18 @@ impl KeyListMachine {
     pub(crate) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
+        _context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ConversionPoll<Vec<Key>> {
-        match self.poll_optional(poll_context, context, durable_context, step_budget) {
-            ConversionPoll::Ready(Some(keys)) => ConversionPoll::Ready(keys),
-            ConversionPoll::Ready(None) => ConversionPoll::Failed(root_message(
-                context,
-                "dictionary keys must evaluate to keyable values",
-            )),
-            ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-            ConversionPoll::Yielded => ConversionPoll::Yielded,
-            ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
-        }
+        let result = poll_context.with_value_access(durable_context, |access| {
+            self.promote_in(&access);
+            let DurableKeyListCheckpoint::Managed(root) = &self.checkpoint else {
+                unreachable!("key-list seed must promote under access")
+            };
+            root.poll_list_in(&access, step_budget)
+        });
+        interpret_durable_conversion(result, durable_context)
     }
 
     pub(crate) fn poll_optional(
@@ -453,7 +456,7 @@ impl KeyListMachine {
             let DurableKeyListCheckpoint::Managed(root) = &self.checkpoint else {
                 unreachable!("key-list seed must promote under access")
             };
-            root.poll_list_in(&access, step_budget)
+            root.poll_list_optional_in(&access, step_budget)
         });
         interpret_durable_conversion(result, durable_context)
     }
@@ -508,6 +511,19 @@ impl ManagedKeyConversionRoot {
     }
 
     fn poll_list_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> DurableConversionPoll<Vec<Key>> {
+        self.with_state_transition(access, |state| {
+            let ManagedKeyConversionState::List(state) = state else {
+                panic!("key-list wrapper retained scalar conversion state")
+            };
+            state.poll_in(access, step_budget)
+        })
+    }
+
+    fn poll_list_optional_in(
         &self,
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
@@ -705,7 +721,11 @@ impl RegionalDictConversion {
 }
 
 impl RegionalKeyList {
-    fn new(access: &EvaluationValueAccess<'_>, value: Value, source_owner: Option<LazyId>) -> Self {
+    pub(in crate::eval) fn new(
+        access: &EvaluationValueAccess<'_>,
+        value: Value,
+        source_owner: Option<LazyId>,
+    ) -> Self {
         Self {
             source: Some(regional_whnf(access, value, source_owner)),
             lists: Vec::new(),
@@ -717,7 +737,7 @@ impl RegionalKeyList {
         }
     }
 
-    fn from_ready(
+    pub(in crate::eval) fn from_ready(
         _access: &EvaluationValueAccess<'_>,
         value: Value,
         source_owner: Option<LazyId>,
@@ -733,7 +753,23 @@ impl RegionalKeyList {
         }
     }
 
-    fn poll_optional_in(
+    pub(in crate::eval) fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalConversionPoll<Vec<Key>> {
+        match self.poll_optional_in(access, step_budget) {
+            RegionalConversionPoll::Ready(Some(keys)) => RegionalConversionPoll::Ready(keys),
+            RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Failed(Arc::new(
+                EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
+            )),
+            RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
+            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
+        }
+    }
+
+    pub(in crate::eval) fn poll_optional_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
@@ -837,7 +873,7 @@ impl RegionalKeyList {
         }
     }
 
-    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         if let Some(source) = &self.source {
             source.trace_managed_edges(visitor);
         }
@@ -1054,6 +1090,22 @@ mod tests {
         })
     }
 
+    fn poll_key_list(
+        machine: &mut KeyListMachine,
+        context: &EvalContext,
+        allowance: usize,
+    ) -> ConversionPoll<Vec<Key>> {
+        let poll = EvaluationPollContext::for_context(context);
+        poll.evaluate(context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                context,
+                &mut EvaluationStepBudget::new(allowance),
+            )
+        })
+    }
+
     #[test]
     fn shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state() {
         let context = context();
@@ -1097,6 +1149,88 @@ mod tests {
             context.values().managed_root_registrations_for_test(),
             registrations + 1,
             "recursive scalar/list conversion must share one temporary managed cell"
+        );
+    }
+
+    #[test]
+    fn shared_key_list_converter_survives_deferred_collection_with_one_root() {
+        let context = context();
+        let chunk = PromisedValue::new(context.values(), "regional key-list chunk");
+        let input = context.values().construct_runtime_value_root(|_| {
+            Value::List(List::concat(
+                List::from_values(vec![Value::Number(1.into())]),
+                List::from_thunk(ListThunk::Promised(chunk.clone())),
+            ))
+        });
+        let registrations = context.values().managed_root_registrations_for_test();
+        let mut machine = KeyListMachine::unowned(input);
+
+        assert!(matches!(
+            poll_key_list(&mut machine, &context, 1),
+            ConversionPoll::Yielded
+        ));
+        assert_eq!(
+            context.values().managed_root_registrations_for_test(),
+            registrations + 1,
+            "recursive list/path conversion must share one temporary managed cell"
+        );
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the key-list source must remain traced after promotion");
+
+        loop {
+            match poll_key_list(&mut machine, &context, 1) {
+                ConversionPoll::Pending(_) => break,
+                ConversionPoll::Yielded => {
+                    context
+                        .values()
+                        .collect_managed_for_test()
+                        .expect("the key-list prefix must remain traced before its dependency");
+                }
+                ConversionPoll::Ready(_) => {
+                    panic!("an unresolved deferred key-list chunk must not complete")
+                }
+                ConversionPoll::Failed(failure) => {
+                    panic!("the deferred key-list prefix failed: {failure:?}")
+                }
+            }
+        }
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the exact key-list dependency must remain traced across collection");
+        crate::core::set_test_promise(
+            context.values(),
+            &chunk,
+            Value::Binary(bytes::Bytes::from_static(&[2_u8, 3_u8])),
+        )
+        .expect("the deferred binary key-list chunk should accept its assignment");
+
+        let keys = loop {
+            match poll_key_list(&mut machine, &context, 1) {
+                ConversionPoll::Ready(keys) => break keys,
+                ConversionPoll::Yielded => {
+                    context
+                        .values()
+                        .collect_managed_for_test()
+                        .expect("every yielded key-list transition must retain its edges");
+                }
+                ConversionPoll::Pending(_) => {
+                    panic!("an assigned key-list chunk must not return to its promise wait")
+                }
+                ConversionPoll::Failed(failure) => {
+                    panic!("the assigned key-list chunk failed: {failure:?}")
+                }
+            }
+        };
+        assert_eq!(
+            keys,
+            vec![
+                Key::Number(1.into()),
+                Key::Number(2.into()),
+                Key::Number(3.into()),
+            ]
         );
     }
 

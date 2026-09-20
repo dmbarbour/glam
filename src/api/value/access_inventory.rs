@@ -121,10 +121,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/eval/access_machine.rs",
         0,
-        1,
+        2,
         0,
-        "shared key/list conversion retains one temporary managed regional checkpoint while computed access itself is an edge-owned lazy checkpoint",
-        "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover"
+        "forced key and key-list conversion fixtures retain one temporary managed regional checkpoint while computed access itself is an edge-owned lazy checkpoint",
+        "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover; W6G.1f.3g.1b shared path child"
     ),
     entry!(
         "src/eval/annotation_machine.rs",
@@ -804,6 +804,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
+    "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
     "src/eval/annotation_machine.rs::annotation_error_root#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::finish_metadata_update#1|surface=access-publication|scope=production",
     "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized#1|surface=access-publication|scope=production",

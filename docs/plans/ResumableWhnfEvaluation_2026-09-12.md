@@ -5940,11 +5940,15 @@ for it:
        and resumes the same checkpoint without replay. The durable-owner,
        root-publication, and persistent-edge inventories record the reviewed
        exchange of three registered-root fields for one traced cell.
-     - **W6G.1f.3g.1b — regional key-list and path conversion.** Expose one
-       callback-free raw child form for recursive key lists and pattern paths,
-       preserving source-owner diagnostics and exact dependency boundaries.
-       Keep any durable compatibility caller behind one temporary managed root
-       until its builtin parent migrates; do not rebuild a vector of roots.
+     - **W6G.1f.3g.1b — Complete (2026-09-20): regional key-list and path
+       conversion.** Expose `RegionalKeyList` as the one callback-free raw
+       child form for recursive key lists and pattern paths, preserving
+       source-owner diagnostics and exact dependency boundaries. Required and
+       optional conversion now share that regional implementation. Durable
+       compatibility callers remain behind the existing single managed cell;
+       a forced deferred-chunk fixture collects after promotion, at the exact
+       promise wait, and after every resumed yield without rebuilding a vector
+       of roots.
      - **W6G.1f.3g.1c — regional builtin poll vocabulary.** Define the common
        raw ready/failure, scheduler-boundary, yield, and spark-intent result
        shape at the first production family which consumes it. Avoid a dead
