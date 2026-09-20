@@ -6057,9 +6057,36 @@ for it:
        matching the existing loader/driver isolation policy; its focused
        failure is preserved as the regression rather than accepting a
        repetition-only pass.
-     - **W6G.1f.3g.3c — list observation.** Reuse regional logical-list
+     - **W6G.1f.3g.3c — Complete (2026-09-20): list observation.** Reuse regional logical-list
        front/back reducers for slice, length, split, index, head, and tail;
        retain strict-prefix progress and the selected suffix without roots.
+       - **W6G.1f.3g.3c.1 — Complete (2026-09-20): regional owner and dispatch.** Move ordered index
+         demand, subject classification, binary leaves, and front/back list
+         walks beneath the typed builtin checkpoint. Keep result construction
+         raw through the containing access region and preserve index failure
+         contexts exactly.
+       - **W6G.1f.3g.3c.2 — Complete (2026-09-20): forced traversal closure.** Force collection and
+         route loss while a later list chunk is blocked, covering both front
+         and back traversal and proving accepted prefixes/suffixes are not
+         replayed. Remove the durable owner/publications and reconcile the
+         access, root, checkpoint, edge, and WHNF inventories.
+       Completion record: index operands, the subject, front/back logical-list
+       reducers, accepted items, and binary/list results now remain raw and
+       traced beneath `ManagedBuiltinCheckpointCell`; the durable
+       list-observation owner and its four result-root publications are gone.
+       Private-heap fixtures suspend after accepting the front prefix and the
+       back suffix, collect before and after assignment, re-enter through the
+       owning lazy, and prove those completed chunks run once. Existing
+       slice, split, index, and contextual-error suites preserve the public
+       behavior, while exact access, owner, checkpoint, edge, and WHNF
+       inventories record the boundary change. The full parallel gate again
+       reached the already-latched
+       `configured_bare_cli_rewrites_and_executes_in_the_prepared_session`
+       route/session-affinity schedule assigned to W6G.1f.2b; its exact test,
+       complete library suite, clippy gate, and interaction-net profiling
+       regressions pass. This repetition remains evidence for the pending
+       coordinator cutover rather than evidence against the list-observation
+       representation.
      - **W6G.1f.3g.3d — list transformation.** Move structure-preserving map,
        balanced concat, and resumable text-lines extraction. Preserve lazy
        fragment boundaries and completed transform prefixes.

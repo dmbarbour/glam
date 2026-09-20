@@ -1,33 +1,40 @@
 //! Resumable list and binary observation builtins.
 //!
 //! Indices are demanded and validated before the subject. Logical lists then
-//! advance through [`ListFrontMachine`] one item at a time, retaining the
-//! exact tail and any completed prefix across yields or dependencies.
+//! advance through the regional front/back projections one item at a time,
+//! retaining the exact suffix and completed prefix beneath the containing
+//! managed builtin checkpoint.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
+use glam_gc::Visitor;
 
-use crate::core::{Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, List, Value};
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+use crate::core::{
+    Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, LazyId, List, Value,
+    trace_compatibility_value_managed_edges,
 };
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::number::Number;
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::builtin_machine::BuiltinTaskPoll;
-use super::list_machine::{ListBackMachine, ListBackPoll, ListFrontMachine, ListFrontPoll};
+use super::builtin_machine::RegionalBuiltinPoll;
+use super::list_machine::{
+    RegionalListBack, RegionalListBackPoll, RegionalListFront, RegionalListFrontPoll,
+};
 use super::value::{evaluation_context_frame_in, index_from_evaluated, split_result_value};
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
+};
 
-pub(crate) struct ListObservationMachine {
+pub(in crate::eval) struct RegionalListObservationMachine {
     operation: ListObservation,
-    index_demands: Vec<WhnfComputation>,
-    next_index: usize,
+    index_sources: Vec<Value>,
+    index_demand: Option<RegionalWhnfWork>,
     indices: Vec<usize>,
-    source: WhnfComputation,
-    source_root: RuntimeValueRoot,
-    walk: Option<ListWalk>,
+    source: Option<Value>,
+    source_demand: Option<RegionalWhnfWork>,
+    walk: Option<RegionalListWalk>,
+    source_owner: LazyId,
 }
 
 #[derive(Clone, Copy)]
@@ -41,12 +48,13 @@ enum ListObservation {
     Tail,
 }
 
-struct ListWalk {
+struct RegionalListWalk {
     operation: ListWalkOperation,
-    front: Option<ListFrontMachine>,
-    back: Option<ListBackMachine>,
-    items: Vec<RuntimeValueRoot>,
+    front: Option<RegionalListFront>,
+    back: Option<RegionalListBack>,
+    items: Vec<Value>,
     position: usize,
+    source_owner: LazyId,
 }
 
 #[derive(Clone, Copy)]
@@ -60,13 +68,8 @@ enum ListWalkOperation {
     Tail,
 }
 
-enum SourceShape {
-    Binary(Bytes),
-    List,
-}
-
-impl ListObservationMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
+impl RegionalListObservationMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
             Builtin::Slice
@@ -79,7 +82,12 @@ impl ListObservationMachine {
         )
     }
 
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
         let operation = match builtin {
             Builtin::Slice => ListObservation::Slice,
             Builtin::ListLen => ListObservation::Len,
@@ -90,109 +98,126 @@ impl ListObservationMachine {
             Builtin::ListTail => ListObservation::Tail,
             _ => unreachable!("list observation machine received another builtin"),
         };
-        let mut arguments = arguments;
-        let source_root = arguments
-            .pop()
+        let (source, indices) = arguments
+            .split_last()
             .expect("a list observation retains its source operand");
         Self {
             operation,
-            index_demands: arguments
-                .into_iter()
-                .map(WhnfComputation::from_root)
+            index_sources: indices
+                .iter()
+                .rev()
+                .map(|value| access.values().duplicate_value(value))
                 .collect(),
-            next_index: 0,
-            indices: Vec::new(),
-            source: WhnfComputation::from_root(source_root.clone()),
-            source_root,
+            index_demand: None,
+            indices: Vec::with_capacity(indices.len()),
+            source: Some(access.values().duplicate_value(source)),
+            source_demand: None,
             walk: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        if let Some(index) = self.index_demands.get_mut(self.next_index) {
-            let value = match poll_demand(index, poll_context, durable_context, step_budget) {
-                DemandPoll::Ready(value) => value,
-                DemandPoll::Failed(failure) => {
-                    return BuiltinTaskPoll::Failed(contextual_index_failure(
-                        context,
-                        failure,
-                        self.index_context(),
-                    ));
-                }
-                other => return other.into_builtin_poll(),
-            };
-            let value = context.with_value_access(|access| access.clone_root(&value));
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if self.index_demand.is_none()
+            && let Some(index) = self.index_sources.pop()
+        {
+            self.index_demand = Some(
+                RegionalWhnfWork::from_focus(access, index).with_source_owner(self.source_owner),
+            );
+        }
+        if let Some(index) = &mut self.index_demand {
+            let value =
+                match drive_regional_in_place(access, index, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(contextual_index_failure(
+                            access,
+                            failure,
+                            self.index_context(),
+                        ));
+                    }
+                };
+            self.index_demand = None;
             let value = EvaluatedValue::try_from(value)
                 .expect("list observation index demand must reach WHNF");
             let index = match index_from_evaluated(value, self.index_builtin_name()) {
                 Ok(index) => index,
                 Err(error) => {
-                    return BuiltinTaskPoll::Failed(
-                        context.root_failure(error.into_permanent_failure()),
-                    );
+                    return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
                 }
             };
             self.indices.push(index);
-            self.next_index += 1;
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         if matches!(self.operation, ListObservation::Slice) && self.indices[0] > self.indices[1] {
-            return failure(
-                context,
-                "slice builtin requires start to be less than or equal to end",
-            );
+            return failure("slice builtin requires start to be less than or equal to end");
         }
 
         if self.walk.is_none() {
-            let source =
-                match poll_demand(&mut self.source, poll_context, durable_context, step_budget) {
-                    DemandPoll::Ready(value) => value,
-                    other => return other.into_builtin_poll(),
-                };
-            self.source_root = source.clone();
-            let shape = context.with_value_access(|access| match access.clone_root(&source) {
-                Value::Binary(bytes) => Ok(SourceShape::Binary(bytes)),
-                Value::List(_) => Ok(SourceShape::List),
-                _ => Err(self.subject_error()),
-            });
-            let shape = match shape {
-                Ok(shape) => shape,
-                Err(message) => return failure(context, message),
-            };
-            match shape {
-                SourceShape::Binary(bytes) => return self.finish_binary(context, bytes),
-                SourceShape::List => {
-                    let operation = self.list_operation();
-                    if let Some(result) =
-                        immediate_empty_prefix_result(context, &operation, &self.source_root)
-                    {
-                        return result;
-                    }
-                    self.walk = Some(ListWalk {
-                        operation,
-                        front: (!matches!(operation, ListWalkOperation::SplitEnd { .. }))
-                            .then(|| ListFrontMachine::unowned(self.source_root.clone())),
-                        back: matches!(operation, ListWalkOperation::SplitEnd { .. })
-                            .then(|| ListBackMachine::new(self.source_root.clone())),
-                        items: Vec::new(),
-                        position: 0,
-                    });
-                    return BuiltinTaskPoll::Yielded;
+            if self.source_demand.is_none() {
+                let source = self
+                    .source
+                    .take()
+                    .expect("list observation must retain its undemanded source");
+                self.source_demand = Some(
+                    RegionalWhnfWork::from_focus(access, source)
+                        .with_source_owner(self.source_owner),
+                );
+            }
+            let source = match drive_regional_in_place(
+                access,
+                self.source_demand
+                    .as_mut()
+                    .expect("list observation source demand must be installed"),
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                    .expect("list observation source demand must reach WHNF")
+                    .into_value(),
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
                 }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            self.source_demand = None;
+
+            match source {
+                Value::Binary(bytes) => return self.finish_binary(access, bytes),
+                source @ Value::List(_) => {
+                    let operation = self.list_operation();
+                    if let Some(result) = immediate_empty_prefix_result(access, operation, &source)
+                    {
+                        return RegionalBuiltinPoll::Ready(result);
+                    }
+                    self.walk = Some(RegionalListWalk::new_in(
+                        access,
+                        operation,
+                        source,
+                        self.source_owner,
+                    ));
+                    return RegionalBuiltinPoll::Yielded;
+                }
+                _ => return failure(self.subject_error()),
             }
         }
 
         self.walk
             .as_mut()
             .expect("list observation walk must be installed once")
-            .poll(poll_context, context, durable_context, step_budget)
+            .poll_in(access, step_budget)
     }
 
     fn index_context(&self) -> &'static str {
@@ -248,14 +273,18 @@ impl ListObservationMachine {
         }
     }
 
-    fn finish_binary(&self, context: &EvaluatorStepContext<'_>, bytes: Bytes) -> BuiltinTaskPoll {
+    fn finish_binary(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        bytes: Bytes,
+    ) -> RegionalBuiltinPoll {
         let result = match self.operation {
             ListObservation::Slice => {
                 let [start, end] = self.indices.as_slice() else {
                     unreachable!("slice retains two indices")
                 };
                 if *end > bytes.len() {
-                    return failure(context, "slice builtin end is out of bounds");
+                    return failure("slice builtin end is out of bounds");
                 }
                 Value::Binary(bytes.slice(*start..*end))
             }
@@ -263,112 +292,170 @@ impl ListObservationMachine {
             ListObservation::Split => {
                 let index = self.indices[0];
                 if index > bytes.len() {
-                    return failure(context, "split builtin index is out of bounds");
+                    return failure("split builtin index is out of bounds");
                 }
-                return rooted_binary_split(context, &bytes, index);
+                return RegionalBuiltinPoll::Ready(binary_split(access, &bytes, index));
             }
             ListObservation::SplitEnd => {
                 let count = self.indices[0];
                 if count > bytes.len() {
-                    return failure(context, "split_end builtin count is out of bounds");
+                    return failure("split_end builtin count is out of bounds");
                 }
-                let index = bytes.len() - count;
-                return rooted_binary_split(context, &bytes, index);
+                return RegionalBuiltinPoll::Ready(binary_split(
+                    access,
+                    &bytes,
+                    bytes.len() - count,
+                ));
             }
             ListObservation::At => {
                 let Some(byte) = bytes.get(self.indices[0]) else {
-                    return failure(context, "list at builtin index is out of bounds");
+                    return failure("list at builtin index is out of bounds");
                 };
                 Value::Number(Number::from_u8(*byte))
             }
             ListObservation::Head => {
                 let Some(byte) = bytes.first() else {
-                    return failure(
-                        context,
-                        "list head builtin requires a non-empty list or binary",
-                    );
+                    return failure("list head builtin requires a non-empty list or binary");
                 };
                 Value::Number(Number::from_u8(*byte))
             }
             ListObservation::Tail => {
                 if bytes.is_empty() {
-                    return failure(
-                        context,
-                        "list tail builtin requires a non-empty list or binary",
-                    );
+                    return failure("list tail builtin requires a non-empty list or binary");
                 }
                 Value::Binary(bytes.slice(1..bytes.len()))
             }
         };
-        BuiltinTaskPoll::Ready(context.root_value(result))
+        RegionalBuiltinPoll::Ready(result)
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for value in &self.index_sources {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(demand) = &self.index_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(source) = &self.source {
+            trace_compatibility_value_managed_edges(source, visitor);
+        }
+        if let Some(demand) = &self.source_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(walk) = &self.walk {
+            walk.trace_managed_edges(visitor);
+        }
     }
 }
 
-impl ListWalk {
-    fn poll(
+impl RegionalListWalk {
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        operation: ListWalkOperation,
+        source: Value,
+        source_owner: LazyId,
+    ) -> Self {
+        let (front, back) = if matches!(operation, ListWalkOperation::SplitEnd { .. }) {
+            (
+                None,
+                Some(RegionalListBack::new_in(access, source, Some(source_owner))),
+            )
+        } else {
+            (
+                Some(RegionalListFront::new_in(
+                    access,
+                    source,
+                    Some(source_owner),
+                )),
+                None,
+            )
+        };
+        Self {
+            operation,
+            front,
+            back,
+            items: Vec::new(),
+            position: 0,
+            source_owner,
+        }
+    }
+
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         if matches!(self.operation, ListWalkOperation::SplitEnd { .. }) {
             return match self
                 .back
                 .as_mut()
                 .expect("split-end traversal owns back-list work")
-                .poll(poll_context, context, durable_context, step_budget)
+                .poll_in(access, step_budget)
             {
-                ListBackPoll::Ready(Some((init, item))) => {
-                    self.consume_back_item(context, init, item)
+                RegionalListBackPoll::Ready(Some((init, item))) => {
+                    self.consume_back_item(access, init, item)
                 }
-                ListBackPoll::Ready(None) => {
-                    failure(context, "split_end builtin count is out of bounds")
+                RegionalListBackPoll::Ready(None) => {
+                    failure("split_end builtin count is out of bounds")
                 }
-                ListBackPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                ListBackPoll::Yielded => BuiltinTaskPoll::Yielded,
-                ListBackPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                RegionalListBackPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalListBackPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListBackPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
         match self
             .front
             .as_mut()
             .expect("front-list observation owns front-list work")
-            .poll(poll_context, context, durable_context, step_budget)
+            .poll_in(access, step_budget)
         {
-            ListFrontPoll::Ready(Some((item, tail))) => self.consume_item(context, item, tail),
-            ListFrontPoll::Ready(None) => self.finish_empty(context),
-            ListFrontPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            ListFrontPoll::Yielded => BuiltinTaskPoll::Yielded,
-            ListFrontPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+            RegionalListFrontPoll::Ready(Some((item, tail))) => {
+                self.consume_item(access, item, tail)
+            }
+            RegionalListFrontPoll::Ready(None) => self.finish_empty(),
+            RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
 
     fn consume_item(
         &mut self,
-        context: &EvaluatorStepContext<'_>,
-        item: RuntimeValueRoot,
-        tail: RuntimeValueRoot,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        item: Value,
+        tail: Value,
+    ) -> RegionalBuiltinPoll {
         match self.operation {
-            ListWalkOperation::Head => BuiltinTaskPoll::Ready(item),
-            ListWalkOperation::Tail => BuiltinTaskPoll::Ready(tail),
+            ListWalkOperation::Head => RegionalBuiltinPoll::Ready(item),
+            ListWalkOperation::Tail => RegionalBuiltinPoll::Ready(tail),
             ListWalkOperation::At { index } if self.position == index => {
-                BuiltinTaskPoll::Ready(item)
+                RegionalBuiltinPoll::Ready(item)
             }
             ListWalkOperation::At { .. } | ListWalkOperation::Len => {
                 self.position += 1;
-                self.front = Some(ListFrontMachine::unowned(tail));
-                BuiltinTaskPoll::Yielded
+                self.front = Some(RegionalListFront::new_in(
+                    access,
+                    tail,
+                    Some(self.source_owner),
+                ));
+                RegionalBuiltinPoll::Yielded
             }
             ListWalkOperation::Split { index } => {
                 self.items.push(item);
                 self.position += 1;
                 if self.position == index {
-                    rooted_split_from_items_and_root(context, &self.items, &tail)
+                    RegionalBuiltinPoll::Ready(split_result_value(
+                        access.values(),
+                        Value::List(List::from_values(std::mem::take(&mut self.items))),
+                        tail,
+                    ))
                 } else {
-                    self.front = Some(ListFrontMachine::unowned(tail));
-                    BuiltinTaskPoll::Yielded
+                    self.front = Some(RegionalListFront::new_in(
+                        access,
+                        tail,
+                        Some(self.source_owner),
+                    ));
+                    RegionalBuiltinPoll::Yielded
                 }
             }
             ListWalkOperation::Slice { start, end } => {
@@ -377,10 +464,16 @@ impl ListWalk {
                 }
                 self.position += 1;
                 if self.position == end {
-                    rooted_list_from_items(context, &self.items)
+                    RegionalBuiltinPoll::Ready(Value::List(List::from_values(std::mem::take(
+                        &mut self.items,
+                    ))))
                 } else {
-                    self.front = Some(ListFrontMachine::unowned(tail));
-                    BuiltinTaskPoll::Yielded
+                    self.front = Some(RegionalListFront::new_in(
+                        access,
+                        tail,
+                        Some(self.source_owner),
+                    ));
+                    RegionalBuiltinPoll::Yielded
                 }
             }
             ListWalkOperation::SplitEnd { .. } => unreachable!("split-end walks from the back"),
@@ -389,10 +482,10 @@ impl ListWalk {
 
     fn consume_back_item(
         &mut self,
-        context: &EvaluatorStepContext<'_>,
-        init: RuntimeValueRoot,
-        item: RuntimeValueRoot,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        init: Value,
+        item: Value,
+    ) -> RegionalBuiltinPoll {
         let ListWalkOperation::SplitEnd { count } = self.operation else {
             unreachable!("only split-end walks from the back")
         };
@@ -400,170 +493,96 @@ impl ListWalk {
         self.position += 1;
         if self.position == count {
             self.items.reverse();
-            rooted_split_from_root_and_items(context, &init, &self.items)
+            RegionalBuiltinPoll::Ready(split_result_value(
+                access.values(),
+                init,
+                Value::List(List::from_values(std::mem::take(&mut self.items))),
+            ))
         } else {
-            self.back = Some(ListBackMachine::new(init));
-            BuiltinTaskPoll::Yielded
+            self.back = Some(RegionalListBack::new_in(
+                access,
+                init,
+                Some(self.source_owner),
+            ));
+            RegionalBuiltinPoll::Yielded
         }
     }
 
-    fn finish_empty(&self, context: &EvaluatorStepContext<'_>) -> BuiltinTaskPoll {
+    fn finish_empty(&self) -> RegionalBuiltinPoll {
         match self.operation {
-            ListWalkOperation::Len => BuiltinTaskPoll::Ready(
-                context.root_value(Value::Number(Number::from_usize(self.position))),
-            ),
+            ListWalkOperation::Len => {
+                RegionalBuiltinPoll::Ready(Value::Number(Number::from_usize(self.position)))
+            }
             ListWalkOperation::SplitEnd { .. } => {
                 unreachable!("split-end empty results are handled by back traversal")
             }
-            ListWalkOperation::At { .. } => {
-                failure(context, "list at builtin index is out of bounds")
+            ListWalkOperation::At { .. } => failure("list at builtin index is out of bounds"),
+            ListWalkOperation::Head => {
+                failure("list head builtin requires a non-empty list or binary")
             }
-            ListWalkOperation::Head => failure(
-                context,
-                "list head builtin requires a non-empty list or binary",
-            ),
-            ListWalkOperation::Tail => failure(
-                context,
-                "list tail builtin requires a non-empty list or binary",
-            ),
-            ListWalkOperation::Split { .. } => {
-                failure(context, "split builtin index is out of bounds")
+            ListWalkOperation::Tail => {
+                failure("list tail builtin requires a non-empty list or binary")
             }
-            ListWalkOperation::Slice { .. } => {
-                failure(context, "slice builtin end is out of bounds")
-            }
+            ListWalkOperation::Split { .. } => failure("split builtin index is out of bounds"),
+            ListWalkOperation::Slice { .. } => failure("slice builtin end is out of bounds"),
         }
     }
-}
 
-enum DemandPoll {
-    Ready(RuntimeValueRoot),
-    Pending(crate::evaluation::WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-impl DemandPoll {
-    fn into_builtin_poll(self) -> BuiltinTaskPoll {
-        match self {
-            Self::Ready(_) => unreachable!("a ready demand must be consumed by its owner"),
-            Self::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-            Self::Yielded => BuiltinTaskPoll::Yielded,
-            Self::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
         }
-    }
-}
-
-fn poll_demand(
-    demand: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandPoll {
-    match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandPoll::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => DemandPoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => DemandPoll::Yielded,
-        WhnfOwnerPoll::Failed(failure) => DemandPoll::Failed(failure),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("list observation produced an external {boundary:?} boundary")
+        if let Some(back) = &self.back {
+            back.trace_managed_edges(visitor);
+        }
+        for value in &self.items {
+            trace_compatibility_value_managed_edges(value, visitor);
         }
     }
 }
 
 fn immediate_empty_prefix_result(
-    context: &EvaluatorStepContext<'_>,
-    operation: &ListWalkOperation,
-    source: &RuntimeValueRoot,
-) -> Option<BuiltinTaskPoll> {
+    access: &EvaluationValueAccess<'_>,
+    operation: ListWalkOperation,
+    source: &Value,
+) -> Option<Value> {
     match operation {
-        ListWalkOperation::Split { index: 0 } => {
-            Some(rooted_split_from_items_and_root(context, &[], source))
-        }
-        ListWalkOperation::SplitEnd { count: 0 } => {
-            Some(rooted_split_from_root_and_items(context, source, &[]))
-        }
-        ListWalkOperation::Slice { end: 0, .. } => Some(rooted_list_from_items(context, &[])),
+        ListWalkOperation::Split { index: 0 } => Some(split_result_value(
+            access.values(),
+            Value::List(List::empty()),
+            access.values().duplicate_value(source),
+        )),
+        ListWalkOperation::SplitEnd { count: 0 } => Some(split_result_value(
+            access.values(),
+            access.values().duplicate_value(source),
+            Value::List(List::empty()),
+        )),
+        ListWalkOperation::Slice { end: 0, .. } => Some(Value::List(List::empty())),
         _ => None,
     }
 }
 
-fn rooted_list_from_items(
-    context: &EvaluatorStepContext<'_>,
-    items: &[RuntimeValueRoot],
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let items = items.iter().map(|item| access.clone_root(item)).collect();
-        access
-            .values()
-            .root_runtime_value(Value::List(List::from_values(items)))
-    });
-    BuiltinTaskPoll::Ready(result)
-}
-
-fn rooted_split_from_items_and_root(
-    context: &EvaluatorStepContext<'_>,
-    left: &[RuntimeValueRoot],
-    right: &RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let left = left.iter().map(|item| access.clone_root(item)).collect();
-        let right = access.clone_root(right);
-        access.values().root_runtime_value(split_result_value(
-            access.values(),
-            Value::List(List::from_values(left)),
-            right,
-        ))
-    });
-    BuiltinTaskPoll::Ready(result)
-}
-
-fn rooted_split_from_root_and_items(
-    context: &EvaluatorStepContext<'_>,
-    left: &RuntimeValueRoot,
-    right: &[RuntimeValueRoot],
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let left = access.clone_root(left);
-        let right = right.iter().map(|item| access.clone_root(item)).collect();
-        access.values().root_runtime_value(split_result_value(
-            access.values(),
-            left,
-            Value::List(List::from_values(right)),
-        ))
-    });
-    BuiltinTaskPoll::Ready(result)
-}
-
-fn rooted_binary_split(
-    context: &EvaluatorStepContext<'_>,
-    bytes: &Bytes,
-    index: usize,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        access.values().root_runtime_value(split_result_value(
-            access.values(),
-            Value::Binary(bytes.slice(0..index)),
-            Value::Binary(bytes.slice(index..bytes.len())),
-        ))
-    });
-    BuiltinTaskPoll::Ready(result)
+fn binary_split(access: &EvaluationValueAccess<'_>, bytes: &Bytes, index: usize) -> Value {
+    split_result_value(
+        access.values(),
+        Value::Binary(bytes.slice(0..index)),
+        Value::Binary(bytes.slice(index..bytes.len())),
+    )
 }
 
 fn contextual_index_failure(
-    context: &EvaluatorStepContext<'_>,
-    failure: RuntimeFailureRoot,
+    access: &EvaluationValueAccess<'_>,
+    failure: Arc<EvaluationFailure>,
     operation: &str,
-) -> RuntimeFailureRoot {
-    let failure = context.with_value_access(|access| {
-        EvaluationHalt::failure(failure.into_failure()).with_context(
+) -> Arc<EvaluationFailure> {
+    EvaluationHalt::failure(failure)
+        .with_context(
             access.values(),
             evaluation_context_frame_in(access.values(), operation),
         )
-    });
-    context.root_failure(failure.into_permanent_failure())
+        .into_permanent_failure()
 }
 
-fn failure(context: &EvaluatorStepContext<'_>, message: &str) -> BuiltinTaskPoll {
-    BuiltinTaskPoll::Failed(context.root_failure(Arc::new(EvaluationFailure::message(message))))
+fn failure(message: &str) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message)))
 }

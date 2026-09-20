@@ -990,10 +990,12 @@ fn is_production_source(relative: &Path) -> bool {
 // roots with raw value, list, dictionary, and tagged-payload frames nested
 // beneath the shared builtin checkpoint. The legacy semantic-undefined owner
 // remains only for pattern families pending W6G.1f.3g.3e.
-const DECLARATION_BASELINE_COUNT: usize = 240;
+// W6G.1f.3g.3c replaces the durable list-observation owner with raw index,
+// subject, front/back traversal, and result state beneath the checkpoint.
+const DECLARATION_BASELINE_COUNT: usize = 239;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([198, 212, 5, 30, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_595_731_598_761_339_575;
+    DeclarationSignals::new([201, 209, 5, 30, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 6_725_574_259_674_271_980;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

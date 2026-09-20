@@ -23,7 +23,7 @@ use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
-use super::list_observation_machine::ListObservationMachine;
+use super::list_observation_machine::RegionalListObservationMachine;
 use super::list_transform_machine::{ListConcatMachine, ListMapMachine, TextLinesMachine};
 use super::object_builtin_machine::ObjectBuiltinMachine;
 use super::object_composition_machine::ObjectCompositionMachine;
@@ -64,6 +64,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
     Dictionary(RegionalDictBuiltinMachine),
+    ListObservation(Box<RegionalListObservationMachine>),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Provenance(RegionalProvenanceMachine),
@@ -160,6 +161,13 @@ impl RegionalBuiltinMachine {
                 | Builtin::DictUnion
                 | Builtin::DictUpdate
                 | Builtin::MergeDuplicate
+                | Builtin::Slice
+                | Builtin::ListLen
+                | Builtin::ListSplit
+                | Builtin::ListSplitEnd
+                | Builtin::ListAt
+                | Builtin::ListHead
+                | Builtin::ListTail
         )
     }
 
@@ -269,6 +277,14 @@ impl RegionalBuiltinMachine {
                 builtin,
                 arguments,
             )),
+            builtin if RegionalListObservationMachine::supports(builtin) => {
+                Self::ListObservation(Box::new(RegionalListObservationMachine::new_in(
+                    access,
+                    source_owner,
+                    builtin,
+                    arguments,
+                )))
+            }
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -293,6 +309,7 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
             Self::Dictionary(machine) => machine.poll_in(access, step_budget),
+            Self::ListObservation(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
@@ -306,6 +323,7 @@ impl RegionalBuiltinMachine {
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
             Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
+            Self::ListObservation(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
@@ -751,7 +769,6 @@ impl RegionalStrategyMachine {
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
     Effect(EffectBuiltinMachine),
-    ListObservation(Box<ListObservationMachine>),
     ListMap(ListMapMachine),
     ListConcat(ListConcatMachine),
     TextLines(TextLinesMachine),
@@ -845,9 +862,6 @@ impl BuiltinTaskMachine {
             builtin if EffectBuiltinMachine::supports(builtin) => {
                 Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
             }
-            builtin if ListObservationMachine::supports(builtin) => {
-                Self::ListObservation(Box::new(ListObservationMachine::new(builtin, arguments)))
-            }
             Builtin::Map => Self::ListMap(ListMapMachine::new(arguments)),
             Builtin::ListConcat => Self::ListConcat(ListConcatMachine::new(arguments)),
             Builtin::TextLines => Self::TextLines(TextLinesMachine::new(arguments)),
@@ -888,9 +902,6 @@ impl BuiltinTaskMachine {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Effect(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::ListObservation(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::ListMap(machine) => {
@@ -968,7 +979,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::core::{CoreValueFactory, ListThunk, PromisedValue};
+    use crate::core::{CoreValueFactory, LazyValue, ListThunk, PromisedValue};
     use crate::evaluation::EvalContext;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
@@ -1395,5 +1406,124 @@ mod tests {
         crate::eval::eval_value(&context, &comparison).expect("list comparison must resume");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         drop(comparison_root);
+    }
+
+    #[test]
+    fn list_observation_retains_a_completed_front_chunk_across_collection() {
+        let context = context();
+        let prefix_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&prefix_demands);
+        let prefix = LazyValue::semantic_thunk(
+            context.values(),
+            "list observation front prefix",
+            move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::List(crate::core::List::from_values(vec![
+                    Value::Number(41.into()),
+                ])))
+            },
+        );
+        let tail = PromisedValue::new(context.values(), "list observation front tail");
+        let list = Value::List(crate::core::List::concat(
+            crate::core::List::from_thunk(prefix.into()),
+            crate::core::List::from_thunk(ListThunk::Promised(tail.clone())),
+        ));
+        let observation = Value::builtin_call(
+            context.values(),
+            Builtin::ListAt,
+            vec![Value::Number(1.into()), list],
+        );
+        let Value::Lazy(observation_lazy) = &observation else {
+            unreachable!("a saturated list observation must remain lazy")
+        };
+        let observation_root = observation_lazy.root(context.values());
+
+        crate::eval::eval_value(&context, &observation)
+            .expect_err("the deferred list tail must suspend observation");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the list observation checkpoint must trace its completed front chunk");
+        crate::eval::eval_value(&context, &observation)
+            .expect_err("a later route must retain the exact deferred front tail");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &tail,
+            Value::List(crate::core::List::from_values(vec![Value::Number(
+                42.into(),
+            )])),
+        )
+        .expect("the deferred front tail should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned front checkpoint must remain live");
+        assert_eq!(
+            crate::eval::eval_value(&context, &observation).expect("list observation must resume"),
+            Value::Number(42.into())
+        );
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        drop(observation_root);
+    }
+
+    #[test]
+    fn list_observation_retains_a_completed_back_chunk_across_collection() {
+        let context = context();
+        let prefix = PromisedValue::new(context.values(), "list observation back prefix");
+        let suffix_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&suffix_demands);
+        let suffix = LazyValue::semantic_thunk(
+            context.values(),
+            "list observation back suffix",
+            move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::List(crate::core::List::from_values(vec![
+                    Value::Number(42.into()),
+                ])))
+            },
+        );
+        let list = Value::List(crate::core::List::concat(
+            crate::core::List::from_thunk(ListThunk::Promised(prefix.clone())),
+            crate::core::List::from_thunk(suffix.into()),
+        ));
+        let observation = Value::builtin_call(
+            context.values(),
+            Builtin::ListSplitEnd,
+            vec![Value::Number(2.into()), list],
+        );
+        let Value::Lazy(observation_lazy) = &observation else {
+            unreachable!("a saturated list observation must remain lazy")
+        };
+        let observation_root = observation_lazy.root(context.values());
+
+        crate::eval::eval_value(&context, &observation)
+            .expect_err("the deferred list prefix must suspend back observation");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the list observation checkpoint must trace its completed back chunk");
+        crate::eval::eval_value(&context, &observation)
+            .expect_err("a later route must retain the exact deferred back prefix");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &prefix,
+            Value::List(crate::core::List::from_values(vec![Value::Number(
+                41.into(),
+            )])),
+        )
+        .expect("the deferred back prefix should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned back checkpoint must remain live");
+        crate::eval::eval_value(&context, &observation).expect("back list observation must resume");
+        assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
+        drop(observation_root);
     }
 }

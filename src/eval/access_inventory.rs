@@ -180,11 +180,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6G.1f.3e.1 and W6G.1f.3g.1a expose regional logical-list front/back bridges while retaining the compatibility owners until parent-family cutover"
     ),
     context_entry!(
-        "src/eval/list_observation_machine.rs",
-        [13, 3],
-        "W6D.3 durable list-observation owner with scoped result publication"
-    ),
-    context_entry!(
         "src/eval/list_transform_machine.rs",
         [6, 3],
         "W6D.4 durable list-transform owners and resumable text extraction"

@@ -151,14 +151,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge"
     ),
     entry!(
-        "src/eval/list_observation_machine.rs",
-        0,
-        0,
-        4,
-        "durable list-observation result publication",
-        "W6D.3 resumable list observation"
-    ),
-    entry!(
         "src/eval/list_transform_machine.rs",
         0,
         0,
@@ -499,10 +491,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/effect_machine.rs::root_effect_map_sequence"
                 | "src/eval/list_machine.rs::impl ManagedListBackRoot::poll_in"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
-                | "src/eval/list_observation_machine.rs::rooted_binary_split"
-                | "src/eval/list_observation_machine.rs::rooted_list_from_items"
-                | "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root"
-                | "src/eval/list_observation_machine.rs::rooted_split_from_root_and_items"
                 | "src/eval/list_transform_machine.rs::finish_text_lines"
                 | "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll"
                 | "src/eval/list_transform_machine.rs::impl ListMapMachine::poll"
@@ -797,10 +785,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::back_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
-    "src/eval/list_observation_machine.rs::rooted_binary_split#1|surface=access-publication|scope=production",
-    "src/eval/list_observation_machine.rs::rooted_list_from_items#1|surface=access-publication|scope=production",
-    "src/eval/list_observation_machine.rs::rooted_split_from_items_and_root#1|surface=access-publication|scope=production",
-    "src/eval/list_observation_machine.rs::rooted_split_from_root_and_items#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::finish_text_lines#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::impl ListConcatMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_transform_machine.rs::impl ListMapMachine::poll#1|surface=access-publication|scope=production",

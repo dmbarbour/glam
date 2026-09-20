@@ -680,8 +680,8 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // with regional key/path children and one explicit sequential operand walk.
 // W6G.1f.3g.3b makes scalar, list, dictionary, and tuple comparisons explicit
 // regional frame work beneath the shared builtin checkpoint.
-const EXPECTED_OCCURRENCES: usize = 193;
-const EXPECTED_FINGERPRINT: u64 = 4_399_279_025_123_893_476;
+const EXPECTED_OCCURRENCES: usize = 195;
+const EXPECTED_FINGERPRINT: u64 = 13_025_846_348_041_599_058;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -695,13 +695,13 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 60),
-    (Signal::UserSizedLoop, 66),
+    (Signal::UserSizedLoop, 68),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 110),
+    (WorkShape::DemandThenInspect, 109),
     (WorkShape::OrderedOperands, 10),
-    (WorkShape::CollectionWalk, 10),
+    (WorkShape::CollectionWalk, 13),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),
