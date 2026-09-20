@@ -1386,7 +1386,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        5_762_163_343_005_422_770,
+        6_285_521_300_826_810_630,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1408,14 +1408,13 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC3 adds thirteen access-qualified control/fix composition and
         // strict hidden-frame adapters. Their values remain within the same
         // caller-owned evaluator region.
-        // PNC4 adds five access-qualified transition/API helpers. Three
-        // test-only convenience functions deliberately retain the legacy raw
-        // fixture shape and remain visible as violations rather than weakening
-        // the production access rule. Raw production values never cross the
-        // caller-owned evaluator region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 292),
+        // PNC4 adds eight access-qualified transition, compact-codec, and API
+        // helpers. Even immediate journal/value constructors retain explicit
+        // regional authority so the production access rule has no exception.
+        // Raw production values never cross the caller-owned evaluator region.
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 295),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 259),
+        ((ApiKind::Function, ApiDisposition::Violation), 256),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,

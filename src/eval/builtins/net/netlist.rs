@@ -73,7 +73,11 @@ pub(super) fn encode_data(access: &RuntimeValueAccess<'_>, value: Value) -> Valu
     operation(access, &DATA_TAG, [value])
 }
 
-pub(super) fn encode_wire(left: ConstructionPortId, right: ConstructionPortId) -> Value {
+pub(super) fn encode_wire(
+    _access: &RuntimeValueAccess<'_>,
+    left: ConstructionPortId,
+    right: ConstructionPortId,
+) -> Value {
     Value::List(List::from_values(vec![
         Value::Number(Number::from_u64(left.get())),
         Value::Number(Number::from_u64(right.get())),
@@ -254,8 +258,8 @@ fn replay_wire(
 ) -> Result<(), EvaluationHalt> {
     let wire = strict_record(access, wire, "wire pair")?;
     let [left, right]: [Value; 2] = exact_record(access, wire, "wire pair")?;
-    let left = decode_wire_port_id(&left)?;
-    let right = decode_wire_port_id(&right)?;
+    let left = decode_wire_port_id(access, &left)?;
+    let right = decode_wire_port_id(access, &right)?;
     builder
         .try_wire(mapped_port(mapped, left)?, mapped_port(mapped, right)?)
         .map_err(|error| malformed(error.to_string()))
@@ -322,7 +326,10 @@ fn decode_port_value(
         .map_err(|error| malformed(error.to_string()))
 }
 
-fn decode_wire_port_id(value: &Value) -> Result<ConstructionPortId, EvaluationHalt> {
+fn decode_wire_port_id(
+    _access: &RuntimeValueAccess<'_>,
+    value: &Value,
+) -> Result<ConstructionPortId, EvaluationHalt> {
     let Value::Number(id) = value else {
         return Err(malformed("wire port ID must be a number"));
     };

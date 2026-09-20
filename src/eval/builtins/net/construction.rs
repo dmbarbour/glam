@@ -819,7 +819,7 @@ fn replay(
                     ));
                 }
                 ConstructionOp::Wire { left, right } => {
-                    reverse_wires.push(super::netlist::encode_wire(*left, *right));
+                    reverse_wires.push(super::netlist::encode_wire(access.values(), *left, *right));
                 }
             }
         }

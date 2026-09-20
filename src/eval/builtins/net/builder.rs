@@ -1075,6 +1075,7 @@ impl RegionalBuilderBuiltinMachine {
             }
         };
         state.reverse_constructors = match prepend_journal_entry(
+            access.values(),
             state.reverse_constructors,
             descriptor,
             "constructor journal",
@@ -1126,8 +1127,9 @@ impl RegionalBuilderBuiltinMachine {
             }
         };
         state.reverse_wires = match prepend_journal_entry(
+            access.values(),
             state.reverse_wires,
-            super::netlist::encode_wire(left, right),
+            super::netlist::encode_wire(access.values(), left, right),
             "wire journal",
         ) {
             Ok(journal) => journal,
@@ -1281,6 +1283,7 @@ fn allocate_builder_ports(
 }
 
 fn prepend_journal_entry(
+    _access: &RuntimeValueAccess<'_>,
     journal: Value,
     entry: Value,
     name: &str,

@@ -59,9 +59,9 @@ fn valid_all_operations(access: &RuntimeValueAccess<'_>) -> Value {
             encode_copy(access, 2),
         ],
         vec![
-            encode_wire(port(1), port(4)),
-            encode_wire(port(2), port(5)),
-            encode_wire(port(3), port(6)),
+            encode_wire(access, port(1), port(4)),
+            encode_wire(access, port(2), port(5)),
+            encode_wire(access, port(3), port(6)),
         ],
         port(7),
     )
@@ -249,7 +249,7 @@ fn replay_rejects_malformed_compact_records() {
                     &brand,
                     4,
                     vec![encode_bind(access)],
-                    vec![encode_wire(port(1), port(4))],
+                    vec![encode_wire(access, port(1), port(4))],
                     port(3),
                 ),
                 "out of range",
