@@ -126,14 +126,22 @@ must return to baseline after terminal assignment and observer release.
 
 ### W6G1R-008 — Net construction remains a deliberate design gate
 
-**Severity:** none yet. **Resolution:** retain W6G.1f.3h.
+**Severity:** none. **Resolution:** replace the isolated search route through
+the W6G.1f.3h
+[`PureInteractionNetConstruction_2026-09-20.md`](../plans/PureInteractionNetConstruction_2026-09-20.md)
+subplan.
 
 `IsolatedEffectSearch` is demand-driven search state, not autonomous root work
 merely because it may launch reflection children. It cannot be replayed after
 observable child or journal progress. The existing W6G.1f.3h instruction to
 separate traceable search/journal state from orchestration and stop if this
-requires a rooted backedge remains appropriate. Do not generalize the
-reflection exception to the entire search machine without another review.
+requires a rooted backedge correctly identified the design boundary. The
+follow-up audit found that the generic search itself is the unnecessary
+boundary: net construction can instead use ordinary pure builder state over
+the existing managed `ListEffect` choice/cut machinery, then invoke one hidden
+callback-free primitive to validate and replay the uniquely selected strict
+netlist. Do not generalize the autonomous-reflection exception to construction
+search.
 
 ### W6G1R-009 — Failure acknowledgement would be lost behind the promise
 
@@ -221,8 +229,9 @@ route-loss/runtime-drain path.
    selector work.
 2. Continue demand-driven checkpoint families W6G.1f.3c-g in their dependency
    order. The builtin transition includes the forced spark handoff.
-3. Treat W6G.1f.3h as the next mandatory stop-and-review boundary if the
-   isolated search representation still requires external registered roots.
+3. Execute the focused W6G.1f.3h pure-construction subplan. Preserve standard
+   task-local semantics, but remove the generic isolated reflection search
+   instead of attempting to place its external roots in the value graph.
 4. Close family inventories in W6G.1f.3i, then perform the route-machine
    cutover and last-subscriber race matrix in W6G.1f.2b.
 5. Only afterward install causal background traversal, narrow drains, and
@@ -235,5 +244,6 @@ or causal selector ordering. Drain sequencing remains sound after explicitly
 classifying autonomous lazy-launched reflection as runtime-scoped rather than
 first-observer-scoped work. The two historical parallel failures remain
 W6G.1f.2b route/session-affinity evidence; neither is explained away by the
-reflection correction. W6G.1f.3h remains an explicit future design gate rather
-than an overlooked defect.
+reflection correction. W6G.1f.3h has now passed its design gate with a focused
+pure-construction plan rather than by granting the isolated search a rooted
+backedge.

@@ -6388,11 +6388,16 @@ for it:
      The source-backed producer, root-publication, durable-owner,
      persistent-edge, raw-value, checkpoint, and WHNF inventories pass along
      with the full workspace, clippy, and interaction-net profiling gates.
-9. **W6G.1f.3h — net-construction checkpoint and decision audit.** Separate
-   traced search/journal state from task-host orchestration. If the existing
-   isolated search cannot be represented without a rooted backedge, stop for
-   a focused lifecycle design review rather than storing the search behind an
-   opaque external sidecar.
+9. **W6G.1f.3h — pure net construction over `ListEffect`.** Follow
+   [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md).
+   Do not migrate `IsolatedEffectSearch` or its roots beneath the lazy
+   checkpoint. Interpret the construction program as ordinary pure builder
+   state over the existing `ListEffect` return/sequence/alternative/cut/fix
+   machinery, preserving the documented task-local state and delimited-control
+   operations. Select exactly one strict semantic netlist, then pass it to one
+   hidden callback-free `interaction_net_from_netlist` primitive for validation
+   and `NetBuilder` replay. Remove the dedicated net-construction producer
+   route after parity and forced route-loss verification.
 10. **W6G.1f.3i — family closure.** Remove every state-bearing
     *lazy-producer route* variant, make route markers compile-exhaustive over
     the typed checkpoint carrier plus the reflection-to-promise handoff, and

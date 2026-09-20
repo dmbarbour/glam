@@ -31,6 +31,10 @@ when their historical value no longer justifies keeping them.
   is the W6B.4b.2 subplan for inline-first callable evaluation and managed-net
   linear `CallableCheckpoint(NetWhnfState)` topology only when a quantum must
   suspend; its only reducing partner is the original `Bind`.
+- [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md)
+  is the W6G.1f.3h subplan for replacing generic isolated reflection search
+  with pure builder state over the existing `ListEffect` choice/cut machinery,
+  followed by one hidden strict-netlist replay primitive.
 
 ## Recent Completed Plans
 
