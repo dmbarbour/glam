@@ -53,6 +53,11 @@ pub(super) fn control_key_for_test() -> Key {
     CONTROL_KEY.clone()
 }
 
+#[cfg(test)]
+pub(super) fn reset_tag_for_test() -> Key {
+    RESET_TAG.clone()
+}
+
 pub(in crate::eval) fn apply_builder_builtin_in(
     access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
@@ -336,7 +341,7 @@ enum BuilderSequenceFrame {
 }
 
 enum BuilderResetFrame {
-    Reset { key: Value, sequence: Value },
+    Reset { key: Key, sequence: Value },
     Resume { sequence: Value },
 }
 
@@ -647,11 +652,11 @@ impl RegionalBuilderBuiltinMachine {
             }
             _ => unreachable!(),
         };
-        let key = access.values().values().key_value(
-            self.converted_key
-                .as_ref()
-                .expect("builder reset key conversion must finish"),
-        );
+        let key = self
+            .converted_key
+            .as_ref()
+            .expect("builder reset key conversion must finish")
+            .clone();
         let mut state = self
             .decoded
             .take()
@@ -687,11 +692,11 @@ impl RegionalBuilderBuiltinMachine {
             BuilderStateOperation::Shift { function } => access.values().duplicate_value(function),
             _ => unreachable!(),
         };
-        let key = access.values().values().key_value(
-            self.converted_key
-                .as_ref()
-                .expect("builder shift key conversion must finish"),
-        );
+        let key = self
+            .converted_key
+            .as_ref()
+            .expect("builder shift key conversion must finish")
+            .clone();
         let mut state = self
             .decoded
             .take()
@@ -1048,6 +1053,8 @@ fn decode_reset_stack_value(
                 let [key, sequence]: [Value; 2] = fields.to_vec().try_into().map_err(|_| {
                     EvaluationHalt::new("builder reset frame has the wrong number of fields")
                 })?;
+                let key = Key::from_value(&key)
+                    .ok_or_else(|| EvaluationHalt::new("builder reset frame key must be a key"))?;
                 decode_sequence_stack(access, &sequence)?;
                 Ok(BuilderResetFrame::Reset { key, sequence })
             } else if tag.key() == &*RESUME_TAG {
@@ -1072,7 +1079,7 @@ fn encode_reset_stack(access: &RuntimeValueAccess<'_>, resets: Vec<BuilderResetF
             .map(|frame| match frame {
                 BuilderResetFrame::Reset { key, sequence } => Value::List(List::from_values(vec![
                     access.values().key_value(&RESET_TAG),
-                    key,
+                    access.values().key_value(&key),
                     sequence,
                 ])),
                 BuilderResetFrame::Resume { sequence } => Value::List(List::from_values(vec![

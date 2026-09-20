@@ -180,7 +180,7 @@ isolation across alternatives is not.
 Add one same-invocation double-resume fixture and one alternative fixture in
 which reset/control changes on a failed branch cannot affect its sibling.
 
-### PNC3R-004 — Open: decoded reset keys use general `Value` equality
+### PNC3R-004 — Resolved: decoded reset keys used general `Value` equality
 
 **Severity:** low design and auditability
 
@@ -191,9 +191,11 @@ source-level defect. It nevertheless weakens malformed-state validation and
 adds a new dependency on general `Value` equality while the broader runtime is
 moving observations behind explicit access.
 
-Decode the field through `Key::from_value`, store `Key` in the transient frame,
-compare keys directly, and re-encode through `key_value`. Add a malformed-key
-fixture.
+The reset decoder now requires `Key::from_value`, the transient frame stores a
+`Key`, shift compares keys directly, and encoding returns through `key_value`.
+`hidden_builder_rejects_malformed_control_records` first reproduced the old
+acceptance of a builtin-valued key and now requires the dedicated malformed-key
+diagnostic.
 
 ### PNC3R-005 — Resolved: empty sequence changed the builder record width
 

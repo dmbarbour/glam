@@ -925,7 +925,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
 #[test]
 fn hidden_builder_rejects_malformed_control_records() {
     let context = EvalContext::standalone();
-    let (malformed_reset, malformed_sequence, missing_sequence, returned) =
+    let (malformed_reset, malformed_reset_key, malformed_sequence, missing_sequence, returned) =
         with_access(&context, |access| {
             let brand = Arc::new(ConstructionBrand::default());
             let malformed_reset = encode_builder_state(
@@ -936,6 +936,24 @@ fn hidden_builder_rejects_malformed_control_records() {
                 Value::Dict(Dict::new_sync().insert(
                     super::builder::control_key_for_test(),
                     Value::Number(1.into()),
+                )),
+            );
+            let malformed_reset_key = encode_builder_state(
+                access,
+                &brand,
+                1,
+                Vec::new(),
+                Value::Dict(Dict::new_sync().insert(
+                    super::builder::control_key_for_test(),
+                    Value::List(List::from_values(vec![Value::List(List::from_values(
+                        vec![
+                        access
+                            .values()
+                            .key_value(&super::builder::reset_tag_for_test()),
+                        Value::Builtin(Builtin::InteractionNetBuilderReturn),
+                        Value::List(List::empty()),
+                    ],
+                    ))])),
                 )),
             );
             let initial = encode_builder_state(
@@ -967,6 +985,7 @@ fn hidden_builder_rejects_malformed_control_records() {
             );
             (
                 malformed_reset,
+                malformed_reset_key,
                 malformed_sequence,
                 missing_sequence,
                 returned,
@@ -975,6 +994,7 @@ fn hidden_builder_rejects_malformed_control_records() {
 
     for (state, expected) in [
         (malformed_reset, "builder reset stack must be a strict list"),
+        (malformed_reset_key, "builder reset frame key must be a key"),
         (
             malformed_sequence,
             "builder sequence stack must be a strict list",
