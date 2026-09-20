@@ -152,7 +152,7 @@ Before PNC4, add a retained-source harness which:
   equal values; and
 - repeats the exercise while demanding a later builder-fix alternative.
 
-### PNC3R-002 — Open: per-alternative future identity and exhaustion are under-latched
+### PNC3R-002 — Resolved: per-alternative future identity and exhaustion were under-latched
 
 **Severity:** medium verification
 
@@ -162,10 +162,12 @@ It therefore does not prove that alternatives receive distinct future
 identities or that each future is assigned its own selected head. No direct
 fixture demands the exhausted tail and verifies the empty-list assignment.
 
-Add a function whose result wraps its supplied promise without forcing it.
-Inspect those nested promise identities under value access for alternatives
-zero and one, require them to differ, and verify the exhausted tail publishes
-and memoizes the empty result without replay.
+The fixture now builds a pure fix function whose two outcomes each contain the
+supplied promise without forcing it. A one-step durable list-front observer
+proves that alternatives zero and one expose distinct promise identities and
+that each promise is assigned its own selected head. It then demands the
+exhausted tail twice: the first demand records exactly one construction and
+publication, while the second uses the memoized empty result without replay.
 
 ### PNC3R-003 — Open: two control-law claims need direct latches
 

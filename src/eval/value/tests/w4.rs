@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::core::{Builtin, ListEffectComputation};
+use crate::eval::list_machine::{ListFrontMachine, ListFrontPoll};
 
 fn isolated_context() -> crate::evaluation::OwnedEvalContext {
     EvalContext::isolated(crate::core::CoreValueFactory::new(
@@ -255,6 +256,69 @@ fn fixed_list_handler(context: &EvalContext, value: Value) -> Value {
 
 fn list_effect_value(function: Value) -> Value {
     Value::Dict(Dict::new_sync().insert((*crate::core::keys::EFF).clone(), function))
+}
+
+fn list_front(context: &EvalContext, list: Value) -> Option<(Value, Value)> {
+    let mut machine = ListFrontMachine::unowned(crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        list,
+    ));
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..256 {
+        let outcome = crate::eval::with_direct_evaluator(context, |evaluator| {
+            machine.poll(
+                &poll,
+                evaluator,
+                context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
+        });
+        match outcome {
+            ListFrontPoll::Ready(front) => {
+                return front
+                    .map(|(head, tail)| (head.clone_core_for_test(), tail.clone_core_for_test()));
+            }
+            ListFrontPoll::Pending(WorkDependency::Wait(wait)) => pump_to_ready(context, &wait),
+            ListFrontPoll::Pending(WorkDependency::Promise(_)) => {
+                panic!("the fix-list spine must not expose its promised element as a dependency")
+            }
+            ListFrontPoll::Pending(WorkDependency::Test(_)) => {
+                panic!("the fix-list spine exposed a synthetic dependency")
+            }
+            ListFrontPoll::Yielded => {}
+            ListFrontPoll::Failed(failure) => panic!("fix-list front failed: {failure}"),
+        }
+        assert_ne!(attempt, 255, "fix-list front exhausted its poll bound");
+    }
+    unreachable!("bounded fix-list front must complete or panic")
+}
+
+fn fix_function_returning_its_future_twice(context: &EvalContext) -> Value {
+    let handler_code = Arc::new(crate::eval::test_support::lower_test_function_code_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::List(Arc::from([
+            Arc::new(crate::eval::test_support::TestExpr::Local(1)),
+            Arc::new(crate::eval::test_support::TestExpr::Local(1)),
+        ])),
+    ));
+    let handler = crate::eval::test_support::TestExpr::Function {
+        code: handler_code,
+        captures: Arc::from([Arc::new(crate::eval::test_support::TestExpr::Local(0))]),
+    };
+    let eff_key = context
+        .values()
+        .with_runtime_value_access(|access| access.values().key_value(&crate::core::keys::EFF));
+    let effect = crate::eval::test_support::TestExpr::Apply(
+        Arc::new(crate::eval::test_support::TestExpr::Apply(
+            Arc::new(crate::eval::test_support::TestExpr::Value(Value::Builtin(
+                Builtin::DictSingleton,
+            ))),
+            Arc::new(crate::eval::test_support::TestExpr::Value(eff_key)),
+        )),
+        Arc::new(handler),
+    );
+    crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
 }
 
 fn poll_object_until_blocked(
@@ -1012,20 +1076,7 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
 #[test]
 fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
     let context = isolated_context();
-    let handler = crate::eval::test_support::closed_function_value_in(
-        context.values(),
-        1,
-        crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![
-            number(51),
-            number(52),
-        ]))),
-    );
-    let effect = list_effect_value(handler);
-    let function = crate::eval::test_support::closed_function_value_in(
-        context.values(),
-        1,
-        crate::eval::test_support::TestExpr::Value(effect),
-    );
+    let function = fix_function_returning_its_future_twice(&context);
     let fixed = crate::eval::eval_value(
         &context,
         &Value::builtin_call(context.values(), Builtin::ListEffectFix, vec![function]),
@@ -1033,21 +1084,54 @@ fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
     .expect("list-effect fix construction should evaluate");
     let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
 
-    for (index, expected_count) in [(0, 1), (1, 2)] {
-        let selected = Value::builtin_call(
-            context.values(),
-            Builtin::ListAt,
-            vec![number(index), fixed.clone()],
-        );
-        assert_eq!(
-            crate::eval::eval_value(&context, &selected)
-                .expect("the selected fixed alternative should evaluate"),
-            number(51 + index)
-        );
-        let lifecycle = context.values().managed_promise_lifecycle_counts_for_test();
-        assert_eq!(lifecycle.0 - lifecycle_before.0, expected_count);
-        assert_eq!(lifecycle.1 - lifecycle_before.1, expected_count);
+    let (first, tail) = list_front(&context, fixed).expect("the first alternative must exist");
+    let Value::Promised(first) = first else {
+        panic!("the first alternative must expose its own future")
+    };
+    let (second, exhausted) =
+        list_front(&context, tail).expect("the second alternative must exist");
+    let Value::Promised(second) = second else {
+        panic!("the second alternative must expose its own future")
+    };
+    assert_ne!(
+        first.id(context.values()),
+        second.id(context.values()),
+        "each observed alternative must allocate a distinct future"
+    );
+    for future in [&first, &second] {
+        let assigned = future
+            .assignment(context.values())
+            .expect("the future must be assigned when its alternative publishes")
+            .expect("the selected future must be assigned successfully");
+        let Value::Promised(assigned) = assigned else {
+            panic!("the selected head must assign the alternative's own future")
+        };
+        assert_eq!(future.id(context.values()), assigned.id(context.values()));
     }
+    let lifecycle = context.values().managed_promise_lifecycle_counts_for_test();
+    assert_eq!(lifecycle.0 - lifecycle_before.0, 2);
+    assert_eq!(lifecycle.1 - lifecycle_before.1, 2);
+
+    let lifecycle_before_exhaustion = lifecycle;
+    assert!(
+        list_front(&context, exhausted.clone()).is_none(),
+        "the third alternative must publish the empty fixed tail"
+    );
+    let lifecycle_after_exhaustion = context.values().managed_promise_lifecycle_counts_for_test();
+    assert_eq!(
+        lifecycle_after_exhaustion.0 - lifecycle_before_exhaustion.0,
+        1
+    );
+    assert_eq!(
+        lifecycle_after_exhaustion.1 - lifecycle_before_exhaustion.1,
+        1
+    );
+    assert!(list_front(&context, exhausted).is_none());
+    assert_eq!(
+        context.values().managed_promise_lifecycle_counts_for_test(),
+        lifecycle_after_exhaustion,
+        "the memoized exhausted tail must not allocate or publish another future"
+    );
 }
 
 #[test]
