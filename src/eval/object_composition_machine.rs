@@ -1,284 +1,328 @@
-//! Durable object-composition construction.
+//! Object-composition construction.
 //!
-//! Ordinary object extension owns only the object/specification demand. The
-//! callable chain itself is represented by ordinary lazy applications so its
-//! existing WHNF owner preserves exact progress across suspension.
+//! Ordinary extension, composed-definition calls, and recursive override are
+//! raw regional state beneath the owning lazy's managed builtin checkpoint.
 
 use std::sync::Arc;
 
+use glam_gc::Visitor;
+
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, Key, LazyValue, List,
-    Value, keys,
+    Builtin, BuiltinCall, Dict, EvaluationFailure, FixpointComputation, Key, LazyId, LazyValue,
+    List, Value, keys, trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+use crate::evaluation::EvaluationValueAccess;
+
+use super::builtin_machine::RegionalBuiltinPoll;
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::builtin_machine::BuiltinTaskPoll;
-use super::whnf::WhnfComputation;
-
-pub(crate) struct ObjectCompositionMachine {
-    phase: CompositionPhase,
+pub(in crate::eval) struct RegionalObjectCompositionMachine {
+    phase: RegionalCompositionPhase,
+    source_owner: LazyId,
 }
 
-enum CompositionPhase {
+enum RegionalCompositionPhase {
     WithObject {
-        object: WhnfComputation,
-        extension_defs: RuntimeValueRoot,
+        object: RegionalWhnfWork,
+        extension_defs: Value,
     },
     WithSpec {
-        object: RuntimeValueRoot,
-        spec: WhnfComputation,
-        extension_defs: RuntimeValueRoot,
-    },
-    Composed {
-        prior_defs: RuntimeValueRoot,
-        extension_defs: RuntimeValueRoot,
-        base: RuntimeValueRoot,
-        self_value: RuntimeValueRoot,
+        object: Value,
+        spec: RegionalWhnfWork,
+        extension_defs: Value,
     },
     ComposedPriorBase {
-        application: WhnfComputation,
-        extension_defs: RuntimeValueRoot,
-        self_value: RuntimeValueRoot,
+        application: RegionalWhnfWork,
+        extension_defs: Value,
+        self_value: Value,
     },
     ComposedExtensionPrior {
-        application: WhnfComputation,
-        self_value: RuntimeValueRoot,
+        application: RegionalWhnfWork,
+        self_value: Value,
     },
     OverrideUpdates {
-        updates: WhnfComputation,
-        base: RuntimeValueRoot,
+        updates: RegionalWhnfWork,
+        base: Value,
     },
     OverrideBase {
-        updates: RuntimeValueRoot,
-        base: WhnfComputation,
+        updates: Value,
+        base: RegionalWhnfWork,
     },
-    Override(ObjectOverrideMachine),
+    Override(RegionalObjectOverrideMachine),
 }
 
-struct ObjectOverrideMachine {
-    stack: Vec<OverrideFrame>,
+struct RegionalObjectOverrideMachine {
+    stack: Vec<RegionalOverrideFrame>,
+    source_owner: LazyId,
 }
 
-struct OverrideFrame {
-    result: RuntimeValueRoot,
-    updates: RuntimeValueRoot,
+struct RegionalOverrideFrame {
+    result: Value,
+    updates: Value,
     keys: Vec<Key>,
     next: usize,
-    pending: Option<PendingOverride>,
+    pending: Option<RegionalPendingOverride>,
     return_key: Option<Key>,
 }
 
-struct PendingOverride {
+struct RegionalPendingOverride {
     key: Key,
-    update: RuntimeValueRoot,
-    prior: WhnfComputation,
+    update: Value,
+    prior: RegionalWhnfWork,
 }
 
-impl ObjectCompositionMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
+impl RegionalObjectCompositionMachine {
+    pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
         matches!(
             builtin,
             Builtin::ObjectWithDefs | Builtin::ObjectComposedDefs | Builtin::ObjectOverrideDefs
         )
     }
 
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let duplicate = |value: &Value| access.values().duplicate_value(value);
         let phase = match builtin {
             Builtin::ObjectWithDefs => {
-                let [object, extension_defs]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("object extension retains two operands");
-                CompositionPhase::WithObject {
-                    object: WhnfComputation::from_root(object),
-                    extension_defs,
+                let [object, extension_defs] = arguments else {
+                    unreachable!("object extension retains two operands")
+                };
+                RegionalCompositionPhase::WithObject {
+                    object: RegionalWhnfWork::from_focus(access, duplicate(object))
+                        .with_source_owner(source_owner),
+                    extension_defs: duplicate(extension_defs),
                 }
             }
             Builtin::ObjectComposedDefs => {
-                let [prior_defs, extension_defs, base, self_value]: [RuntimeValueRoot; 4] =
-                    arguments
-                        .try_into()
-                        .expect("composed object definitions retain four operands");
-                CompositionPhase::Composed {
-                    prior_defs,
-                    extension_defs,
-                    base,
-                    self_value,
+                let [prior_defs, extension_defs, base, self_value] = arguments else {
+                    unreachable!("composed object definitions retain four operands")
+                };
+                RegionalCompositionPhase::ComposedPriorBase {
+                    application: regional_application_in(
+                        access,
+                        duplicate(prior_defs),
+                        &[duplicate(base)],
+                        source_owner,
+                    ),
+                    extension_defs: duplicate(extension_defs),
+                    self_value: duplicate(self_value),
                 }
             }
             Builtin::ObjectOverrideDefs => {
-                let [updates, base, _self_value]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("object override definitions retain three operands");
-                CompositionPhase::OverrideUpdates {
-                    updates: WhnfComputation::from_root(updates),
-                    base,
+                let [updates, base, _self_value] = arguments else {
+                    unreachable!("object override definitions retain three operands")
+                };
+                RegionalCompositionPhase::OverrideUpdates {
+                    updates: RegionalWhnfWork::from_focus(access, duplicate(updates))
+                        .with_source_owner(source_owner),
+                    base: duplicate(base),
                 }
             }
-            _ => unreachable!("object composition machine received another builtin"),
+            _ => unreachable!("regional object composition received another builtin"),
         };
-        Self { phase }
+        Self {
+            phase,
+            source_owner,
+        }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+    ) -> RegionalBuiltinPoll {
         match &mut self.phase {
-            CompositionPhase::WithObject {
+            RegionalCompositionPhase::WithObject {
                 object,
                 extension_defs,
             } => {
-                let object = match poll_whnf(object, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let object = match poll_regional_whnf_in(access, object, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let spec = context.with_value_access(|access| {
-                    let Value::Dict(object) = access.clone_root(&object) else {
-                        return Err("ordinary `with` requires a dictionary or object value");
-                    };
-                    Ok(object.get(&*keys::SPEC).map(|spec| {
-                        access
-                            .values()
-                            .root_runtime_value(access.values().duplicate_value(spec))
-                    }))
-                });
-                let spec = match spec {
-                    Ok(spec) => spec,
-                    Err(message) => return BuiltinTaskPoll::Failed(root_message(context, message)),
+                let Value::Dict(object_dict) = &object else {
+                    return regional_failure(
+                        "ordinary `with` requires a dictionary or object value",
+                    );
                 };
-                let Some(spec) = spec else {
-                    return BuiltinTaskPoll::Ready(root_plain_extension(
-                        context,
+                let Some(spec) = object_dict
+                    .get(&*keys::SPEC)
+                    .map(|spec| access.values().duplicate_value(spec))
+                else {
+                    return RegionalBuiltinPoll::Ready(plain_extension_in(
+                        access,
                         extension_defs,
                         &object,
                     ));
                 };
-                self.phase = CompositionPhase::WithSpec {
+                self.phase = RegionalCompositionPhase::WithSpec {
                     object,
-                    spec: WhnfComputation::from_root(spec),
-                    extension_defs: extension_defs.clone(),
+                    spec: RegionalWhnfWork::from_focus(access, spec)
+                        .with_source_owner(self.source_owner),
+                    extension_defs: access.values().duplicate_value(extension_defs),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
-            CompositionPhase::WithSpec {
+            RegionalCompositionPhase::WithSpec {
                 object,
                 spec,
                 extension_defs,
             } => {
-                let spec = match poll_whnf(spec, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+                let spec = match poll_regional_whnf_in(access, spec, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                match finish_object_extension(context, object, &spec, extension_defs) {
-                    Ok(value) => BuiltinTaskPoll::Ready(value),
-                    Err(message) => BuiltinTaskPoll::Failed(root_message(context, message)),
+                match finish_object_extension_in(access, object, &spec, extension_defs) {
+                    Ok(value) => RegionalBuiltinPoll::Ready(value),
+                    Err(message) => regional_failure(message),
                 }
             }
-            CompositionPhase::Composed {
-                prior_defs,
-                extension_defs,
-                base,
-                self_value,
-            } => {
-                self.phase = CompositionPhase::ComposedPriorBase {
-                    application: application_in(context, prior_defs, std::slice::from_ref(base)),
-                    extension_defs: extension_defs.clone(),
-                    self_value: self_value.clone(),
-                };
-                BuiltinTaskPoll::Yielded
-            }
-            CompositionPhase::ComposedPriorBase {
+            RegionalCompositionPhase::ComposedPriorBase {
                 application,
                 extension_defs,
                 self_value,
             } => {
-                let prior_stage =
-                    match poll_whnf(application, poll_context, durable_context, step_budget) {
-                        DemandResult::Ready(value) => value,
-                        DemandResult::Pending(poll) => return poll,
-                    };
-                let prior_result =
-                    root_application(context, &prior_stage, std::slice::from_ref(self_value));
-                self.phase = CompositionPhase::ComposedExtensionPrior {
-                    application: application_in(
-                        context,
-                        extension_defs,
-                        std::slice::from_ref(&prior_result),
+                let prior_stage = match poll_regional_whnf_in(access, application, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                let prior_result = application_value_in(access, &prior_stage, &[self_value]);
+                self.phase = RegionalCompositionPhase::ComposedExtensionPrior {
+                    application: regional_application_in(
+                        access,
+                        access.values().duplicate_value(extension_defs),
+                        &[prior_result],
+                        self.source_owner,
                     ),
-                    self_value: self_value.clone(),
+                    self_value: access.values().duplicate_value(self_value),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
-            CompositionPhase::ComposedExtensionPrior {
+            RegionalCompositionPhase::ComposedExtensionPrior {
                 application,
                 self_value,
             } => {
-                let extension_stage =
-                    match poll_whnf(application, poll_context, durable_context, step_budget) {
-                        DemandResult::Ready(value) => value,
-                        DemandResult::Pending(poll) => return poll,
-                    };
-                BuiltinTaskPoll::Ready(root_application(
-                    context,
+                let extension_stage = match poll_regional_whnf_in(access, application, step_budget)
+                {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                RegionalBuiltinPoll::Ready(application_value_in(
+                    access,
                     &extension_stage,
-                    std::slice::from_ref(self_value),
+                    &[self_value],
                 ))
             }
-            CompositionPhase::OverrideUpdates { updates, base } => {
-                let updates = match poll_whnf(updates, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+            RegionalCompositionPhase::OverrideUpdates { updates, base } => {
+                let updates = match poll_regional_whnf_in(access, updates, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                self.phase = CompositionPhase::OverrideBase {
+                self.phase = RegionalCompositionPhase::OverrideBase {
                     updates,
-                    base: WhnfComputation::from_root(base.clone()),
+                    base: RegionalWhnfWork::from_focus(
+                        access,
+                        access.values().duplicate_value(base),
+                    )
+                    .with_source_owner(self.source_owner),
                 };
-                BuiltinTaskPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
-            CompositionPhase::OverrideBase { updates, base } => {
-                let base = match poll_whnf(base, poll_context, durable_context, step_budget) {
-                    DemandResult::Ready(value) => value,
-                    DemandResult::Pending(poll) => return poll,
+            RegionalCompositionPhase::OverrideBase { updates, base } => {
+                let base = match poll_regional_whnf_in(access, base, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
                 };
-                let machine = match ObjectOverrideMachine::new(context, base, updates.clone()) {
+                let machine = match RegionalObjectOverrideMachine::new_in(
+                    access,
+                    base,
+                    access.values().duplicate_value(updates),
+                    self.source_owner,
+                ) {
                     Ok(machine) => machine,
-                    Err(message) => {
-                        return BuiltinTaskPoll::Failed(root_message(context, message));
-                    }
+                    Err(message) => return regional_failure(message),
                 };
-                self.phase = CompositionPhase::Override(machine);
-                BuiltinTaskPoll::Yielded
+                self.phase = RegionalCompositionPhase::Override(machine);
+                RegionalBuiltinPoll::Yielded
             }
-            CompositionPhase::Override(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
+            RegionalCompositionPhase::Override(machine) => machine.poll_in(access, step_budget),
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match &self.phase {
+            RegionalCompositionPhase::WithObject {
+                object,
+                extension_defs,
+            } => {
+                object.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(extension_defs, visitor);
             }
+            RegionalCompositionPhase::WithSpec {
+                object,
+                spec,
+                extension_defs,
+            } => {
+                for value in [object, extension_defs] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+                spec.trace_managed_edges(visitor);
+            }
+            RegionalCompositionPhase::ComposedPriorBase {
+                application,
+                extension_defs,
+                self_value,
+            } => {
+                application.trace_managed_edges(visitor);
+                for value in [extension_defs, self_value] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+            }
+            RegionalCompositionPhase::ComposedExtensionPrior {
+                application,
+                self_value,
+            } => {
+                application.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(self_value, visitor);
+            }
+            RegionalCompositionPhase::OverrideUpdates { updates, base } => {
+                updates.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(base, visitor);
+            }
+            RegionalCompositionPhase::OverrideBase { updates, base } => {
+                trace_compatibility_value_managed_edges(updates, visitor);
+                base.trace_managed_edges(visitor);
+            }
+            RegionalCompositionPhase::Override(machine) => machine.trace_managed_edges(visitor),
         }
     }
 }
 
-impl ObjectOverrideMachine {
-    fn new(
-        context: &EvaluatorStepContext<'_>,
-        base: RuntimeValueRoot,
-        updates: RuntimeValueRoot,
+impl RegionalObjectOverrideMachine {
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        base: Value,
+        updates: Value,
+        source_owner: LazyId,
     ) -> Result<Self, &'static str> {
-        let frame = override_frame(context, base, updates, None)?;
-        Ok(Self { stack: vec![frame] })
+        let frame = regional_override_frame_in(access, base, updates, None)?;
+        Ok(Self {
+            stack: vec![frame],
+            source_owner,
+        })
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+    ) -> RegionalBuiltinPoll {
         let pending = self
             .stack
             .last_mut()
@@ -286,14 +330,9 @@ impl ObjectOverrideMachine {
             .pending
             .take();
         if let Some(mut pending) = pending {
-            let prior = match poll_whnf(
-                &mut pending.prior,
-                poll_context,
-                durable_context,
-                step_budget,
-            ) {
-                DemandResult::Ready(value) => value,
-                DemandResult::Pending(poll) => {
+            let prior = match poll_regional_whnf_in(access, &mut pending.prior, step_budget) {
+                Ok(value) => value,
+                Err(poll) => {
                     self.stack
                         .last_mut()
                         .expect("pending object override retains its frame")
@@ -301,9 +340,12 @@ impl ObjectOverrideMachine {
                     return poll;
                 }
             };
-            if let Some(child) =
-                nested_override_frame(context, prior, pending.update.clone(), pending.key.clone())
-            {
+            if let Some(child) = regional_nested_override_frame_in(
+                access,
+                prior,
+                access.values().duplicate_value(&pending.update),
+                pending.key.clone(),
+            ) {
                 self.stack.push(child);
             } else {
                 let result = {
@@ -311,14 +353,19 @@ impl ObjectOverrideMachine {
                         .stack
                         .last()
                         .expect("pending object override retains its frame");
-                    insert_override_value(context, &frame.result, pending.key, &pending.update)
+                    insert_regional_override_value_in(
+                        access,
+                        &frame.result,
+                        pending.key,
+                        &pending.update,
+                    )
                 };
                 self.stack
                     .last_mut()
                     .expect("pending object override retains its frame")
                     .result = result;
             }
-            return BuiltinTaskPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         let complete = {
@@ -334,13 +381,14 @@ impl ObjectOverrideMachine {
                 .pop()
                 .expect("completed object override retains a frame");
             let Some(parent) = self.stack.last_mut() else {
-                return BuiltinTaskPoll::Ready(completed.result);
+                return RegionalBuiltinPoll::Ready(completed.result);
             };
             let key = completed
                 .return_key
                 .expect("a nested object override retains its parent key");
-            parent.result = insert_override_value(context, &parent.result, key, &completed.result);
-            return BuiltinTaskPoll::Yielded;
+            parent.result =
+                insert_regional_override_value_in(access, &parent.result, key, &completed.result);
+            return RegionalBuiltinPoll::Yielded;
         }
 
         let step = {
@@ -350,55 +398,66 @@ impl ObjectOverrideMachine {
                 .expect("unfinished object override retains a frame");
             let key = frame.keys[frame.next].clone();
             frame.next += 1;
-            next_override_step(context, &frame.result, &frame.updates, key)
+            next_regional_override_step_in(access, &frame.result, &frame.updates, key)
         };
         match step {
-            OverrideStep::Inserted(result) => {
+            RegionalOverrideStep::Inserted(result) => {
                 self.stack
                     .last_mut()
                     .expect("unfinished object override retains a frame")
                     .result = result;
             }
-            OverrideStep::DemandPrior { key, update, prior } => {
+            RegionalOverrideStep::DemandPrior { key, update, prior } => {
                 self.stack
                     .last_mut()
                     .expect("unfinished object override retains a frame")
-                    .pending = Some(PendingOverride {
+                    .pending = Some(RegionalPendingOverride {
                     key,
                     update,
-                    prior: WhnfComputation::from_root(prior),
+                    prior: RegionalWhnfWork::from_focus(access, prior)
+                        .with_source_owner(self.source_owner),
                 });
             }
         }
-        BuiltinTaskPoll::Yielded
+        RegionalBuiltinPoll::Yielded
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for frame in &self.stack {
+            for value in [&frame.result, &frame.updates] {
+                trace_compatibility_value_managed_edges(value, visitor);
+            }
+            if let Some(pending) = &frame.pending {
+                trace_compatibility_value_managed_edges(&pending.update, visitor);
+                pending.prior.trace_managed_edges(visitor);
+            }
+        }
     }
 }
 
-enum OverrideStep {
-    Inserted(RuntimeValueRoot),
+enum RegionalOverrideStep {
+    Inserted(Value),
     DemandPrior {
         key: Key,
-        update: RuntimeValueRoot,
-        prior: RuntimeValueRoot,
+        update: Value,
+        prior: Value,
     },
 }
 
-fn override_frame(
-    context: &EvaluatorStepContext<'_>,
-    result: RuntimeValueRoot,
-    updates: RuntimeValueRoot,
+fn regional_override_frame_in(
+    _access: &EvaluationValueAccess<'_>,
+    result: Value,
+    updates: Value,
     return_key: Option<Key>,
-) -> Result<OverrideFrame, &'static str> {
-    let keys = context.with_value_access(|access| {
-        if !matches!(access.clone_root(&result), Value::Dict(_)) {
-            return Err("object override definitions require dictionary values");
-        }
-        let Value::Dict(update_values) = access.clone_root(&updates) else {
-            return Err("object override definitions require dictionary values");
-        };
-        Ok(update_values.iter().map(|(key, _)| key.clone()).collect())
-    })?;
-    Ok(OverrideFrame {
+) -> Result<RegionalOverrideFrame, &'static str> {
+    if !matches!(result, Value::Dict(_)) {
+        return Err("object override definitions require dictionary values");
+    }
+    let Value::Dict(update_values) = &updates else {
+        return Err("object override definitions require dictionary values");
+    };
+    let keys = update_values.iter().map(|(key, _)| key.clone()).collect();
+    Ok(RegionalOverrideFrame {
         result,
         updates,
         keys,
@@ -408,200 +467,160 @@ fn override_frame(
     })
 }
 
-fn nested_override_frame(
-    context: &EvaluatorStepContext<'_>,
-    prior: RuntimeValueRoot,
-    updates: RuntimeValueRoot,
+fn regional_nested_override_frame_in(
+    access: &EvaluationValueAccess<'_>,
+    prior: Value,
+    updates: Value,
     return_key: Key,
-) -> Option<OverrideFrame> {
-    let prior_is_dict =
-        context.with_value_access(|access| matches!(access.clone_root(&prior), Value::Dict(_)));
-    prior_is_dict
-        .then(|| override_frame(context, prior, updates, Some(return_key)))
+) -> Option<RegionalOverrideFrame> {
+    matches!(prior, Value::Dict(_))
+        .then(|| regional_override_frame_in(access, prior, updates, Some(return_key)))
         .transpose()
         .expect("nested override updates are already known dictionaries")
 }
 
-fn next_override_step(
-    context: &EvaluatorStepContext<'_>,
-    result: &RuntimeValueRoot,
-    updates: &RuntimeValueRoot,
+fn next_regional_override_step_in(
+    access: &EvaluationValueAccess<'_>,
+    result: &Value,
+    updates: &Value,
     key: Key,
-) -> OverrideStep {
-    context.with_value_access(|access| {
-        let Value::Dict(result_values) = access.clone_root(result) else {
-            unreachable!("object override result remains a dictionary")
+) -> RegionalOverrideStep {
+    let Value::Dict(result_values) = result else {
+        unreachable!("object override result remains a dictionary")
+    };
+    let Value::Dict(update_values) = updates else {
+        unreachable!("object override updates remain a dictionary")
+    };
+    let update = update_values
+        .get(&key)
+        .expect("an inventoried object override key remains present");
+    if let (Some(prior), Value::Dict(_)) = (result_values.get(&key), update) {
+        return RegionalOverrideStep::DemandPrior {
+            key,
+            update: access.values().duplicate_value(update),
+            prior: access.values().duplicate_value(prior),
         };
-        let Value::Dict(update_values) = access.clone_root(updates) else {
-            unreachable!("object override updates remain a dictionary")
-        };
-        let update = update_values
-            .get(&key)
-            .expect("an inventoried object override key remains present");
-        if let (Some(prior), Value::Dict(_)) = (result_values.get(&key), update) {
-            return OverrideStep::DemandPrior {
-                key,
-                update: access
-                    .values()
-                    .root_runtime_value(access.values().duplicate_value(update)),
-                prior: access
-                    .values()
-                    .root_runtime_value(access.values().duplicate_value(prior)),
-            };
-        }
-        let result = result_values.insert(key, access.values().duplicate_value(update));
-        OverrideStep::Inserted(access.values().root_runtime_value(Value::Dict(result)))
-    })
+    }
+    let result = result_values.insert(key, access.values().duplicate_value(update));
+    RegionalOverrideStep::Inserted(Value::Dict(result))
 }
 
-fn insert_override_value(
-    context: &EvaluatorStepContext<'_>,
-    result: &RuntimeValueRoot,
+fn insert_regional_override_value_in(
+    access: &EvaluationValueAccess<'_>,
+    result: &Value,
     key: Key,
-    value: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let Value::Dict(result) = access.clone_root(result) else {
-            unreachable!("object override result remains a dictionary")
-        };
-        let result = result.insert(key, access.clone_root(value));
-        access.values().root_runtime_value(Value::Dict(result))
-    })
+    value: &Value,
+) -> Value {
+    let Value::Dict(result) = result else {
+        unreachable!("object override result remains a dictionary")
+    };
+    Value::Dict(result.insert(key, access.values().duplicate_value(value)))
 }
 
-enum DemandResult {
-    Ready(RuntimeValueRoot),
-    Pending(BuiltinTaskPoll),
-}
-
-fn poll_whnf(
-    computation: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
+fn poll_regional_whnf_in(
+    access: &EvaluationValueAccess<'_>,
+    computation: &mut RegionalWhnfWork,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandResult {
-    match poll_whnf_computation(computation, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandResult::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => {
-            DemandResult::Pending(BuiltinTaskPoll::Pending(dependency))
-        }
-        WhnfOwnerPoll::Yielded => DemandResult::Pending(BuiltinTaskPoll::Yielded),
-        WhnfOwnerPoll::Failed(failure) => DemandResult::Pending(BuiltinTaskPoll::Failed(failure)),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("object composition produced an external {boundary:?} boundary")
-        }
+) -> Result<Value, RegionalBuiltinPoll> {
+    match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
+        RegionalWhnfStatus::Ready(value) => Ok(value),
+        RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
+        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }
 
-fn root_plain_extension(
-    context: &EvaluatorStepContext<'_>,
-    extension_defs: &RuntimeValueRoot,
-    object: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| root_plain_extension_in(&access, extension_defs, object))
+fn regional_application_in(
+    access: &EvaluationValueAccess<'_>,
+    function: Value,
+    arguments: &[Value],
+    source_owner: LazyId,
+) -> RegionalWhnfWork {
+    RegionalWhnfWork::from_application_checkpoint_in(
+        access,
+        function,
+        arguments,
+        Some(source_owner),
+    )
 }
 
-fn root_plain_extension_in(
-    access: &crate::evaluation::EvaluationValueAccess<'_>,
-    extension_defs: &RuntimeValueRoot,
-    object: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
+fn application_value_in(
+    access: &EvaluationValueAccess<'_>,
+    function: &Value,
+    arguments: &[&Value],
+) -> Value {
+    Value::Lazy(LazyValue::from_application_in(
+        access.values(),
+        access.values().duplicate_value(function),
+        Arc::from(
+            arguments
+                .iter()
+                .map(|argument| access.values().duplicate_value(argument))
+                .collect::<Vec<_>>(),
+        ),
+    ))
+}
+
+fn plain_extension_in(
+    access: &EvaluationValueAccess<'_>,
+    extension_defs: &Value,
+    object: &Value,
+) -> Value {
     let extension = LazyValue::from_application_in(
         access.values(),
-        access.clone_root(extension_defs),
-        Arc::from([access.clone_root(object)]),
+        access.values().duplicate_value(extension_defs),
+        Arc::from([access.values().duplicate_value(object)]),
     );
-    let fixed = LazyValue::from_builtin_in(
+    Value::Lazy(LazyValue::from_builtin_in(
         access.values(),
         BuiltinCall {
             builtin: Builtin::Fixpoint,
             arguments: Arc::from([Value::Lazy(extension)]),
         },
+    ))
+}
+
+fn finish_object_extension_in(
+    access: &EvaluationValueAccess<'_>,
+    object: &Value,
+    spec: &Value,
+    extension_defs: &Value,
+) -> Result<Value, &'static str> {
+    let Value::Dict(spec) = spec else {
+        return Err("object instance builtin requires a specification dictionary");
+    };
+    if spec.is_empty() {
+        return Ok(plain_extension_in(access, extension_defs, object));
+    }
+    let name = spec
+        .get(&*keys::NAME)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
+    let deps = spec
+        .get(&*keys::DEPS)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| Value::List(List::empty()));
+    let prior_defs = spec
+        .get(&*keys::DEFS)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or(Value::Builtin(Builtin::ObjectDefaultDefs));
+    let composed_defs = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::ObjectComposedDefs,
+        arguments: Arc::from([prior_defs, access.values().duplicate_value(extension_defs)]),
+    });
+    let spec = Value::Dict(
+        Dict::new_sync()
+            .insert((*keys::NAME).clone(), name)
+            .insert((*keys::DEPS).clone(), deps)
+            .insert((*keys::DEFS).clone(), composed_defs),
     );
-    access.values().root_runtime_value(Value::Lazy(fixed))
+    Ok(Value::Lazy(LazyValue::computed_fixpoint_in(
+        access.values(),
+        "object self",
+        FixpointComputation::ObjectInstance(spec),
+    )))
 }
 
-fn finish_object_extension(
-    context: &EvaluatorStepContext<'_>,
-    object: &RuntimeValueRoot,
-    spec: &RuntimeValueRoot,
-    extension_defs: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, &'static str> {
-    context.with_value_access(|access| {
-        let Value::Dict(spec) = access.clone_root(spec) else {
-            return Err("object instance builtin requires a specification dictionary");
-        };
-        if spec.is_empty() {
-            return Ok(root_plain_extension_in(&access, extension_defs, object));
-        }
-        let name = spec
-            .get(&*keys::NAME)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
-        let deps = spec
-            .get(&*keys::DEPS)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or_else(|| Value::List(List::empty()));
-        let prior_defs = spec
-            .get(&*keys::DEFS)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or(Value::Builtin(Builtin::ObjectDefaultDefs));
-        let composed_defs = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::ObjectComposedDefs,
-            arguments: Arc::from([prior_defs, access.clone_root(extension_defs)]),
-        });
-        let spec = Value::Dict(
-            Dict::new_sync()
-                .insert((*keys::NAME).clone(), name)
-                .insert((*keys::DEPS).clone(), deps)
-                .insert((*keys::DEFS).clone(), composed_defs),
-        );
-        let object = LazyValue::computed_fixpoint_in(
-            access.values(),
-            "object self",
-            FixpointComputation::ObjectInstance(spec),
-        );
-        Ok(access.values().root_runtime_value(Value::Lazy(object)))
-    })
-}
-
-fn application_in(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    arguments: &[RuntimeValueRoot],
-) -> WhnfComputation {
-    context.with_value_access(|access| {
-        let function = access.clone_root(function);
-        let arguments = arguments
-            .iter()
-            .map(|argument| access.clone_root(argument))
-            .collect::<Vec<_>>();
-        WhnfComputation::from_application_checkpoint_in(&access, function, &arguments, None)
-    })
-}
-
-fn root_application(
-    context: &EvaluatorStepContext<'_>,
-    function: &RuntimeValueRoot,
-    arguments: &[RuntimeValueRoot],
-) -> RuntimeValueRoot {
-    context.with_value_access(|access| {
-        let arguments = arguments
-            .iter()
-            .map(|argument| access.clone_root(argument))
-            .collect::<Vec<_>>();
-        let application = LazyValue::from_application_in(
-            access.values(),
-            access.clone_root(function),
-            Arc::from(arguments),
-        );
-        access.values().root_runtime_value(Value::Lazy(application))
-    })
-}
-
-fn root_message(
-    context: &EvaluatorStepContext<'_>,
-    message: impl Into<Arc<str>>,
-) -> RuntimeFailureRoot {
-    context.root_failure(Arc::new(EvaluationFailure::message(message.into())))
+fn regional_failure(message: impl Into<Arc<str>>) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message.into())))
 }

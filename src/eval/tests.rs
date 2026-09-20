@@ -376,10 +376,21 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
         vec![object, extension],
     )
     .expect("object extension should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated object extension builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the promised specification should suspend object extension");
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(object_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the object-extension checkpoint must retain its completed object demand");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact specification demand");
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     let resolved_spec = Value::Dict(
         Dict::new_sync()
@@ -392,6 +403,10 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     );
     set_promise(&owner, &spec, resolved_spec)
         .expect("the object specification should accept its assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned specification must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
         eval_value(&observer, &application).expect("object extension should resume")
@@ -400,6 +415,7 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     };
     assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]
@@ -435,10 +451,21 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
         ],
     )
     .expect("composed definitions should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated composed-definitions builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the promised extension should suspend composition");
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the composed-definitions checkpoint must retain its completed prior stage");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact extension stage");
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     let extension_defs = closed_function_value_in(
         owner.values(),
@@ -449,6 +476,10 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     );
     set_promise(&owner, &extension, extension_defs)
         .expect("the composed extension should accept its assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned extension must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
         eval_value(&observer, &application).expect("composed definitions should resume")
@@ -457,6 +488,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     };
     assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]
@@ -510,10 +542,22 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         vec![updates, base, unit_value()],
     )
     .expect("object override definitions should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated object-override builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the nested promised prior should suspend object override");
     assert!(blocked.blocked_on().is_some());
+    assert_eq!(update_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the override checkpoint must retain its completed outer prefix and stack");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact nested prior demand");
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     set_promise(
@@ -524,6 +568,10 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         ),
     )
     .expect("the nested prior should accept its assignment");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned nested prior must remain live beneath the override stack");
 
     let Value::Dict(result) =
         eval_value(&observer, &application).expect("object override should resume")
@@ -544,6 +592,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
     );
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
 }
 
 #[test]

@@ -383,17 +383,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6D.5"
     ),
     closed_durable!(
-        "src/eval/object_composition_machine.rs",
-        "ordinary object extension, composed-definition, and recursive override progress",
-        "canonical RuntimeValueRoot object/specification/definition/application fields plus rooted persistent-dictionary frames and child WHNF machines",
-        "yielded or dependency-blocked object composition evaluation",
-        "saturated builtin admission and bounded extension or application publication",
-        "composition completion, failure, cancellation, or builtin-source retirement",
-        ManagedRootSurface,
-        RootSurface,
-        "W6F.3"
-    ),
-    closed_durable!(
         "src/eval/value.rs",
         "LazyTaskMachine / PromiseFollower poll-spanning state",
         "managed lazy owner plus one specialized producer machine; ordinary WHNF and host-call work use state-free route markers after publishing exact managed checkpoints beneath the lazy, reflection work retains one stable reservation, and PromiseFollower delegates ownership to one WhnfComputation",
@@ -472,12 +461,12 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph; list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand, list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss, and list_effect_fix_checkpoint_constructs_and_assigns_one_promise force route loss and collection across every recipe family"
     ),
     exact_managed!(
-        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/annotation_machine.rs; src/eval/object_builtin_machine.rs",
+        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/annotation_machine.rs; src/eval/object_builtin_machine.rs; src/eval/object_composition_machine.rs",
         "managed builtin checkpoint cell",
-        "raw builtin arguments, completed scalar and object prefixes, and regional WHNF/list-front child state behind one representation mutex",
+        "raw builtin arguments, completed scalar/object/composition prefixes, recursive override frames, and regional WHNF/list-front child state behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
         CompatibilityPayload,
-        "W6G.1f.3g.2a-.4b introduce numeric, assertion, provenance, conditional, net, collection, pattern, metadata, annotation, and object-inspection arms; forced fixtures collect across exact dependencies, diagnostic phases, deferred traversals, and completed prefixes"
+        "W6G.1f.3g.2a-.4c introduce numeric, assertion, provenance, conditional, net, collection, pattern, metadata, annotation, object-inspection, and object-composition arms; forced fixtures collect across exact dependencies, diagnostic phases, deferred traversals, and completed prefixes"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -979,10 +968,10 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.4b removes the durable object-builtin owner and keeps its raw
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 242;
+const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([278, 136, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_707_416_467_551_016_254;
+    DeclarationSignals::new([292, 116, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 532_757_175_564_236_746;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1140,6 +1129,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     } else if declaration.starts_with("src/eval/annotation_machine.rs::")
         || declaration.starts_with("src/eval/effect_machine.rs::")
         || declaration.starts_with("src/eval/object_builtin_machine.rs::")
+        || declaration.starts_with("src/eval/object_composition_machine.rs::")
     {
         "managed builtin checkpoint cell"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {
@@ -1152,8 +1142,6 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
         "structural list-map/list-concat inputs and text-lines traversal progress"
     } else if declaration.starts_with("src/eval/pattern_machine.rs::") {
         "compiler-pattern path, dictionary, and collection progress"
-    } else if declaration.starts_with("src/eval/object_composition_machine.rs::") {
-        "ordinary object extension, composed-definition, and recursive override progress"
     } else if declaration.starts_with("src/eval/builtin_machine.rs::")
         || declaration.starts_with("src/eval/comparison_machine.rs::")
         || declaration.starts_with("src/eval/dict_machine.rs::")

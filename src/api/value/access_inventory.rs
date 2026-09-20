@@ -135,14 +135,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge / W6G.1f.3g.3e.1 pattern-list embedding"
     ),
     entry!(
-        "src/eval/object_composition_machine.rs",
-        0,
-        0,
-        8,
-        "durable ordinary extension, composed-definition application, and recursive override results",
-        "W6F.3 resumable object composition ownership"
-    ),
-    entry!(
         "src/eval/strategy_machine.rs",
         0,
         0,
@@ -162,9 +154,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        10,
-        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
-        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d source or terminal handoff"
+        9,
+        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint, immediate builtin result, and net-construction source arguments published before leaving their access regions",
+        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d-.4c source or terminal handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -430,12 +422,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
-                | "src/eval/object_composition_machine.rs::finish_object_extension"
-                | "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll"
-                | "src/eval/object_composition_machine.rs::insert_override_value"
-                | "src/eval/object_composition_machine.rs::next_override_step"
-                | "src/eval/object_composition_machine.rs::root_application"
-                | "src/eval/object_composition_machine.rs::root_plain_extension_in"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
@@ -691,14 +677,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
-    "src/eval/object_composition_machine.rs::finish_object_extension#1|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::impl ObjectCompositionMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::insert_override_value#1|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::next_override_step#1|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::next_override_step#2|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::next_override_step#3|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::root_application#1|surface=access-publication|scope=production",
-    "src/eval/object_composition_machine.rs::root_plain_extension_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
@@ -710,7 +688,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint#1|surface=access-publication|scope=production",

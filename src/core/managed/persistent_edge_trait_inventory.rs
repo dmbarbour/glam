@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        835,
+        838,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -899,9 +899,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1f.3g.4b adds three test-only owning-lazy roots for object local-name,
     // dictionary-definition, and plain-dictionary conversion schedules. All
     // production object progress remains raw beneath the traced checkpoint.
+    // W6G.1f.3g.4c adds three test-only owning-lazy roots for ordinary
+    // extension, composed definitions, and recursive override. Production
+    // composition progress remains raw beneath that same checkpoint.
     assert_eq!(
         occurrence_fingerprint(actual),
-        16_935_672_737_546_182_656,
+        18_224_054_388_620_867_549,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -948,7 +951,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 584),
+            ((SourceScope::Test, EdgeSurface::Typed), 587),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

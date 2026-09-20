@@ -6316,17 +6316,46 @@ for it:
        object/dictionary prefixes are not replayed. The exact inventories,
        clippy gate, full workspace suite, and interaction-net profiling
        regressions pass.
-     - **W6G.1f.3g.4c — object composition.** Move ordinary extension,
+     - **W6G.1f.3g.4c — Complete (2026-09-20): object composition.** Move ordinary extension,
        composed definitions, and the recursive override stack beneath the
        checkpoint. Keep each completed prior/update prefix as traced raw state
-       and use regional application demand for callable stages.
-     - **W6G.1f.3g.4d — family closure.** Confirm removal of the three
+       and use regional application demand for callable stages. Partition the
+       cutover so each intermediate tree retains one complete owner:
+       - **W6G.1f.3g.4c.1 — Complete (2026-09-20): ordinary and composed definitions.** Move `with`
+         object/spec demand and the two-stage prior/extension callable chain
+         beneath the managed checkpoint. Leave recursive override as the only
+         legacy durable builtin family.
+       - **W6G.1f.3g.4c.2 — Complete (2026-09-20): recursive override.** Move the iterative override
+         stack, completed dictionary prefixes, pending update/prior demand,
+         and nested return keys beneath the same managed checkpoint.
+       Completion record: ordinary extension, composed-definition callable
+       staging, and recursive override now share one compile-exhaustive
+       regional composition variant beneath the managed builtin checkpoint.
+       Object/specification/definition values, staged applications, completed
+       dictionary prefixes, pending prior demand, nested frames, and return
+       keys are traced in place. Eight result-root publications, six rooted
+       WHNF seeds, one rooted application checkpoint, and both legacy
+       composition machines are gone. Deterministic private-heap schedules
+       retain only the owning lazy, collect before and after exact promise
+       dependencies, re-enter through a later route, and prove ordinary
+       object demand, prior-definition demand, and completed override prefixes
+       are not replayed. The dispatcher audit also caught and fixed an omitted
+       override admission arm: family and outer source admission are now both
+       compile-exhaustive over all three operations.
+     - **W6G.1f.3g.4d — Complete (2026-09-20): family closure.** Confirm removal of the three
        durable family owners, reconcile exact inventories, and force
        collection plus route loss during representative effect-call/map,
        object-member/list-front, and recursive override suspensions. Count
        completed traversal and callable prefixes so terminal equality cannot
        hide replay.
-   - **W6G.1f.3g.5 — typed checkpoint and source cutover closure.** Complete
+       Completion record: effect, object-builtin, and object-composition
+       progress all live beneath the same typed checkpoint. Their former
+       durable owners and registered result publications are absent from the
+       ownership and root-publication ledgers. Forced effect call/map, object
+       list/dictionary, ordinary/composed extension, and recursive-override
+       schedules cover yield, exact dependency suspension, route loss,
+       collection, and no-replay prefixes.
+   - **W6G.1f.3g.5 — Complete (2026-09-20): typed checkpoint and source cutover closure.** Complete
      the incrementally introduced compile-exhaustive
      `ManagedBuiltinCheckpointCell`, allocate every selected regional family
      directly from the source's raw arguments, and remove
@@ -6334,13 +6363,31 @@ for it:
      raw ready/failure/spark results into temporary roots only after the
      managed transition closes. Remove the old rooted family sum and its
      temporary list/conversion adapters.
-   - **W6G.1f.3g.6 — forced schedules and family closure.** Force yield,
+     Completion record: every demand-capable saturated builtin selected by
+     `RegionalBuiltinMachine::supports` is allocated directly from raw source
+     arguments into `ManagedBuiltinCheckpointCell`. `LazyTaskWork` retains
+     only the state-free `BuiltinCheckpoint` route marker; the rooted
+     `BuiltinTaskMachine` sum and its family-specific root adapters no longer
+     exist. Immediate callback-free operations remain on the direct fallback
+     and publish their result through the source owner before access closes.
+   - **W6G.1f.3g.6 — Complete (2026-09-20): forced schedules and family closure.** Force yield,
      dependency suspension, route loss, and collection in every family group.
      Count completed traversal prefixes and spark admission. For spark, latch
      both permitted loss before admission and at-most-once submission after
      the poll returns, including the release-before-submit ordering. Close the
      source, checkpoint, root-publication, persistent-edge, and no-replay
      inventories before proceeding.
+     Completion record: each scalar, structural, annotation, effect, object,
+     and composition family has a deterministic private-heap schedule that
+     crosses its representative exact dependency or yielded transition,
+     destroys the active route, collects, and resumes through a later route.
+     Completed operand/traversal/callable prefixes are counted rather than
+     inferred from terminal equality. Strategy records spark intent beneath
+     the checkpoint before returning it, and the outer route performs the one
+     registered publication and submission only after managed access closes.
+     The source-backed producer, root-publication, durable-owner,
+     persistent-edge, raw-value, checkpoint, and WHNF inventories pass along
+     with the full workspace, clippy, and interaction-net profiling gates.
 9. **W6G.1f.3h — net-construction checkpoint and decision audit.** Separate
    traced search/journal state from task-host orchestration. If the existing
    isolated search cannot be represented without a rooted backedge, stop for

@@ -691,8 +691,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W6G.1f.3g.4b replaces rooted object-builtin phases with one explicit
 // regional object state machine. Its list-prefix traversal is represented as
 // two user-sized loops rather than one recursive helper.
-const EXPECTED_OCCURRENCES: usize = 201;
-const EXPECTED_FINGERPRINT: u64 = 46_219_372_223_103_128;
+// W6G.1f.3g.4c replaces rooted object-composition phases with explicit
+// regional application and iterative override state.
+const EXPECTED_OCCURRENCES: usize = 204;
+const EXPECTED_FINGERPRINT: u64 = 16_874_666_531_593_424_644;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -705,12 +707,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 52),
-    (Signal::UserSizedLoop, 82),
+    (Signal::StructuralRecursion, 51),
+    (Signal::UserSizedLoop, 86),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 116),
+    (WorkShape::DemandThenInspect, 119),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 12),
     (WorkShape::KeyConversion, 2),

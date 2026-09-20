@@ -150,16 +150,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "I3D.4/W6F.6-W6F.7 scoped result decoding and replay with one durable exposed-port WHNF owner"
     ),
     context_entry!(
-        "src/eval/builtin_machine.rs",
-        [1, 1],
-        "W6F.5 retains the builtin compatibility owner; W6G.1f.3g.2a-.2d move numeric, assertion, provenance, conditional, net, seq, and spark state beneath caller-supplied regional access"
-    ),
-    context_entry!(
-        "src/eval/object_composition_machine.rs",
-        [12, 3],
-        "W6F.3 durable ordinary extension, composed-definition application, and recursive override ownership"
-    ),
-    context_entry!(
         "src/eval/list_machine.rs",
         [1, 3],
         "W6G.1f.3e.1 retains the regional logical-list front bridge while W6G.1f.3g.3e.1 removes the final durable back owner after pattern-list embedding"

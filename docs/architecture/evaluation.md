@@ -292,9 +292,13 @@ the dispatcher does not open nested access or receive an evaluator-step
 carrier. It either constructs a partial builtin, installs a lazy saturated
 source, or performs one immediate callback-free constructor such as append or
 list-effect recipe construction. The lazy-source owner routes every
-demand-capable saturated family through `BuiltinTaskMachine`, which roots its
-operands once and retains explicit resumable child work. An immediate result
-is rooted by that owner before regional access closes.
+demand-capable saturated family through one `ManagedBuiltinCheckpointCell`.
+Its compile-exhaustive regional state traces raw operands, completed prefixes,
+and resumable child work beneath the owning lazy. Each transition runs inside
+bounded caller-supplied value access; ready, failure, scheduler-boundary, and
+spark outcomes cross that region only after the checkpoint transition closes.
+Immediate families still return directly to the source owner, which roots
+their result before regional access closes.
 
 The direct `apply_builtin` wrapper is test-only. The broader direct evaluator
 compatibility facade remains for W8 and legacy library/test helpers, but no

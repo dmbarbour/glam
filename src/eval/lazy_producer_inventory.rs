@@ -11,7 +11,6 @@ const EXPECTED_VARIANTS: &[&str] = &[
     // W6G.1f.3d carries no access progress: it marks the typed checkpoint
     // retained directly beneath the managed lazy.
     "AccessCheckpoint",
-    "Builtin",
     // Migrated builtin families retain raw progress beneath the typed managed
     // checkpoint; this marker carries no duplicate producer state.
     "BuiltinCheckpoint",

@@ -1380,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        531,
+        542,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        833_097_097_408_899_540,
+        6_205_565_148_559_445_763,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1400,7 +1400,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // W6G.1f.3g.1a-.3e.3b expose the regional list/key constructors and
         // builtin family entry points through literal-pattern migration. Each
         // raw value handoff remains tied to caller-supplied value access.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 235),
+        // W6G.1f.3g.4c moves object composition and its recursive override
+        // stack to eleven caller-access-qualified regional helpers.
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 246),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

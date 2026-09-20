@@ -1,8 +1,8 @@
-//! Durable owners for saturated builtin computations.
+//! Regional state for saturated builtin computations.
 //!
-//! A builtin source roots its operands once, then delegates each semantic
-//! demand to the ordinary WHNF owner. Family-specific immediate operations run
-//! only after those demands complete and never retain raw values across polls.
+//! A builtin source installs one traced checkpoint beneath its owning lazy.
+//! Family-specific state and semantic demand remain raw inside that checkpoint
+//! while each bounded transition holds caller-supplied value access.
 
 use std::sync::Arc;
 
@@ -12,11 +12,8 @@ use crate::core::{
     Atom, Builtin, EvaluatedValue, EvaluationFailure, EvaluationHalt, FunctionValue, LazyId,
     LazyValue, Value, keys, trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WorkDependency,
-};
+use crate::evaluation::EvaluationValueAccess;
 use crate::number::Number;
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::annotation_machine::RegionalAnnotationMachine;
 use super::comparison_machine::RegionalComparisonMachine;
@@ -28,7 +25,7 @@ use super::list_transform_machine::{
     RegionalListConcatMachine, RegionalListMapMachine, RegionalTextLinesMachine,
 };
 use super::object_builtin_machine::RegionalObjectBuiltinMachine;
-use super::object_composition_machine::ObjectCompositionMachine;
+use super::object_composition_machine::RegionalObjectCompositionMachine;
 use super::pattern_machine::{
     RegionalPatternDictPredicateMachine, RegionalPatternDictTakeMachine,
     RegionalPatternEqualMachine, RegionalPatternListMachine, RegionalPatternPathMachine,
@@ -38,13 +35,6 @@ use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
     reduce_semantic_shell,
 };
-
-pub(crate) enum BuiltinTaskPoll {
-    Ready(RuntimeValueRoot),
-    Pending(WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
 
 /// Callback-free result of one regional builtin transition.
 ///
@@ -80,6 +70,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Object(Box<RegionalObjectBuiltinMachine>),
+    ObjectComposition(Box<RegionalObjectCompositionMachine>),
     Provenance(RegionalProvenanceMachine),
     Strategy(RegionalStrategyMachine),
 }
@@ -209,6 +200,9 @@ impl RegionalBuiltinMachine {
                 | Builtin::ObjectDefaultDefs
                 | Builtin::ObjectDictDefs
                 | Builtin::ObjectFromDict
+                | Builtin::ObjectWithDefs
+                | Builtin::ObjectComposedDefs
+                | Builtin::ObjectOverrideDefs
         )
     }
 
@@ -221,6 +215,14 @@ impl RegionalBuiltinMachine {
         assert!(Self::supports(builtin));
         assert_eq!(arguments.len(), builtin.arity());
         match builtin {
+            builtin if RegionalObjectCompositionMachine::supports(builtin) => {
+                Self::ObjectComposition(Box::new(RegionalObjectCompositionMachine::new_in(
+                    access,
+                    source_owner,
+                    builtin,
+                    arguments,
+                )))
+            }
             builtin if RegionalObjectBuiltinMachine::supports(builtin) => Self::Object(Box::new(
                 RegionalObjectBuiltinMachine::new_in(access, source_owner, builtin, arguments),
             )),
@@ -415,6 +417,7 @@ impl RegionalBuiltinMachine {
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Object(machine) => machine.poll_in(access, step_budget),
+            Self::ObjectComposition(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
             Self::Strategy(machine) => machine.poll_in(access, step_budget),
         }
@@ -440,6 +443,7 @@ impl RegionalBuiltinMachine {
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Object(machine) => machine.trace_managed_edges(visitor),
+            Self::ObjectComposition(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
             Self::Strategy(machine) => machine.trace_managed_edges(visitor),
         }
@@ -876,94 +880,6 @@ impl RegionalStrategyMachine {
         trace_compatibility_value_managed_edges(&self.target, visitor);
         if let Some(demand) = &self.demand {
             demand.trace_managed_edges(visitor);
-        }
-    }
-}
-
-pub(crate) enum BuiltinTaskMachine {
-    ObjectComposition(Box<ObjectCompositionMachine>),
-}
-
-impl BuiltinTaskMachine {
-    pub(crate) fn supports(builtin: Builtin) -> bool {
-        matches!(
-            builtin,
-            Builtin::AssertUnit
-                | Builtin::IfResult
-                | Builtin::MatchResult
-                | Builtin::Greater
-                | Builtin::GreaterEqual
-                | Builtin::Equal
-                | Builtin::NotEqual
-                | Builtin::LessEqual
-                | Builtin::Less
-                | Builtin::Add
-                | Builtin::Subtract
-                | Builtin::Multiply
-                | Builtin::Divide
-                | Builtin::Floor
-                | Builtin::Mod
-                | Builtin::InspectOrigin
-                | Builtin::Seq
-                | Builtin::Spark
-                | Builtin::DictSingleton
-                | Builtin::DictUnion
-                | Builtin::DictUpdate
-                | Builtin::MergeDuplicate
-                | Builtin::Slice
-                | Builtin::ListLen
-                | Builtin::ListSplit
-                | Builtin::ListSplitEnd
-                | Builtin::ListAt
-                | Builtin::ListHead
-                | Builtin::ListTail
-                | Builtin::Map
-                | Builtin::ListConcat
-                | Builtin::TextLines
-                | Builtin::InteractionNet
-                | Builtin::NetArity
-                | Builtin::PatternIsList
-                | Builtin::PatternListTryUncons
-                | Builtin::PatternListTryUnsnoc
-                | Builtin::PatternListIsEmpty
-                | Builtin::PatternPathEqual
-                | Builtin::PatternIsDict
-                | Builtin::PatternDictIsEmpty
-                | Builtin::PatternDictTryTake
-                | Builtin::PatternDictTryTakeOptional
-                | Builtin::PatternEqual
-                | Builtin::ObjectWithDefs
-                | Builtin::ObjectComposedDefs
-                | Builtin::ObjectOverrideDefs
-        )
-    }
-
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        assert!(Self::supports(builtin));
-        assert_eq!(
-            arguments.len(),
-            builtin.arity(),
-            "a builtin source must contain one saturated call"
-        );
-        match builtin {
-            builtin if ObjectCompositionMachine::supports(builtin) => {
-                Self::ObjectComposition(Box::new(ObjectCompositionMachine::new(builtin, arguments)))
-            }
-            _ => unreachable!("migrated builtin family must install its managed checkpoint"),
-        }
-    }
-
-    pub(crate) fn poll(
-        &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
-        match self {
-            Self::ObjectComposition(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
         }
     }
 }

@@ -19,9 +19,7 @@ use crate::list::ListItem;
 use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessRegionalPoll};
-use super::builtin_machine::{
-    BuiltinTaskMachine, BuiltinTaskPoll, RegionalBuiltinMachine, RegionalBuiltinPoll,
-};
+use super::builtin_machine::{RegionalBuiltinMachine, RegionalBuiltinPoll};
 use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
 use super::lazy_checkpoint::{
     HostCallCheckpointObservation, ManagedLazyCheckpointEdge, ManagedLazyCheckpointKindTag,
@@ -207,7 +205,6 @@ enum LazyTaskWork {
     ObjectFixpointCheckpoint,
     ListEffectCheckpoint,
     BuiltinCheckpoint,
-    Builtin(Box<BuiltinTaskMachine>),
     /// Transient one-shot authority held only by the route which installed an
     /// `Invoking` host-call checkpoint.
     HostCallInvoke,
@@ -274,11 +271,6 @@ impl LazyTaskMachine {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
-    }
-
-    fn follow_value(&mut self, value: crate::runtime::RuntimeValueRoot) -> EvaluationMachinePoll {
-        self.work = LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_root(value));
-        EvaluationMachinePoll::Yielded
     }
 
     /// Moves an ordinary rooted WHNF computation into the exact checkpoint
@@ -1397,22 +1389,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 return self.cached_poll(context);
                             }
                         }
-                        LazySource::Builtin(call) if BuiltinTaskMachine::supports(call.builtin) => {
-                            let arguments = context.with_value_access(|access| {
-                                call.arguments
-                                    .iter()
-                                    .map(|value| {
-                                        access.values().root_runtime_value(
-                                            access.values().duplicate_value(value),
-                                        )
-                                    })
-                                    .collect()
-                            });
-                            LazyTaskWork::Builtin(Box::new(BuiltinTaskMachine::new(
-                                call.builtin,
-                                arguments,
-                            )))
-                        }
                         LazySource::Builtin(call) => {
                             let result = context.with_value_access(|access| {
                                 let mut arguments =
@@ -1483,23 +1459,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     }
                     NetConstructionPoll::Yielded => EvaluationMachinePoll::Yielded,
                     NetConstructionPoll::Failed(failure) => {
-                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
-            }
-
-            if let LazyTaskWork::Builtin(machine) = &mut self.work {
-                return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    BuiltinTaskPoll::Ready(value) => self.follow_value(value),
-                    BuiltinTaskPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    BuiltinTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
-                    BuiltinTaskPoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
                     }
                 };
@@ -1998,9 +1957,6 @@ mod ownership_tests {
             LazyTaskWork::ObjectFixpointCheckpoint => {}
             LazyTaskWork::ListEffectCheckpoint => {}
             LazyTaskWork::BuiltinCheckpoint => {}
-            LazyTaskWork::Builtin(machine) => {
-                let _: &BuiltinTaskMachine = machine;
-            }
             LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
             LazyTaskWork::NetConstruction(machine) => {
                 let _: &NetConstructionMachine = machine;
