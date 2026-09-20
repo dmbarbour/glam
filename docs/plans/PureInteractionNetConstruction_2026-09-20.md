@@ -880,6 +880,12 @@ remains PNC5 work.
 - Validate and extract the exposed branded port from the selected outcome.
 - Change public `interaction_net` application to construct the pure runner,
   selector, and hidden replay pipeline.
+- Add `eval:{op:'net_construction}` exactly once at this public boundary for
+  failures from effect application, builder execution, selection, exposed-port
+  demand, and replay. Keep private operand demands transparent: the legacy
+  `copy_count` frame is not a compatibility requirement, and the builder does
+  not introduce parallel wire-port, reset/shift-key, path, state, or exposed-
+  port frames.
 - Preserve laziness and memoization: constructing `interaction_net Effect`
   does not itself run `Effect`, and demanding the resulting lazy runs and
   replays the selected construction at most once.
@@ -897,6 +903,9 @@ Exit: production construction no longer enters `IsolatedEffectSearch`.
 - Remove `LazyTaskWork::NetConstruction` and
   `LazySource::NetConstruction` once no compatibility caller remains.
 - Remove the root-bearing Rust construction journal and its isolated host.
+- Remove the legacy `copy_count` evaluator frame and update the automatic-
+  context inventory in `docs/Syntax.md`; the public `net_construction` frame
+  remains authoritative.
 - Reconcile compile-exhaustive lazy-source, producer-route, registered-root,
   persistent-edge, and autonomous-obligation inventories.
 - Update `docs/agent_context/interaction_nets.md`, `docs/Syntax.md`, and source

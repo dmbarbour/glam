@@ -66,34 +66,51 @@ authoritative.
 
 ## Findings
 
-### PNC4R-001 — Pure construction failures are not yet diagnostic-parity ready
+### PNC4R-001 — Public construction needs one selected diagnostic boundary
 
 **Severity:** medium integration blocker
 
 The legacy interpreter enriches a failed copy-count demand with
 `eval:{op:'copy_count}` and enriches failed construction search with
-`eval:{op:'net_construction}`. The pure builder's regional operand driver
-currently propagates its failure unchanged. Its immediate copy-validation text
-also differs from the legacy public text. None of this is observable through
-production today, but a direct PNC5 cutover would silently change structured
-failure context and some message text despite PNC0 treating diagnostics as
-part of the behavioral baseline.
+`eval:{op:'net_construction}`. The first frame is not part of a coherent
+operation-local policy. It originated as the required context-label argument
+to the former generic numeric-index helper and was copied forward when copy
+evaluation became resumable. Equivalent demands for left and right wire
+ports never gained frames, nor do the pure builder's reset/shift keys,
+get/set paths, builder state, or exposed port. No focused test asserts the
+`copy_count` frame.
+
+The pure builder consistently propagates failures from all of those regional
+demands unchanged. That is the preferable local contract. Adding a distinct
+frame for every private operand role would expose implementation staging,
+produce noisy stacks, and still leave an arbitrary question about which
+roles deserve labels. `net_construction`, by contrast, is the stable public
+answer to why any of these values was demanded.
+
+The pure builder's immediate copy-validation text also differs from the
+legacy public text. None of this is observable through production today, but
+a direct PNC5 cutover would silently change some message text unless the
+intended public behavior is latched deliberately.
 
 Before cutover:
 
-1. latch the legacy structured failure and the intended pure failure for a
-   failing copy-count computation and a general failing construction program;
-2. preserve `copy_count` at the operation boundary unless deliberately
-   superseded by a documented replacement;
+1. latch the intended pure failure for failed copy-count, wire-port, and
+   reset/shift-key demands, plus a general failing construction program;
+2. keep private builder demands transparent: do not reproduce the legacy
+   `copy_count` frame and do not add parallel `wire_port`, `reset_key`, path,
+   state, or exposed-port frames;
 3. make the PNC5 public runner add `net_construction` exactly once around
    failures from effect application, builder execution, selection, exposed
    port demand, and replay; and
 4. decide whether immediate validation strings are compatibility promises or
    may be updated together with the baseline fixtures.
 
-The outer context belongs naturally to PNC5's public composition. PNC4 should
-still establish the operation-local failure contract so the runner does not
-need to know which private operation failed.
+The outer context belongs naturally to PNC5's public composition. PNC6 should
+remove `copy_count` with the legacy interpreter and update `docs/Syntax.md`,
+whose current-operation inventory accurately describes the transitional
+production path. If operand-role contexts later prove useful, design them as
+one semantic policy with structured operation and operand fields rather than
+preserving this one historical label.
 
 ### PNC4R-002 — Operand route-loss evidence can conceal replay
 
