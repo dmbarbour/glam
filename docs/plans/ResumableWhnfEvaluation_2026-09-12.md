@@ -5908,6 +5908,56 @@ for it:
    the checkpoint; loss before admission is allowed by best-effort semantics,
    while route replay must not multiply an admission already returned to the
    coordinator. Force the current release-before-submit ordering explicitly.
+
+   The implementation census found that this is not one safe spike. The
+   current 21-variant `BuiltinTaskMachine` delegates across eleven modules and
+   roughly 7,100 lines; every family still retains `RuntimeValueRoot`, rooted
+   `WhnfComputation`, or rooted list/conversion children. Partition it as
+   follows:
+
+   - **W6G.1f.3g.0 — census and cutover partition.** **Complete
+     (2026-09-20).** Record the complete variant/module surface and separate
+     raw semantic state from rooted terminal transport. The direct variants
+     are annotation, assertion, conditional, comparison, dictionary, effect,
+     list observation/map/concat/text, net, numeric, object, object
+     composition, five pattern families, provenance, and strategy. Common
+     blockers are rooted WHNF state, front/back list projection, key/path
+     conversion, and result/failure roots. Spark is the only fire-and-forget
+     boundary; all other variants are demand-driven regional computation.
+   - **W6G.1f.3g.1 — shared regional prerequisites.** Add callback-free raw
+     edge forms for back-list projection and key-list/path conversion, reusing
+     `RegionalWhnfWork`, `RegionalListFront`, and `RegionalKeyConversion`.
+     Define one regional builtin poll vocabulary carrying raw values/failures,
+     exact scheduler boundaries, yields, and a raw spark intent. This pulls
+     only the pattern list/path *child support* formerly left vaguely in
+     W6G.1f.3i into the checkpoint that requires it; W6G.1f.3i retains the
+     route/family closure audit.
+   - **W6G.1f.3g.2 — scalar and direct families.** Regionalize numeric,
+     assertion, conditional, provenance, net, and strategy state. Strategy
+     records `SparkRequested` beneath the lazy before returning a spark intent;
+     the outer route roots and submits it only after managed access closes.
+   - **W6G.1f.3g.3 — structural families.** Regionalize comparison,
+     dictionary, list observation/transformation, pattern, and annotation
+     state using the shared child reducers. Preserve exact traversal prefixes,
+     diagnostic context, ordering, and failure text.
+   - **W6G.1f.3g.4 — effect and object families.** Regionalize effect,
+     object-builtin, and object-composition state. Reuse application
+     checkpoints and regional child forms rather than embedding a registered
+     root or reconstructing a completed prefix.
+   - **W6G.1f.3g.5 — typed checkpoint and source cutover.** Introduce one
+     compile-exhaustive `ManagedBuiltinCheckpointCell`, allocate the selected
+     regional family directly from the source's raw arguments, and replace
+     `LazyTaskWork::Builtin(Box<_>)` with a state-free checkpoint marker.
+     Translate raw ready/failure/spark results into temporary roots only after
+     the managed transition closes. Remove the old rooted family sum and its
+     temporary list/conversion adapters.
+   - **W6G.1f.3g.6 — forced schedules and family closure.** Force yield,
+     dependency suspension, route loss, and collection in every family group.
+     Count completed traversal prefixes and spark admission. For spark, latch
+     both permitted loss before admission and at-most-once submission after
+     the poll returns, including the release-before-submit ordering. Close the
+     source, checkpoint, root-publication, persistent-edge, and no-replay
+     inventories before proceeding.
 9. **W6G.1f.3h — net-construction checkpoint and decision audit.** Separate
    traced search/journal state from task-host orchestration. If the existing
    isolated search cannot be represented without a rooted backedge, stop for
