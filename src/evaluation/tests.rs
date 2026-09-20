@@ -719,6 +719,114 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
 }
 
 #[test]
+fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (root, evaluations) = counted_client_lazy(
+        &context,
+        "dormant causal tail before stable abandonment",
+        Value::Number(43.into()),
+    );
+    let mut handle = context
+        .demand_whnf(root)
+        .expect("lazy client demand should be admitted");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    let ClientDemandSnapshot::Blocked {
+        dependency: WorkDependency::Wait(wait),
+        subscription_epoch,
+    } = coordinator
+        .client_demand_snapshot(handle.work())
+        .expect("client demand should retain its exact lazy dependency")
+    else {
+        panic!("uncached lazy demand should block on its producer")
+    };
+    assert!(
+        coordinator.park_deferred_wait_for_test(&wait),
+        "the forced ordering must park the queued causal producer"
+    );
+
+    assert!(
+        handle
+            .abandon_if_stably_blocked(subscription_epoch)
+            .is_none(),
+        "a dormant producer at the exact dependency tail remains causal progress"
+    );
+    assert_eq!(wait.exact_subscription_count(), 1);
+
+    let producer = coordinator
+        .producer_for_wait(&wait)
+        .expect("canonical lazy wait should name its producer");
+    let work = coordinator
+        .claim_task(producer)
+        .expect("the dormant exact producer should remain locally claimable");
+    coordinator.poll_claimed_task(work);
+    assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        handle.poll(),
+        Some(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == Value::Number(43.into())
+    ));
+    assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
+fn blocked_client_follows_a_blocked_chain_to_dormant_causal_progress() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+
+    let tail = inert_lazy_for(context.values(), "dormant dependency tail");
+    let tail_wait = context
+        .lazy_task(&tail, |_, _| Box::new(Complete))
+        .expect("tail producer should register");
+    let head = inert_lazy_for(context.values(), "blocked dependency head");
+    let dependency = Arc::new(OnceLock::new());
+    dependency
+        .set(tail_wait.clone())
+        .expect("head dependency should initialize once");
+    let head_wait = register_lazy_await(&context, &head, dependency);
+    let mut handle = context
+        .demand_whnf(client_lazy_root(&context, head))
+        .expect("head demand should be admitted");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    let ClientDemandSnapshot::Blocked {
+        dependency: WorkDependency::Wait(observed_head),
+        subscription_epoch,
+    } = coordinator
+        .client_demand_snapshot(handle.work())
+        .expect("client demand should block on the head producer")
+    else {
+        panic!("head demand should retain an exact wait")
+    };
+    assert_eq!(observed_head, head_wait);
+
+    let head_task = coordinator
+        .producer_for_wait(&head_wait)
+        .expect("head wait should name its producer");
+    let head_work = coordinator
+        .claim_task(head_task)
+        .expect("head producer should be claimable");
+    coordinator.poll_claimed_task(head_work);
+    assert!(
+        coordinator.park_deferred_wait_for_test(&tail_wait),
+        "the forced ordering must park the dependency-chain tail"
+    );
+
+    assert!(
+        handle
+            .abandon_if_stably_blocked(subscription_epoch)
+            .is_none(),
+        "stable abandonment must follow blocked producers to a dormant causal tail"
+    );
+    assert_eq!(head_wait.exact_subscription_count(), 1);
+    handle.abandon();
+}
+
+#[test]
 fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

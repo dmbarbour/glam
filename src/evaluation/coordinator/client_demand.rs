@@ -14,7 +14,8 @@ use super::settlement::runtime_pump_snapshot_locked;
 use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration,
     WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkState,
-    demand_session_is_closed, prune_closed_session_registration, queue_current_registration,
+    demand_session_is_closed, dependency_has_causal_progress_locked,
+    prune_closed_session_registration, queue_current_registration,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -696,6 +697,10 @@ impl EvaluationWorkCoordinator {
             // The client sampled quiescence before entering mutation
             // admission. Revalidate it here so a producer claimed or queued
             // after that sample cannot lose this exact subscription.
+            let current_epoch = self.observations.current();
+            if dependency_has_causal_progress_locked(&state, &dependency, current_epoch) {
+                return None;
+            }
             let runtime = runtime_pump_snapshot_locked(&state);
             if runtime.background_ready || runtime.progress_owned || runtime.abandonable_sparks {
                 return None;

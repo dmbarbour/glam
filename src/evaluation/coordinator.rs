@@ -49,14 +49,15 @@ pub(super) use deferred::{
     DeferredWorkPoll, DeferredWorkReservation,
 };
 use deferred::{
-    DeferredIndexes, DeferredWork, begin_deferred_abandonment, claim_deferred, deferred_work,
-    deferred_work_mut,
+    DeferredIndexes, DeferredWork, begin_deferred_abandonment, claim_deferred, deferred_work_mut,
 };
 #[cfg(test)]
 pub(super) use reflection::ReflectionWorkSnapshot;
+#[cfg(test)]
+use reflection::reflection_work;
 use reflection::{
     AbandonedReflectionWork, ReflectionIndexes, ReflectionWork, claim_reflection,
-    insert_task_failure, reflection_work, reflection_work_mut, remove_ready_reflection,
+    insert_task_failure, reflection_work_mut, remove_ready_reflection,
 };
 pub(super) use reflection::{
     ClaimedReflectionWork, ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
@@ -1354,18 +1355,9 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        if let Some(id) = state.promise_by_wait.get(wait) {
-            return state.work.get(id).and_then(task_for_record);
-        }
-        if let Some(id) = state.deferred.by_wait.get(wait) {
-            return state.work.get(id).map(|record| deferred_work(record).task);
-        }
-        state
-            .reflection
-            .by_wait
-            .get(wait)
-            .and_then(|id| state.work.get(id))
-            .map(|record| reflection_work(record).task)
+        work_for_wait_locked(&state, wait)
+            .and_then(|id| state.work.get(&id))
+            .and_then(task_for_record)
     }
 
     pub(super) fn register_task_promise(
@@ -1979,6 +1971,63 @@ fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
         WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref(),
     }
+}
+
+fn work_for_wait_locked(
+    state: &WorkCoordinatorState,
+    wait: &EvaluationWaitToken,
+) -> Option<EvaluationWorkId> {
+    state
+        .promise_by_wait
+        .get(wait)
+        .or_else(|| state.deferred.by_wait.get(wait))
+        .or_else(|| state.reflection.by_wait.get(wait))
+        .copied()
+}
+
+/// Reports progress already latent in one exact producer chain.
+///
+/// The caller holds runtime mutation admission and the coordinator-state
+/// mutex, so a claimable tail, owned poll, terminal dependency, or stale
+/// observation cannot disappear between this check and a client retirement.
+fn dependency_has_causal_progress_locked(
+    state: &WorkCoordinatorState,
+    dependency: &WorkDependency,
+    current_epoch: RuntimeObservationEpoch,
+) -> bool {
+    let mut dependency = Some(dependency.clone());
+    let mut seen = HashSet::new();
+    while let Some(current) = dependency {
+        if current.is_terminal() {
+            return true;
+        }
+        let Some(wait) = current.producer_wait() else {
+            return false;
+        };
+        let Some(work) = work_for_wait_locked(state, &wait) else {
+            return false;
+        };
+        if !seen.insert(work) {
+            return false;
+        }
+        let Some(record) = state.work.get(&work) else {
+            return false;
+        };
+        match record.state {
+            WorkState::Dormant
+            | WorkState::Reserved
+            | WorkState::Queued
+            | WorkState::Running
+            | WorkState::Terminalizing => return true,
+            WorkState::Blocked | WorkState::ExitWaiting => {
+                if task_observation_epoch(record).is_some_and(|epoch| epoch < current_epoch) {
+                    return true;
+                }
+                dependency = work_dependency(record).cloned();
+            }
+        }
+    }
+    false
 }
 
 fn debug_assert_task_block_runtime(runtime: EvaluationRuntimeId, block: &EvaluationTaskBlock) {

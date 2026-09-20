@@ -383,6 +383,40 @@ impl EvaluationWorkCoordinator {
             .count();
         (active, waits, tasks)
     }
+
+    /// Forces the exact ordering in which an upstream client observes a
+    /// blocked chain after its causal tail cooperatively parks.
+    #[cfg(test)]
+    pub(in crate::evaluation) fn park_deferred_wait_for_test(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> bool {
+        let mutation = self.admission.mutation_guard();
+        let parked = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(id) = state.deferred.by_wait.get(wait).copied() else {
+                return false;
+            };
+            let Some(record) = state.work.get_mut(&id) else {
+                return false;
+            };
+            if !matches!(record.state, WorkState::Queued) {
+                return false;
+            }
+            record.state = WorkState::Dormant;
+            remove_ready_deferred(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            true
+        };
+        drop(mutation);
+        if parked {
+            self.work_available.notify_all();
+        }
+        parked
+    }
 }
 
 #[derive(Clone)]
