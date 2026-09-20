@@ -261,9 +261,10 @@ impl RuntimeValueAccess<'_> {
         _label: impl Into<Arc<str>>,
     ) -> Result<ManagedPromiseEdge, UnsupportedLayout> {
         let allocator = self.allocator::<ManagedPromiseCell>()?;
-        Ok(ManagedPromiseEdge(
-            allocator.alloc(ManagedPromiseCell::new(self.values())),
-        ))
+        let edge = ManagedPromiseEdge(allocator.alloc(ManagedPromiseCell::new(self.values())));
+        #[cfg(test)]
+        self.values().record_managed_promise_allocation_for_test();
+        Ok(edge)
     }
 
     fn allocate_managed_core_net(
@@ -1055,6 +1056,10 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
                         .take()
                         .expect("promise transition must consume its proposed assignment once");
                     self.cell.assignment.set(assignment)?;
+                    #[cfg(test)]
+                    self.authority
+                        .values()
+                        .record_managed_promise_publication_for_test();
                     self.cell.terminal.store(true, Ordering::Release);
                     Ok(after_assignment(self.cell.assignment.get().expect(
                         "managed promise publication must initialize its assignment",

@@ -367,6 +367,10 @@ pub(crate) struct RuntimeValueDomain {
     cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     external_owners: ExternalOwnerRegistry,
+    #[cfg(test)]
+    managed_promise_allocations: AtomicUsize,
+    #[cfg(test)]
+    managed_promise_publications: AtomicUsize,
     #[cfg(feature = "interaction-net-profiling")]
     interaction_net_profile: crate::interaction_net::profiling::InteractionNetProfile,
 }
@@ -430,6 +434,10 @@ impl CoreValueFactory {
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
             external_owners: ExternalOwnerRegistry::new(runtime),
+            #[cfg(test)]
+            managed_promise_allocations: AtomicUsize::new(0),
+            #[cfg(test)]
+            managed_promise_publications: AtomicUsize::new(0),
             #[cfg(feature = "interaction-net-profiling")]
             interaction_net_profile: Default::default(),
         });
@@ -549,6 +557,32 @@ impl CoreValueFactory {
 
     fn deferred_value_id(&self) -> NonZeroU64 {
         self.domain.ids.deferred_value()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_promise_lifecycle_counts_for_test(&self) -> (usize, usize) {
+        (
+            self.domain
+                .managed_promise_allocations
+                .load(Ordering::Relaxed),
+            self.domain
+                .managed_promise_publications
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_managed_promise_allocation_for_test(&self) {
+        self.domain
+            .managed_promise_allocations
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_managed_promise_publication_for_test(&self) {
+        self.domain
+            .managed_promise_publications
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clones one runtime-owned compatibility root through this factory's

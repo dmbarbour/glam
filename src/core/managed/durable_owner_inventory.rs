@@ -502,7 +502,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "raw recipe phase, continuation values, regional WHNF/list-front children, and one traced fixpoint promise edge behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler boundary translation, fix publication, and terminal cache publication occur around its bounded transition",
         CompatibilityPayload,
-        "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph"
+        "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph; list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand, list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss, and list_effect_fix_checkpoint_constructs_and_assigns_one_promise force route loss and collection across every recipe family"
     ),
     closed_durable!(
         "src/reflection/requests.rs",

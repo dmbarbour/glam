@@ -5871,14 +5871,34 @@ for it:
      delivery. Exact root-publication, durable-owner, recursive-identity,
      persistent-edge, evaluator-access, raw-value, producer-family, and WHNF
      inventories latch the new boundary.
-   - **W6G.1f.3f.2 — forced schedules and family closure.** Force route loss
-     and collection during effect demand, handler application, deferred
-     sequence/cut list chunks, fix-function demand, fix-operation demand, and
-     terminal publication. Count recipe/function evaluation, fix promise
-     construction, and terminal assignment so a later route demonstrably
-     resumes rather than manufacturing another promise or repeating an
-     assignment. Close the list-effect source, checkpoint, collection, and
-     no-replay ledgers before proceeding to the builtin family.
+   - **W6G.1f.3f.2 — forced schedules and family closure.** **Complete
+     (2026-09-20).** Force route loss and collection during effect demand,
+     handler application, deferred sequence/cut list chunks, fix-function
+     demand, fix-operation demand, and terminal publication. Count
+     recipe/function evaluation, fix promise construction, and terminal
+     assignment so a later route demonstrably resumes rather than
+     manufacturing another promise or repeating an assignment. Close the
+     list-effect source, checkpoint, collection, and no-replay ledgers before
+     proceeding to the builtin family.
+
+     Three deterministic fixtures destroy the active route and collect after
+     every yielded transition and at every exposed dependency boundary. The
+     run fixture counts both effect and handler demand, then re-enters the
+     completed lazy through a fresh route. The sequence/cut fixture retains
+     deferred promise-backed chunks across collection and resumes the exact
+     typed checkpoint after assignment. The fix fixture counts function and
+     operation demand and snapshots runtime-local test instrumentation around
+     managed promise allocation and successful publication: exactly one of
+     each occurs, and a later route changes neither count.
+
+     Fix-promise assignment and terminal lazy caching intentionally occur in
+     one bounded value-access transition. There is therefore no schedulable
+     route-loss point between them; notifications are delivered only after
+     that access closes. The adversarial fixture forces the transition from
+     both sides rather than inventing a test-only semantic gap. Durable-owner
+     and persistent-edge inventories now name the forced collection fixtures,
+     including the two test-only promise roots needed to keep deferred inputs
+     valid while their routes are destroyed.
 8. **W6G.1f.3g — builtin checkpoint.** Migrate the compile-exhaustive builtin
    task sum after its shared access, object, list, and WHNF child forms are
    available. Retain spark publication as post-access orchestration rather

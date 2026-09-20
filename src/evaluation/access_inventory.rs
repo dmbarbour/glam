@@ -639,6 +639,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::assert_list_effect_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::assert_object_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -647,9 +648,14 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#4|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::interrupted_host_call_is_never_replayed_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::list_effect_fix_checkpoint_constructs_and_assigns_one_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::resume_after_list_effect_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::resume_after_object_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::retained_list_effect_machine#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::retained_list_effect_machine#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -874,8 +880,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // explicit same-runtime test regions, including forced route loss.
         // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a
         // route after forced collection through two additional bounded test
-        // regions.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(11, 0)),
+        // regions. W6G.1f.3f.2 does the same for list-effect checkpoints and
+        // constructs their retained fixtures beneath matching access.
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(17, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the

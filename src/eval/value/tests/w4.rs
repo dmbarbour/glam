@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::core::{Builtin, ListEffectComputation};
 
 fn isolated_context() -> crate::evaluation::OwnedEvalContext {
     EvalContext::isolated(crate::core::CoreValueFactory::new(
@@ -126,6 +127,134 @@ fn resume_after_object_route_loss(
         .values()
         .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
     lazy_machine(context, lazy)
+}
+
+fn assert_list_effect_checkpoint(context: &EvalContext, machine: &LazyTaskMachine) {
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = machine
+            .lazy
+            .access(&access)
+            .expect("the list-effect fixture must share its value domain")
+            .checkpoint_snapshot()
+            .expect("list-effect progress must remain in its managed checkpoint");
+        assert_eq!(checkpoint.kind(), ManagedLazyCheckpointKindTag::ListEffect);
+    });
+}
+
+fn resume_after_list_effect_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    machine: LazyTaskMachine,
+) -> LazyTaskMachine {
+    assert_list_effect_checkpoint(context, &machine);
+    drop(machine);
+    collect_between_handoffs(context);
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+    lazy_machine(context, lazy)
+}
+
+fn retained_list_effect_machine(
+    context: &EvalContext,
+    label: &'static str,
+    recipe: ListEffectComputation,
+) -> (ManagedLazyRoot, LazyTaskMachine) {
+    let retained = context.values().with_runtime_value_access(|access| {
+        LazyValue::list_effect_computation_in(&access, label, recipe).root_in(&access)
+    });
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    let machine = lazy_machine(context, lazy);
+    (retained, machine)
+}
+
+fn poll_list_effect_until_blocked(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+) -> (LazyTaskMachine, WorkDependency) {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..256 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_list_effect_route_loss(context, retained, machine);
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                return (
+                    machine,
+                    block
+                        .dependency
+                        .expect("list-effect blockage must expose its exact dependency"),
+                );
+            }
+            EvaluationMachinePoll::Complete(_) => panic!("list-effect fixture completed early"),
+            EvaluationMachinePoll::Failed(failure) => {
+                panic!("list-effect fixture failed: {failure}")
+            }
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("list-effect fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(attempt, 255, "list-effect fixture did not reach its wait");
+    }
+    unreachable!("bounded list-effect fixture loop must block or panic")
+}
+
+fn drive_list_effect_after_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+) -> Value {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..512 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_list_effect_route_loss(context, retained, machine);
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                let dependency = block
+                    .dependency
+                    .expect("list-effect blockage must expose its exact dependency");
+                machine = resume_after_list_effect_route_loss(context, retained, machine);
+                match dependency {
+                    WorkDependency::Wait(wait) => pump_to_ready(context, &wait),
+                    WorkDependency::Promise(_) => {
+                        panic!("the self-contained list-effect fixture left an unresolved promise")
+                    }
+                    WorkDependency::Test(_) => {
+                        panic!("the list-effect fixture exposed a synthetic dependency")
+                    }
+                }
+            }
+            EvaluationMachinePoll::Complete(value) => return value.clone_core_for_test(),
+            EvaluationMachinePoll::Failed(failure) => {
+                panic!("list-effect fixture failed: {failure}")
+            }
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("list-effect fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(attempt, 511, "list-effect fixture did not complete");
+    }
+    unreachable!("bounded list-effect fixture loop must complete or panic")
+}
+
+fn fixed_list_handler(context: &EvalContext, value: Value) -> Value {
+    crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::List(List::from_values(vec![value]))),
+    )
+}
+
+fn list_effect_value(function: Value) -> Value {
+    Value::Dict(Dict::new_sync().insert((*crate::core::keys::EFF).clone(), function))
 }
 
 fn poll_object_until_blocked(
@@ -638,6 +767,178 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
             "the base and self mixin applications must each commit exactly once"
         );
     }
+}
+
+#[test]
+fn list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand() {
+    let context = isolated_context();
+    let effect_demands = Arc::new(AtomicUsize::new(0));
+    let handler_demands = Arc::new(AtomicUsize::new(0));
+
+    let handler = fixed_list_handler(&context, number(42));
+    let _handler_owner = crate::runtime::RuntimeValueRoot::new(context.values(), handler.clone());
+    let observed_handler = Arc::clone(&handler_demands);
+    let counted_handler = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted list-effect handler",
+        move |_| {
+            observed_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(handler.clone())
+        },
+    ));
+    let effect = list_effect_value(counted_handler);
+    let _effect_owner = crate::runtime::RuntimeValueRoot::new(context.values(), effect.clone());
+    let observed_effect = Arc::clone(&effect_demands);
+    let counted_effect = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted list effect",
+        move |_| {
+            observed_effect.fetch_add(1, Ordering::SeqCst);
+            Ok(effect.clone())
+        },
+    ));
+    let (retained, machine) = retained_list_effect_machine(
+        &context,
+        "retained list-effect run",
+        ListEffectComputation::Run {
+            effect: counted_effect,
+        },
+    );
+
+    let value = drive_list_effect_after_route_loss(&context, &retained, machine);
+    assert_eq!(value, Value::List(List::from_values(vec![number(42)])));
+    assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(handler_demands.load(Ordering::SeqCst), 1);
+
+    let cached = context.values().with_runtime_value_access(|access| {
+        lazy_machine(&context, LazyValue::from_root(&retained, &access))
+    });
+    assert_eq!(
+        drive_list_effect_after_route_loss(&context, &retained, cached),
+        Value::List(List::from_values(vec![number(42)]))
+    );
+    assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(handler_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss() {
+    let context = isolated_context();
+
+    let sequence_chunk = PromisedValue::new(context.values(), "retained sequence chunk");
+    let _sequence_chunk_owner = sequence_chunk.root(context.values());
+    let (sequence_retained, sequence_machine) = retained_list_effect_machine(
+        &context,
+        "retained list-effect sequence",
+        ListEffectComputation::Sequence {
+            results: List::from_thunk(ListThunk::Promised(sequence_chunk.clone())),
+            continuation: Value::Builtin(Builtin::Add),
+        },
+    );
+    let (sequence_machine, sequence_dependency) =
+        poll_list_effect_until_blocked(&context, &sequence_retained, sequence_machine);
+    assert!(matches!(sequence_dependency, WorkDependency::Promise(_)));
+    let sequence_machine =
+        resume_after_list_effect_route_loss(&context, &sequence_retained, sequence_machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &sequence_chunk,
+        Value::List(List::from_values(vec![number(1)])),
+    )
+    .expect("the deferred sequence chunk should accept its assignment");
+    assert!(matches!(
+        drive_list_effect_after_route_loss(&context, &sequence_retained, sequence_machine,),
+        Value::List(_)
+    ));
+
+    let cut_operation = PromisedValue::new(context.values(), "retained cut operation");
+    let _cut_operation_owner = cut_operation.root(context.values());
+    let (cut_retained, cut_machine) = retained_list_effect_machine(
+        &context,
+        "retained list-effect cut",
+        ListEffectComputation::Cut {
+            operation: Value::Promised(cut_operation.clone()),
+        },
+    );
+    let (cut_machine, cut_dependency) =
+        poll_list_effect_until_blocked(&context, &cut_retained, cut_machine);
+    let cut_machine = resume_after_list_effect_route_loss(&context, &cut_retained, cut_machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &cut_operation,
+        list_effect_value(fixed_list_handler(&context, number(43))),
+    )
+    .expect("the deferred cut operation should accept its assignment");
+    if let WorkDependency::Wait(wait) = cut_dependency {
+        pump_to_ready(&context, &wait);
+    }
+    assert_eq!(
+        drive_list_effect_after_route_loss(&context, &cut_retained, cut_machine),
+        Value::List(List::from_values(vec![number(43)]))
+    );
+}
+
+#[test]
+fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
+    let context = isolated_context();
+    let function_demands = Arc::new(AtomicUsize::new(0));
+    let operation_demands = Arc::new(AtomicUsize::new(0));
+
+    let handler = fixed_list_handler(&context, number(44));
+    let effect = list_effect_value(handler);
+    let _effect_owner = crate::runtime::RuntimeValueRoot::new(context.values(), effect.clone());
+    let observed_operation = Arc::clone(&operation_demands);
+    let operation =
+        LazyValue::semantic_thunk(context.values(), "counted list-fix operation", move |_| {
+            observed_operation.fetch_add(1, Ordering::SeqCst);
+            Ok(effect.clone())
+        });
+    let function = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::Lazy(operation)),
+    );
+    let _function_owner = crate::runtime::RuntimeValueRoot::new(context.values(), function.clone());
+    let observed_function = Arc::clone(&function_demands);
+    let counted_function = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted list-fix function",
+        move |_| {
+            observed_function.fetch_add(1, Ordering::SeqCst);
+            Ok(function.clone())
+        },
+    ));
+    let (retained, machine) = retained_list_effect_machine(
+        &context,
+        "retained list-effect fix",
+        ListEffectComputation::FixFunction {
+            function: counted_function,
+        },
+    );
+    let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
+
+    assert_eq!(
+        drive_list_effect_after_route_loss(&context, &retained, machine),
+        Value::List(List::from_values(vec![number(44)]))
+    );
+    assert_eq!(function_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(operation_demands.load(Ordering::SeqCst), 1);
+    let lifecycle_after = context.values().managed_promise_lifecycle_counts_for_test();
+    assert_eq!(lifecycle_after.0 - lifecycle_before.0, 1);
+    assert_eq!(lifecycle_after.1 - lifecycle_before.1, 1);
+
+    let cached = context.values().with_runtime_value_access(|access| {
+        lazy_machine(&context, LazyValue::from_root(&retained, &access))
+    });
+    assert_eq!(
+        drive_list_effect_after_route_loss(&context, &retained, cached),
+        Value::List(List::from_values(vec![number(44)]))
+    );
+    assert_eq!(
+        context.values().managed_promise_lifecycle_counts_for_test(),
+        lifecycle_after,
+        "a later route must not manufacture or assign another fix promise"
+    );
 }
 
 #[test]

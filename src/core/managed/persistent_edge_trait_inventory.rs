@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        808,
+        810,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -848,10 +848,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // future promise, lazy, and function fixtures remain valid across each
     // deliberately forced collection. W6G.1f.3f adds the list-effect typed
     // checkpoint allocation/trace arm and the access-bounded promise working
-    // duplicates used for exactly-once fixpoint publication.
+    // duplicates used for exactly-once fixpoint publication. Its forced
+    // sequence/cut schedule adds two test-only promise roots so their deferred
+    // inputs remain valid across deliberate collections.
     assert_eq!(
         occurrence_fingerprint(actual),
-        17_901_285_226_588_816_835,
+        7_665_115_543_033_129_922,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -898,7 +900,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 556),
+            ((SourceScope::Test, EdgeSurface::Typed), 558),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
