@@ -678,8 +678,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // admission returns a post-access scheduling intent without inline demand.
 // W6G.1f.3g.3a replaces the durable dictionary constructor/poller helpers
 // with regional key/path children and one explicit sequential operand walk.
-const EXPECTED_OCCURRENCES: usize = 188;
-const EXPECTED_FINGERPRINT: u64 = 13_041_225_962_124_986_373;
+// W6G.1f.3g.3b makes scalar, list, dictionary, and tuple comparisons explicit
+// regional frame work beneath the shared builtin checkpoint.
+const EXPECTED_OCCURRENCES: usize = 193;
+const EXPECTED_FINGERPRINT: u64 = 4_399_279_025_123_893_476;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -692,13 +694,13 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 61),
-    (Signal::UserSizedLoop, 60),
+    (Signal::StructuralRecursion, 60),
+    (Signal::UserSizedLoop, 66),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 108),
-    (WorkShape::OrderedOperands, 7),
+    (WorkShape::DemandThenInspect, 110),
+    (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 10),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),

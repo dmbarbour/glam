@@ -165,11 +165,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6F.5 retains the builtin compatibility owner; W6G.1f.3g.2a-.2d move numeric, assertion, provenance, conditional, net, seq, and spark state beneath caller-supplied regional access"
     ),
     context_entry!(
-        "src/eval/comparison_machine.rs",
-        [9, 6],
-        "W6C.3 durable recursive comparison owner with scoped classification and result projection"
-    ),
-    context_entry!(
         "src/eval/object_builtin_machine.rs",
         [12, 2],
         "W6F.2/W6F.4a-W6F.4c durable object specification, diagnostic normalization, local-name, instance, definition-adapter, and plain-dictionary conversion ownership"
@@ -216,8 +211,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/tagged_machine.rs",
-        [2, 4],
-        "W6C.3 shared tagged-payload and semantic-undefined owner"
+        [1, 3],
+        "W6G.1f.3g.3b regional tagged-payload owner with one legacy semantic-undefined owner pending pattern cutover"
     ),
     context_entry!(
         "src/eval/value.rs",

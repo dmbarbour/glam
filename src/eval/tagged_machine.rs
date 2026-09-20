@@ -5,40 +5,70 @@
 //! exact dictionary cursor and nested demand across polls so comparison,
 //! application, and later builtin families share one interpretation.
 
-use crate::core::{Dict, Key, RuntimeValueAccess, Value};
+use std::sync::Arc;
+
+use glam_gc::Visitor;
+
+use crate::core::{
+    Dict, EvaluatedValue, EvaluationFailure, Key, LazyId, Value,
+    trace_compatibility_value_managed_edges,
+};
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
+    WorkDependency, poll_whnf_computation,
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfComputation,
+    drive_regional_in_place, reduce_semantic_shell,
+};
 
-pub(crate) enum TaggedPayloadPoll {
-    Ready(Option<RuntimeValueRoot>),
-    Pending(WorkDependency),
+pub(in crate::eval) enum RegionalTaggedPayloadPoll {
+    Ready(Option<Value>),
+    Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
-/// Recognizes one dictionary tag while preserving recursive undefined work.
-pub(crate) struct TaggedPayloadMachine {
-    payload: Option<RuntimeValueRoot>,
-    ignored: Vec<RuntimeValueRoot>,
+/// Raw tagged-dictionary recognition retained beneath a managed parent.
+pub(in crate::eval) struct RegionalTaggedPayload {
+    payload: Option<Value>,
+    ignored: Vec<Value>,
     next_ignored: usize,
     checking_payload: bool,
-    undefined: Option<SemanticUndefinedMachine>,
+    undefined: Option<RegionalSemanticUndefined>,
+    source_owner: LazyId,
 }
 
-impl TaggedPayloadMachine {
-    pub(crate) fn new(access: &RuntimeValueAccess<'_>, dict: &Dict, tag: &Key) -> Self {
+pub(in crate::eval) enum RegionalSemanticUndefinedPoll {
+    Ready(bool),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
+/// Depth-first semantic-undefined traversal beneath a managed parent.
+pub(in crate::eval) struct RegionalSemanticUndefined {
+    remaining: Vec<Value>,
+    demand: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
+}
+
+impl RegionalTaggedPayload {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        dict: &Dict,
+        tag: &Key,
+        source_owner: LazyId,
+    ) -> Self {
         let payload = dict
             .get(tag)
-            .map(|value| access.root_runtime_value(access.duplicate_value(value)));
+            .map(|value| access.values().duplicate_value(value));
         let ignored = dict
             .iter()
             .filter(|(key, _)| *key != tag)
-            .map(|(_, value)| access.root_runtime_value(access.duplicate_value(value)))
+            .map(|(_, value)| access.values().duplicate_value(value))
             .collect();
         Self {
             payload,
@@ -46,57 +76,151 @@ impl TaggedPayloadMachine {
             next_ignored: 0,
             checking_payload: true,
             undefined: None,
+            source_owner,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> TaggedPayloadPoll {
+    ) -> RegionalTaggedPayloadPoll {
         let Some(payload) = &self.payload else {
-            return TaggedPayloadPoll::Ready(None);
+            return RegionalTaggedPayloadPoll::Ready(None);
         };
 
         if self.undefined.is_none() {
             let candidate = if self.checking_payload {
-                payload.clone()
+                access.values().duplicate_value(payload)
             } else if let Some(value) = self.ignored.get(self.next_ignored) {
                 self.next_ignored += 1;
-                value.clone()
+                access.values().duplicate_value(value)
             } else {
-                return TaggedPayloadPoll::Ready(Some(payload.clone()));
+                return RegionalTaggedPayloadPoll::Ready(Some(
+                    access.values().duplicate_value(payload),
+                ));
             };
-            self.undefined = Some(SemanticUndefinedMachine::new(candidate));
-            return TaggedPayloadPoll::Yielded;
+            self.undefined = Some(RegionalSemanticUndefined::new_in(
+                access,
+                candidate,
+                self.source_owner,
+            ));
+            return RegionalTaggedPayloadPoll::Yielded;
         }
 
         match self
             .undefined
             .as_mut()
             .expect("semantic-undefined child must be installed")
-            .poll(poll_context, context, durable_context, step_budget)
+            .poll_in(access, step_budget)
         {
-            SemanticUndefinedPoll::Ready(undefined) => {
+            RegionalSemanticUndefinedPoll::Ready(undefined) => {
                 self.undefined = None;
                 if self.checking_payload {
                     self.checking_payload = false;
                     if undefined {
-                        TaggedPayloadPoll::Ready(None)
+                        RegionalTaggedPayloadPoll::Ready(None)
                     } else {
-                        TaggedPayloadPoll::Yielded
+                        RegionalTaggedPayloadPoll::Yielded
                     }
                 } else if undefined {
-                    TaggedPayloadPoll::Yielded
+                    RegionalTaggedPayloadPoll::Yielded
                 } else {
-                    TaggedPayloadPoll::Ready(None)
+                    RegionalTaggedPayloadPoll::Ready(None)
                 }
             }
-            SemanticUndefinedPoll::Pending(dependency) => TaggedPayloadPoll::Pending(dependency),
-            SemanticUndefinedPoll::Yielded => TaggedPayloadPoll::Yielded,
-            SemanticUndefinedPoll::Failed(failure) => TaggedPayloadPoll::Failed(failure),
+            RegionalSemanticUndefinedPoll::Boundary(request) => {
+                RegionalTaggedPayloadPoll::Boundary(request)
+            }
+            RegionalSemanticUndefinedPoll::Yielded => RegionalTaggedPayloadPoll::Yielded,
+            RegionalSemanticUndefinedPoll::Failed(failure) => {
+                RegionalTaggedPayloadPoll::Failed(failure)
+            }
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(payload) = &self.payload {
+            trace_compatibility_value_managed_edges(payload, visitor);
+        }
+        for value in &self.ignored {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(undefined) = &self.undefined {
+            undefined.trace_managed_edges(visitor);
+        }
+    }
+}
+
+impl RegionalSemanticUndefined {
+    pub(in crate::eval) fn new_in(
+        _access: &EvaluationValueAccess<'_>,
+        value: Value,
+        source_owner: LazyId,
+    ) -> Self {
+        Self {
+            remaining: vec![value],
+            demand: None,
+            source_owner,
+        }
+    }
+
+    pub(in crate::eval) fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalSemanticUndefinedPoll {
+        if self.demand.is_none() {
+            let Some(value) = self.remaining.pop() else {
+                return RegionalSemanticUndefinedPoll::Ready(true);
+            };
+            self.demand = Some(
+                RegionalWhnfWork::from_focus(access, value).with_source_owner(self.source_owner),
+            );
+        }
+
+        let value = match drive_regional_in_place(
+            access,
+            self.demand
+                .as_mut()
+                .expect("undefined traversal demand must be installed"),
+            step_budget,
+            reduce_semantic_shell,
+        ) {
+            RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                .expect("semantic-undefined demand must reach WHNF")
+                .into_value(),
+            RegionalWhnfStatus::Boundary(request) => {
+                return RegionalSemanticUndefinedPoll::Boundary(request);
+            }
+            RegionalWhnfStatus::Yielded => return RegionalSemanticUndefinedPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => {
+                return RegionalSemanticUndefinedPoll::Failed(failure);
+            }
+        };
+        self.demand = None;
+
+        let Value::Dict(dict) = value else {
+            return RegionalSemanticUndefinedPoll::Ready(false);
+        };
+        self.remaining.extend(
+            dict.iter()
+                .rev()
+                .map(|(_, value)| access.values().duplicate_value(value)),
+        );
+        if self.remaining.is_empty() {
+            RegionalSemanticUndefinedPoll::Ready(true)
+        } else {
+            RegionalSemanticUndefinedPoll::Yielded
+        }
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for value in &self.remaining {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
         }
     }
 }
@@ -194,32 +318,32 @@ mod tests {
         ))
     }
 
-    fn poll(machine: &mut TaggedPayloadMachine, context: &EvalContext) -> TaggedPayloadPoll {
+    fn poll(
+        machine: &mut RegionalTaggedPayload,
+        context: &EvalContext,
+    ) -> RegionalTaggedPayloadPoll {
         let poll = EvaluationPollContext::for_context(context);
-        poll.evaluate(context, |evaluator| {
-            machine.poll(
-                &poll,
-                evaluator,
-                context,
-                &mut EvaluationStepBudget::new(64),
-            )
+        poll.with_value_access(context, |access| {
+            machine.poll_in(&access, &mut EvaluationStepBudget::new(64))
         })
     }
 
     fn recognize(context: &EvalContext, dict: &Dict, tag: &Key) -> Option<Value> {
-        let mut machine = context
+        let (owner, _) = context
             .values()
-            .with_runtime_value_access(|access| TaggedPayloadMachine::new(&access, dict, tag));
+            .rooted_error_lazy_for_test("regional tagged-payload owner");
+        let poll_context = EvaluationPollContext::for_context(context);
+        let mut machine = poll_context.with_value_access(context, |access| {
+            RegionalTaggedPayload::new_in(&access, dict, tag, owner.id())
+        });
         loop {
             match poll(&mut machine, context) {
-                TaggedPayloadPoll::Ready(payload) => {
-                    return payload.map(|payload| payload.clone_core_for_test());
-                }
-                TaggedPayloadPoll::Yielded => {}
-                TaggedPayloadPoll::Pending(_) => {
+                RegionalTaggedPayloadPoll::Ready(payload) => return payload,
+                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Boundary(_) => {
                     panic!("strict tagged-payload recognition must not suspend")
                 }
-                TaggedPayloadPoll::Failed(error) => {
+                RegionalTaggedPayloadPoll::Failed(error) => {
                     panic!("closed tagged-payload recognition failed: {error}")
                 }
             }
@@ -270,18 +394,24 @@ mod tests {
                 ignored,
                 Value::Dict(Dict::new_sync().insert(nested, Value::Promised(promise.clone()))),
             );
-        let mut machine = context
+        let (owner, _) = context
             .values()
-            .with_runtime_value_access(|access| TaggedPayloadMachine::new(&access, &dict, &tag));
+            .rooted_error_lazy_for_test("regional tagged-payload owner");
+        let poll_context = EvaluationPollContext::for_context(&context);
+        let mut machine = poll_context.with_value_access(&context, |access| {
+            RegionalTaggedPayload::new_in(&access, &dict, &tag, owner.id())
+        });
 
         loop {
             match poll(&mut machine, &context) {
-                TaggedPayloadPoll::Yielded => {}
-                TaggedPayloadPoll::Pending(_) => break,
-                TaggedPayloadPoll::Ready(_) => {
+                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Boundary(_) => break,
+                RegionalTaggedPayloadPoll::Ready(_) => {
                     panic!("nested promise must suspend tag recognition")
                 }
-                TaggedPayloadPoll::Failed(error) => panic!("tag recognition failed: {error}"),
+                RegionalTaggedPayloadPoll::Failed(error) => {
+                    panic!("tag recognition failed: {error}")
+                }
             }
         }
 
@@ -289,15 +419,19 @@ mod tests {
             .expect("nested undefined promise should accept its assignment");
         let payload = loop {
             match poll(&mut machine, &context) {
-                TaggedPayloadPoll::Yielded => {}
-                TaggedPayloadPoll::Ready(Some(payload)) => break payload,
-                TaggedPayloadPoll::Ready(None) => {
+                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Ready(Some(payload)) => break payload,
+                RegionalTaggedPayloadPoll::Ready(None) => {
                     panic!("undefined ignored member must preserve the tag")
                 }
-                TaggedPayloadPoll::Pending(_) => panic!("assigned nested member must resume"),
-                TaggedPayloadPoll::Failed(error) => panic!("tag recognition failed: {error}"),
+                RegionalTaggedPayloadPoll::Boundary(_) => {
+                    panic!("assigned nested member must resume")
+                }
+                RegionalTaggedPayloadPoll::Failed(error) => {
+                    panic!("tag recognition failed: {error}")
+                }
             }
         };
-        assert_eq!(payload.clone_core_for_test(), Value::Number(7.into()));
+        assert_eq!(payload, Value::Number(7.into()));
     }
 }

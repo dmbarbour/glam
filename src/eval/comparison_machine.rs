@@ -3,27 +3,22 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use glam_gc::Visitor;
+
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluatedValue, EvaluationFailure, Key, List, RuntimeValueAccess,
-    Value, keys,
+    Builtin, BuiltinCall, Dict, EvaluatedValue, EvaluationFailure, Key, LazyId, List, Value, keys,
+    trace_compatibility_value_managed_edges,
 };
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    poll_whnf_computation,
-};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 
 use super::application::effect_value;
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
-use super::tagged_machine::{TaggedPayloadMachine, TaggedPayloadPoll};
-use super::whnf::WhnfComputation;
-
-pub(crate) enum ComparisonBuiltinPoll {
-    Ready(RuntimeValueRoot),
-    Pending(WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
+use super::builtin_machine::RegionalBuiltinPoll;
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
+use super::tagged_machine::{RegionalTaggedPayload, RegionalTaggedPayloadPoll};
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
+    reduce_semantic_shell,
+};
 
 #[derive(Clone, Copy)]
 enum ComparisonMode {
@@ -37,16 +32,12 @@ enum ComparisonResult {
     Ordering(Ordering),
 }
 
-pub(crate) struct ComparisonBuiltinMachine {
+pub(in crate::eval) struct RegionalComparisonMachine {
     builtin: Builtin,
     frames: Vec<ComparisonFrame>,
     child_result: Option<ComparisonResult>,
 }
 
-#[allow(
-    clippy::large_enum_variant,
-    reason = "regional list-front state shrank the list variant before W6G.1f.3g converts this whole builtin family to one managed checkpoint"
-)]
 enum ComparisonFrame {
     Value(ValueComparisonFrame),
     List(ListComparisonFrame),
@@ -56,26 +47,29 @@ enum ComparisonFrame {
 
 struct ValueComparisonFrame {
     mode: ComparisonMode,
-    left: RuntimeValueRoot,
-    right: RuntimeValueRoot,
-    left_ready: Option<RuntimeValueRoot>,
-    right_ready: Option<RuntimeValueRoot>,
-    demand: Option<WhnfComputation>,
+    left: Value,
+    right: Value,
+    left_ready: Option<Value>,
+    right_ready: Option<Value>,
+    demand: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
 }
 
 struct ListComparisonFrame {
     mode: ComparisonMode,
-    left: ListFrontMachine,
-    right: ListFrontMachine,
-    left_item: Option<Option<(RuntimeValueRoot, RuntimeValueRoot)>>,
-    right_item: Option<Option<(RuntimeValueRoot, RuntimeValueRoot)>>,
+    left: RegionalListFront,
+    right: RegionalListFront,
+    left_item: Option<Option<(Value, Value)>>,
+    right_item: Option<Option<(Value, Value)>>,
     awaiting_child: bool,
+    source_owner: LazyId,
 }
 
 struct DictEqualityFrame {
-    pairs: Vec<(RuntimeValueRoot, RuntimeValueRoot)>,
+    pairs: Vec<(Value, Value)>,
     next: usize,
     awaiting_child: bool,
+    source_owner: LazyId,
 }
 
 enum TupleOrderingPhase {
@@ -87,107 +81,107 @@ enum TupleOrderingPhase {
 }
 
 struct TupleOrderingFrame {
-    left_tag: TaggedPayloadMachine,
-    right_tag: TaggedPayloadMachine,
-    left_payload: Option<RuntimeValueRoot>,
-    right_payload: Option<RuntimeValueRoot>,
-    left_list: Option<RuntimeValueRoot>,
-    demand: Option<WhnfComputation>,
+    left_tag: RegionalTaggedPayload,
+    right_tag: RegionalTaggedPayload,
+    left_payload: Option<Value>,
+    right_payload: Option<Value>,
+    left_list: Option<Value>,
+    demand: Option<RegionalWhnfWork>,
     phase: TupleOrderingPhase,
+    source_owner: LazyId,
 }
 
 enum FrameAction {
     Replace(ComparisonFrame),
     Push(ComparisonFrame),
     Complete(ComparisonResult),
-    Pending(WorkDependency),
+    Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
 enum TuplePayloadPoll {
-    Ready(RuntimeValueRoot),
-    Pending(WorkDependency),
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
-impl ComparisonBuiltinMachine {
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
-        let [left, right]: [RuntimeValueRoot; 2] = arguments
-            .try_into()
-            .expect("a comparison source retains two operands");
+impl RegionalComparisonMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
+        let [left, right] = arguments else {
+            unreachable!("a comparison source retains two operands")
+        };
         Self {
             builtin,
-            frames: vec![ComparisonFrame::Value(ValueComparisonFrame::new(
+            frames: vec![ComparisonFrame::Value(ValueComparisonFrame::new_in(
+                access,
                 comparison_mode(builtin),
                 left,
                 right,
+                source_owner,
             ))],
             child_result: None,
         }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> ComparisonBuiltinPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         if let Some(result) = self.child_result.take() {
             let Some(parent) = self.frames.last_mut() else {
-                return self.finish(context, result);
+                return self.finish(access, result);
             };
             if let Some(result) = parent.accept_child(result) {
                 self.frames.pop();
                 self.child_result = Some(result);
             }
-            return ComparisonBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         let Some(frame) = self.frames.last_mut() else {
             unreachable!("comparison work must retain a frame or completed child")
         };
-        let action = frame.poll(
-            poll_context,
-            context,
-            durable_context,
-            step_budget,
-            comparison_name(self.builtin),
-        );
+        let action = frame.poll(access, step_budget, comparison_name(self.builtin));
         match action {
             FrameAction::Replace(frame) => {
                 *self
                     .frames
                     .last_mut()
                     .expect("replacement requires the current frame") = frame;
-                ComparisonBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             FrameAction::Push(frame) => {
                 self.frames.push(frame);
-                ComparisonBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Yielded
             }
             FrameAction::Complete(result) => {
                 self.frames.pop();
                 if self.frames.is_empty() {
-                    self.finish(context, result)
+                    self.finish(access, result)
                 } else {
                     self.child_result = Some(result);
-                    ComparisonBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Yielded
                 }
             }
-            FrameAction::Pending(dependency) => ComparisonBuiltinPoll::Pending(dependency),
-            FrameAction::Yielded => ComparisonBuiltinPoll::Yielded,
-            FrameAction::Failed(failure) => ComparisonBuiltinPoll::Failed(failure),
+            FrameAction::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+            FrameAction::Yielded => RegionalBuiltinPoll::Yielded,
+            FrameAction::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
 
     fn finish(
         &self,
-        context: &EvaluatorStepContext<'_>,
+        access: &EvaluationValueAccess<'_>,
         result: ComparisonResult,
-    ) -> ComparisonBuiltinPoll {
+    ) -> RegionalBuiltinPoll {
         let success = match (self.builtin, result) {
             (Builtin::Greater, ComparisonResult::Ordering(ordering)) => {
                 ordering == Ordering::Greater
@@ -211,39 +205,37 @@ impl ComparisonBuiltinMachine {
         } else {
             Vec::new()
         };
-        ComparisonBuiltinPoll::Ready(context.with_value_access(|access| {
-            access.values().root_runtime_value(effect_value(
-                access.values(),
-                Value::PartialBuiltin(BuiltinCall {
-                    builtin: Builtin::EffectCall,
-                    arguments: Arc::from([
-                        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(effect))),
-                        Value::List(List::from_values(arguments)),
-                    ]),
-                }),
-            ))
-        }))
+        RegionalBuiltinPoll::Ready(effect_value(
+            access.values(),
+            Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::EffectCall,
+                arguments: Arc::from([
+                    Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(effect))),
+                    Value::List(List::from_values(arguments)),
+                ]),
+            }),
+        ))
+    }
+
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for frame in &self.frames {
+            frame.trace_managed_edges(visitor);
+        }
     }
 }
 
 impl ComparisonFrame {
     fn poll(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
         name: &'static str,
     ) -> FrameAction {
         match self {
-            Self::Value(frame) => {
-                frame.poll(poll_context, context, durable_context, step_budget, name)
-            }
-            Self::List(frame) => frame.poll(poll_context, context, durable_context, step_budget),
-            Self::Dict(frame) => frame.poll(),
-            Self::Tuple(frame) => {
-                frame.poll(poll_context, context, durable_context, step_budget, name)
-            }
+            Self::Value(frame) => frame.poll_in(access, step_budget, name),
+            Self::List(frame) => frame.poll_in(access, step_budget),
+            Self::Dict(frame) => frame.poll(access),
+            Self::Tuple(frame) => frame.poll_in(access, step_budget, name),
         }
     }
 
@@ -255,26 +247,40 @@ impl ComparisonFrame {
             Self::Value(_) => unreachable!("value frames are replaced by their recursive work"),
         }
     }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Value(frame) => frame.trace_managed_edges(visitor),
+            Self::List(frame) => frame.trace_managed_edges(visitor),
+            Self::Dict(frame) => frame.trace_managed_edges(visitor),
+            Self::Tuple(frame) => frame.trace_managed_edges(visitor),
+        }
+    }
 }
 
 impl ValueComparisonFrame {
-    fn new(mode: ComparisonMode, left: RuntimeValueRoot, right: RuntimeValueRoot) -> Self {
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        mode: ComparisonMode,
+        left: &Value,
+        right: &Value,
+        source_owner: LazyId,
+    ) -> Self {
         Self {
             mode,
-            left,
-            right,
+            left: access.values().duplicate_value(left),
+            right: access.values().duplicate_value(right),
             left_ready: None,
             right_ready: None,
             demand: None,
+            source_owner,
         }
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
         name: &'static str,
     ) -> FrameAction {
         let source = if self.left_ready.is_none() {
@@ -283,26 +289,29 @@ impl ValueComparisonFrame {
             &self.right
         } else {
             return classify_values(
-                context,
+                access,
                 self.mode,
                 &self.left_ready,
                 &self.right_ready,
+                self.source_owner,
                 name,
             );
         };
-        let demand = self
-            .demand
-            .get_or_insert_with(|| WhnfComputation::from_root(source.clone()));
-        let value = match poll_whnf_computation(demand, poll_context, durable_context, step_budget)
-        {
-            WhnfOwnerPoll::Ready(value) => value,
-            WhnfOwnerPoll::Pending(dependency) => return FrameAction::Pending(dependency),
-            WhnfOwnerPoll::Yielded => return FrameAction::Yielded,
-            WhnfOwnerPoll::Failed(failure) => return FrameAction::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("comparison demand produced an external {boundary:?} boundary")
-            }
-        };
+        let demand = self.demand.get_or_insert_with(|| {
+            RegionalWhnfWork::from_focus(access, access.values().duplicate_value(source))
+                .with_source_owner(self.source_owner)
+        });
+        let value =
+            match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                    .expect("comparison operand must reach WHNF")
+                    .into_value(),
+                RegionalWhnfStatus::Boundary(request) => {
+                    return FrameAction::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return FrameAction::Yielded,
+                RegionalWhnfStatus::Failed(failure) => return FrameAction::Failed(failure),
+            };
         self.demand = None;
         if self.left_ready.is_none() {
             self.left_ready = Some(value);
@@ -311,13 +320,28 @@ impl ValueComparisonFrame {
         }
         FrameAction::Yielded
     }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.left, visitor);
+        trace_compatibility_value_managed_edges(&self.right, visitor);
+        if let Some(value) = &self.left_ready {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(value) = &self.right_ready {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+    }
 }
 
 fn classify_values(
-    context: &EvaluatorStepContext<'_>,
+    access: &EvaluationValueAccess<'_>,
     mode: ComparisonMode,
-    left: &Option<RuntimeValueRoot>,
-    right: &Option<RuntimeValueRoot>,
+    left: &Option<Value>,
+    right: &Option<Value>,
+    source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
     let left = left
@@ -326,28 +350,39 @@ fn classify_values(
     let right = right
         .as_ref()
         .expect("right comparison operand must be ready");
-    context.with_value_access(|access| {
-        let left_value = EvaluatedValue::try_from(access.clone_root(left))
-            .expect("comparison operand must be in WHNF");
-        let right_value = EvaluatedValue::try_from(access.clone_root(right))
-            .expect("comparison operand must be in WHNF");
-        match mode {
-            ComparisonMode::Ordering => {
-                classify_ordering(access.values(), left, right, left_value, right_value, name)
-            }
-            ComparisonMode::Equality => {
-                classify_equality(access.values(), left, right, left_value, right_value, name)
-            }
-        }
-    })
+    let left_value = EvaluatedValue::try_from(access.values().duplicate_value(left))
+        .expect("comparison operand must be in WHNF");
+    let right_value = EvaluatedValue::try_from(access.values().duplicate_value(right))
+        .expect("comparison operand must be in WHNF");
+    match mode {
+        ComparisonMode::Ordering => classify_ordering(
+            access,
+            left,
+            right,
+            left_value,
+            right_value,
+            source_owner,
+            name,
+        ),
+        ComparisonMode::Equality => classify_equality(
+            access,
+            left,
+            right,
+            left_value,
+            right_value,
+            source_owner,
+            name,
+        ),
+    }
 }
 
 fn classify_ordering(
-    access: &RuntimeValueAccess<'_>,
-    left_root: &RuntimeValueRoot,
-    right_root: &RuntimeValueRoot,
+    access: &EvaluationValueAccess<'_>,
+    left_root: &Value,
+    right_root: &Value,
     left: EvaluatedValue,
     right: EvaluatedValue,
+    source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
     match (left.into_value(), right.into_value()) {
@@ -363,27 +398,33 @@ fn classify_ordering(
         }
         (Value::Binary(left), Value::List(_)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Ordering,
-                access.root_runtime_value(Value::List(List::from_bytes(left))),
-                right_root.clone(),
+                Value::List(List::from_bytes(left)),
+                access.values().duplicate_value(right_root),
+                Some(source_owner),
             )))
         }
         (Value::List(_), Value::Binary(right)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Ordering,
-                left_root.clone(),
-                access.root_runtime_value(Value::List(List::from_bytes(right))),
+                access.values().duplicate_value(left_root),
+                Value::List(List::from_bytes(right)),
+                Some(source_owner),
             )))
         }
         (Value::List(_), Value::List(_)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Ordering,
-                left_root.clone(),
-                right_root.clone(),
+                access.values().duplicate_value(left_root),
+                access.values().duplicate_value(right_root),
+                Some(source_owner),
             )))
         }
         (Value::Dict(left), Value::Dict(right)) => FrameAction::Replace(ComparisonFrame::Tuple(
-            TupleOrderingFrame::new(access, &left, &right),
+            TupleOrderingFrame::new_in(access, &left, &right, source_owner),
         )),
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))
@@ -392,31 +433,28 @@ fn classify_ordering(
         | (Value::Function(_), _)
         | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_)) => failure(context_message(
-            access,
-            format!("{name} builtin cannot compare function values"),
-        )),
-        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => failure(context_message(
-            access,
-            format!("{name} builtin cannot compare opaque values"),
-        )),
-        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => failure(context_message(
-            access,
-            format!("{name} builtin cannot compare sealed values"),
-        )),
-        (left, right) => failure(context_message(
-            access,
-            format!("{name} builtin cannot order values {left:?} and {right:?}"),
+        | (_, Value::Net(_)) => {
+            failure_message(format!("{name} builtin cannot compare function values"))
+        }
+        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => {
+            failure_message(format!("{name} builtin cannot compare opaque values"))
+        }
+        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
+            failure_message(format!("{name} builtin cannot compare sealed values"))
+        }
+        (left, right) => failure_message(format!(
+            "{name} builtin cannot order values {left:?} and {right:?}"
         )),
     }
 }
 
 fn classify_equality(
-    access: &RuntimeValueAccess<'_>,
-    left_root: &RuntimeValueRoot,
-    right_root: &RuntimeValueRoot,
+    access: &EvaluationValueAccess<'_>,
+    left_root: &Value,
+    right_root: &Value,
     left: EvaluatedValue,
     right: EvaluatedValue,
+    source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
     match (left.into_value(), right.into_value()) {
@@ -435,27 +473,33 @@ fn classify_equality(
         }
         (Value::Binary(left), Value::List(_)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Equality,
-                access.root_runtime_value(Value::List(List::from_bytes(left))),
-                right_root.clone(),
+                Value::List(List::from_bytes(left)),
+                access.values().duplicate_value(right_root),
+                Some(source_owner),
             )))
         }
         (Value::List(_), Value::Binary(right)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Equality,
-                left_root.clone(),
-                access.root_runtime_value(Value::List(List::from_bytes(right))),
+                access.values().duplicate_value(left_root),
+                Value::List(List::from_bytes(right)),
+                Some(source_owner),
             )))
         }
         (Value::List(_), Value::List(_)) => {
             FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+                access,
                 ComparisonMode::Equality,
-                left_root.clone(),
-                right_root.clone(),
+                access.values().duplicate_value(left_root),
+                access.values().duplicate_value(right_root),
+                Some(source_owner),
             )))
         }
         (Value::Dict(left), Value::Dict(right)) => FrameAction::Replace(ComparisonFrame::Dict(
-            DictEqualityFrame::new(access, &left, &right),
+            DictEqualityFrame::new_in(access, &left, &right, source_owner),
         )),
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))
@@ -464,20 +508,18 @@ fn classify_equality(
         | (Value::Function(_), _)
         | (_, Value::Function(_))
         | (Value::Net(_), _)
-        | (_, Value::Net(_)) => failure(context_message(
-            access,
-            format!("{name} builtin cannot compare function values"),
-        )),
+        | (_, Value::Net(_)) => {
+            failure_message(format!("{name} builtin cannot compare function values"))
+        }
         (Value::Opaque(left), Value::Opaque(right)) => {
             FrameAction::Complete(ComparisonResult::Equality(left == right))
         }
         (Value::Opaque(_), _) | (_, Value::Opaque(_)) => {
             FrameAction::Complete(ComparisonResult::Equality(false))
         }
-        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => failure(context_message(
-            access,
-            format!("{name} builtin cannot compare sealed values"),
-        )),
+        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
+            failure_message(format!("{name} builtin cannot compare sealed values"))
+        }
         (Value::Atom(_), _)
         | (Value::Number(_), _)
         | (Value::Binary(_), _)
@@ -487,53 +529,57 @@ fn classify_equality(
 }
 
 impl ListComparisonFrame {
-    fn new(mode: ComparisonMode, left: RuntimeValueRoot, right: RuntimeValueRoot) -> Self {
+    fn new(
+        access: &EvaluationValueAccess<'_>,
+        mode: ComparisonMode,
+        left: Value,
+        right: Value,
+        source_owner: Option<LazyId>,
+    ) -> Self {
+        let source_owner = source_owner.expect("comparison list work must retain its source owner");
         Self {
             mode,
-            left: ListFrontMachine::unowned(left),
-            right: ListFrontMachine::unowned(right),
+            left: RegionalListFront::new_in(access, left, Some(source_owner)),
+            right: RegionalListFront::new_in(access, right, Some(source_owner)),
             left_item: None,
             right_item: None,
             awaiting_child: false,
+            source_owner,
         }
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
     ) -> FrameAction {
         if self.awaiting_child {
             unreachable!("list comparison must receive its child before polling again")
         }
         if self.left_item.is_none() {
-            self.left_item = Some(
-                match self
-                    .left
-                    .poll(poll_context, context, durable_context, step_budget)
-                {
-                    ListFrontPoll::Ready(item) => item,
-                    ListFrontPoll::Pending(dependency) => return FrameAction::Pending(dependency),
-                    ListFrontPoll::Yielded => return FrameAction::Yielded,
-                    ListFrontPoll::Failed(failure) => return FrameAction::Failed(failure),
-                },
-            );
+            self.left_item = Some(match self.left.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(item) => item,
+                RegionalListFrontPoll::Boundary(request) => {
+                    return FrameAction::Boundary(request);
+                }
+                RegionalListFrontPoll::Yielded => return FrameAction::Yielded,
+                RegionalListFrontPoll::Failed(failure) => {
+                    return FrameAction::Failed(failure);
+                }
+            });
             return FrameAction::Yielded;
         }
         if self.right_item.is_none() {
-            self.right_item = Some(
-                match self
-                    .right
-                    .poll(poll_context, context, durable_context, step_budget)
-                {
-                    ListFrontPoll::Ready(item) => item,
-                    ListFrontPoll::Pending(dependency) => return FrameAction::Pending(dependency),
-                    ListFrontPoll::Yielded => return FrameAction::Yielded,
-                    ListFrontPoll::Failed(failure) => return FrameAction::Failed(failure),
-                },
-            );
+            self.right_item = Some(match self.right.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(item) => item,
+                RegionalListFrontPoll::Boundary(request) => {
+                    return FrameAction::Boundary(request);
+                }
+                RegionalListFrontPoll::Yielded => return FrameAction::Yielded,
+                RegionalListFrontPoll::Failed(failure) => {
+                    return FrameAction::Failed(failure);
+                }
+            });
             return FrameAction::Yielded;
         }
 
@@ -559,11 +605,15 @@ impl ListComparisonFrame {
                 ComparisonMode::Ordering => ComparisonResult::Ordering(Ordering::Greater),
             }),
             (Some((left, left_tail)), Some((right, right_tail))) => {
-                self.left = ListFrontMachine::unowned(left_tail);
-                self.right = ListFrontMachine::unowned(right_tail);
+                self.left = RegionalListFront::new_in(access, left_tail, Some(self.source_owner));
+                self.right = RegionalListFront::new_in(access, right_tail, Some(self.source_owner));
                 self.awaiting_child = true;
-                FrameAction::Push(ComparisonFrame::Value(ValueComparisonFrame::new(
-                    self.mode, left, right,
+                FrameAction::Push(ComparisonFrame::Value(ValueComparisonFrame::new_in(
+                    access,
+                    self.mode,
+                    &left,
+                    &right,
+                    self.source_owner,
                 )))
             }
         }
@@ -577,26 +627,42 @@ impl ListComparisonFrame {
             result => Some(result),
         }
     }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.left.trace_managed_edges(visitor);
+        self.right.trace_managed_edges(visitor);
+        for item in [&self.left_item, &self.right_item] {
+            if let Some(Some((value, tail))) = item {
+                trace_compatibility_value_managed_edges(value, visitor);
+                trace_compatibility_value_managed_edges(tail, visitor);
+            }
+        }
+    }
 }
 
 impl DictEqualityFrame {
-    fn new(access: &RuntimeValueAccess<'_>, left: &Dict, right: &Dict) -> Self {
-        let empty = access.root_runtime_value(Value::Dict(Dict::new_sync()));
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        left: &Dict,
+        right: &Dict,
+        source_owner: LazyId,
+    ) -> Self {
+        let empty = Value::Dict(Dict::new_sync());
         let mut pairs = Vec::new();
         for (key, left_value) in left.iter() {
             pairs.push((
-                access.root_runtime_value(access.duplicate_value(left_value)),
+                access.values().duplicate_value(left_value),
                 right.get(key).map_or_else(
-                    || empty.clone(),
-                    |value| access.root_runtime_value(access.duplicate_value(value)),
+                    || access.values().duplicate_value(&empty),
+                    |value| access.values().duplicate_value(value),
                 ),
             ));
         }
         for (key, right_value) in right.iter() {
             if !left.contains_key(key) {
                 pairs.push((
-                    empty.clone(),
-                    access.root_runtime_value(access.duplicate_value(right_value)),
+                    access.values().duplicate_value(&empty),
+                    access.values().duplicate_value(right_value),
                 ));
             }
         }
@@ -604,10 +670,11 @@ impl DictEqualityFrame {
             pairs,
             next: 0,
             awaiting_child: false,
+            source_owner,
         }
     }
 
-    fn poll(&mut self) -> FrameAction {
+    fn poll(&mut self, access: &EvaluationValueAccess<'_>) -> FrameAction {
         if self.awaiting_child {
             unreachable!("dictionary comparison must receive its child before polling again")
         }
@@ -616,10 +683,12 @@ impl DictEqualityFrame {
         };
         self.next += 1;
         self.awaiting_child = true;
-        FrameAction::Push(ComparisonFrame::Value(ValueComparisonFrame::new(
+        FrameAction::Push(ComparisonFrame::Value(ValueComparisonFrame::new_in(
+            access,
             ComparisonMode::Equality,
-            left.clone(),
-            right.clone(),
+            left,
+            right,
+            self.source_owner,
         )))
     }
 
@@ -634,77 +703,75 @@ impl DictEqualityFrame {
             }
         }
     }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for (left, right) in &self.pairs {
+            trace_compatibility_value_managed_edges(left, visitor);
+            trace_compatibility_value_managed_edges(right, visitor);
+        }
+    }
 }
 
 impl TupleOrderingFrame {
-    fn new(access: &RuntimeValueAccess<'_>, left: &Dict, right: &Dict) -> Self {
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        left: &Dict,
+        right: &Dict,
+        source_owner: LazyId,
+    ) -> Self {
         Self {
-            left_tag: TaggedPayloadMachine::new(access, left, &keys::TUPLE),
-            right_tag: TaggedPayloadMachine::new(access, right, &keys::TUPLE),
+            left_tag: RegionalTaggedPayload::new_in(access, left, &keys::TUPLE, source_owner),
+            right_tag: RegionalTaggedPayload::new_in(access, right, &keys::TUPLE, source_owner),
             left_payload: None,
             right_payload: None,
             left_list: None,
             demand: None,
             phase: TupleOrderingPhase::LeftTag,
+            source_owner,
         }
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
         name: &'static str,
     ) -> FrameAction {
         match self.phase {
-            TupleOrderingPhase::LeftTag => {
-                match self
-                    .left_tag
-                    .poll(poll_context, context, durable_context, step_budget)
-                {
-                    TaggedPayloadPoll::Ready(Some(payload)) => {
-                        self.left_payload = Some(payload);
-                        self.phase = TupleOrderingPhase::RightTag;
-                        FrameAction::Yielded
-                    }
-                    TaggedPayloadPoll::Ready(None) => failure_message(
-                        context,
-                        format!("{name} builtin can only order dictionaries tagged as `tuple`"),
-                    ),
-                    TaggedPayloadPoll::Pending(dependency) => FrameAction::Pending(dependency),
-                    TaggedPayloadPoll::Yielded => FrameAction::Yielded,
-                    TaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
+            TupleOrderingPhase::LeftTag => match self.left_tag.poll_in(access, step_budget) {
+                RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
+                    self.left_payload = Some(payload);
+                    self.phase = TupleOrderingPhase::RightTag;
+                    FrameAction::Yielded
                 }
-            }
-            TupleOrderingPhase::RightTag => {
-                match self
-                    .right_tag
-                    .poll(poll_context, context, durable_context, step_budget)
-                {
-                    TaggedPayloadPoll::Ready(Some(payload)) => {
-                        self.right_payload = Some(payload);
-                        self.phase = TupleOrderingPhase::LeftPayload;
-                        FrameAction::Yielded
-                    }
-                    TaggedPayloadPoll::Ready(None) => failure_message(
-                        context,
-                        format!("{name} builtin can only order dictionaries tagged as `tuple`"),
-                    ),
-                    TaggedPayloadPoll::Pending(dependency) => FrameAction::Pending(dependency),
-                    TaggedPayloadPoll::Yielded => FrameAction::Yielded,
-                    TaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
+                RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
+                    "{name} builtin can only order dictionaries tagged as `tuple`"
+                )),
+                RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
+                RegionalTaggedPayloadPoll::Yielded => FrameAction::Yielded,
+                RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
+            },
+            TupleOrderingPhase::RightTag => match self.right_tag.poll_in(access, step_budget) {
+                RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
+                    self.right_payload = Some(payload);
+                    self.phase = TupleOrderingPhase::LeftPayload;
+                    FrameAction::Yielded
                 }
-            }
+                RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
+                    "{name} builtin can only order dictionaries tagged as `tuple`"
+                )),
+                RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
+                RegionalTaggedPayloadPoll::Yielded => FrameAction::Yielded,
+                RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
+            },
             TupleOrderingPhase::LeftPayload => {
                 match demand_tuple_payload(
                     &mut self.demand,
                     self.left_payload
                         .as_ref()
                         .expect("left tuple payload must be retained"),
-                    poll_context,
-                    context,
-                    durable_context,
+                    self.source_owner,
+                    access,
                     step_budget,
                     name,
                 ) {
@@ -713,7 +780,7 @@ impl TupleOrderingFrame {
                         self.phase = TupleOrderingPhase::RightPayload;
                         FrameAction::Yielded
                     }
-                    TuplePayloadPoll::Pending(dependency) => FrameAction::Pending(dependency),
+                    TuplePayloadPoll::Boundary(request) => FrameAction::Boundary(request),
                     TuplePayloadPoll::Yielded => FrameAction::Yielded,
                     TuplePayloadPoll::Failed(failure) => FrameAction::Failed(failure),
                 }
@@ -724,24 +791,26 @@ impl TupleOrderingFrame {
                     self.right_payload
                         .as_ref()
                         .expect("right tuple payload must be retained"),
-                    poll_context,
-                    context,
-                    durable_context,
+                    self.source_owner,
+                    access,
                     step_budget,
                     name,
                 ) {
                     TuplePayloadPoll::Ready(list) => {
                         self.phase = TupleOrderingPhase::Comparing;
                         FrameAction::Push(ComparisonFrame::List(ListComparisonFrame::new(
+                            access,
                             ComparisonMode::Ordering,
-                            self.left_list
-                                .as_ref()
-                                .expect("left tuple list must be ready")
-                                .clone(),
+                            access.values().duplicate_value(
+                                self.left_list
+                                    .as_ref()
+                                    .expect("left tuple list must be ready"),
+                            ),
                             list,
+                            Some(self.source_owner),
                         )))
                     }
-                    TuplePayloadPoll::Pending(dependency) => FrameAction::Pending(dependency),
+                    TuplePayloadPoll::Boundary(request) => FrameAction::Boundary(request),
                     TuplePayloadPoll::Yielded => FrameAction::Yielded,
                     TuplePayloadPoll::Failed(failure) => FrameAction::Failed(failure),
                 }
@@ -756,44 +825,52 @@ impl TupleOrderingFrame {
         assert!(matches!(self.phase, TupleOrderingPhase::Comparing));
         Some(result)
     }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.left_tag.trace_managed_edges(visitor);
+        self.right_tag.trace_managed_edges(visitor);
+        for value in [&self.left_payload, &self.right_payload, &self.left_list]
+            .into_iter()
+            .flatten()
+        {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+    }
 }
 
 fn demand_tuple_payload(
-    demand: &mut Option<WhnfComputation>,
-    payload: &RuntimeValueRoot,
-    poll_context: &EvaluationPollContext,
-    context: &EvaluatorStepContext<'_>,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    demand: &mut Option<RegionalWhnfWork>,
+    payload: &Value,
+    source_owner: LazyId,
+    access: &EvaluationValueAccess<'_>,
+    step_budget: &mut EvaluationStepBudget,
     name: &'static str,
 ) -> TuplePayloadPoll {
-    let computation = demand.get_or_insert_with(|| WhnfComputation::from_root(payload.clone()));
-    let value = match poll_whnf_computation(computation, poll_context, durable_context, step_budget)
-    {
-        WhnfOwnerPoll::Ready(value) => value,
-        WhnfOwnerPoll::Pending(dependency) => return TuplePayloadPoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => return TuplePayloadPoll::Yielded,
-        WhnfOwnerPoll::Failed(failure) => return TuplePayloadPoll::Failed(failure),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("tuple-payload demand produced an external {boundary:?} boundary")
-        }
-    };
-    *demand = None;
-    let list = context.with_value_access(|access| match access.clone_root(&value) {
-        Value::Binary(bytes) => Ok(access
-            .values()
-            .root_runtime_value(Value::List(List::from_bytes(bytes)))),
-        Value::List(_) => Ok(value),
-        other => Err(format!(
-            "{name} builtin requires tuple payloads to be lists or binaries, got {other:?}"
-        )),
+    let computation = demand.get_or_insert_with(|| {
+        RegionalWhnfWork::from_focus(access, access.values().duplicate_value(payload))
+            .with_source_owner(source_owner)
     });
-    match list {
-        Ok(list) => TuplePayloadPoll::Ready(list),
-        Err(message) => match failure_message(context, message) {
-            FrameAction::Failed(failure) => TuplePayloadPoll::Failed(failure),
-            _ => unreachable!("failure construction must produce a failed frame action"),
-        },
+    let value =
+        match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
+            RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                .expect("tuple payload must reach WHNF")
+                .into_value(),
+            RegionalWhnfStatus::Boundary(request) => {
+                return TuplePayloadPoll::Boundary(request);
+            }
+            RegionalWhnfStatus::Yielded => return TuplePayloadPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => return TuplePayloadPoll::Failed(failure),
+        };
+    *demand = None;
+    match value {
+        Value::Binary(bytes) => TuplePayloadPoll::Ready(Value::List(List::from_bytes(bytes))),
+        Value::List(_) => TuplePayloadPoll::Ready(value),
+        other => TuplePayloadPoll::Failed(Arc::new(EvaluationFailure::message(format!(
+            "{name} builtin requires tuple payloads to be lists or binaries, got {other:?}"
+        )))),
     }
 }
 
@@ -819,14 +896,6 @@ fn comparison_name(builtin: Builtin) -> &'static str {
     }
 }
 
-fn context_message(access: &RuntimeValueAccess<'_>, message: String) -> RuntimeFailureRoot {
-    access.root_runtime_failure(Arc::new(EvaluationFailure::message(message)))
-}
-
-fn failure(failure: RuntimeFailureRoot) -> FrameAction {
-    FrameAction::Failed(failure)
-}
-
-fn failure_message(context: &EvaluatorStepContext<'_>, message: String) -> FrameAction {
-    FrameAction::Failed(context.root_failure(Arc::new(EvaluationFailure::message(message))))
+fn failure_message(message: String) -> FrameAction {
+    FrameAction::Failed(Arc::new(EvaluationFailure::message(message)))
 }

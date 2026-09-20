@@ -135,14 +135,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6E.1-W6E.4 resumable annotation ownership"
     ),
     entry!(
-        "src/eval/comparison_machine.rs",
-        0,
-        0,
-        10,
-        "durable comparison operands, recursive list/dictionary members, and tuple payloads",
-        "W6C.3 resumable recursive comparison ownership"
-    ),
-    entry!(
         "src/eval/effect_machine.rs",
         0,
         0,
@@ -210,9 +202,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/tagged_machine.rs",
         0,
         0,
-        3,
-        "tagged payload and recursive semantic-undefined traversal",
-        "W6C.3 shared resumable tagged-payload owner"
+        1,
+        "legacy recursive semantic-undefined traversal retained for pattern families",
+        "W6G.1f.3g.3b regional tagged-payload owner; W6G.1f.3g.3e pending pattern cutover"
     ),
     entry!(
         "src/eval/builtins/net/construction.rs",
@@ -499,11 +491,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/annotation_machine.rs::root_builtin"
                 | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
-                | "src/eval/comparison_machine.rs::classify_equality"
-                | "src/eval/comparison_machine.rs::classify_ordering"
-                | "src/eval/comparison_machine.rs::demand_tuple_payload"
-                | "src/eval/comparison_machine.rs::impl ComparisonBuiltinMachine::finish"
-                | "src/eval/comparison_machine.rs::impl DictEqualityFrame::new"
                 | "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll"
                 | "src/eval/effect_machine.rs::root_application"
                 | "src/eval/effect_machine.rs::root_effect_call"
@@ -536,7 +523,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
                 | "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll"
-                | "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint"
@@ -799,16 +785,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/annotation_machine.rs::root_builtin#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::classify_equality#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::classify_equality#2|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::classify_ordering#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::classify_ordering#2|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::demand_tuple_payload#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::impl ComparisonBuiltinMachine::finish#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#1|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#2|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#3|surface=access-publication|scope=production",
-    "src/eval/comparison_machine.rs::impl DictEqualityFrame::new#4|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_application#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_call#1|surface=access-publication|scope=production",
@@ -848,8 +824,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/pattern_machine.rs::pattern_effect_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/tagged_machine.rs::impl SemanticUndefinedMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#1|surface=access-publication|scope=production",
-    "src/eval/tagged_machine.rs::impl TaggedPayloadMachine::new#2|surface=access-publication|scope=production",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",

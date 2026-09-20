@@ -6026,10 +6026,37 @@ for it:
        `command_line_workers_override_glam_workers` route/session-affinity
        schedule assigned to W6G.1f.2b; the complete library suite, structural
        inventories, and profiling regression set otherwise pass.
-     - **W6G.1f.3g.3b — comparison and tagged payload.** Move ordered scalar,
+     - **W6G.1f.3g.3b — Complete (2026-09-20): comparison and tagged payload.** Move ordered scalar,
        tuple, list, dictionary, tagged-payload, and semantic-undefined frames
        together because comparison owns both tagged helper families. Preserve
        short-circuit ordering and the exact nested diagnostic context.
+       - **W6G.1f.3g.3b.1 — Complete (2026-09-20): regional tagged primitives.** Introduce raw
+         tagged-payload recognition and semantic-undefined traversal using an
+         exact regional child demand and exhaustive visitors. Keep the durable
+         adapters only until comparison switches representations in `.3b.2`.
+       - **W6G.1f.3g.3b.2 — Complete (2026-09-20): comparison frame cutover.** Convert the explicit
+         comparison frame stack as one unit: value classification owns its
+         exact child demand; list/dictionary frames retain raw prefixes; tuple
+         ordering embeds the regional tagged primitives and payload demand.
+         Remove the superseded durable comparison/tagged owners and root
+         publications only after the frame stack is fully traced.
+       Completion record: scalar, list, dictionary, tuple, tag recognition,
+       and recursive undefined progress now live as one traced raw frame stack
+       beneath `ManagedBuiltinCheckpointCell`. Exact source ownership follows
+       each regional WHNF child; no comparison result or recursive member is
+       published through a registered root. Scalar and lazy-list route-loss
+       fixtures collect before and after their exact promise assignments and
+       prove completed operands/prefixes are not replayed. The legacy
+       semantic-undefined owner remains only for pattern families and is
+       explicitly assigned to `.3e`; its superseded tagged-payload companion
+       is removed. Root-publication, durable-owner, raw-access, checkpoint,
+       persistent-edge, and WHNF inventories record the cutover.
+       The parallel gate also exposed a compiler import fixture constructing
+       unrooted callback state on the process-global test heap while unrelated
+       tests could collect it. The fixture now owns one private value domain,
+       matching the existing loader/driver isolation policy; its focused
+       failure is preserved as the regression rather than accepting a
+       repetition-only pass.
      - **W6G.1f.3g.3c — list observation.** Reuse regional logical-list
        front/back reducers for slice, length, split, index, head, and tail;
        retain strict-prefix progress and the selected suffix without roots.

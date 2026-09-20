@@ -986,12 +986,14 @@ fn is_production_source(relative: &Path) -> bool {
 // shared checkpoint. Three raw values and two nested regional WHNF edges
 // replace the durable strategy machine's two registered child roots.
 // W6G.1f.3g.3a replaces the durable dictionary declaration with raw regional
-// singleton/update/sequential state. Five raw values and one raw failure edge
-// replace five registered roots; key/path and WHNF children remain nested.
-const DECLARATION_BASELINE_COUNT: usize = 238;
+// singleton/update/sequential state. W6G.1f.3g.3b then replaces comparison
+// roots with raw value, list, dictionary, and tagged-payload frames nested
+// beneath the shared builtin checkpoint. The legacy semantic-undefined owner
+// remains only for pattern families pending W6G.1f.3g.3e.
+const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([180, 230, 5, 26, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_150_286_162_596_150_893;
+    DeclarationSignals::new([198, 212, 5, 30, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 11_595_731_598_761_339_575;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

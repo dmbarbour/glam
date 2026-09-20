@@ -19,7 +19,7 @@ use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::annotation_machine::AnnotationBuiltinMachine;
-use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
+use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
@@ -62,6 +62,7 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 pub(in crate::eval) enum RegionalBuiltinMachine {
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
+    Comparison(RegionalComparisonMachine),
     Dictionary(RegionalDictBuiltinMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
@@ -138,6 +139,12 @@ impl RegionalBuiltinMachine {
             Builtin::AssertUnit
                 | Builtin::IfResult
                 | Builtin::MatchResult
+                | Builtin::Greater
+                | Builtin::GreaterEqual
+                | Builtin::Equal
+                | Builtin::NotEqual
+                | Builtin::LessEqual
+                | Builtin::Less
                 | Builtin::Add
                 | Builtin::Subtract
                 | Builtin::Multiply
@@ -251,6 +258,17 @@ impl RegionalBuiltinMachine {
                 builtin,
                 arguments,
             )),
+            Builtin::Greater
+            | Builtin::GreaterEqual
+            | Builtin::Equal
+            | Builtin::NotEqual
+            | Builtin::LessEqual
+            | Builtin::Less => Self::Comparison(RegionalComparisonMachine::new_in(
+                access,
+                source_owner,
+                builtin,
+                arguments,
+            )),
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -273,6 +291,7 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
+            Self::Comparison(machine) => machine.poll_in(access, step_budget),
             Self::Dictionary(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
@@ -285,6 +304,7 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
+            Self::Comparison(machine) => machine.trace_managed_edges(visitor),
             Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
@@ -730,7 +750,6 @@ impl RegionalStrategyMachine {
 
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
-    Comparison(ComparisonBuiltinMachine),
     Effect(EffectBuiltinMachine),
     ListObservation(Box<ListObservationMachine>),
     ListMap(ListMapMachine),
@@ -826,12 +845,6 @@ impl BuiltinTaskMachine {
             builtin if EffectBuiltinMachine::supports(builtin) => {
                 Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
             }
-            Builtin::Greater
-            | Builtin::GreaterEqual
-            | Builtin::Equal
-            | Builtin::NotEqual
-            | Builtin::LessEqual
-            | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
             builtin if ListObservationMachine::supports(builtin) => {
                 Self::ListObservation(Box::new(ListObservationMachine::new(builtin, arguments)))
             }
@@ -873,16 +886,6 @@ impl BuiltinTaskMachine {
         match self {
             Self::Annotation(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
-            }
-            Self::Comparison(machine) => {
-                match machine.poll(poll_context, context, durable_context, step_budget) {
-                    ComparisonBuiltinPoll::Ready(value) => BuiltinTaskPoll::Ready(value),
-                    ComparisonBuiltinPoll::Pending(dependency) => {
-                        BuiltinTaskPoll::Pending(dependency)
-                    }
-                    ComparisonBuiltinPoll::Yielded => BuiltinTaskPoll::Yielded,
-                    ComparisonBuiltinPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
-                }
             }
             Self::Effect(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
@@ -1317,14 +1320,30 @@ mod tests {
             Builtin::Equal,
             vec![first, Value::Promised(second.clone())],
         );
+        let Value::Lazy(comparison_lazy) = &comparison else {
+            unreachable!("a saturated comparison builtin must remain lazy")
+        };
+        let comparison_root = comparison_lazy.root(context.values());
 
         crate::eval::eval_value(&context, &comparison)
             .expect_err("the second comparison operand must suspend");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the comparison checkpoint must trace its completed first operand");
+        crate::eval::eval_value(&context, &comparison)
+            .expect_err("a later route must retain the same comparison dependency");
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         crate::core::set_test_promise(context.values(), &second, Value::Number(7.into()))
             .expect("the second operand should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned comparison checkpoint must remain live");
         crate::eval::eval_value(&context, &comparison).expect("comparison must resume");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        drop(comparison_root);
     }
 
     #[test]
@@ -1346,9 +1365,20 @@ mod tests {
             Value::Number(2.into()),
         ]));
         let comparison = Value::builtin_call(context.values(), Builtin::Equal, vec![left, right]);
+        let Value::Lazy(comparison_lazy) = &comparison else {
+            unreachable!("a saturated comparison builtin must remain lazy")
+        };
+        let comparison_root = comparison_lazy.root(context.values());
 
         crate::eval::eval_value(&context, &comparison)
             .expect_err("the deferred list tail must suspend comparison");
+        assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the comparison checkpoint must trace its list-front state");
+        crate::eval::eval_value(&context, &comparison)
+            .expect_err("a later route must retain the exact deferred list tail");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         crate::core::set_test_promise(
             context.values(),
@@ -1358,7 +1388,12 @@ mod tests {
             )])),
         )
         .expect("the list tail should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned list-tail checkpoint must remain live");
         crate::eval::eval_value(&context, &comparison).expect("list comparison must resume");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
+        drop(comparison_root);
     }
 }
