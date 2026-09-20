@@ -449,18 +449,147 @@ the semantic graph, or a second implementation of ordered list search.
 
 ### PNC3 — Fixpoint and delimited-control parity
 
-- Compose `.fix` with `ListEffectFix` while retaining the documented reset
-  scoping and one-fixpoint-value-per-alternative behavior.
-- Implement `.reset/.shift` as pure task-local control over the builder state
-  and continuation, guided by the existing interpreter oracle and the pure
-  handler model in `docs/Design.md`.
-- Cover nested and missing keys, continuation invocation, hidden-state
-  preservation under nonempty paths, whole-state clearing and restoration,
-  cut inside reset, reset inside alternatives, cross-invocation rejection,
-  and fix/reset interaction.
-- Keep the pure control helper general enough for other pure handlers, but do
-  not turn this checkpoint into a replacement for the effectful reflection
-  task interpreter.
+The reference monolith in `docs/Design.md` and the current reflection handler
+agree on three details which the PNC2 flat-map representation does not yet
+make explicit:
+
+- `.seq` contributes a continuation which may be captured by `.shift`;
+- `.cut` is a delimiter inside that continuation and must select before the
+  continuation outside the cut runs; and
+- `.fix` hides the complete reset/control scope while its function runs, then
+  restores that scope independently for each result alternative.
+
+PNC3 keeps the external pure-builder shape
+`BuilderState -> List [value, BuilderState]`. It defunctionalizes the active
+continuation into ordinary semantic values beneath `CONTROL_KEY`; it does not
+introduce another evaluator or search engine. The provisional strict encoding
+is:
+
+```text
+control_stack = StrictList ControlFrame       # head is the next frame
+
+sequence = [SequenceTag, continuation]
+reset    = [ResetTag, key]
+cut      = [CutTag]
+resume   = [ResumeTag, caller_stack]
+```
+
+The tags are implementation-owned abstract global paths. Continuations and
+saved stacks are normal traced value edges. Missing `CONTROL_KEY` means an
+empty stack, so `.set [] {}` clears active control exactly as the current
+handler does. The stack itself is strict; continuation values remain lazy.
+The construction brand already present in `BuilderState` is the invocation
+identity and therefore need not be duplicated in every frame.
+
+#### PNC3A — Reference matrix and structural contract
+
+- Translate the existing reflection-oracle fixtures into a table of pure
+  builder transitions before changing composition: normal and missing shift,
+  nested keys, cut inside reset, reset inside alternatives, complete-state
+  clear/restore, cross-invocation continuation use, and fix/reset hiding.
+- Add strict frame encode/decode helpers and reject malformed hidden control
+  records at the evaluator boundary. Do not demand continuation fields while
+  decoding the structural stack.
+- Keep the control representation private to the evaluator. It is ordinary
+  traceable data under the hidden key, not a Rust opaque payload or root.
+
+Exit: every later transition has one named oracle case and one concrete
+semantic record shape.
+
+#### PNC3B — Defunctionalized sequence, return, and cut
+
+- Change builder `.seq` from direct result flat-map to pushing a sequence
+  frame and running its operation. Builder `.r` becomes the common return
+  dispatcher: it pops a sequence frame and applies its continuation, pops a
+  reset frame on normal return, restores a caller stack at a resume frame, or
+  emits the terminal `[value, state]` outcome when the stack is empty.
+- Route successful `.get`, `.set`, and later construction operations through
+  that same dispatcher; no valid builder operation may bypass active control.
+- Implement `.cut` with a strict cut frame. Return stops at that frame and
+  exposes one candidate to `ListEffect` `FirstResult`; only the selected
+  candidate is redispatched into the continuation outside the cut.
+- When a captured continuation contains cut frames, its resume adapter
+  reinstalls the corresponding first-result stages in order. This prevents a
+  continuation which escapes a reset from silently losing its cut delimiters.
+- Preserve `.alt` as two applications over the same persistent input state,
+  including the same immutable control stack.
+
+Exit: ordinary sequence and cut use one traceable continuation stack, retain
+PNC2 branch-local state behavior, and still delegate ordered selection to the
+canonical list-effect reducer.
+
+#### PNC3C — Pure reset, shift, and continuation invocation
+
+- Convert reset/shift keys with `RegionalKeyConversion`, preserving exact
+  lazy/promise suspension and source ownership.
+- `.reset Key Operation` pushes a reset frame and runs `Operation`.
+- `.shift Key Function` scans from the top for the nearest matching reset,
+  removes that reset and all inner frames from the active state, and passes a
+  captured continuation to `Function`. A missing key fails with the existing
+  “not in reset scope” diagnostic.
+- A captured continuation contains the construction brand plus the immutable
+  inner frame prefix. Invoking it installs that prefix followed by a resume
+  frame containing the caller's current stack, then returns its argument into
+  the installed continuation. Reaching the resume frame restores the caller
+  stack and continues there.
+- Compare decoded construction-brand identity on invocation and reject a
+  continuation used with another builder invocation. Reuse within the owning
+  invocation remains non-affine.
+
+Exit: reset/shift and escaped continuation calls match the reflection oracle
+without a task object, host callback, or root in the semantic graph.
+
+#### PNC3D — One fixpoint future per ordered alternative
+
+- First add a direct `ListEffectFix` regression in which the second
+  alternative observes a different future than the first. The present
+  implementation publishes only the first head and returns its existing tail;
+  that is insufficient for the documented `fixListFn` semantics.
+- Extend the existing managed list-effect recipe with an alternative index.
+  Index `N` creates one managed promise, evaluates the fix function with that
+  promise, skips exactly `N` ordered results with `RegionalListFront`, assigns
+  the selected result to the promise, and emits it with a lazy `N + 1` recipe
+  as the tail. Exhaustion publishes the established empty-list assignment and
+  terminates the result list.
+- Preserve source-order blocking, one promise per observed alternative,
+  bounded resumption, and route-loss memoization. Do not add another list
+  walker or producer route.
+
+Exit: generic `ListEffectFix` implements the design's one-future-per-choice
+contract and has a forced-order regression.
+
+#### PNC3E — Builder fixpoint composition
+
+- `.fix Function` saves the active control stack, clears it in the function's
+  builder state, and adapts `Function` to PNC3D `ListEffectFix`.
+- The generic fix promise carries the complete selected builder outcome. The
+  value passed to the user's `Function` is a lazy projection of field zero;
+  recursively demanding it retains the ordinary promise-cycle diagnostic.
+- Each fixed outcome restores the saved outer control stack into its updated
+  user state and enters the common return dispatcher. Reset frames are thus
+  unavailable inside the fix body but restored after every alternative.
+- Keep this adapter as ordinary hidden builtins and list recipes. Do not move
+  reflection fix frames, task-owned promises, or branch journals into the
+  builder.
+
+Exit: builder fixpoints preserve branch-local state, receive one value future
+per alternative, and hide then restore reset scope.
+
+#### PNC3F — Parity, ownership, and closure
+
+- Cover nested and missing reset keys, normal and escaped continuation
+  invocation, cut inside reset, a captured cut delimiter, reset inside
+  alternatives, hidden-state preservation under nonempty paths, whole-state
+  clearing and restoration, cross-invocation rejection, recursive
+  self-observation, and fix/reset interaction.
+- Force lazy key, continuation, and fix-function suspension at explicit poll
+  boundaries; add route-loss/collection coverage for the new managed builtin
+  and list-effect states.
+- Reconcile the raw-value, durable-owner, recursive-constructor, persistent
+  edge, WHNF, and builtin exhaustiveness inventories.
+- Keep the helper private and no broader than the pure task-local API. The
+  effectful reflection interpreter retains its independent transactional,
+  task, heap, diagnostic, and host-I/O responsibilities.
 
 Exit: the documented standard task-local API has behavioral parity without a
 reflection machine.
