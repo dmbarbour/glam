@@ -662,6 +662,63 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
 }
 
 #[test]
+fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (root, evaluations) = counted_client_lazy(
+        &context,
+        "producer claimed before stable abandonment",
+        Value::Number(41.into()),
+    );
+    let mut handle = context
+        .demand_whnf(root)
+        .expect("lazy client demand should be admitted");
+
+    assert!(poll_one_runtime_work(&coordinator));
+    let ClientDemandSnapshot::Blocked {
+        dependency: WorkDependency::Wait(wait),
+        subscription_epoch,
+    } = coordinator
+        .client_demand_snapshot(handle.work())
+        .expect("client demand should retain its exact lazy dependency")
+    else {
+        panic!("uncached lazy demand should block on its producer")
+    };
+    assert_eq!(wait.exact_subscription_count(), 1);
+
+    let producer = coordinator
+        .producer_for_wait(&wait)
+        .expect("canonical lazy wait should name its producer");
+    let work = coordinator
+        .claim_task(producer)
+        .expect("the exact producer should be claimable");
+    assert!(coordinator.target_has_running_producer(&wait));
+
+    assert!(
+        handle
+            .abandon_if_stably_blocked(subscription_epoch)
+            .is_none(),
+        "a producer claimed after the client's quiescence snapshot is still authoritative progress"
+    );
+    assert_eq!(
+        wait.exact_subscription_count(),
+        1,
+        "rejected abandonment must preserve the exact subscription"
+    );
+
+    coordinator.poll_claimed_task(work);
+    assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        handle.poll(),
+        Some(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == Value::Number(41.into())
+    ));
+    assert_eq!(context.deferred_task_count(), 0);
+}
+
+#[test]
 fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

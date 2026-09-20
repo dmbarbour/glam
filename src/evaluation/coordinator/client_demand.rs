@@ -10,6 +10,7 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 use super::super::EvaluationDemandState;
 #[cfg(test)]
 use super::session_has_running_machine;
+use super::settlement::runtime_pump_snapshot_locked;
 use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration,
     WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkState,
@@ -690,6 +691,13 @@ impl EvaluationWorkCoordinator {
                 .as_ref()
                 .expect("blocked client demand must retain its exact subscription");
             if subscription.registration.subscription_epoch != subscription_epoch {
+                return None;
+            }
+            // The client sampled quiescence before entering mutation
+            // admission. Revalidate it here so a producer claimed or queued
+            // after that sample cannot lose this exact subscription.
+            let runtime = runtime_pump_snapshot_locked(&state);
+            if runtime.background_ready || runtime.progress_owned || runtime.abandonable_sparks {
                 return None;
             }
             let retirement =

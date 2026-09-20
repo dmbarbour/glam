@@ -108,21 +108,7 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        RuntimePumpSnapshot {
-            background_ready: state.work.values().any(|record| {
-                matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
-                    && matches!(record.state, WorkState::Queued)
-            }),
-            progress_owned: state.work.values().any(|record| {
-                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-            }) || state.client_demands.values().any(|record| {
-                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-            }),
-            abandonable_sparks: state.work.values().any(|record| {
-                matches!(record.kind, WorkKind::Spark(_))
-                    && matches!(record.state, WorkState::Queued | WorkState::Blocked)
-            }),
-        }
+        runtime_pump_snapshot_locked(&state)
     }
 
     /// Classifies all retained work while the caller holds settlement
@@ -154,6 +140,26 @@ impl EvaluationWorkCoordinator {
             exits: exits.to_vec(),
             kills: kills.to_vec(),
         })
+    }
+}
+
+pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> RuntimePumpSnapshot {
+    RuntimePumpSnapshot {
+        background_ready: state.work.values().any(|record| {
+            matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
+                && matches!(record.state, WorkState::Queued)
+        }),
+        progress_owned: state
+            .work
+            .values()
+            .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
+            || state.client_demands.values().any(|record| {
+                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            }),
+        abandonable_sparks: state.work.values().any(|record| {
+            matches!(record.kind, WorkKind::Spark(_))
+                && matches!(record.state, WorkState::Queued | WorkState::Blocked)
+        }),
     }
 }
 
