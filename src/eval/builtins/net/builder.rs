@@ -40,6 +40,10 @@ static RESUME_TAG: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["builtin", "interaction_net", "builder", "resume"])
 });
 
+#[allow(
+    dead_code,
+    reason = "PNC4 defines the private initial state before PNC5 composes the public runner"
+)]
 pub(super) fn initial_user_state(_access: &RuntimeValueAccess<'_>) -> Value {
     Value::Dict(Dict::new_sync().insert(CONTROL_KEY.clone(), Value::List(List::empty())))
 }
@@ -49,6 +53,10 @@ pub(super) fn initial_user_state(_access: &RuntimeValueAccess<'_>) -> Value {
 /// Brand allocation belongs to the public runner in PNC5. Individual builder
 /// operations receive and preserve this state; they never allocate a new
 /// construction identity.
+#[allow(
+    dead_code,
+    reason = "PNC4 defines the private initial state before PNC5 composes the public runner"
+)]
 pub(super) fn initial_builder_state(
     access: &RuntimeValueAccess<'_>,
     brand: &Arc<super::construction::ConstructionBrand>,
@@ -94,6 +102,42 @@ pub(in crate::eval) fn decode_outcome_for_test(
     outcome: &Value,
 ) -> Result<[Value; 2], EvaluationHalt> {
     decode_outcome(access, outcome)
+}
+
+#[cfg(test)]
+pub(in crate::eval) fn construction_state_and_ports_for_test(
+    access: &RuntimeValueAccess<'_>,
+) -> (Value, [Value; 2]) {
+    let brand = Arc::new(super::construction::ConstructionBrand::default());
+    (
+        initial_builder_state(access, &brand),
+        [
+            super::construction::encode_construction_port(
+                access,
+                &brand,
+                super::construction::ConstructionPortId::new(1)
+                    .expect("fixture port IDs are positive"),
+            ),
+            super::construction::encode_construction_port(
+                access,
+                &brand,
+                super::construction::ConstructionPortId::new(2)
+                    .expect("fixture port IDs are positive"),
+            ),
+        ],
+    )
+}
+
+#[cfg(test)]
+pub(in crate::eval) fn construction_journal_lengths_for_test(
+    access: &RuntimeValueAccess<'_>,
+    state: &Value,
+) -> Result<(usize, usize), EvaluationHalt> {
+    let state = decode_builder_state(access, state)?;
+    let constructors =
+        super::netlist::strict_record(access, &state.reverse_constructors, "constructor journal")?;
+    let wires = super::netlist::strict_record(access, &state.reverse_wires, "wire journal")?;
+    Ok((constructors.len(), wires.len()))
 }
 
 pub(in crate::eval) fn apply_builder_builtin_in(
@@ -351,6 +395,9 @@ pub(in crate::eval) struct RegionalBuilderBuiltinMachine {
     keys: Option<Vec<Key>>,
     key: Option<Box<RegionalKeyConversion>>,
     converted_key: Option<Key>,
+    reverse_operands: Vec<Value>,
+    evaluated_operands: Vec<Value>,
+    operand_demand: Option<RegionalWhnfWork>,
     state: Option<Value>,
     state_demand: Option<RegionalWhnfWork>,
     decoded: Option<DecodedBuilderState>,
@@ -363,6 +410,10 @@ enum BuilderStateOperation {
     Set { replacement: Value },
     Reset { operation: Value },
     Shift { function: Value },
+    Bind,
+    Copy,
+    Data { payload: Value },
+    Wire,
 }
 
 struct DecodedBuilderState {
@@ -384,6 +435,13 @@ enum BuilderResetFrame {
     Resume { sequence: Value },
 }
 
+enum PendingBuilderConstruction {
+    Bind,
+    Copy(usize),
+    Data(Value),
+    Wire(Value, Value),
+}
+
 impl RegionalBuilderBuiltinMachine {
     pub(in crate::eval) fn new_in(
         access: &EvaluationValueAccess<'_>,
@@ -391,7 +449,7 @@ impl RegionalBuilderBuiltinMachine {
         builtin: Builtin,
         arguments: &[Value],
     ) -> Self {
-        let (path, key, operation, state) = match builtin {
+        let (path, key, mut reverse_operands, operation, state) = match builtin {
             Builtin::InteractionNetBuilderGet => {
                 let [path, state] = arguments else {
                     unreachable!("builder get retains its path and state")
@@ -399,6 +457,7 @@ impl RegionalBuilderBuiltinMachine {
                 (
                     Some(access.values().duplicate_value(path)),
                     None,
+                    Vec::new(),
                     BuilderStateOperation::Get,
                     access.values().duplicate_value(state),
                 )
@@ -410,6 +469,7 @@ impl RegionalBuilderBuiltinMachine {
                 (
                     Some(access.values().duplicate_value(path)),
                     None,
+                    Vec::new(),
                     BuilderStateOperation::Set {
                         replacement: access.values().duplicate_value(replacement),
                     },
@@ -423,6 +483,7 @@ impl RegionalBuilderBuiltinMachine {
                 (
                     None,
                     Some(access.values().duplicate_value(key)),
+                    Vec::new(),
                     BuilderStateOperation::Reset {
                         operation: access.values().duplicate_value(operation),
                     },
@@ -436,14 +497,69 @@ impl RegionalBuilderBuiltinMachine {
                 (
                     None,
                     Some(access.values().duplicate_value(key)),
+                    Vec::new(),
                     BuilderStateOperation::Shift {
                         function: access.values().duplicate_value(function),
                     },
                     access.values().duplicate_value(state),
                 )
             }
+            Builtin::InteractionNetBuilderBind => {
+                let [state] = arguments else {
+                    unreachable!("builder bind retains its state")
+                };
+                (
+                    None,
+                    None,
+                    Vec::new(),
+                    BuilderStateOperation::Bind,
+                    access.values().duplicate_value(state),
+                )
+            }
+            Builtin::InteractionNetBuilderCopy => {
+                let [count, state] = arguments else {
+                    unreachable!("builder copy retains its count and state")
+                };
+                (
+                    None,
+                    None,
+                    vec![access.values().duplicate_value(count)],
+                    BuilderStateOperation::Copy,
+                    access.values().duplicate_value(state),
+                )
+            }
+            Builtin::InteractionNetBuilderData => {
+                let [payload, state] = arguments else {
+                    unreachable!("builder data retains its payload and state")
+                };
+                (
+                    None,
+                    None,
+                    Vec::new(),
+                    BuilderStateOperation::Data {
+                        payload: access.values().duplicate_value(payload),
+                    },
+                    access.values().duplicate_value(state),
+                )
+            }
+            Builtin::InteractionNetBuilderWire => {
+                let [left, right, state] = arguments else {
+                    unreachable!("builder wire retains its ports and state")
+                };
+                (
+                    None,
+                    None,
+                    vec![
+                        access.values().duplicate_value(left),
+                        access.values().duplicate_value(right),
+                    ],
+                    BuilderStateOperation::Wire,
+                    access.values().duplicate_value(state),
+                )
+            }
             _ => unreachable!("builder state machine received another builtin"),
         };
+        reverse_operands.reverse();
         Self {
             source_owner,
             operation,
@@ -452,6 +568,9 @@ impl RegionalBuilderBuiltinMachine {
             key: key
                 .map(|key| Box::new(RegionalKeyConversion::new(access, key, Some(source_owner)))),
             converted_key: None,
+            reverse_operands,
+            evaluated_operands: Vec::new(),
+            operand_demand: None,
             state: Some(state),
             state_demand: None,
             decoded: None,
@@ -489,6 +608,43 @@ impl RegionalBuilderBuiltinMachine {
                 RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
+        }
+
+        if self.operand_demand.is_some() || !self.reverse_operands.is_empty() {
+            if self.operand_demand.is_none() {
+                let operand = self
+                    .reverse_operands
+                    .pop()
+                    .expect("a pending builder operand must exist");
+                self.operand_demand = Some(
+                    RegionalWhnfWork::from_focus(access, operand)
+                        .with_source_owner(self.source_owner),
+                );
+            }
+            let operand = match drive_regional_in_place(
+                access,
+                self.operand_demand
+                    .as_mut()
+                    .expect("builder operand demand must be installed"),
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(operand) => operand,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            self.evaluated_operands.push(
+                EvaluatedValue::try_from(operand)
+                    .expect("builder operand demand must reach WHNF")
+                    .into_value(),
+            );
+            self.operand_demand = None;
+            return RegionalBuiltinPoll::Yielded;
         }
 
         if self.decoded.is_none() {
@@ -530,6 +686,10 @@ impl RegionalBuilderBuiltinMachine {
             BuilderStateOperation::Set { .. } => self.poll_set_in(access, step_budget),
             BuilderStateOperation::Reset { .. } => self.poll_reset_in(access),
             BuilderStateOperation::Shift { .. } => self.poll_shift_in(access),
+            BuilderStateOperation::Bind
+            | BuilderStateOperation::Copy
+            | BuilderStateOperation::Data { .. }
+            | BuilderStateOperation::Wire => self.poll_construction_in(access),
         }
     }
 
@@ -624,7 +784,11 @@ impl RegionalBuilderBuiltinMachine {
                 }
                 BuilderStateOperation::Get
                 | BuilderStateOperation::Reset { .. }
-                | BuilderStateOperation::Shift { .. } => unreachable!(),
+                | BuilderStateOperation::Shift { .. }
+                | BuilderStateOperation::Bind
+                | BuilderStateOperation::Copy
+                | BuilderStateOperation::Data { .. }
+                | BuilderStateOperation::Wire => unreachable!(),
             };
             let keys = self
                 .keys
@@ -798,6 +962,150 @@ impl RegionalBuilderBuiltinMachine {
         )))
     }
 
+    fn poll_construction_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+        let construction = match &self.operation {
+            BuilderStateOperation::Bind => PendingBuilderConstruction::Bind,
+            BuilderStateOperation::Copy => {
+                let [count] = self.evaluated_operands.as_slice() else {
+                    unreachable!("builder copy must evaluate one count operand")
+                };
+                let Value::Number(count) = count else {
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                        "interaction-net copy count must be a number",
+                    )));
+                };
+                let Some(count) = count.to_usize_if_integer() else {
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                        "interaction-net copy count must be a nonnegative integer",
+                    )));
+                };
+                PendingBuilderConstruction::Copy(count)
+            }
+            BuilderStateOperation::Data { payload } => {
+                PendingBuilderConstruction::Data(access.values().duplicate_value(payload))
+            }
+            BuilderStateOperation::Wire => {
+                let [left, right] = self.evaluated_operands.as_slice() else {
+                    unreachable!("builder wire must evaluate two port operands")
+                };
+                PendingBuilderConstruction::Wire(
+                    access.values().duplicate_value(left),
+                    access.values().duplicate_value(right),
+                )
+            }
+            BuilderStateOperation::Get
+            | BuilderStateOperation::Set { .. }
+            | BuilderStateOperation::Reset { .. }
+            | BuilderStateOperation::Shift { .. } => unreachable!(),
+        };
+
+        match construction {
+            PendingBuilderConstruction::Bind => {
+                self.publish_constructor_in(access, 3, super::netlist::encode_bind(access.values()))
+            }
+            PendingBuilderConstruction::Copy(output_count) => {
+                let Some(port_count) = output_count.checked_add(1) else {
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
+                        "interaction-net copy count is too large",
+                    )));
+                };
+                self.publish_constructor_in(
+                    access,
+                    port_count,
+                    super::netlist::encode_copy(access.values(), output_count),
+                )
+            }
+            PendingBuilderConstruction::Data(payload) => self.publish_constructor_in(
+                access,
+                1,
+                super::netlist::encode_data(access.values(), payload),
+            ),
+            PendingBuilderConstruction::Wire(left, right) => {
+                self.publish_wire_in(access, left, right)
+            }
+        }
+    }
+
+    fn publish_constructor_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        port_count: usize,
+        descriptor: Value,
+    ) -> RegionalBuiltinPoll {
+        let mut state = self
+            .decoded
+            .take()
+            .expect("builder construction must retain decoded state");
+        let (brand, ports) = match allocate_builder_ports(access.values(), &mut state, port_count) {
+            Ok(allocated) => allocated,
+            Err(error) => {
+                return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+            }
+        };
+        state.reverse_constructors = match prepend_journal_entry(
+            state.reverse_constructors,
+            descriptor,
+            "constructor journal",
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+            }
+        };
+        let value = Value::List(List::from_values(
+            ports
+                .into_iter()
+                .map(|port| {
+                    super::construction::encode_construction_port(access.values(), &brand, port)
+                })
+                .collect(),
+        ));
+        self.finish_state_in(access, value, state)
+    }
+
+    fn publish_wire_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        left: Value,
+        right: Value,
+    ) -> RegionalBuiltinPoll {
+        let mut state = self
+            .decoded
+            .take()
+            .expect("builder wire must retain decoded state");
+        let brand = match decode_builder_brand(access.values(), &state) {
+            Ok(brand) => brand,
+            Err(error) => {
+                return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+            }
+        };
+        let ports = [left, right].map(|port| {
+            let Value::Opaque(port) = port else {
+                return Err(EvaluationHalt::new(
+                    "interaction-net operation requires a construction port",
+                ));
+            };
+            super::construction::decode_construction_port(access.values().values(), &port, &brand)
+        });
+        let [left, right] = match ports {
+            [Ok(left), Ok(right)] => [left, right],
+            [Err(error), _] | [_, Err(error)] => {
+                return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+            }
+        };
+        state.reverse_wires = match prepend_journal_entry(
+            state.reverse_wires,
+            super::netlist::encode_wire(left, right),
+            "wire journal",
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+            }
+        };
+        self.finish_state_in(access, access.values().values().unit(), state)
+    }
+
     fn finish_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
@@ -808,13 +1116,20 @@ impl RegionalBuilderBuiltinMachine {
             .decoded
             .take()
             .expect("builder operation must retain decoded state");
-        let state = encode_builder_state(
-            access.values(),
-            DecodedBuilderState {
-                user_state: replacement.unwrap_or(state.user_state),
-                ..state
-            },
-        );
+        let state = DecodedBuilderState {
+            user_state: replacement.unwrap_or(state.user_state),
+            ..state
+        };
+        self.finish_state_in(access, value, state)
+    }
+
+    fn finish_state_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        value: Value,
+        state: DecodedBuilderState,
+    ) -> RegionalBuiltinPoll {
+        let state = encode_builder_state(access.values(), state);
         RegionalBuiltinPoll::Ready(Value::List(application_list(
             access.values(),
             Value::Builtin(Builtin::InteractionNetBuilderReturn),
@@ -828,6 +1143,15 @@ impl RegionalBuilderBuiltinMachine {
         }
         if let Some(key) = &self.key {
             key.trace_managed_edges(visitor);
+        }
+        for operand in &self.reverse_operands {
+            trace_compatibility_value_managed_edges(operand, visitor);
+        }
+        for operand in &self.evaluated_operands {
+            trace_compatibility_value_managed_edges(operand, visitor);
+        }
+        if let Some(demand) = &self.operand_demand {
+            demand.trace_managed_edges(visitor);
         }
         if let Some(state) = &self.state {
             trace_compatibility_value_managed_edges(state, visitor);
@@ -855,8 +1179,89 @@ impl RegionalBuilderBuiltinMachine {
             BuilderStateOperation::Shift { function } => {
                 trace_compatibility_value_managed_edges(function, visitor);
             }
+            BuilderStateOperation::Data { payload } => {
+                trace_compatibility_value_managed_edges(payload, visitor);
+            }
+            BuilderStateOperation::Bind
+            | BuilderStateOperation::Copy
+            | BuilderStateOperation::Wire => {}
         }
     }
+}
+
+fn decode_builder_brand(
+    access: &RuntimeValueAccess<'_>,
+    state: &DecodedBuilderState,
+) -> Result<Arc<super::construction::ConstructionBrand>, EvaluationHalt> {
+    let Value::Opaque(brand) = &state.brand else {
+        return Err(EvaluationHalt::new(
+            "interaction-net builder brand must be opaque",
+        ));
+    };
+    super::construction::decode_construction_brand(access.values(), brand)
+}
+
+fn allocate_builder_ports(
+    access: &RuntimeValueAccess<'_>,
+    state: &mut DecodedBuilderState,
+    count: usize,
+) -> Result<
+    (
+        Arc<super::construction::ConstructionBrand>,
+        Vec<super::construction::ConstructionPortId>,
+    ),
+    EvaluationHalt,
+> {
+    let brand = decode_builder_brand(access, state)?;
+    let Value::Number(next_port) = &state.next_port else {
+        return Err(EvaluationHalt::new(
+            "interaction-net builder next-port must be a number",
+        ));
+    };
+    let next_port = next_port
+        .to_u64_if_integer()
+        .filter(|next| *next != 0)
+        .ok_or_else(|| {
+            EvaluationHalt::new("interaction-net builder next-port must be a positive integer")
+        })?;
+    let count = u64::try_from(count)
+        .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds u64"))?;
+    let end = next_port
+        .checked_add(count)
+        .ok_or_else(|| EvaluationHalt::new("interaction-net port IDs exhausted"))?;
+    usize::try_from(end - 1)
+        .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
+
+    let capacity = usize::try_from(count)
+        .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
+    let mut ports = Vec::new();
+    ports
+        .try_reserve_exact(capacity)
+        .map_err(|_| EvaluationHalt::new("interaction-net port allocation is too large"))?;
+    for id in next_port..end {
+        ports.push(
+            super::construction::ConstructionPortId::new(id)
+                .expect("builder port allocation starts from a positive cursor"),
+        );
+    }
+    state.next_port = Value::Number(Number::from_u64(end));
+    Ok((brand, ports))
+}
+
+fn prepend_journal_entry(
+    journal: Value,
+    entry: Value,
+    name: &str,
+) -> Result<Value, EvaluationHalt> {
+    let Value::List(journal) = journal else {
+        return Err(EvaluationHalt::new(format!(
+            "interaction-net builder {name} must be a list"
+        )));
+    };
+    Ok(Value::List(List::concat(
+        List::from_values(vec![entry]),
+        journal,
+    )))
 }
 
 impl DecodedBuilderState {

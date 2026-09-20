@@ -1357,6 +1357,84 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
 }
 
 #[test]
+fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies() {
+    let context = isolated_context();
+    let left_promise = PromisedValue::new(context.values(), "builder wire left dependency");
+    let left_owner = left_promise.root(context.values());
+    let right_promise = PromisedValue::new(context.values(), "builder wire right dependency");
+    let right_owner = right_promise.root(context.values());
+    let state_promise = PromisedValue::new(context.values(), "builder wire state dependency");
+    let state_owner = state_promise.root(context.values());
+    let (state, [left, right]) = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::construction_state_and_ports_for_test(&access)
+    });
+    let left_root = crate::runtime::RuntimeValueRoot::new(context.values(), left);
+    let right_root = crate::runtime::RuntimeValueRoot::new(context.values(), right);
+    let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
+
+    let call = context.values().with_runtime_value_access(|access| {
+        Value::builtin_call_in(
+            &access,
+            Builtin::InteractionNetBuilderWire,
+            vec![
+                Value::Promised(PromisedValue::from_root(&left_owner, &access)),
+                Value::Promised(PromisedValue::from_root(&right_owner, &access)),
+                Value::Promised(PromisedValue::from_root(&state_owner, &access)),
+            ],
+        )
+    });
+    let (retained, mut machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    for (expected, promise, value) in [
+        (left_promise.id(context.values()), &left_promise, &left_root),
+        (
+            right_promise.id(context.values()),
+            &right_promise,
+            &right_root,
+        ),
+        (
+            state_promise.id(context.values()),
+            &state_promise,
+            &state_root,
+        ),
+    ] {
+        let (blocked, dependency) =
+            poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+        assert_lazy_checkpoint_kind(&context, &blocked, ManagedLazyCheckpointKindTag::Builtin);
+        let WorkDependency::Promise(dependency) = dependency else {
+            panic!("builder wire demand must publish its exact promise dependency")
+        };
+        assert_eq!(dependency.id(), expected);
+        machine = resume_after_lazy_route_loss(&context, &retained, blocked);
+        route_losses += 1;
+        crate::core::set_test_promise(context.values(), promise, value.clone_core_for_test())
+            .expect("the builder wire dependency should accept its assignment");
+    }
+
+    let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    let (outcome, tail) =
+        list_front(&context, results).expect("builder wire must return one outcome");
+    assert!(list_front(&context, tail).is_none());
+    let [unit, state] = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
+            .expect("builder wire must retain the strict outcome schema")
+    });
+    assert_eq!(unit, context.values().unit());
+    context.values().with_runtime_value_access(|access| {
+        assert_eq!(
+            crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
+                .expect("builder wire state must retain strict journals"),
+            (0, 1)
+        );
+    });
+    assert!(
+        route_losses >= 4,
+        "the fixture must lose routes around all three exact dependencies"
+    );
+}
+
+#[test]
 fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
     let context = isolated_context();
     let key_demands = Arc::new(AtomicUsize::new(0));

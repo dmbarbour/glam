@@ -968,7 +968,7 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.4b removes the durable object-builtin owner and keeps its raw
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 245;
+const DECLARATION_BASELINE_COUNT: usize = 246;
 // PNC1 gives the managed builtin checkpoint one additional traced raw value:
 // the already-selected strict semantic netlist consumed by hidden replay.
 // PNC2C adds three nested regional builder declarations and eight raw values
@@ -977,11 +977,13 @@ const DECLARATION_BASELINE_COUNT: usize = 245;
 // PNC3 adds two access-bounded builder fix adapters and seven raw values. The
 // PNC3R-004 remediation replaces one reset-frame Value with its decoded Key.
 // PNC4A.1 adds the separate raw wire journal to the decoded compact builder
-// state. The remaining values are consumed synchronously beneath the managed
-// builtin checkpoint; neither helper is a durable owner.
+// state. PNC4B/C add the construction-transition enum and six raw semantic
+// operands beneath the existing managed builder checkpoint. The remaining
+// values are consumed synchronously beneath that checkpoint; neither helper
+// is a durable owner.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([308, 116, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_238_202_125_580_620_907;
+    DeclarationSignals::new([314, 116, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_879_932_771_008_123_132;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

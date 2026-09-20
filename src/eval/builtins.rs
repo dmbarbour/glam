@@ -3,7 +3,10 @@
 mod net;
 
 #[cfg(test)]
-pub(in crate::eval) use net::{decode_outcome_for_test, initial_state_for_test};
+pub(in crate::eval) use net::{
+    construction_journal_lengths_for_test, construction_state_and_ports_for_test,
+    decode_outcome_for_test, initial_state_for_test,
+};
 
 use super::sequence::append_values;
 use super::*;
@@ -195,7 +198,11 @@ pub(super) fn apply_builtin_in(
         Builtin::InteractionNetBuilderGet
         | Builtin::InteractionNetBuilderSet
         | Builtin::InteractionNetBuilderReset
-        | Builtin::InteractionNetBuilderShift => Ok(deferred(arguments)),
+        | Builtin::InteractionNetBuilderShift
+        | Builtin::InteractionNetBuilderBind
+        | Builtin::InteractionNetBuilderCopy
+        | Builtin::InteractionNetBuilderData
+        | Builtin::InteractionNetBuilderWire => Ok(deferred(arguments)),
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),

@@ -167,6 +167,10 @@ impl RegionalBuiltinMachine {
                 | Builtin::InteractionNetBuilderSet
                 | Builtin::InteractionNetBuilderReset
                 | Builtin::InteractionNetBuilderShift
+                | Builtin::InteractionNetBuilderBind
+                | Builtin::InteractionNetBuilderCopy
+                | Builtin::InteractionNetBuilderData
+                | Builtin::InteractionNetBuilderWire
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
@@ -304,7 +308,11 @@ impl RegionalBuiltinMachine {
             Builtin::InteractionNetBuilderGet
             | Builtin::InteractionNetBuilderSet
             | Builtin::InteractionNetBuilderReset
-            | Builtin::InteractionNetBuilderShift => Self::Builder(Box::new(
+            | Builtin::InteractionNetBuilderShift
+            | Builtin::InteractionNetBuilderBind
+            | Builtin::InteractionNetBuilderCopy
+            | Builtin::InteractionNetBuilderData
+            | Builtin::InteractionNetBuilderWire => Self::Builder(Box::new(
                 RegionalBuilderBuiltinMachine::new_in(access, source_owner, builtin, arguments),
             )),
             Builtin::NetArity => {

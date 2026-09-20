@@ -798,6 +798,8 @@ brand allocation remains deliberately deferred to PNC5.
 
 #### PNC4B — Bind and data transitions
 
+Status: complete on 2026-09-20.
+
 - Implement `.bind` and `.data` beneath the existing managed builder builtin
   checkpoint. Demand and decode the builder state, allocate monotonic positive
   IDs with checked arithmetic, prepend `BindTag` or `[DataTag, payload]`, and
@@ -807,7 +809,14 @@ brand allocation remains deliberately deferred to PNC5.
   payload as an unforced semantic edge; only the state is demanded before the
   transition is published.
 
+Completion record: bind and data now share the managed builder checkpoint's
+resumable state demand, checked monotonic allocation, compact constructor
+journal prepend, and common return dispatcher. Bind returns three branded
+ports and data one; a failing lazy data payload remains wholly undemanded.
+
 #### PNC4C — Copy and wire operand demand
+
+Status: complete on 2026-09-20.
 
 - Evaluate `.copy` count and `.wire` ports through resumable regional WHNF
   work before publishing a replacement builder state. Wire evaluation remains
@@ -822,6 +831,15 @@ brand allocation remains deliberately deferred to PNC5.
 - Force yield, exact dependency, failure, route-loss, and collection at each
   operand boundary; equal terminal values are not sufficient evidence that an
   operand or transition was not replayed.
+
+Completion record: construction operands use one ordered regional-WHNF queue
+inside the same traced builder checkpoint. Copy validates its count before
+state demand and retains only the count descriptor. Wire evaluates left,
+right, then state, validates both branded tokens, and retains only their IDs.
+A forced-route-loss fixture publishes all three exact dependencies in order,
+collects between handoffs, and verifies one committed wire. Compact replay,
+invalid-count, foreign-token, exhaustion, and lazy-payload fixtures cover the
+remaining transition boundary.
 
 #### PNC4D — Private API assembly and closure
 

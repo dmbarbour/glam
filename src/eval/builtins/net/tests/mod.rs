@@ -347,6 +347,17 @@ fn run_builder_at(
     })
 }
 
+fn strict_fields(context: &EvalContext, value: &Value, name: &str) -> Vec<Value> {
+    with_access(context, |access| {
+        super::netlist::strict_record(access, value, name)
+            .unwrap_or_else(|error| panic!("{name} must be strict: {error}"))
+    })
+}
+
+fn duplicate(context: &EvalContext, value: &Value) -> Value {
+    with_access(context, |access| access.duplicate_value(value))
+}
+
 fn builder_result_at(
     context: &EvalContext,
     operation: Value,
@@ -540,6 +551,202 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         Value::Number(20.into()),
         "cut must retain the selected alternative's state"
     );
+}
+
+#[test]
+fn hidden_builder_bind_and_data_append_compact_constructors_without_demanding_payloads() {
+    let context = EvalContext::standalone();
+    let (initial, data) = with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        (
+            super::builder::initial_builder_state(access, &brand),
+            partial_builder(
+                access,
+                Builtin::InteractionNetBuilderData,
+                vec![Value::Lazy(LazyValue::error_in(
+                    access,
+                    "pure builder data payload must remain undemanded",
+                ))],
+            ),
+        )
+    });
+
+    let [bind_ports, after_bind] = run_builder_at(
+        &context,
+        Value::Builtin(Builtin::InteractionNetBuilderBind),
+        initial,
+        0,
+    );
+    assert_eq!(strict_fields(&context, &bind_ports, "bind result").len(), 3);
+    let bind_state = strict_fields(&context, &after_bind, "bind state");
+    assert!(
+        matches!(&bind_state[1], Value::Number(number) if number.to_u64_if_integer() == Some(4))
+    );
+    assert_eq!(
+        strict_fields(&context, &bind_state[2], "bind constructor journal").len(),
+        1
+    );
+    assert!(strict_fields(&context, &bind_state[3], "bind wire journal").is_empty());
+
+    let [data_ports, after_data] = run_builder_at(&context, data, after_bind, 0);
+    assert_eq!(strict_fields(&context, &data_ports, "data result").len(), 1);
+    let data_state = strict_fields(&context, &after_data, "data state");
+    assert!(
+        matches!(&data_state[1], Value::Number(number) if number.to_u64_if_integer() == Some(5))
+    );
+    assert_eq!(
+        strict_fields(&context, &data_state[2], "data constructor journal").len(),
+        2
+    );
+    assert!(strict_fields(&context, &data_state[3], "data wire journal").is_empty());
+}
+
+#[test]
+fn hidden_builder_copy_and_wire_complete_one_replayable_compact_netlist() {
+    let context = EvalContext::standalone();
+    let initial = with_access(&context, |access| {
+        super::builder::initial_builder_state(access, &Arc::new(ConstructionBrand::default()))
+    });
+    let [bind_ports, state] = run_builder_at(
+        &context,
+        Value::Builtin(Builtin::InteractionNetBuilderBind),
+        initial,
+        0,
+    );
+    let bind_ports = strict_fields(&context, &bind_ports, "bind ports");
+    let data = with_access(&context, |access| {
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderData,
+            vec![Value::Number(42.into())],
+        )
+    });
+    let [data_ports, state] = run_builder_at(&context, data, state, 0);
+    let data_ports = strict_fields(&context, &data_ports, "data ports");
+    let copy = with_access(&context, |access| {
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderCopy,
+            vec![Value::Number(2.into())],
+        )
+    });
+    let [copy_ports, mut state] = run_builder_at(&context, copy, state, 0);
+    let copy_ports = strict_fields(&context, &copy_ports, "copy ports");
+    assert_eq!(copy_ports.len(), 3);
+
+    for (left, right) in [
+        (
+            duplicate(&context, &bind_ports[0]),
+            duplicate(&context, &data_ports[0]),
+        ),
+        (
+            duplicate(&context, &bind_ports[1]),
+            duplicate(&context, &copy_ports[0]),
+        ),
+        (
+            duplicate(&context, &bind_ports[2]),
+            duplicate(&context, &copy_ports[1]),
+        ),
+    ] {
+        let wire = with_access(&context, |access| {
+            partial_builder(
+                access,
+                Builtin::InteractionNetBuilderWire,
+                vec![left, right],
+            )
+        });
+        let [unit, next_state] = run_builder_at(&context, wire, state, 0);
+        assert_eq!(unit, with_access(&context, |access| access.values().unit()));
+        state = next_state;
+    }
+
+    let fields = strict_fields(&context, &state, "completed builder state");
+    assert_eq!(
+        strict_fields(&context, &fields[2], "constructor journal").len(),
+        3
+    );
+    assert_eq!(strict_fields(&context, &fields[3], "wire journal").len(), 3);
+    let selected = Value::List(List::from_values(vec![
+        state,
+        duplicate(&context, &copy_ports[2]),
+    ]));
+    assert!(matches!(
+        with_access(&context, |access| interaction_net_from_netlist_in(
+            access, &selected
+        ))
+        .expect("the pure builder must emit a replayable compact netlist"),
+        Value::Net(_)
+    ));
+}
+
+#[test]
+fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion() {
+    let context = EvalContext::standalone();
+    let (initial, exhausted, valid_port, foreign_port) = with_access(&context, |access| {
+        let brand = Arc::new(ConstructionBrand::default());
+        let foreign = Arc::new(ConstructionBrand::default());
+        (
+            super::builder::initial_builder_state(access, &brand),
+            encode_builder_state(
+                access,
+                &brand,
+                u64::MAX,
+                Vec::new(),
+                Vec::new(),
+                super::builder::initial_user_state(access),
+            ),
+            super::construction::encode_construction_port(access, &brand, port(1)),
+            super::construction::encode_construction_port(access, &foreign, port(1)),
+        )
+    });
+
+    for (count, expected) in [
+        (Value::binary_from_text("two"), "must be a number"),
+        (Value::Number((-1).into()), "nonnegative integer"),
+        (
+            Value::Number(
+                crate::number::Number::from_ratio_i64(1, 2)
+                    .expect("fixture denominator is nonzero"),
+            ),
+            "nonnegative integer",
+        ),
+        (
+            Value::Number(crate::number::Number::from_u64(u64::MAX)),
+            "too large",
+        ),
+    ] {
+        let copy = with_access(&context, |access| {
+            partial_builder(access, Builtin::InteractionNetBuilderCopy, vec![count])
+        });
+        let error = builder_result_at(&context, copy, duplicate(&context, &initial), 0)
+            .expect_err("invalid copy counts must fail before state publication");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    let error = builder_result_at(
+        &context,
+        Value::Builtin(Builtin::InteractionNetBuilderBind),
+        exhausted,
+        0,
+    )
+    .expect_err("port allocation must reject cursor exhaustion");
+    assert!(error.to_string().contains("port IDs exhausted"), "{error}");
+
+    for (left, expected) in [
+        (Value::Number(1.into()), "requires a construction port"),
+        (foreign_port, "belongs to another invocation"),
+    ] {
+        let wire = with_access(&context, |access| {
+            partial_builder(
+                access,
+                Builtin::InteractionNetBuilderWire,
+                vec![left, duplicate(&context, &valid_port)],
+            )
+        });
+        let error = builder_result_at(&context, wire, duplicate(&context, &initial), 0)
+            .expect_err("invalid wire tokens must fail before journal insertion");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }
 
 #[test]

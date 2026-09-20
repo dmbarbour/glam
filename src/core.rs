@@ -2161,6 +2161,26 @@ pub enum Builtin {
     InteractionNetBuilderShift,
     #[allow(
         dead_code,
+        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
+    )]
+    InteractionNetBuilderBind,
+    #[allow(
+        dead_code,
+        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
+    )]
+    InteractionNetBuilderCopy,
+    #[allow(
+        dead_code,
+        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
+    )]
+    InteractionNetBuilderData,
+    #[allow(
+        dead_code,
+        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
+    )]
+    InteractionNetBuilderWire,
+    #[allow(
+        dead_code,
         reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
     )]
     InteractionNetBuilderResume,
@@ -2280,6 +2300,10 @@ impl Builtin {
             Self::InteractionNetBuilderSet => 3,
             Self::InteractionNetBuilderReset => 3,
             Self::InteractionNetBuilderShift => 3,
+            Self::InteractionNetBuilderBind => 1,
+            Self::InteractionNetBuilderCopy => 2,
+            Self::InteractionNetBuilderData => 2,
+            Self::InteractionNetBuilderWire => 3,
             Self::InteractionNetBuilderResume => 5,
             Self::InteractionNetBuilderFix => 2,
             Self::InteractionNetBuilderFixApply => 3,

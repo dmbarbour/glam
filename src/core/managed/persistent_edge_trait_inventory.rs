@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        844,
+        847,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -908,9 +908,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // ordered fix alternatives and proving that each receives its own future.
     // PNC3R-001 adds four test-only registered roots for exact builder
     // path/state dependencies and retained route-loss applications.
+    // PNC4C adds three test-only registered value roots so left port, right
+    // port, and state can be published independently across forced route loss
+    // and collection while the managed builder checkpoint preserves progress.
     assert_eq!(
         occurrence_fingerprint(actual),
-        3_505_358_059_458_879_632,
+        2_630_269_019_476_994_868,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -957,7 +960,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 592),
+            ((SourceScope::Test, EdgeSurface::Typed), 595),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

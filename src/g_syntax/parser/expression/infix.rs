@@ -343,5 +343,17 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectComposedDefs) => "object_composed_defs",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectOverrideDefs) => "object_override_defs",
         SyntaxOperator::Builtin(crate::core::Builtin::DiagnosticObject) => "diagnostic_object",
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderBind) => {
+            "interaction_net_builder_bind"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderCopy) => {
+            "interaction_net_builder_copy"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderData) => {
+            "interaction_net_builder_data"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::InteractionNetBuilderWire) => {
+            "interaction_net_builder_wire"
+        }
     }
 }

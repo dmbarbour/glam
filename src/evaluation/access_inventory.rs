@@ -648,6 +648,10 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#4|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::fix_function_returning_its_future_twice#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -902,7 +906,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // constructs their retained fixtures beneath matching access.
         // PNC3R-001/002 add bounded retained builder-route, list-front, and
         // promise-identity observations; none escape their test access.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(29, 0)),
+        // PNC4C adds four bounded regions for independently published wire
+        // operands, state, and the final outcome inspection.
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(33, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the
