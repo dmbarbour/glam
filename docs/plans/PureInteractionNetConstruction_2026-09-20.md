@@ -144,8 +144,9 @@ task-local operations:
 - `.reset` and `.shift` with task-local delimited continuations.
 
 `.get` and `.set` operate on a `user_state` component of `BuilderState`.
-Construction internals such as the next port and operation journal are in a
-separate protected component and cannot be addressed through user paths.
+Construction internals such as the next port, constructor journal, and wire
+journal are in a separate protected component and cannot be addressed through
+user paths.
 
 Delimited-control state is deliberately different: it lives *inside*
 `user_state`, beneath an implementation-owned `abstract_global_path` key. The
@@ -199,7 +200,8 @@ reflection machine only for net construction.
 {
   brand: ConstructionBrand,
   next_port: PositiveInteger,
-  reverse_operations: StrictList ConstructionOperation,
+  reverse_constructors: StrictList ConstructorDescriptor,
+  reverse_wires: StrictList WirePair,
   user_state: DictWithHiddenAbstractGlobalPathControlEntry,
   sequence_stack: StrictList SequenceFrame,
 }
@@ -209,26 +211,54 @@ The precise field encoding is an implementation decision. It must remain an
 ordinary traceable semantic value graph. It must not be an opaque payload
 which secretly contains `Value`, `Gc`, or `Root` edges.
 
-The builder operations are pure state transitions:
+The compact constructor program is:
 
-- `.bind` allocates three logical ports and prepends a bind operation;
+```text
+ConstructorDescriptor =
+    BindTag
+  | [CopyTag, output_count]
+  | [DataTag, payload]
+
+WirePair = [left_port_id, right_port_id]
+```
+
+The tags are implementation-owned atoms. Wire endpoints are protected positive
+integer IDs, not branded public port values. The builder operations are pure
+state transitions:
+
+- `.bind` allocates three logical ports and prepends `BindTag`;
 - `.copy N` evaluates and validates `N`, allocates `N + 1` ports, and
-  prepends a copy operation;
-- `.data Value` allocates one logical port and prepends the unforced `Value`;
-  and
+  prepends `[CopyTag, N]`;
+- `.data Value` allocates one logical port and prepends
+  `[DataTag, Value]` without forcing `Value`; and
 - `.wire Left Right` evaluates and validates both port tokens and prepends a
-  wire operation.
+  protected pair of their logical IDs to `reverse_wires`.
 
 Port tokens retain the current edge-free construction brand and positive
 logical ID. A token from another invocation fails before replay. Creating a
 construction brand once for the public `interaction_net` application is
 permitted: the brand is identity-only host data and contains no Glam edge.
 
-Operation insertion is O(1). The journal is a strict reverse spine so branch
-prefixes share structure. Replay restores source order once, after unique
-selection. No operation record may contain a deferred structural field;
-`.data` payload is the deliberate exception because it is net data, not
-builder syntax.
+Each insertion adds one O(1) journal entry after any unavoidable construction
+of the operation's result tokens. Both journals are strict reverse spines, so
+branch prefixes share structure. Constructor order remains authoritative
+because it assigns logical ports, node order, and copy sites. Explicit wires
+are commutative with constructor allocation once their public operands have
+been demanded and brand-checked, so replay creates all constructors first and
+then applies wire pairs in their original relative order.
+
+`next_port` remains an O(1) allocation cursor even though replay can derive it.
+Replay checks the derived constructor-port total against it. Constructor
+descriptors do not repeat their derived logical ports: bind contributes three,
+copy contributes `N + 1`, and data contributes one. No descriptor may contain
+a deferred structural field; `.data` payload is the deliberate exception
+because it is net data, not builder syntax.
+
+A fully columnar encoding with separate tag, copy-count, and data-value stacks
+would retain marginally less list-record overhead. It is deliberately deferred:
+the compact descriptors remove the unbounded copy-port duplication without
+introducing several synchronized streams. Because the protocol is private, it
+may be columnarized later if profiling justifies the additional invariants.
 
 ### Unique selection
 
@@ -244,8 +274,8 @@ result list. If determining whether a second outcome exists blocks, unique
 selection blocks rather than prematurely accepting the first.
 
 The selected exposed value is evaluated and decoded as a branded port before
-calling replay. The selected builder record and its reverse journal are fully
-structural at that boundary.
+calling replay. The selected builder record and both reverse journals are
+fully structural at that boundary.
 
 ### Hidden replay primitive
 
@@ -255,11 +285,14 @@ may follow the existing builtin convention). It is not bound by `import
 
 It accepts one selected, normalized construction record and:
 
-1. validates sequential allocation and operation arities;
-2. maps logical ports to `NetBuilder` ports;
-3. validates wires and the exposed port;
-4. constructs the managed `CoreRuntimeNet`; and
-5. returns `Value::Net`.
+1. replays constructor descriptors in source order while assigning logical
+   ports implicitly;
+2. validates descriptor shapes, copy counts, and the derived `next_port`;
+3. maps logical IDs to `NetBuilder` ports;
+4. validates and applies wire pairs in their original relative order;
+5. validates the exposed branded port and completed topology;
+6. constructs the managed `CoreRuntimeNet`; and
+7. returns `Value::Net`.
 
 Replay may duplicate ordinary value edges into the resulting net under the
 matching value-access region. It must not force `.data` payloads. It performs
@@ -273,9 +306,10 @@ fixture demonstrates that it is necessary.
 ## Ownership and GC Invariants
 
 1. Search progress belongs to the existing managed `ListEffect` machinery.
-2. Builder state and operation records are ordinary traceable values.
-3. No runtime root is stored inside builder state, operation records, the
-   selected outcome, or any managed lazy checkpoint.
+2. Builder state, constructor descriptors, and wire pairs are ordinary
+   traceable values.
+3. No runtime root is stored inside builder state, constructor descriptors,
+   wire pairs, the selected outcome, or any managed lazy checkpoint.
 4. Construction port tokens are edge-free and branded per invocation.
 5. `.data` stores the original semantic value as a normal managed edge and
    does not demand it.
@@ -360,9 +394,10 @@ Status: complete on 2026-09-20.
 Exit: a strict selected record can build the same runtime net without the
 construction search machine.
 
-Completion record: the provisional semantic schema uses strict value lists so
-an empty `user_state` remains an actual field rather than disappearing under
-Glam's undefined-dictionary-entry rule:
+Completion record: PNC1 implemented the following provisional, port-explicit
+semantic schema. It uses strict value lists so an empty `user_state` remains an
+actual field rather than disappearing under Glam's undefined-dictionary-entry
+rule:
 
 ```text
 selected = [builder_state, exposed_port]
@@ -374,26 +409,48 @@ data = [DataTag, port, payload]
 wire = [WireTag, left_port, right_port]
 ```
 
-The tags are implementation-owned abstract global paths. `brand` and `port`
-are edge-free opaque identity tokens; every other field is an ordinary
-traceable semantic value. Structural lists must contain no byte or deferred
-segments. The `.data` payload is copied as an edge without observation and is
-the only field permitted to remain lazy.
+This is a historical implementation record, not the PNC4 target. PNC4A
+replaces the single port-explicit journal with the six-field compact state:
+
+```text
+builder_state = [brand, next_port, reverse_constructors, reverse_wires,
+                 user_state, sequence_stack]
+
+constructor = BindTag | [CopyTag, output_count] | [DataTag, payload]
+wire        = [left_port_id, right_port_id]
+```
+
+Constructor replay derives every allocation port. Wire pairs retain only
+positive logical IDs after their public tokens have been demanded and
+brand-checked. The PNC1 wire tag and the repeated bind/copy/data port tokens
+therefore disappear. `next_port` remains both the construction cursor and a
+replay consistency check.
+
+In the PNC1 schema, the tags are implementation-owned abstract global paths
+and `brand` and `port` are edge-free opaque identity tokens; every other field
+is an ordinary traceable semantic value. Structural lists must contain no byte
+or deferred segments. The `.data` payload is copied as an edge without
+observation and is the only field permitted to remain lazy. PNC4A preserves
+these boundary properties while replacing journal-local port tokens with
+protected numeric IDs.
 
 `Builtin::InteractionNetFromNetlist` is implemented by one callback-free
 regional transition and is deliberately absent from `import 'std`. The
 legacy construction machine now adapts its selected journal to this exact
 schema before replay, so both current construction and the later pure runner
 share validation and `NetBuilder` lowering. This adapter is transitional:
-PNC4 will construct the semantic state directly, and PNC5 removes the old
-search machine.
+PNC4A migrates the primitive and adapter together to the compact schema, PNC4
+then constructs that semantic state directly, and PNC5 removes the old search
+machine.
 
-Direct fixtures cover a net containing bind/copy/data/wire, malformed outer
-and operation records, zero-port copies, nonsequential allocation, foreign
-brands, incomplete topology, and an undemanded lazy data payload. A separate
-source inventory rejects reflection/effect imports, scheduler or WHNF
-boundaries, evaluator callbacks, waits, and runtime-root construction in the
-replay module.
+Direct PNC1 fixtures cover a net containing bind/copy/data/wire, malformed
+outer and operation records, zero-port copies, nonsequential allocation,
+foreign brands, incomplete topology, and an undemanded lazy data payload.
+PNC4A replaces the port-explicit cases with compact-schema checks for malformed
+constructor descriptors, inconsistent `next_port`, malformed or out-of-range
+wire IDs, and unconsumed structural fields. A separate source inventory rejects
+reflection/effect imports, scheduler or WHNF boundaries, evaluator callbacks,
+waits, and runtime-root construction in the replay module.
 
 ### PNC2 — State-over-`ListEffect` foundation
 
@@ -496,6 +553,12 @@ fixed-arity private record rather than a sum of four- and five-field shapes.
 Both stacks are strict while continuation values remain lazy. The
 construction brand already present in `BuilderState` is the invocation
 identity and therefore need not be duplicated in every frame.
+
+This five-field shape records the PNC3 implementation. PNC4A splits its
+`reverse_operations` field into `reverse_constructors` and `reverse_wires`,
+making the protected record six fields wide. State/control transitions remain
+representation-neutral: they transport both journals unchanged just as they
+currently transport the one provisional journal.
 
 This separation mirrors the oracle rather than weakening the checkpoint rule:
 a reset frame stored in `user_state` carries the protected sequence snapshot
@@ -680,27 +743,49 @@ Status: ready after the post-PNC3 review remediations. The implementation
 should use the following checkpoints rather than combining state
 representation, operand demand, and API assembly in one change.
 
-#### PNC4A — Initial state and operation schema
+#### PNC4A — Compact replay schema and initial state
 
-- Define private strict operation records for bind, copy, data, and wire,
-  reusing the PNC1 tags and token codec rather than creating a second netlist
-  representation.
+##### PNC4A.1 — Compact state and replay migration
+
+- Replace PNC1's port-explicit operation list with
+  `reverse_constructors` and `reverse_wires`. Reuse the PNC1 bind, copy, and
+  data tags, but remove the wire tag and every derived allocation-port field.
+- Atomically migrate the shared protected-state codec to
+  `[brand, next_port, reverse_constructors, reverse_wires, user_state,
+  sequence_stack]`. Update PNC2/PNC3 encode/decode, tracing, malformed-state,
+  terminal-replay, and fixed-arity fixtures in the same checkpoint; do not
+  temporarily accept both shapes.
+- Decode `BindTag`, `[CopyTag, output_count]`, and `[DataTag, payload]` as the
+  only constructor descriptors. Replay them in source order while assigning
+  consecutive logical IDs and building the logical-ID-to-`NetBuilder` mapping.
+- Validate that the derived allocation cursor equals `next_port`. Then replay
+  `[left_port_id, right_port_id]` pairs in their original relative order,
+  range-checking both endpoints before calling `NetBuilder::try_wire`.
+- Update the legacy construction adapter to emit the compact schema. Preserve
+  `.data` payloads as unforced semantic edges and preserve one callback-free
+  value-access region around replay.
+- Replace PNC1's derivable-port fixtures with malformed-descriptor,
+  inconsistent-`next_port`, malformed/out-of-range-wire, exposed-brand, and
+  topology fixtures. Keep the lazy-data and replay-boundary source proofs.
+
+##### PNC4A.2 — Initial pure-builder state
+
 - Add one initial-state encoder which receives a construction brand and emits
-  the fixed five-field builder record with port ID one, an empty reverse
-  journal, initialized user state, and an explicit empty sequence stack.
-  PNC5, not an individual operation, will allocate the brand once per public
-  `interaction_net` application.
+  port ID one, two empty reverse journals, initialized user state, and an
+  explicit empty sequence stack. PNC5, not an individual operation, will
+  allocate the brand once per public `interaction_net` application.
 - Keep protected fields raw while ordinary state/control operations merely
-  transport them. Construction transitions may validate the fields they edit,
-  but must not traverse the complete reverse journal on every append.
+  transport both journals. Construction transitions may validate the fields
+  they edit, but must not traverse either complete reverse journal on append.
 
 #### PNC4B — Bind and data transitions
 
 - Implement `.bind` and `.data` beneath the existing managed builder builtin
   checkpoint. Demand and decode the builder state, allocate monotonic positive
-  IDs with checked arithmetic, prepend one strict operation record, and enter
-  the common return dispatcher.
-- Return branded port tokens as ordinary strict lists. `.data` records its
+  IDs with checked arithmetic, prepend `BindTag` or `[DataTag, payload]`, and
+  enter the common return dispatcher. Neither descriptor repeats its derived
+  port IDs.
+- Return branded port tokens as ordinary strict lists. `.data` retains its
   payload as an unforced semantic edge; only the state is demanded before the
   transition is published.
 
@@ -712,6 +797,10 @@ representation, operand demand, and API assembly in one change.
 - Require a nonnegative integer copy count, check `count + 1`, target capacity,
   and logical-port exhaustion, and reject non-port or foreign-brand wire
   operands before journal insertion.
+- Prepend `[CopyTag, count]` without retaining its returned port vector.
+  Convert successfully decoded wire tokens to logical IDs and prepend only the
+  strict pair; the hidden replay boundary remains responsible for range and
+  completed-topology validation.
 - Force yield, exact dependency, failure, route-loss, and collection at each
   operand boundary; equal terminal values are not sufficient evidence that an
   operand or transition was not replayed.
@@ -722,9 +811,9 @@ representation, operand demand, and API assembly in one change.
   task-local operations plus bind, copy, data, and wire. The builtin arities
   are the operation-arity contract; direct malformed internal calls may fail
   defensively, but source-visible partial application is not an arity error.
-- Cover fixed-state preservation, branch-local journal rollback, port-count
-  overflow, non-integer/negative copy counts, wrong token kinds, foreign
-  invocation tokens, and lazy data payloads.
+- Cover fixed-state preservation, independent branch-local rollback of both
+  journals, port-count overflow, non-integer/negative copy counts, wrong token
+  kinds, foreign invocation tokens, and lazy data payloads.
 - Reconcile builtin, raw-value, durable-owner, persistent-edge, recursive-cell,
   and WHNF inventories before closing the phase.
 
@@ -778,6 +867,7 @@ both relevant orderings.
 - failed-branch journal and state rollback;
 - `get/set`, `fix`, and `reset/shift` parity;
 - foreign brands and malformed tokens;
+- inconsistent `next_port` summaries and malformed or out-of-range wire IDs;
 - lazy `.data` payloads, including a backedge to the owning construction;
 - invalid exposure, unwired ports, duplicate wires, and other builder errors;
 - yield and exact dependency suspension in list search, state/control,
@@ -807,7 +897,9 @@ state-bearing lazy-producer inventory.
 - Budget or incrementally replay very large selected netlists.
 - Batch construction calls or arguments to reduce intermediate semantic
   values.
-- Refine strict operation records alongside `ValueRepresentationRefinement`.
+- Profile compact constructor descriptors before considering a columnar tag,
+  copy-count, and data-value representation alongside
+  `ValueRepresentationRefinement`.
 - Move reusable pure handler definitions into Glam source once bootstrap and
   cache boundaries make that preferable.
 - Add profiling counters for result-prefix demand, builder operations, and
