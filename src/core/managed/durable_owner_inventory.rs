@@ -985,10 +985,13 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.2d moves seq and spark source/target/metadata progress into the
 // shared checkpoint. Three raw values and two nested regional WHNF edges
 // replace the durable strategy machine's two registered child roots.
-const DECLARATION_BASELINE_COUNT: usize = 239;
+// W6G.1f.3g.3a replaces the durable dictionary declaration with raw regional
+// singleton/update/sequential state. Five raw values and one raw failure edge
+// replace five registered roots; key/path and WHNF children remain nested.
+const DECLARATION_BASELINE_COUNT: usize = 238;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([175, 235, 5, 25, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 5_146_427_873_735_280_271;
+    DeclarationSignals::new([180, 230, 5, 26, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_150_286_162_596_150_893;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

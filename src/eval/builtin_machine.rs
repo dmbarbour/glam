@@ -20,7 +20,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::annotation_machine::AnnotationBuiltinMachine;
 use super::comparison_machine::{ComparisonBuiltinMachine, ComparisonBuiltinPoll};
-use super::dict_machine::DictBuiltinMachine;
+use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::list_observation_machine::ListObservationMachine;
@@ -62,6 +62,7 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 pub(in crate::eval) enum RegionalBuiltinMachine {
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
+    Dictionary(RegionalDictBuiltinMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Provenance(RegionalProvenanceMachine),
@@ -148,6 +149,10 @@ impl RegionalBuiltinMachine {
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
+                | Builtin::DictSingleton
+                | Builtin::DictUnion
+                | Builtin::DictUpdate
+                | Builtin::MergeDuplicate
         )
     }
 
@@ -237,6 +242,15 @@ impl RegionalBuiltinMachine {
                     source_owner,
                 })
             }
+            Builtin::DictSingleton
+            | Builtin::DictUnion
+            | Builtin::DictUpdate
+            | Builtin::MergeDuplicate => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
+                access,
+                source_owner,
+                builtin,
+                arguments,
+            )),
             _ => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
@@ -259,6 +273,7 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
+            Self::Dictionary(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Provenance(machine) => machine.poll_in(access, step_budget),
@@ -270,6 +285,7 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
+            Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Provenance(machine) => machine.trace_managed_edges(visitor),
@@ -715,7 +731,6 @@ impl RegionalStrategyMachine {
 pub(crate) enum BuiltinTaskMachine {
     Annotation(Box<AnnotationBuiltinMachine>),
     Comparison(ComparisonBuiltinMachine),
-    Dictionary(DictBuiltinMachine),
     Effect(EffectBuiltinMachine),
     ListObservation(Box<ListObservationMachine>),
     ListMap(ListMapMachine),
@@ -817,12 +832,6 @@ impl BuiltinTaskMachine {
             | Builtin::NotEqual
             | Builtin::LessEqual
             | Builtin::Less => Self::Comparison(ComparisonBuiltinMachine::new(builtin, arguments)),
-            Builtin::DictSingleton
-            | Builtin::DictUnion
-            | Builtin::DictUpdate
-            | Builtin::MergeDuplicate => {
-                Self::Dictionary(DictBuiltinMachine::new(builtin, arguments))
-            }
             builtin if ListObservationMachine::supports(builtin) => {
                 Self::ListObservation(Box::new(ListObservationMachine::new(builtin, arguments)))
             }
@@ -874,9 +883,6 @@ impl BuiltinTaskMachine {
                     ComparisonBuiltinPoll::Yielded => BuiltinTaskPoll::Yielded,
                     ComparisonBuiltinPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
                 }
-            }
-            Self::Dictionary(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
             }
             Self::Effect(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
@@ -1195,6 +1201,58 @@ mod tests {
         );
         assert_eq!(result_demands.load(Ordering::Relaxed), 1);
         drop(selection_root);
+    }
+
+    #[test]
+    fn dictionary_machine_retains_completed_operand_across_collection() {
+        let context = context();
+        let first_demands = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&first_demands);
+        let first =
+            Value::semantic_thunk(context.values(), "first dictionary operand", move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Dict(crate::core::Dict::new_sync()))
+            });
+        let second = PromisedValue::new(context.values(), "second dictionary operand");
+        let union = Value::builtin_call(
+            context.values(),
+            Builtin::DictUnion,
+            vec![first, Value::Promised(second.clone())],
+        );
+        let Value::Lazy(union_lazy) = &union else {
+            unreachable!("a saturated dictionary builtin must remain lazy")
+        };
+        let union_root = union_lazy.root(context.values());
+
+        let blocked = crate::eval::eval_value(&context, &union)
+            .expect_err("the second dictionary operand must suspend");
+        assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the dictionary checkpoint must trace its completed prefix");
+        crate::eval::eval_value(&context, &union)
+            .expect_err("a later route must retain the same dictionary dependency");
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+
+        crate::core::set_test_promise(
+            context.values(),
+            &second,
+            Value::Dict(crate::core::Dict::new_sync()),
+        )
+        .expect("the second dictionary operand should accept its assignment");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("the assigned dictionary checkpoint must remain live");
+        assert!(matches!(
+            crate::eval::eval_value(&context, &union)
+                .expect("dictionary union must resume"),
+            Value::Dict(dict) if dict.is_empty()
+        ));
+        assert_eq!(first_demands.load(Ordering::Relaxed), 1);
+        drop(union_root);
     }
 
     #[test]

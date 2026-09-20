@@ -170,11 +170,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6C.3 durable recursive comparison owner with scoped classification and result projection"
     ),
     context_entry!(
-        "src/eval/dict_machine.rs",
-        [5, 3],
-        "W6D.1-W6D.2 durable dictionary operands with access-qualified merge and update leaves"
-    ),
-    context_entry!(
         "src/eval/object_builtin_machine.rs",
         [12, 2],
         "W6F.2/W6F.4a-W6F.4c durable object specification, diagnostic normalization, local-name, instance, definition-adapter, and plain-dictionary conversion ownership"

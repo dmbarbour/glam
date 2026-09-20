@@ -1,316 +1,365 @@
 //! Resumable dictionary builtin operands and access-qualified transformations.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::core::{Builtin, BuiltinCall, Dict, EvaluationFailure, Key, LazyValue, List, Value};
-use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
-};
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use glam_gc::Visitor;
 
-use super::access_machine::{ConversionPoll, KeyConversionMachine, KeyListMachine};
-use super::builtin_machine::BuiltinTaskPoll;
+use crate::core::{
+    Builtin, BuiltinCall, Dict, EvaluatedValue, EvaluationFailure, Key, LazyId, LazyValue, List,
+    Value, trace_compatibility_value_managed_edges,
+};
+use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
+
+use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion, RegionalKeyList};
+use super::builtin_machine::RegionalBuiltinPoll;
 use super::value::{
     format_name_part, is_deferred_value, is_error_lazy_value, is_undefined_dict_value,
 };
-use super::whnf::WhnfComputation;
+use super::whnf::{
+    RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
+};
 
-pub(crate) struct DictBuiltinMachine {
-    state: DictBuiltinState,
+pub(in crate::eval) struct RegionalDictBuiltinMachine {
+    state: RegionalDictBuiltinState,
 }
 
-enum DictBuiltinState {
+enum RegionalDictBuiltinState {
     Singleton {
-        key: KeyConversionMachine,
-        value: RuntimeValueRoot,
+        key: RegionalKeyConversion,
+        value: Value,
     },
-    Union(SequentialDemands),
+    Union(RegionalSequentialDemands),
     Update {
-        path: Option<Box<KeyListMachine>>,
+        path: Option<Box<RegionalKeyList>>,
         keys: Option<Vec<Key>>,
-        new_value: RuntimeValueRoot,
-        dict: WhnfComputation,
+        new_value: Value,
+        dict: RegionalWhnfWork,
     },
-    MergeDuplicate(SequentialDemands),
+    MergeDuplicate(RegionalSequentialDemands),
 }
 
-struct SequentialDemands {
-    demands: Vec<WhnfComputation>,
-    next: usize,
-    ready: Vec<RuntimeValueRoot>,
+struct RegionalSequentialDemands {
+    remaining: VecDeque<Value>,
+    demand: Option<RegionalWhnfWork>,
+    ready: Vec<Value>,
+    source_owner: LazyId,
 }
 
-enum SequentialDemandPoll<'a> {
-    Ready(&'a [RuntimeValueRoot]),
-    Pending(crate::evaluation::WorkDependency),
+enum RegionalSequentialDemandPoll<'a> {
+    Ready(&'a [Value]),
+    Boundary(super::whnf::RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
-impl DictBuiltinMachine {
-    pub(crate) fn new(builtin: Builtin, arguments: Vec<RuntimeValueRoot>) -> Self {
+impl RegionalDictBuiltinMachine {
+    pub(in crate::eval) fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        builtin: Builtin,
+        arguments: &[Value],
+    ) -> Self {
         let state = match builtin {
             Builtin::DictSingleton => {
-                let [key, value]: [RuntimeValueRoot; 2] = arguments
-                    .try_into()
-                    .expect("dictionary singleton retains two operands");
-                DictBuiltinState::Singleton {
-                    key: KeyConversionMachine::new(key, None),
-                    value,
+                let [key, value] = arguments else {
+                    unreachable!("dictionary singleton retains two operands")
+                };
+                RegionalDictBuiltinState::Singleton {
+                    key: RegionalKeyConversion::new(
+                        access,
+                        access.values().duplicate_value(key),
+                        Some(source_owner),
+                    ),
+                    value: access.values().duplicate_value(value),
                 }
             }
-            Builtin::DictUnion => DictBuiltinState::Union(SequentialDemands::new(arguments)),
+            Builtin::DictUnion => RegionalDictBuiltinState::Union(
+                RegionalSequentialDemands::new_in(access, source_owner, arguments),
+            ),
             Builtin::DictUpdate => {
-                let [path, new_value, dict]: [RuntimeValueRoot; 3] = arguments
-                    .try_into()
-                    .expect("dictionary update retains three operands");
-                DictBuiltinState::Update {
-                    path: Some(Box::new(KeyListMachine::unowned(path))),
+                let [path, new_value, dict] = arguments else {
+                    unreachable!("dictionary update retains three operands")
+                };
+                RegionalDictBuiltinState::Update {
+                    path: Some(Box::new(RegionalKeyList::new(
+                        access,
+                        access.values().duplicate_value(path),
+                        Some(source_owner),
+                    ))),
                     keys: None,
-                    new_value,
-                    dict: WhnfComputation::from_root(dict),
+                    new_value: access.values().duplicate_value(new_value),
+                    dict: RegionalWhnfWork::from_focus(
+                        access,
+                        access.values().duplicate_value(dict),
+                    )
+                    .with_source_owner(source_owner),
                 }
             }
-            Builtin::MergeDuplicate => {
-                DictBuiltinState::MergeDuplicate(SequentialDemands::new(arguments))
-            }
+            Builtin::MergeDuplicate => RegionalDictBuiltinState::MergeDuplicate(
+                RegionalSequentialDemands::new_in(access, source_owner, arguments),
+            ),
             _ => unreachable!("dictionary machine received another builtin"),
         };
         Self { state }
     }
 
-    pub(crate) fn poll(
+    pub(in crate::eval) fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> BuiltinTaskPoll {
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         match &mut self.state {
-            DictBuiltinState::Singleton { key, value } => {
-                match key.poll(poll_context, context, durable_context, step_budget) {
-                    ConversionPoll::Ready(key) => {
-                        let result = context.with_value_access(|access| {
-                            let value = access.clone_root(value);
-                            let dict = if is_undefined_dict_value(access.values(), &value) {
-                                Dict::new_sync()
-                            } else {
-                                Dict::new_sync().insert(key, value)
-                            };
-                            access.values().root_runtime_value(Value::Dict(dict))
-                        });
-                        BuiltinTaskPoll::Ready(result)
+            RegionalDictBuiltinState::Singleton { key, value } => {
+                match key.poll_in(access, step_budget) {
+                    RegionalConversionPoll::Ready(key) => {
+                        let value = access.values().duplicate_value(value);
+                        let dict = if is_undefined_dict_value(access.values(), &value) {
+                            Dict::new_sync()
+                        } else {
+                            Dict::new_sync().insert(key, value)
+                        };
+                        RegionalBuiltinPoll::Ready(Value::Dict(dict))
                     }
-                    ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                    ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
-                    ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                    RegionalConversionPoll::Boundary(request) => {
+                        RegionalBuiltinPoll::Boundary(request)
+                    }
+                    RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
                 }
             }
-            DictBuiltinState::Union(demands) => {
-                let operands = match demands.poll(poll_context, durable_context, step_budget) {
-                    SequentialDemandPoll::Ready(operands) => operands,
-                    SequentialDemandPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
+            RegionalDictBuiltinState::Union(demands) => {
+                let operands = match demands.poll_in(access, step_budget) {
+                    RegionalSequentialDemandPoll::Ready(operands) => operands,
+                    RegionalSequentialDemandPoll::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
                     }
-                    SequentialDemandPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    SequentialDemandPoll::Failed(failure) => {
-                        return BuiltinTaskPoll::Failed(failure);
+                    RegionalSequentialDemandPoll::Yielded => {
+                        return RegionalBuiltinPoll::Yielded;
+                    }
+                    RegionalSequentialDemandPoll::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
                 let [left, right] = operands else {
                     unreachable!("dictionary union retains two operands")
                 };
-                finish_union(context, left, right)
+                finish_union_in(access, left, right)
             }
-            DictBuiltinState::Update {
+            RegionalDictBuiltinState::Update {
                 path,
                 keys,
                 new_value,
                 dict,
             } => {
                 if let Some(machine) = path {
-                    return match machine.poll(poll_context, context, durable_context, step_budget) {
-                        ConversionPoll::Ready(path_keys) => {
+                    return match machine.poll_in(access, step_budget) {
+                        RegionalConversionPoll::Ready(path_keys) => {
                             *keys = Some(path_keys);
                             *path = None;
-                            BuiltinTaskPoll::Yielded
+                            RegionalBuiltinPoll::Yielded
                         }
-                        ConversionPoll::Pending(dependency) => BuiltinTaskPoll::Pending(dependency),
-                        ConversionPoll::Yielded => BuiltinTaskPoll::Yielded,
-                        ConversionPoll::Failed(failure) => BuiltinTaskPoll::Failed(failure),
+                        RegionalConversionPoll::Boundary(request) => {
+                            RegionalBuiltinPoll::Boundary(request)
+                        }
+                        RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                        RegionalConversionPoll::Failed(failure) => {
+                            RegionalBuiltinPoll::Failed(failure)
+                        }
                     };
                 }
                 let path = keys
                     .as_ref()
                     .expect("dictionary update path conversion must finish once");
                 if path.is_empty() {
-                    return BuiltinTaskPoll::Failed(root_message(
-                        context,
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                         "dict update builtin requires a non-empty path",
-                    ));
+                    )));
                 }
-                let dict = match poll_demand(dict, poll_context, durable_context, step_budget) {
-                    DemandPoll::Ready(value) => value,
-                    DemandPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
-                    }
-                    DemandPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    DemandPoll::Failed(failure) => return BuiltinTaskPoll::Failed(failure),
-                };
-                finish_update(context, path, new_value, &dict)
+                let dict =
+                    match drive_regional_in_place(access, dict, step_budget, reduce_semantic_shell)
+                    {
+                        RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                            .expect("dictionary demand must reach WHNF")
+                            .into_value(),
+                        RegionalWhnfStatus::Boundary(request) => {
+                            return RegionalBuiltinPoll::Boundary(request);
+                        }
+                        RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                        RegionalWhnfStatus::Failed(failure) => {
+                            return RegionalBuiltinPoll::Failed(failure);
+                        }
+                    };
+                finish_update_in(access, path, new_value, &dict)
             }
-            DictBuiltinState::MergeDuplicate(demands) => {
-                let operands = match demands.poll(poll_context, durable_context, step_budget) {
-                    SequentialDemandPoll::Ready(operands) => operands,
-                    SequentialDemandPoll::Pending(dependency) => {
-                        return BuiltinTaskPoll::Pending(dependency);
+            RegionalDictBuiltinState::MergeDuplicate(demands) => {
+                let operands = match demands.poll_in(access, step_budget) {
+                    RegionalSequentialDemandPoll::Ready(operands) => operands,
+                    RegionalSequentialDemandPoll::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
                     }
-                    SequentialDemandPoll::Yielded => return BuiltinTaskPoll::Yielded,
-                    SequentialDemandPoll::Failed(failure) => {
-                        return BuiltinTaskPoll::Failed(failure);
+                    RegionalSequentialDemandPoll::Yielded => {
+                        return RegionalBuiltinPoll::Yielded;
+                    }
+                    RegionalSequentialDemandPoll::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
                 let [name, left, right] = operands else {
                     unreachable!("merge duplicate retains three operands")
                 };
-                finish_merge_duplicate(context, name, left, right)
+                finish_merge_duplicate_in(access, name, left, right)
             }
         }
     }
-}
 
-impl SequentialDemands {
-    fn new(values: Vec<RuntimeValueRoot>) -> Self {
-        Self {
-            demands: values.into_iter().map(WhnfComputation::from_root).collect(),
-            next: 0,
-            ready: Vec::new(),
-        }
-    }
-
-    fn poll<'a>(
-        &'a mut self,
-        poll_context: &EvaluationPollContext,
-        durable_context: &EvalContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> SequentialDemandPoll<'a> {
-        let Some(demand) = self.demands.get_mut(self.next) else {
-            return SequentialDemandPoll::Ready(&self.ready);
-        };
-        match poll_demand(demand, poll_context, durable_context, step_budget) {
-            DemandPoll::Ready(value) => {
-                self.ready.push(value);
-                self.next += 1;
-                SequentialDemandPoll::Yielded
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match &self.state {
+            RegionalDictBuiltinState::Singleton { key, value } => {
+                key.trace_managed_edges(visitor);
+                trace_compatibility_value_managed_edges(value, visitor);
             }
-            DemandPoll::Pending(dependency) => SequentialDemandPoll::Pending(dependency),
-            DemandPoll::Yielded => SequentialDemandPoll::Yielded,
-            DemandPoll::Failed(failure) => SequentialDemandPoll::Failed(failure),
-        }
-    }
-}
-
-enum DemandPoll {
-    Ready(RuntimeValueRoot),
-    Pending(crate::evaluation::WorkDependency),
-    Yielded,
-    Failed(RuntimeFailureRoot),
-}
-
-fn poll_demand(
-    demand: &mut WhnfComputation,
-    poll_context: &EvaluationPollContext,
-    durable_context: &EvalContext,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> DemandPoll {
-    match poll_whnf_computation(demand, poll_context, durable_context, step_budget) {
-        WhnfOwnerPoll::Ready(value) => DemandPoll::Ready(value),
-        WhnfOwnerPoll::Pending(dependency) => DemandPoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => DemandPoll::Yielded,
-        WhnfOwnerPoll::Failed(failure) => DemandPoll::Failed(failure),
-        WhnfOwnerPoll::External(boundary) => {
-            unreachable!("dictionary demand produced an external {boundary:?} boundary")
-        }
-    }
-}
-
-fn finish_union(
-    context: &EvaluatorStepContext<'_>,
-    left: &RuntimeValueRoot,
-    right: &RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let Value::Dict(left) = access.clone_root(left) else {
-            return Err("dictionary union requires dictionary values");
-        };
-        let Value::Dict(right) = access.clone_root(right) else {
-            return Err("dictionary union requires dictionary values");
-        };
-        Ok(access
-            .values()
-            .root_runtime_value(Value::Dict(merge_dicts_in(access.values(), &left, &right))))
-    });
-    match result {
-        Ok(value) => BuiltinTaskPoll::Ready(value),
-        Err(message) => BuiltinTaskPoll::Failed(root_message(context, message)),
-    }
-}
-
-fn finish_update(
-    context: &EvaluatorStepContext<'_>,
-    path: &[Key],
-    new_value: &RuntimeValueRoot,
-    dict: &RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let Value::Dict(dict) = access.clone_root(dict) else {
-            return Err("dict update builtin requires a dictionary");
-        };
-        let new_value = access.clone_root(new_value);
-        Ok(access
-            .values()
-            .root_runtime_value(Value::Dict(update_dict_path_in(
-                access.values(),
-                &dict,
+            RegionalDictBuiltinState::Union(demands)
+            | RegionalDictBuiltinState::MergeDuplicate(demands) => {
+                demands.trace_managed_edges(visitor);
+            }
+            RegionalDictBuiltinState::Update {
                 path,
                 new_value,
-            ))))
-    });
-    match result {
-        Ok(value) => BuiltinTaskPoll::Ready(value),
-        Err(message) => BuiltinTaskPoll::Failed(root_message(context, message)),
+                dict,
+                ..
+            } => {
+                if let Some(path) = path {
+                    path.trace_managed_edges(visitor);
+                }
+                trace_compatibility_value_managed_edges(new_value, visitor);
+                dict.trace_managed_edges(visitor);
+            }
+        }
     }
 }
 
-fn finish_merge_duplicate(
-    context: &EvaluatorStepContext<'_>,
-    name: &RuntimeValueRoot,
-    left: &RuntimeValueRoot,
-    right: &RuntimeValueRoot,
-) -> BuiltinTaskPoll {
-    let result = context.with_value_access(|access| {
-        let name = render_name(access.values(), &access.clone_root(name));
-        let left = access.clone_root(left);
-        let right = access.clone_root(right);
-        let result = if is_undefined_dict_value(access.values(), &left) {
-            right
-        } else if is_undefined_dict_value(access.values(), &right)
-            || is_error_lazy_value(access.values(), &left)
-        {
-            left
-        } else if is_error_lazy_value(access.values(), &right) {
-            right
-        } else if let (Value::Dict(left), Value::Dict(right)) = (&left, &right) {
-            Value::Dict(merge_dicts_in(access.values(), left, right))
-        } else {
-            Value::Lazy(LazyValue::error_in(
-                access.values(),
-                format!("dictionary union is ambiguous at key `{name}`"),
-            ))
+impl RegionalSequentialDemands {
+    fn new_in(access: &EvaluationValueAccess<'_>, source_owner: LazyId, values: &[Value]) -> Self {
+        Self {
+            remaining: values
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect(),
+            demand: None,
+            ready: Vec::new(),
+            source_owner,
+        }
+    }
+
+    fn poll_in<'a>(
+        &'a mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalSequentialDemandPoll<'a> {
+        if self.demand.is_none() {
+            let Some(next) = self.remaining.pop_front() else {
+                return RegionalSequentialDemandPoll::Ready(&self.ready);
+            };
+            self.demand = Some(
+                RegionalWhnfWork::from_focus(access, next).with_source_owner(self.source_owner),
+            );
         };
-        access.values().root_runtime_value(result)
-    });
-    BuiltinTaskPoll::Ready(result)
+        match drive_regional_in_place(
+            access,
+            self.demand.as_mut().expect("demand was installed"),
+            step_budget,
+            reduce_semantic_shell,
+        ) {
+            RegionalWhnfStatus::Ready(value) => {
+                self.ready.push(
+                    EvaluatedValue::try_from(value)
+                        .expect("sequential demand must reach WHNF")
+                        .into_value(),
+                );
+                self.demand = None;
+                RegionalSequentialDemandPoll::Yielded
+            }
+            RegionalWhnfStatus::Boundary(request) => {
+                RegionalSequentialDemandPoll::Boundary(request)
+            }
+            RegionalWhnfStatus::Yielded => RegionalSequentialDemandPoll::Yielded,
+            RegionalWhnfStatus::Failed(failure) => RegionalSequentialDemandPoll::Failed(failure),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for value in &self.remaining {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+        if let Some(demand) = &self.demand {
+            demand.trace_managed_edges(visitor);
+        }
+        for value in &self.ready {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+    }
+}
+
+fn finish_union_in(
+    access: &EvaluationValueAccess<'_>,
+    left: &Value,
+    right: &Value,
+) -> RegionalBuiltinPoll {
+    let Value::Dict(left) = left else {
+        return failure("dictionary union requires dictionary values");
+    };
+    let Value::Dict(right) = right else {
+        return failure("dictionary union requires dictionary values");
+    };
+    RegionalBuiltinPoll::Ready(Value::Dict(merge_dicts_in(access.values(), left, right)))
+}
+
+fn failure(message: &str) -> RegionalBuiltinPoll {
+    RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message)))
+}
+
+fn finish_update_in(
+    access: &EvaluationValueAccess<'_>,
+    path: &[Key],
+    new_value: &Value,
+    dict: &Value,
+) -> RegionalBuiltinPoll {
+    let Value::Dict(dict) = dict else {
+        return failure("dict update builtin requires a dictionary");
+    };
+    RegionalBuiltinPoll::Ready(Value::Dict(update_dict_path_in(
+        access.values(),
+        dict,
+        path,
+        access.values().duplicate_value(new_value),
+    )))
+}
+
+fn finish_merge_duplicate_in(
+    access: &EvaluationValueAccess<'_>,
+    name: &Value,
+    left: &Value,
+    right: &Value,
+) -> RegionalBuiltinPoll {
+    let name = render_name(access.values(), name);
+    let result = if is_undefined_dict_value(access.values(), left) {
+        access.values().duplicate_value(right)
+    } else if is_undefined_dict_value(access.values(), right)
+        || is_error_lazy_value(access.values(), left)
+    {
+        access.values().duplicate_value(left)
+    } else if is_error_lazy_value(access.values(), right) {
+        access.values().duplicate_value(right)
+    } else if let (Value::Dict(left), Value::Dict(right)) = (left, right) {
+        Value::Dict(merge_dicts_in(access.values(), left, right))
+    } else {
+        Value::Lazy(LazyValue::error_in(
+            access.values(),
+            format!("dictionary union is ambiguous at key `{name}`"),
+        ))
+    };
+    RegionalBuiltinPoll::Ready(result)
 }
 
 fn render_name(_access: &crate::core::RuntimeValueAccess<'_>, value: &Value) -> String {
@@ -468,8 +517,4 @@ fn builtin_apply3_value_in(
             ]),
         },
     ))
-}
-
-fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFailureRoot {
-    context.root_failure(Arc::new(EvaluationFailure::message(message)))
 }

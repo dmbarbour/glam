@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        817,
+        818,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -866,9 +866,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1f.3g.2c keeps the production typed-edge total stable while moving
     // net work beneath the shared checkpoint. Its strengthened route-loss
     // fixture contributes one test-only owning-lazy root.
+    // W6G.1f.3g.3a keeps dictionary progress as raw traced state beneath that
+    // checkpoint; its forced collection fixture contributes one test-only
+    // owning-lazy root.
     assert_eq!(
         occurrence_fingerprint(actual),
-        1_915_470_387_312_364_519,
+        5_023_969_910_200_140_637,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -915,7 +918,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 204),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 563),
+            ((SourceScope::Test, EdgeSurface::Typed), 564),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

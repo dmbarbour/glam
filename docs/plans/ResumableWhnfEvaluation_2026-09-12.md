@@ -6013,10 +6013,19 @@ for it:
      diagnostic context, ordering, and failure text. This is six independent
      durable owners totaling several thousand lines, so migrate them through
      compile-exhaustive checkpoint additions rather than one cutover:
-     - **W6G.1f.3g.3a — dictionary.** Reuse `RegionalKeyConversion` and
-       `RegionalKeyList` for singleton/update keys, replace sequential rooted
-       demands with one indexed regional operand walk, and retain completed
-       dictionaries/name operands without replay.
+     - **W6G.1f.3g.3a — Complete (2026-09-20): dictionary.** Reuse
+       `RegionalKeyConversion` and `RegionalKeyList` for singleton/update keys,
+       replace sequential rooted demands with one regional operand queue, and
+       retain completed dictionaries/name operands without replay. The queue
+       removes each source as its exact child is installed, so the checkpoint
+       traces remaining inputs, at most one active demand, and completed WHNF
+       operands without retaining duplicate source edges. A private-heap
+       fixture forces collection while the second union operand is blocked and
+       again after assignment, proving the completed first operand runs once.
+       The full parallel suite again reached the already-latched
+       `command_line_workers_override_glam_workers` route/session-affinity
+       schedule assigned to W6G.1f.2b; the complete library suite, structural
+       inventories, and profiling regression set otherwise pass.
      - **W6G.1f.3g.3b — comparison and tagged payload.** Move ordered scalar,
        tuple, list, dictionary, tagged-payload, and semantic-undefined frames
        together because comparison owns both tagged helper families. Preserve
