@@ -41,8 +41,15 @@ that finalization splices into a direct wire, and larger copies use a balanced
 binary fan tree. Tunnels never enter a template or runtime.
 
 `Assembler::net` is a lifetime-scoped, core-specialized facade over this same
-builder. Source `interaction_net` also ends at this builder: its branch-local
-write-only operation journal is transaction state, not a second graph IR.
+builder. Source `interaction_net` still searches with a branch-local
+write-only transaction journal. After selecting one branch, it encodes a
+strict ordinary-value netlist and passes that to the evaluator-private
+`InteractionNetFromNetlist` builtin. That synchronous boundary validates
+brands, sequential logical ports, operation shapes, and topology before
+lowering through `NetBuilder`; it performs no demand, effect dispatch,
+callback, wait, or root retention. The semantic netlist is a checked replay
+protocol, not a second mutable graph IR. PNC2-PNC5 will make the pure builder
+produce it directly and remove the legacy construction search machine.
 
 `interaction_net Effect` is lazy and memoized. Its isolated freer machine
 provides `.bind`, `.copy`, `.data`, and `.wire` together with the standard
@@ -52,11 +59,12 @@ operations reject handles from another invocation. Alternatives cheaply share
 a persistent journal prefix. No partial graph is built while searching.
 
 At completion, zero successful branches fail, more than one is ambiguous, and
-exactly one must return a branded port to expose. Only that branch is replayed
-in order through `NetBuilder`, then instantiated once as the runtime memoized
-by the construction lazy. Failed alternatives are never finalized, so their
-partial topology cannot produce spurious build errors. `.data` records its
-payload without forcing it.
+exactly one must return a branded port to expose. Only that branch is encoded
+and replayed in order through the hidden semantic-netlist boundary, then
+instantiated once as the runtime memoized by the construction lazy. Failed
+alternatives are never finalized, so their partial topology cannot produce
+spurious build errors. `.data` records and replays its payload without forcing
+it.
 
 ## Runtime Identity and Graph State
 

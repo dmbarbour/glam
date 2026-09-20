@@ -7,6 +7,7 @@ use super::*;
 use crate::evaluation::EvaluationValueAccess;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
+pub(in crate::eval) use net::interaction_net_from_netlist_in;
 pub(super) use net::{NetConstructionMachine, NetConstructionPoll};
 
 #[cfg(test)]
@@ -168,7 +169,9 @@ pub(super) fn apply_builtin_in(
         | Builtin::EffectMap
         | Builtin::EffectMapRun
         | Builtin::EffectMapContinue => Ok(deferred(arguments)),
-        Builtin::InteractionNet | Builtin::NetArity => Ok(deferred(arguments)),
+        Builtin::InteractionNet | Builtin::InteractionNetFromNetlist | Builtin::NetArity => {
+            Ok(deferred(arguments))
+        }
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),

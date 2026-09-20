@@ -7,13 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::api::{Value as PublicValue, Values};
-use crate::core::{List, NetValue, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value};
-use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
+use crate::core::{Dict, List, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value};
 use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
     WorkDependency, poll_whnf_computation,
 };
-use crate::interaction_net::{NetBuilder, Port};
 use crate::reflection::{
     EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost, RequestContext,
     RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
@@ -26,49 +24,54 @@ use super::super::super::value::evaluation_context_frame_in;
 use super::super::super::whnf::WhnfComputation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ConstructionPortId(NonZeroU64);
+pub(super) struct ConstructionPortId(NonZeroU64);
 
 impl ConstructionPortId {
-    fn index(self) -> Result<usize, EvaluationHalt> {
+    #[cfg(test)]
+    pub(super) fn new(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+
+    pub(super) fn index(self) -> Result<usize, EvaluationHalt> {
         usize::try_from(self.0.get() - 1)
             .map_err(|_| EvaluationHalt::new("interaction-net port index exceeds this target"))
     }
 }
 
 #[derive(Default)]
-struct ConstructionBrand {
+pub(super) struct ConstructionBrand {
     #[cfg(test)]
     probe: std::sync::OnceLock<Arc<ConstructionProbe>>,
 }
 
-struct ConstructionPort {
+struct ConstructionToken {
     brand: Arc<ConstructionBrand>,
-    id: ConstructionPortId,
+    port: Option<ConstructionPortId>,
 }
 
 #[cfg(test)]
 pub(crate) fn assert_construction_port_family_shape() {
-    fn inspect(port: &ConstructionPort) {
-        let ConstructionPort { brand, id } = port;
+    fn inspect(token: &ConstructionToken) {
+        let ConstructionToken { brand, port } = token;
         let _: &Arc<ConstructionBrand> = brand;
-        let _: &ConstructionPortId = id;
+        let _: &Option<ConstructionPortId> = port;
     }
 
-    let _: fn(&ConstructionPort) = inspect;
+    let _: fn(&ConstructionToken) = inspect;
     assert_eq!(
-        <ConstructionPort as OpaquePayloadFamily>::PAYLOAD_RECORD
+        <ConstructionToken as OpaquePayloadFamily>::PAYLOAD_RECORD
             .fields()
             .2,
         "edge-free token"
     );
 }
 
-// SAFETY: a construction port contains only one construction-local brand and
-// a scalar port ID. Neither field can contain or reach a Glam value, runtime
-// root, managed pointer, or active runtime capability.
-unsafe impl OpaquePayloadFamily for ConstructionPort {
+// SAFETY: a construction token contains only one construction-local brand and
+// an optional scalar port ID. Neither field can contain or reach a Glam value,
+// runtime root, managed pointer, or active runtime capability.
+unsafe impl OpaquePayloadFamily for ConstructionToken {
     const PAYLOAD_RECORD: OpaquePayloadRecord = OpaquePayloadRecord::edge_free(
-        "interaction-net construction port",
+        "interaction-net construction token",
         "src/eval/builtins/net/construction.rs",
     );
 }
@@ -581,7 +584,7 @@ impl NetConstructionMachine {
                                 construction_port_value(&access, &value, &self.brand)
                             });
                             return match exposed
-                                .and_then(|exposed| replay(context, journal, exposed))
+                                .and_then(|exposed| replay(context, &self.brand, journal, exposed))
                             {
                                 Ok(value) => {
                                     #[cfg(test)]
@@ -703,17 +706,38 @@ fn port_list(
     values.wrap(Value::List(List::from_values(
         ports
             .into_iter()
-            .map(|id| {
-                Value::Opaque(OpaqueValue::new(
-                    values.core(),
-                    Arc::new(ConstructionPort {
-                        brand: brand.clone(),
-                        id,
-                    }),
-                ))
-            })
+            .map(|id| Value::Opaque(construction_token(values.core(), brand, Some(id))))
             .collect(),
     )))
+}
+
+pub(super) fn encode_construction_brand(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    brand: &Arc<ConstructionBrand>,
+) -> Value {
+    Value::Opaque(construction_token(access.values(), brand, None))
+}
+
+pub(super) fn encode_construction_port(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    brand: &Arc<ConstructionBrand>,
+    id: ConstructionPortId,
+) -> Value {
+    Value::Opaque(construction_token(access.values(), brand, Some(id)))
+}
+
+fn construction_token(
+    values: &crate::core::CoreValueFactory,
+    brand: &Arc<ConstructionBrand>,
+    port: Option<ConstructionPortId>,
+) -> OpaqueValue {
+    OpaqueValue::new(
+        values,
+        Arc::new(ConstructionToken {
+            brand: Arc::clone(brand),
+            port,
+        }),
+    )
 }
 
 fn construction_port_value(
@@ -730,106 +754,86 @@ fn construction_port_value(
     decode_construction_port(access.values().values(), &port, brand)
 }
 
-fn decode_construction_port(
+pub(super) fn decode_construction_port(
     values: &crate::core::CoreValueFactory,
     port: &OpaqueValue,
     brand: &Arc<ConstructionBrand>,
 ) -> Result<ConstructionPortId, EvaluationHalt> {
-    let port = port.downcast::<ConstructionPort>(values).ok_or_else(|| {
+    let token = decode_construction_token(values, port).ok_or_else(|| {
         EvaluationHalt::new("interaction-net operation requires a construction port")
     })?;
-    if !Arc::ptr_eq(&port.brand, brand) {
+    if !Arc::ptr_eq(&token.brand, brand) {
         return Err(EvaluationHalt::new(
             "interaction-net construction port belongs to another invocation",
         ));
     }
-    Ok(port.id)
+    token.port.ok_or_else(|| {
+        EvaluationHalt::new("interaction-net operation requires a construction port")
+    })
+}
+
+pub(super) fn decode_construction_brand(
+    values: &crate::core::CoreValueFactory,
+    value: &OpaqueValue,
+) -> Result<Arc<ConstructionBrand>, EvaluationHalt> {
+    let token = decode_construction_token(values, value).ok_or_else(|| {
+        EvaluationHalt::new("interaction-net builder brand must be a construction brand")
+    })?;
+    if token.port.is_some() {
+        return Err(EvaluationHalt::new(
+            "interaction-net builder brand must be a brand token",
+        ));
+    }
+    Ok(Arc::clone(&token.brand))
+}
+
+fn decode_construction_token(
+    values: &crate::core::CoreValueFactory,
+    token: &OpaqueValue,
+) -> Option<Arc<ConstructionToken>> {
+    token.downcast::<ConstructionToken>(values)
 }
 
 fn replay(
     context: &EvaluatorStepContext<'_>,
+    brand: &Arc<ConstructionBrand>,
     journal: &ConstructionJournal,
     exposed: ConstructionPortId,
 ) -> Result<RuntimeValueRoot, EvaluationHalt> {
     context.with_value_access(|access| {
-        let capacity = usize::try_from(journal.next_port - 1)
-            .map_err(|_| EvaluationHalt::new("interaction-net port count exceeds this target"))?;
-        let mut mapped = Vec::new();
-        mapped
-            .try_reserve_exact(capacity)
-            .map_err(|_| EvaluationHalt::new("interaction-net replay allocation is too large"))?;
-        let mut builder = NetBuilder::<CoreSpecialization>::new();
-
-        for operation in journal.operations() {
-            match operation {
+        let reverse_operations = journal
+            .operations()
+            .into_iter()
+            .rev()
+            .map(|operation| match operation {
                 ConstructionOp::Bind { ports } => {
-                    append_ports(&mut mapped, ports.iter().copied(), builder.bind())?;
+                    super::netlist::encode_bind(access.values(), brand, *ports)
                 }
                 ConstructionOp::Copy { ports } => {
-                    let copy = builder.copy(ports.len() - 1);
-                    append_ports(
-                        &mut mapped,
-                        ports.iter().copied(),
-                        std::iter::once(copy.input).chain(copy.outputs),
-                    )?;
+                    super::netlist::encode_copy(access.values(), brand, ports)
                 }
-                ConstructionOp::Data { port, value } => {
-                    let value = access.clone_root(&value.clone().into_runtime_root());
-                    append_ports(&mut mapped, [*port], [builder.data(value)])?;
-                }
+                ConstructionOp::Data { port, value } => super::netlist::encode_data(
+                    access.values(),
+                    brand,
+                    *port,
+                    access.clone_root(&value.clone().into_runtime_root()),
+                ),
                 ConstructionOp::Wire { left, right } => {
-                    builder
-                        .try_wire(mapped_port(&mapped, *left)?, mapped_port(&mapped, *right)?)
-                        .map_err(|error| EvaluationHalt::new(error.to_string()))?;
+                    super::netlist::encode_wire(access.values(), brand, *left, *right)
                 }
-            }
-        }
-
-        let exposed = mapped_port(&mapped, exposed)?;
-        let template = builder
-            .try_finish(exposed)
-            .map_err(|error| EvaluationHalt::new(error.to_string()))?;
-        let net_root = access
-            .values()
-            .construct_rooted_managed_core_net(template.instantiate())
-            .expect("managed core-net representation must fit one collector run");
-        let net = CoreRuntimeNet::from_root(&net_root, access.values());
-        Ok(access
-            .values()
-            .root_runtime_value(Value::Net(NetValue::new(net))))
-    })
-}
-
-fn append_ports(
-    mapped: &mut Vec<Port>,
-    logical: impl IntoIterator<Item = ConstructionPortId>,
-    actual: impl IntoIterator<Item = Port>,
-) -> Result<(), EvaluationHalt> {
-    let mut logical = logical.into_iter();
-    let mut actual = actual.into_iter();
-    loop {
-        match (logical.next(), actual.next()) {
-            (Some(logical), Some(actual)) => {
-                if logical.index()? != mapped.len() {
-                    return Err(EvaluationHalt::new(
-                        "interaction-net construction journal has nonsequential ports",
-                    ));
-                }
-                mapped.push(actual);
-            }
-            (None, None) => return Ok(()),
-            _ => {
-                return Err(EvaluationHalt::new(
-                    "interaction-net construction journal port arity mismatch",
-                ));
-            }
-        }
-    }
-}
-
-fn mapped_port(mapped: &[Port], port: ConstructionPortId) -> Result<Port, EvaluationHalt> {
-    mapped.get(port.index()?).copied().ok_or_else(|| {
-        EvaluationHalt::new("interaction-net construction refers to an unknown port")
+            })
+            .collect();
+        let state = super::netlist::encode_builder_state(
+            access.values(),
+            brand,
+            journal.next_port,
+            reverse_operations,
+            Value::Dict(Dict::new_sync()),
+        );
+        let selected =
+            super::netlist::encode_selected_netlist(access.values(), state, brand, exposed);
+        let net = super::netlist::interaction_net_from_netlist_in(access.values(), &selected)?;
+        Ok(access.values().root_runtime_value(net))
     })
 }
 
@@ -1112,7 +1116,10 @@ mod tests {
 
         let exposed_port = Value::Opaque(OpaqueValue::new(
             context.values(),
-            Arc::new(ConstructionPort { brand, id: port }),
+            Arc::new(ConstructionToken {
+                brand,
+                port: Some(port),
+            }),
         ));
         crate::core::set_test_promise(context.values(), &promise, exposed_port)
             .expect("the exposed port should accept one assignment");
@@ -1139,9 +1146,9 @@ mod tests {
         let foreign = Arc::new(ConstructionBrand::default());
         let port = OpaqueValue::new(
             &values,
-            Arc::new(ConstructionPort {
+            Arc::new(ConstructionToken {
                 brand: foreign,
-                id: ConstructionPortId(NonZeroU64::new(1).unwrap()),
+                port: Some(ConstructionPortId(NonZeroU64::new(1).unwrap())),
             }),
         );
 

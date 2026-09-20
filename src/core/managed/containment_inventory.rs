@@ -250,13 +250,13 @@ const OPAQUE_FAMILY_INVENTORY: &[OpaqueFamilyInventoryEntry] = &[
         retention: "immutable source provenance only",
     },
     OpaqueFamilyInventoryEntry {
-        family: "ConstructionPort",
+        family: "ConstructionToken",
         path: "src/eval/builtins/net/construction.rs",
-        admission: "OpaquePayloadFamily for ConstructionPort",
+        admission: "OpaquePayloadFamily for ConstructionToken",
         constructor: "OpaqueValue::new(",
-        downcast: ".downcast::<ConstructionPort>",
+        downcast: ".downcast::<ConstructionToken>",
         disposition: OpaqueBootstrapDisposition::ExternalEdgeFree,
-        retention: "construction-local brand and scalar port identity only",
+        retention: "construction-local brand and optional scalar port identity only",
     },
     OpaqueFamilyInventoryEntry {
         family: "EffectToken<T>",

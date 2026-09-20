@@ -1,7 +1,7 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0 completed on 2026-09-20. This is the focused W6G.1f.3h
-transition from the generic reflection-task interpreter used by
+Status: active; PNC0-PNC1 completed on 2026-09-20. This is the focused
+W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
 [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md).
@@ -341,6 +341,8 @@ behavior.
 
 ### PNC1 — Strict semantic netlist and hidden replay
 
+Status: complete on 2026-09-20.
+
 - Define the ordinary semantic encoding for builder state, branded ports, and
   reverse operation records.
 - Extract the current `NetBuilder` replay and validation into the hidden
@@ -353,6 +355,41 @@ behavior.
 
 Exit: a strict selected record can build the same runtime net without the
 construction search machine.
+
+Completion record: the provisional semantic schema uses strict value lists so
+an empty `user_state` remains an actual field rather than disappearing under
+Glam's undefined-dictionary-entry rule:
+
+```text
+selected = [builder_state, exposed_port]
+builder_state = [brand, next_port, reverse_operations, user_state]
+
+bind = [BindTag, port, port, port]
+copy = [CopyTag, input_port, output_port...]
+data = [DataTag, port, payload]
+wire = [WireTag, left_port, right_port]
+```
+
+The tags are implementation-owned abstract global paths. `brand` and `port`
+are edge-free opaque identity tokens; every other field is an ordinary
+traceable semantic value. Structural lists must contain no byte or deferred
+segments. The `.data` payload is copied as an edge without observation and is
+the only field permitted to remain lazy.
+
+`Builtin::InteractionNetFromNetlist` is implemented by one callback-free
+regional transition and is deliberately absent from `import 'std`. The
+legacy construction machine now adapts its selected journal to this exact
+schema before replay, so both current construction and the later pure runner
+share validation and `NetBuilder` lowering. This adapter is transitional:
+PNC4 will construct the semantic state directly, and PNC5 removes the old
+search machine.
+
+Direct fixtures cover a net containing bind/copy/data/wire, malformed outer
+and operation records, zero-port copies, nonsequential allocation, foreign
+brands, incomplete topology, and an undemanded lazy data payload. A separate
+source inventory rejects reflection/effect imports, scheduler or WHNF
+boundaries, evaluator callbacks, waits, and runtime-root construction in the
+replay module.
 
 ### PNC2 — State-over-`ListEffect` foundation
 

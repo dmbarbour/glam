@@ -463,7 +463,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     exact_managed!(
         "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/annotation_machine.rs; src/eval/object_builtin_machine.rs; src/eval/object_composition_machine.rs",
         "managed builtin checkpoint cell",
-        "raw builtin arguments, completed scalar/object/composition prefixes, recursive override frames, and regional WHNF/list-front child state behind one representation mutex",
+        "raw builtin arguments, selected strict netlist records, completed scalar/object/composition prefixes, recursive override frames, and regional WHNF/list-front child state behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
         CompatibilityPayload,
         "W6G.1f.3g.2a-.4c introduce numeric, assertion, provenance, conditional, net, collection, pattern, metadata, annotation, object-inspection, and object-composition arms; forced fixtures collect across exact dependencies, diagnostic phases, deferred traversals, and completed prefixes"
@@ -969,9 +969,11 @@ fn is_production_source(relative: &Path) -> bool {
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
 const DECLARATION_BASELINE_COUNT: usize = 240;
+// PNC1 gives the managed builtin checkpoint one additional traced raw value:
+// the already-selected strict semantic netlist consumed by hidden replay.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([292, 116, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 532_757_175_564_236_746;
+    DeclarationSignals::new([293, 116, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 9_672_021_774_992_206_831;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

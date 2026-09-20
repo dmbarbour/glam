@@ -1380,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        542,
+        559,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        6_205_565_148_559_445_763,
+        12_812_610_959_489_936_851,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1402,7 +1402,10 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // raw value handoff remains tied to caller-supplied value access.
         // W6G.1f.3g.4c moves object composition and its recursive override
         // stack to eleven caller-access-qualified regional helpers.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 246),
+        // PNC1 adds seventeen access-qualified helpers which encode, validate,
+        // and replay the strict semantic interaction-net record. Raw values
+        // never cross the caller-owned replay region.
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 263),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

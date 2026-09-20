@@ -693,8 +693,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // two user-sized loops rather than one recursive helper.
 // W6G.1f.3g.4c replaces rooted object-composition phases with explicit
 // regional application and iterative override state.
+// PNC1 moves the two strict semantic replay loops from the construction host
+// into `netlist.rs`; their reviewed shape is now a collection walk rather
+// than generic construction demand-and-inspect work.
 const EXPECTED_OCCURRENCES: usize = 204;
-const EXPECTED_FINGERPRINT: u64 = 16_874_666_531_593_424_644;
+const EXPECTED_FINGERPRINT: u64 = 16_647_533_649_234_182_830;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -712,9 +715,9 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 119),
+    (WorkShape::DemandThenInspect, 117),
     (WorkShape::OrderedOperands, 10),
-    (WorkShape::CollectionWalk, 12),
+    (WorkShape::CollectionWalk, 14),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),

@@ -5675,6 +5675,11 @@ fn lowers_builtin_imports_to_module_dictionaries() {
                 std.get(&Key::atom_from_text("interaction_net")),
                 Some(Value::Builtin(crate::core::Builtin::InteractionNet))
             ));
+            assert!(
+                std.get(&Key::atom_from_text("interaction_net_from_netlist"))
+                    .is_none(),
+                "strict semantic netlist replay must remain evaluator-private"
+            );
             assert!(matches!(
                 std.get(&Key::atom_from_text("net_arity")),
                 Some(Value::Builtin(crate::core::Builtin::NetArity))

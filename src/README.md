@@ -70,7 +70,8 @@ not define language semantics or collect subsystem invariants.
 | `eval/whnf_checkpoint_inventory.rs` | Test-only W6G.3 census of durable WHNF constructors, source-entry operations, observers, and seed modifiers before aggregate-cell migration |
 | `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
 | `eval/builtins/` | Builtin implementations by semantic family; saturation uses the caller's bounded `EvaluationValueAccess`, immediate constructors publish before that region closes, and `ManagedBuiltinCheckpointCell` traces every demand-capable family's regional state across yield, dependency, failure, and completion |
-| `eval/builtins/net/construction.rs` | Source interaction-net construction search |
+| `eval/builtins/net/construction.rs` | Legacy source interaction-net construction search and selected-journal semantic adapter (removed by PNC5) |
+| `eval/builtins/net/netlist.rs` | PNC1 strict ordinary-value construction schema plus evaluator-private callback-free checked replay through `NetBuilder` |
 | `eval/sequence.rs` | Lazy sequence and binary extraction |
 | `list.rs`, `number.rs` | Persistent list ropes, non-forcing logical list-part traversal and trace-work counters, and exact numbers |
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |

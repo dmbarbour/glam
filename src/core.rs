@@ -2077,6 +2077,13 @@ pub enum Builtin {
     Seq,
     Spark,
     InteractionNet,
+    /// Evaluator-private checked replay of one selected strict semantic
+    /// interaction-net record. The built-in module never binds this value.
+    #[allow(
+        dead_code,
+        reason = "PNC1 establishes hidden replay before PNC5 composes the pure public runner"
+    )]
+    InteractionNetFromNetlist,
     NetArity,
     /// Host-provided capability for inspecting opaque compilation origins.
     /// The constructor is exposed only through the reflection environment.
@@ -2162,6 +2169,7 @@ impl Builtin {
             Self::Seq => 2,
             Self::Spark => 2,
             Self::InteractionNet => 1,
+            Self::InteractionNetFromNetlist => 1,
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,

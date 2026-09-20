@@ -108,6 +108,7 @@ pub(in crate::eval) struct RegionalNumericMachine {
 
 enum RegionalNetPhase {
     Construction { effect: Value },
+    FromNetlist { selected: Option<Value> },
     Arity { arity: RegionalWhnfWork, net: Value },
     Net { arity: usize, net: RegionalWhnfWork },
 }
@@ -159,6 +160,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::Mod
                 | Builtin::InspectOrigin
                 | Builtin::InteractionNet
+                | Builtin::InteractionNetFromNetlist
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
@@ -278,6 +280,17 @@ impl RegionalBuiltinMachine {
                 Self::Net(RegionalNetMachine {
                     phase: RegionalNetPhase::Construction {
                         effect: access.values().duplicate_value(effect),
+                    },
+                    source_owner,
+                })
+            }
+            Builtin::InteractionNetFromNetlist => {
+                let [selected] = arguments else {
+                    unreachable!("semantic netlist replay must retain one selected record")
+                };
+                Self::Net(RegionalNetMachine {
+                    phase: RegionalNetPhase::FromNetlist {
+                        selected: Some(access.values().duplicate_value(selected)),
                     },
                     source_owner,
                 })
@@ -673,6 +686,15 @@ impl RegionalNetMachine {
                     access.values().duplicate_value(effect),
                 )))
             }
+            RegionalNetPhase::FromNetlist { selected } => {
+                let selected = selected
+                    .take()
+                    .expect("semantic netlist replay must be polled exactly once");
+                match super::builtins::interaction_net_from_netlist_in(access.values(), &selected) {
+                    Ok(net) => RegionalBuiltinPoll::Ready(net),
+                    Err(error) => RegionalBuiltinPoll::Failed(error.into_permanent_failure()),
+                }
+            }
             RegionalNetPhase::Arity { arity, net } => {
                 let arity = match drive_regional_in_place(
                     access,
@@ -747,6 +769,11 @@ impl RegionalNetMachine {
         match &self.phase {
             RegionalNetPhase::Construction { effect } => {
                 trace_compatibility_value_managed_edges(effect, visitor);
+            }
+            RegionalNetPhase::FromNetlist { selected } => {
+                if let Some(selected) = selected {
+                    trace_compatibility_value_managed_edges(selected, visitor);
+                }
             }
             RegionalNetPhase::Arity { arity, net } => {
                 arity.trace_managed_edges(visitor);
