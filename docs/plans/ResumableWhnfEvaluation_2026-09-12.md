@@ -6010,7 +6010,30 @@ for it:
    - **W6G.1f.3g.3 — structural families.** Regionalize comparison,
      dictionary, list observation/transformation, pattern, and annotation
      state using the shared child reducers. Preserve exact traversal prefixes,
-     diagnostic context, ordering, and failure text.
+     diagnostic context, ordering, and failure text. This is six independent
+     durable owners totaling several thousand lines, so migrate them through
+     compile-exhaustive checkpoint additions rather than one cutover:
+     - **W6G.1f.3g.3a — dictionary.** Reuse `RegionalKeyConversion` and
+       `RegionalKeyList` for singleton/update keys, replace sequential rooted
+       demands with one indexed regional operand walk, and retain completed
+       dictionaries/name operands without replay.
+     - **W6G.1f.3g.3b — comparison and tagged payload.** Move ordered scalar,
+       tuple, list, dictionary, tagged-payload, and semantic-undefined frames
+       together because comparison owns both tagged helper families. Preserve
+       short-circuit ordering and the exact nested diagnostic context.
+     - **W6G.1f.3g.3c — list observation.** Reuse regional logical-list
+       front/back reducers for slice, length, split, index, head, and tail;
+       retain strict-prefix progress and the selected suffix without roots.
+     - **W6G.1f.3g.3d — list transformation.** Move structure-preserving map,
+       balanced concat, and resumable text-lines extraction. Preserve lazy
+       fragment boundaries and completed transform prefixes.
+     - **W6G.1f.3g.3e — patterns.** Move list, path, dictionary predicate/take,
+       and equality patterns after their comparison and list/key dependencies
+       are regional. Preserve fallthrough versus permanent failure exactly.
+     - **W6G.1f.3g.3f — annotations.** Move annotation recognition and its
+       pure, metadata, reflection, and diagnostic-context phases last. Return
+       reflection scheduling only as a post-access boundary intent; never
+       place a reflection checkpoint or registered root in the value graph.
    - **W6G.1f.3g.4 — effect and object families.** Regionalize effect,
      object-builtin, and object-composition state. Reuse application
      checkpoints and regional child forms rather than embedding a registered
