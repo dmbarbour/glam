@@ -461,25 +461,41 @@ make explicit:
 
 PNC3 keeps the external pure-builder shape
 `BuilderState -> List [value, BuilderState]`. It defunctionalizes the active
-continuation into ordinary semantic values beneath `CONTROL_KEY`; it does not
-introduce another evaluator or search engine. The provisional strict encoding
-is:
+continuation into ordinary semantic values; it does not introduce another
+evaluator or search engine. The provisional strict encoding separates the
+protected active sequence from the reset state which `.get []` and `.set []`
+must capture and replace:
 
 ```text
-control_stack = StrictList ControlFrame       # head is the next frame
+builder_state = [brand, next_port, reverse_operations, user_state]
+              | [brand, next_port, reverse_operations, user_state,
+                 sequence_stack]
+
+sequence_stack = StrictList SequenceFrame     # head is the next frame
+reset_stack    = user_state[CONTROL_KEY]       # outer to inner
 
 sequence = [SequenceTag, continuation]
-reset    = [ResetTag, key]
 cut      = [CutTag]
-resume   = [ResumeTag, caller_stack]
+
+reset  = [ResetTag, key, outer_sequence]
+resume = [ResumeTag, caller_sequence]
 ```
 
 The tags are implementation-owned abstract global paths. Continuations and
 saved stacks are normal traced value edges. Missing `CONTROL_KEY` means an
-empty stack, so `.set [] {}` clears active control exactly as the current
-handler does. The stack itself is strict; continuation values remain lazy.
-The construction brand already present in `BuilderState` is the invocation
+empty reset stack, so `.set [] {}` clears active reset scope without erasing
+the monadic continuation currently executing `.set`. The fifth builder-state
+field is protected from `.get/.set`; it is omitted whenever empty, and a
+selected terminal netlist therefore retains PNC1's canonical four-field
+schema. Both stacks are strict while continuation values remain lazy. The
+construction brand already present in `BuilderState` is the invocation
 identity and therefore need not be duplicated in every frame.
+
+This separation mirrors the oracle rather than weakening the checkpoint rule:
+a reset frame stored in `user_state` carries the protected sequence snapshot
+to resume when its body returns. Consequently `.get []` still captures the
+complete reset continuation, while `.set []` can clear or restore reset scope
+without cancelling the operation which performs that update.
 
 #### PNC3A — Reference matrix and structural contract
 
@@ -487,9 +503,10 @@ identity and therefore need not be duplicated in every frame.
   builder transitions before changing composition: normal and missing shift,
   nested keys, cut inside reset, reset inside alternatives, complete-state
   clear/restore, cross-invocation continuation use, and fix/reset hiding.
-- Add strict frame encode/decode helpers and reject malformed hidden control
-  records at the evaluator boundary. Do not demand continuation fields while
-  decoding the structural stack.
+- Add strict sequence/reset frame encode/decode helpers and accept builder
+  state arity four (empty protected sequence) or five (active sequence).
+  Reject malformed hidden control records at the evaluator boundary. Do not
+  demand continuation fields while decoding the structural stacks.
 - Keep the control representation private to the evaluator. It is ordinary
   traceable data under the hidden key, not a Rust opaque payload or root.
 
@@ -498,11 +515,12 @@ semantic record shape.
 
 #### PNC3B — Defunctionalized sequence, return, and cut
 
-- Change builder `.seq` from direct result flat-map to pushing a sequence
-  frame and running its operation. Builder `.r` becomes the common return
+- Change builder `.seq` from direct result flat-map to pushing a protected
+  sequence frame and running its operation. Builder `.r` becomes the common return
   dispatcher: it pops a sequence frame and applies its continuation, pops a
-  reset frame on normal return, restores a caller stack at a resume frame, or
-  emits the terminal `[value, state]` outcome when the stack is empty.
+  reset frame and restores its saved sequence on normal return, restores a
+  caller sequence at a resume frame, or emits the terminal `[value, state]`
+  outcome when both stacks are empty.
 - Route successful `.get`, `.set`, and later construction operations through
   that same dispatcher; no valid builder operation may bypass active control.
 - Implement `.cut` with a strict cut frame. Return stops at that frame and
@@ -522,16 +540,19 @@ canonical list-effect reducer.
 
 - Convert reset/shift keys with `RegionalKeyConversion`, preserving exact
   lazy/promise suspension and source ownership.
-- `.reset Key Operation` pushes a reset frame and runs `Operation`.
+- `.reset Key Operation` moves the current protected sequence into a reset
+  frame under `CONTROL_KEY`, clears the active sequence, and runs `Operation`.
 - `.shift Key Function` scans from the top for the nearest matching reset,
   removes that reset and all inner frames from the active state, and passes a
   captured continuation to `Function`. A missing key fails with the existing
   “not in reset scope” diagnostic.
-- A captured continuation contains the construction brand plus the immutable
-  inner frame prefix. Invoking it installs that prefix followed by a resume
-  frame containing the caller's current stack, then returns its argument into
-  the installed continuation. Reaching the resume frame restores the caller
-  stack and continues there.
+- A captured continuation contains the construction brand, the active
+  sequence, and the immutable reset frames inside the target. Invoking it
+  appends a resume reset frame containing the caller's current sequence,
+  reinstalls the captured inner reset frames and sequence, then returns its
+  argument into that continuation. Reaching the resume frame restores the
+  caller sequence and continues there; the caller's outer reset frames remain
+  in place.
 - Compare decoded construction-brand identity on invocation and reject a
   continuation used with another builder invocation. Reuse within the owning
   invocation remains non-affine.
