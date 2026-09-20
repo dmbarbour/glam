@@ -18,6 +18,7 @@ tests=(
   eval::net::driver_tests::callable_profile_records_checkpoint_install_resume_replace_and_terminalize
   eval::net::driver_tests::callable_profile_records_exact_dependency_retry_and_stale_admission
   eval::net::driver_tests::unsupported_checkpoint_boundary_terminalizes_the_exact_generation
+  eval::value::w4_tests::object_checkpoint_does_not_replay_mixin_stages_after_route_loss
   eval::tests::wrapper_returning_function_then_accepts_remaining_application
   eval::tests::wrapper_application_budget_probe_yields_without_publishing_a_cache
 )

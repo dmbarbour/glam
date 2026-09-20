@@ -5822,7 +5822,8 @@ for it:
      temporary root/cell and rooted object machine are removed. Exact owner,
      root-publication, persistent-edge, evaluator-access, and lazy-family
      inventories latch the cutover.
-   - **W6G.1f.3e.4 — forced schedules and bridge ledger.** Force route loss and
+   - **W6G.1f.3e.4 — forced schedules and bridge ledger.** **Complete
+     (2026-09-20).** Force route loss and
      collection at spec demand, name conversion, deferred dependency chunks,
      nested dependency return, definitions demand, base application, self
      application, and terminal object publication. Count mixin applications
@@ -5830,6 +5831,24 @@ for it:
      list-front adapters to W6G.1f.3f and W6G.1f.3g and the remaining
      key-conversion adapters to W6G.1f.3g, then close the object-family
      inventories.
+
+     Two deterministic fixtures cover the boundary without relying on repeat
+     runs. The linearization fixture destroys the active route and collects at
+     spec demand, name conversion, deferred dependency-chunk demand, nested
+     dependency return, and every yielded transition through terminal
+     publication. Its counted first dependency proves a completed prefix is
+     not replayed. The mix fixture uses separate public client demands with a
+     full collection between definitions, base-result, and self-result
+     boundaries; a counted definitions thunk proves demand is not replayed,
+     while the profiling-only regression records exactly two committed call
+     rewrites for the base and self mixin applications. Future values captured
+     only by the fixture are explicitly rooted before the forced collections.
+
+     The root-publication, mutator-entry, persistent-edge, owner, lazy-family,
+     evaluator-access, WHNF-boundary, and work-shape inventories are green.
+     The remaining list-front adapters stay assigned to W6G.1f.3f/.3g and the
+     remaining key-conversion adapters to W6G.1f.3g; no object-private bridge
+     remains.
 7. **W6G.1f.3f — list-effect checkpoint.** Preserve sequence/cut/fix progress
    and convert the fix promise root to a managed promise edge. Prove that
    route loss cannot manufacture another promise or repeat an assignment.

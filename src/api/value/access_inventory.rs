@@ -916,6 +916,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=compatibility-new|scope=test",
     "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=access-publication|scope=test",
     "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",
+    "src/eval/value/tests/w4.rs::object_checkpoint_does_not_replay_mixin_stages_after_route_loss#1|surface=compatibility-new|scope=test",
+    "src/eval/value/tests/w4.rs::object_checkpoint_does_not_replay_mixin_stages_after_route_loss#2|surface=compatibility-new|scope=test",
     "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
     "src/eval/whnf.rs::regional_status_poll#1|surface=access-publication|scope=production",
     "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",

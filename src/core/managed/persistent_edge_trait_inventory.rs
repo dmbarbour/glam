@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        795,
+        803,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -843,9 +843,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1f.3e.2a-.2b add the temporary managed object checkpoint's typed
     // carrier, allocation, creation/projection, and regional duplicates; its
     // object/spec/mixin and child-machine values stay below one trace visitor.
+    // W6G.1f.3e.3 exchanges that temporary root pair for the lazy carrier's
+    // stored and traced object edge. W6G.1f.3e.4 adds eight test-only roots so
+    // future promise, lazy, and function fixtures remain valid across each
+    // deliberately forced collection.
     assert_eq!(
         occurrence_fingerprint(actual),
-        10_273_774_888_926_855_149,
+        14_803_652_201_065_401_888,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -892,7 +896,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 197),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 548),
+            ((SourceScope::Test, EdgeSurface::Typed), 556),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

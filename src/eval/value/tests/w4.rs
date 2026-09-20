@@ -99,6 +99,71 @@ fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWait
     }
 }
 
+fn assert_object_checkpoint(context: &EvalContext, machine: &LazyTaskMachine) {
+    context.values().with_runtime_value_access(|access| {
+        let checkpoint = machine
+            .lazy
+            .access(&access)
+            .expect("the object fixture must share its value domain")
+            .checkpoint_snapshot()
+            .expect("object progress must remain in its managed checkpoint");
+        assert_eq!(
+            checkpoint.kind(),
+            ManagedLazyCheckpointKindTag::ObjectFixpoint
+        );
+    });
+}
+
+fn resume_after_object_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    machine: LazyTaskMachine,
+) -> LazyTaskMachine {
+    assert_object_checkpoint(context, &machine);
+    drop(machine);
+    collect_between_handoffs(context);
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+    lazy_machine(context, lazy)
+}
+
+fn poll_object_until_blocked(
+    machine: &mut LazyTaskMachine,
+    poll: &crate::evaluation::EvaluationPollContext,
+) -> WorkDependency {
+    for attempt in 0..128 {
+        match machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::Blocked(block) => {
+                return block
+                    .dependency
+                    .expect("object blockage must expose its exact dependency");
+            }
+            EvaluationMachinePoll::Failed(failure) => panic!("object fixture failed: {failure}"),
+            EvaluationMachinePoll::Complete(_) => panic!("object fixture completed early"),
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("object fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(attempt, 127, "object fixture did not reach its next wait");
+    }
+    unreachable!("bounded object fixture loop must block or panic")
+}
+
+fn object_spec(name: &str, deps: Value) -> Value {
+    Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*crate::core::keys::NAME).clone(),
+                Value::binary_from_text(name),
+            )
+            .insert((*crate::core::keys::DEPS).clone(), deps),
+    )
+}
+
 #[test]
 fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     let context = isolated_context();
@@ -358,6 +423,221 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         unreachable!("bounded resume loop must complete or panic")
     };
     assert_eq!(value.clone_core_for_test(), context.values().unit());
+}
+
+#[test]
+fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_collection() {
+    let context = isolated_context();
+    let root_spec = PromisedValue::new(context.values(), "retained object spec");
+    let root_name = PromisedValue::new(context.values(), "retained object name");
+    let dependency_chunk = PromisedValue::new(context.values(), "retained dependency chunk");
+    let second_dependency = PromisedValue::new(context.values(), "retained nested dependency spec");
+    let _root_name_owner = root_name.root(context.values());
+    let _dependency_chunk_owner = dependency_chunk.root(context.values());
+    let _second_dependency_owner = second_dependency.root(context.values());
+    let first_dependency_demands = Arc::new(AtomicUsize::new(0));
+    let observed_first_dependency = Arc::clone(&first_dependency_demands);
+    let first_dependency = LazyValue::semantic_thunk(
+        context.values(),
+        "counted first object dependency",
+        move |_| {
+            observed_first_dependency.fetch_add(1, Ordering::SeqCst);
+            Ok(object_spec("first dependency", Value::List(List::empty())))
+        },
+    );
+    let _first_dependency_owner = first_dependency.root(context.values());
+    let first_dependency = Value::Lazy(first_dependency);
+    let lazy = LazyValue::computed_fixpoint(
+        context.values(),
+        "retained object fixpoint",
+        FixpointComputation::ObjectInstance(Value::Promised(root_spec.clone())),
+    );
+    let retained = lazy.root(context.values());
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut machine = lazy_machine(&context, lazy);
+
+    let _spec_wait = poll_object_until_blocked(&mut machine, &poll);
+    machine = resume_after_object_route_loss(&context, &retained, machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &root_spec,
+        Value::Dict(
+            Dict::new_sync()
+                .insert(
+                    (*crate::core::keys::NAME).clone(),
+                    Value::Promised(root_name.clone()),
+                )
+                .insert(
+                    (*crate::core::keys::DEPS).clone(),
+                    Value::List(List::from_thunk(ListThunk::Promised(
+                        dependency_chunk.clone(),
+                    ))),
+                ),
+        ),
+    )
+    .expect("the retained root spec should accept its assignment");
+
+    let _name_wait = poll_object_until_blocked(&mut machine, &poll);
+    machine = resume_after_object_route_loss(&context, &retained, machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &root_name,
+        Value::binary_from_text("root"),
+    )
+    .expect("the retained root name should accept its assignment");
+
+    let _chunk_wait = poll_object_until_blocked(&mut machine, &poll);
+    machine = resume_after_object_route_loss(&context, &retained, machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &dependency_chunk,
+        Value::List(List::from_values(vec![
+            first_dependency,
+            Value::Promised(second_dependency.clone()),
+        ])),
+    )
+    .expect("the retained dependency chunk should accept its assignment");
+
+    let first_dependency_wait = poll_object_until_blocked(&mut machine, &poll);
+    let WorkDependency::Wait(first_dependency_wait) = first_dependency_wait else {
+        panic!("the counted lazy dependency must expose its producer wait")
+    };
+    pump_to_ready(&context, &first_dependency_wait);
+    let nested_wait = poll_object_until_blocked(&mut machine, &poll);
+    assert!(matches!(nested_wait, WorkDependency::Promise(_)));
+    assert_eq!(first_dependency_demands.load(Ordering::SeqCst), 1);
+    machine = resume_after_object_route_loss(&context, &retained, machine);
+    crate::core::set_test_promise(
+        context.values(),
+        &second_dependency,
+        object_spec("second dependency", Value::List(List::empty())),
+    )
+    .expect("the retained nested dependency should accept its assignment");
+
+    let value = 'complete: {
+        for attempt in 0..256 {
+            match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+                EvaluationMachinePoll::Yielded => {
+                    machine = resume_after_object_route_loss(&context, &retained, machine);
+                }
+                EvaluationMachinePoll::Complete(value) => break 'complete value,
+                EvaluationMachinePoll::Blocked(block) => {
+                    if let Some(WorkDependency::Wait(wait)) = block.dependency {
+                        pump_to_ready(&context, &wait);
+                    } else {
+                        panic!("completed dependencies must not leave another promise wait")
+                    }
+                }
+                EvaluationMachinePoll::Failed(failure) => {
+                    panic!("object fixture failed: {failure}")
+                }
+                EvaluationMachinePoll::ScheduleSpark(_)
+                | EvaluationMachinePoll::Exit(_)
+                | EvaluationMachinePoll::Cancelled => {
+                    panic!("object fixture crossed an unexpected orchestration boundary")
+                }
+            }
+            assert_ne!(attempt, 255, "retained object fixture did not complete");
+        }
+        unreachable!("bounded retained-object loop must complete or panic")
+    };
+    assert!(matches!(value.clone_core_for_test(), Value::Dict(_)));
+    assert_eq!(
+        first_dependency_demands.load(Ordering::SeqCst),
+        1,
+        "a completed dependency prefix must not be replayed by a new route"
+    );
+}
+
+#[test]
+fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
+    let context = isolated_context();
+    let defs_demands = Arc::new(AtomicUsize::new(0));
+    let base_result = PromisedValue::new(context.values(), "retained object base application");
+    let self_result = PromisedValue::new(context.values(), "retained object self application");
+    let _base_result_owner = base_result.root(context.values());
+    let _self_result_owner = self_result.root(context.values());
+    let self_function = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::Promised(self_result.clone())),
+    );
+    let _self_function_owner =
+        crate::runtime::RuntimeValueRoot::new(context.values(), self_function.clone());
+    let base_function = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::Promised(base_result.clone())),
+    );
+    let _base_function_owner =
+        crate::runtime::RuntimeValueRoot::new(context.values(), base_function.clone());
+
+    let observed_defs = Arc::clone(&defs_demands);
+    let definitions = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted object definitions demand",
+        move |_| {
+            observed_defs.fetch_add(1, Ordering::SeqCst);
+            Ok(base_function.clone())
+        },
+    ));
+    let spec = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*crate::core::keys::NAME).clone(),
+                Value::binary_from_text("root"),
+            )
+            .insert(
+                (*crate::core::keys::DEPS).clone(),
+                Value::List(List::empty()),
+            )
+            .insert((*crate::core::keys::DEFS).clone(), definitions),
+    );
+    let lazy = LazyValue::computed_fixpoint(
+        context.values(),
+        "counted object mix",
+        FixpointComputation::ObjectInstance(spec),
+    );
+    let _retained = lazy.root(context.values());
+    let object = Value::Lazy(lazy);
+    #[cfg(feature = "interaction-net-profiling")]
+    let profile_before = context.values().interaction_net_profile_snapshot();
+
+    eval_value(&context, &object).expect_err("the base application must suspend");
+    collect_between_handoffs(&context);
+    assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
+    crate::core::set_test_promise(context.values(), &base_result, self_function)
+        .expect("the retained base application should accept its function result");
+
+    eval_value(&context, &object).expect_err("the self application must suspend");
+    collect_between_handoffs(&context);
+    assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
+    crate::core::set_test_promise(
+        context.values(),
+        &self_result,
+        Value::Dict(Dict::new_sync().insert(Key::binary_from_text("answer"), number(42))),
+    )
+    .expect("the retained self application should accept its result");
+
+    let Value::Dict(value) =
+        eval_value(&context, &object).expect("the retained mixin should finish")
+    else {
+        panic!("the counted mixin must produce an object dictionary")
+    };
+    assert_eq!(
+        value.get(&Key::binary_from_text("answer")),
+        Some(&number(42))
+    );
+    assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
+    #[cfg(feature = "interaction-net-profiling")]
+    {
+        let profile_after = context.values().interaction_net_profile_snapshot();
+        assert_eq!(
+            profile_after.reductions.call - profile_before.reductions.call,
+            2,
+            "the base and self mixin applications must each commit exactly once"
+        );
+    }
 }
 
 #[test]
