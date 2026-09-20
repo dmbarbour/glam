@@ -71,6 +71,38 @@ pub(super) fn initial_builder_state(
     )
 }
 
+/// Returns the evaluator-private API passed to a pure construction program.
+///
+/// These are ordinary values. The operation builtins retain the implicit
+/// builder-state argument in their arity, so normal partial application is
+/// the source-visible operation value.
+#[allow(
+    dead_code,
+    reason = "PNC4 assembles the private API before PNC5 composes the public runner"
+)]
+pub(super) fn private_builder_api(_access: &RuntimeValueAccess<'_>) -> Value {
+    let mut api = Dict::new_sync();
+    for (name, builtin) in [
+        ("r", Builtin::InteractionNetBuilderReturn),
+        ("seq", Builtin::InteractionNetBuilderSeq),
+        ("alt", Builtin::InteractionNetBuilderAlt),
+        ("fail", Builtin::InteractionNetBuilderFail),
+        ("cut", Builtin::InteractionNetBuilderCut),
+        ("fix", Builtin::InteractionNetBuilderFix),
+        ("get", Builtin::InteractionNetBuilderGet),
+        ("set", Builtin::InteractionNetBuilderSet),
+        ("reset", Builtin::InteractionNetBuilderReset),
+        ("shift", Builtin::InteractionNetBuilderShift),
+        ("bind", Builtin::InteractionNetBuilderBind),
+        ("copy", Builtin::InteractionNetBuilderCopy),
+        ("data", Builtin::InteractionNetBuilderData),
+        ("wire", Builtin::InteractionNetBuilderWire),
+    ] {
+        api = api.insert(Key::atom_from_text(name), Value::Builtin(builtin));
+    }
+    Value::Dict(api)
+}
+
 #[cfg(test)]
 pub(super) fn control_key_for_test() -> Key {
     CONTROL_KEY.clone()

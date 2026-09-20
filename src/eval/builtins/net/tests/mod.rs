@@ -750,6 +750,118 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
 }
 
 #[test]
+fn private_builder_api_exposes_only_pure_task_local_and_construction_operations() {
+    let context = EvalContext::standalone();
+    with_access(&context, |access| {
+        let Value::Dict(api) = super::builder::private_builder_api(access) else {
+            panic!("private builder API must be a dictionary")
+        };
+        let expected = [
+            "r", "seq", "alt", "fail", "cut", "fix", "get", "set", "reset", "shift", "bind",
+            "copy", "data", "wire",
+        ];
+        assert_eq!(api.iter().count(), expected.len());
+        for name in expected {
+            assert!(
+                api.get(&crate::core::Key::atom_from_text(name)).is_some(),
+                "private builder API must expose `{name}`"
+            );
+        }
+        for name in ["heap", "exit", "task", "log", "env", "refl"] {
+            assert!(
+                api.get(&crate::core::Key::atom_from_text(name)).is_none(),
+                "private builder API must not expose `{name}`"
+            );
+        }
+    });
+}
+
+#[test]
+fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() {
+    let context = EvalContext::standalone();
+    let (initial, [left, right]) = with_access(&context, |access| {
+        super::builder::construction_state_and_ports_for_test(access)
+    });
+    let (choice, fixed) = with_access(&context, |access| {
+        let wire = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderWire,
+            vec![left, right],
+        );
+        let wire_then_fail = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![
+                wire,
+                constant_builder_continuation(
+                    access,
+                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                ),
+            ],
+        );
+        let bind_then_fail = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![
+                Value::Builtin(Builtin::InteractionNetBuilderBind),
+                constant_builder_continuation(access, wire_then_fail),
+            ],
+        );
+        let right = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReturn,
+            vec![Value::binary_from_text("right")],
+        );
+        let choice = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderAlt,
+            vec![bind_then_fail, right],
+        );
+        let fixed = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderFix,
+            vec![constant_builder_continuation(
+                access,
+                partial_builder(
+                    access,
+                    Builtin::InteractionNetBuilderReturn,
+                    vec![Value::binary_from_text("fixed")],
+                ),
+            )],
+        );
+        (choice, fixed)
+    });
+
+    let [value, rolled_back] = run_builder_at(&context, choice, duplicate(&context, &initial), 0);
+    assert_eq!(value, Value::binary_from_text("right"));
+    with_access(&context, |access| {
+        assert_eq!(
+            super::builder::construction_journal_lengths_for_test(access, &rolled_back)
+                .expect("selected branch must retain strict journals"),
+            (0, 0),
+            "failed branch construction must not escape through either journal"
+        );
+    });
+
+    let [_ports, after_bind] = run_builder_at(
+        &context,
+        Value::Builtin(Builtin::InteractionNetBuilderBind),
+        initial,
+        0,
+    );
+    let [value, after_fix] = run_builder_at(&context, fixed, after_bind, 0);
+    assert_eq!(value, Value::binary_from_text("fixed"));
+    with_access(&context, |access| {
+        assert_eq!(
+            super::builder::construction_journal_lengths_for_test(access, &after_fix)
+                .expect("fixed builder state must retain strict journals"),
+            (1, 0),
+            "fix must preserve the construction state supplied by its caller"
+        );
+    });
+}
+
+#[test]
 fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
     let context = EvalContext::standalone();
     let visible = crate::core::Key::atom_from_text("visible");

@@ -699,8 +699,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC3 adds one bounded strict scan of the reset stack to locate the nearest
 // matching delimiter. The key conversion itself remains resumable regional
 // work; only the already-decoded in-memory frame vector is searched here.
-const EXPECTED_OCCURRENCES: usize = 208;
-const EXPECTED_FINGERPRINT: u64 = 1_471_399_140_820_704_322;
+// PNC4 adds the private API assembly loop, ordered operand queue, checked port
+// allocation, journal/result construction, and its test-only operation loops.
+// Semantic operand demand remains one resumable regional state machine.
+const EXPECTED_OCCURRENCES: usize = 214;
+const EXPECTED_FINGERPRINT: u64 = 3_439_373_140_276_050_711;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -713,12 +716,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 54),
-    (Signal::UserSizedLoop, 87),
+    (Signal::StructuralRecursion, 55),
+    (Signal::UserSizedLoop, 92),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 119),
+    (WorkShape::DemandThenInspect, 125),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),

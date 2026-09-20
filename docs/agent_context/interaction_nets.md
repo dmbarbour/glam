@@ -16,8 +16,9 @@ of the interaction-net migration.
 - `src/eval/builtins/net/construction.rs` interprets source construction
   effects and replays the selected journal.
 - `src/eval/builtins/net/builder.rs` owns the evaluator-private pure
-  state-over-list handler assembled by PNC2/PNC3; production construction does
-  not enter it until PNC5.
+  state-over-list handler assembled by PNC2-PNC4, including the fixed-width
+  protected state, compact construction transitions, and exact private API;
+  production construction does not enter it until PNC5.
 - `src/eval/net.rs` and `src/eval/operator.rs` drive specialization work.
 
 Keep syntax and core policy out of the generic interaction-net modules.

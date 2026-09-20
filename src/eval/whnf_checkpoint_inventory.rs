@@ -355,10 +355,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // access, builtin, list, list-effect, and object child reducers.
     // PNC2C gives the builder state record and nested dictionary update the
     // same exact lazy source owner as their managed builtin checkpoint.
-    (CheckpointApi::WithSourceOwner, 48),
+    // PNC4C adds one ordered construction-operand demand queue under that
+    // same checkpoint and source owner.
+    (CheckpointApi::WithSourceOwner, 49),
 ];
-const EXPECTED_OCCURRENCES: usize = 79;
-const EXPECTED_FINGERPRINT: u64 = 14_172_938_360_768_588_101;
+const EXPECTED_OCCURRENCES: usize = 80;
+const EXPECTED_FINGERPRINT: u64 = 16_928_895_838_830_441_123;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

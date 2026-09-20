@@ -1,6 +1,6 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0-PNC3 completed on 2026-09-20. The
+Status: active; PNC0-PNC4 completed on 2026-09-20. The
 [post-PNC3 review](../reviews/PureInteractionNetConstructionPNC3_2026-09-20.md)
 found no semantic defect, and its focused verification and reset-key
 representation remediations are complete. PNC4 is next. This is the focused
@@ -739,9 +739,9 @@ begin without changing PNC3's architecture or semantics.
 
 ### PNC4 — Pure net-builder API
 
-Status: ready after the post-PNC3 review remediations. The implementation
-should use the following checkpoints rather than combining state
-representation, operand demand, and API assembly in one change.
+Status: complete on 2026-09-20. The implementation used the following
+checkpoints rather than combining state representation, operand demand, and
+API assembly in one change.
 
 #### PNC4A — Compact replay schema and initial state
 
@@ -843,6 +843,8 @@ remaining transition boundary.
 
 #### PNC4D — Private API assembly and closure
 
+Status: complete on 2026-09-20.
+
 - Assemble one private API dictionary containing the PNC2/PNC3 standard
   task-local operations plus bind, copy, data, and wire. The builtin arities
   are the operation-arity contract; direct malformed internal calls may fail
@@ -852,6 +854,15 @@ remaining transition boundary.
   kinds, foreign invocation tokens, and lazy data payloads.
 - Reconcile builtin, raw-value, durable-owner, persistent-edge, recursive-cell,
   and WHNF inventories before closing the phase.
+
+Completion record: the private dictionary exposes exactly `r`, `seq`, `alt`,
+`fail`, `cut`, `fix`, `get`, `set`, `reset`, `shift`, `bind`, `copy`, `data`,
+and `wire`; no reflection, host, heap, logging, environment, exit, or task
+capability enters the builder. Failed alternatives roll back constructor and
+wire journals together, while builder fixpoints preserve the state supplied
+by their caller. Builtin compilation and the raw-value, durable-owner,
+persistent-edge, recursive-identity, bounded-access, registered-root, and WHNF
+censuses are reconciled with the new regional operand queue.
 
 Exit: running a construction program yields only ordinary list-effect
 outcomes containing strict semantic netlists.
