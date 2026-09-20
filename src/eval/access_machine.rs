@@ -99,7 +99,7 @@ enum ManagedKeyConversionState {
     List(Box<RegionalKeyList>),
 }
 
-struct RegionalKeyConversion {
+pub(in crate::eval) struct RegionalKeyConversion {
     state: RegionalKeyConversionState,
     source_owner: Option<LazyId>,
 }
@@ -134,7 +134,7 @@ struct RegionalKeyList {
     source_owner: Option<LazyId>,
 }
 
-enum RegionalConversionPoll<T> {
+pub(in crate::eval) enum RegionalConversionPoll<T> {
     Ready(T),
     Boundary(RegionalBoundaryRequest),
     Yielded,
@@ -566,10 +566,30 @@ impl ManagedKeyConversionRoot {
 }
 
 impl RegionalKeyConversion {
-    fn new(access: &EvaluationValueAccess<'_>, value: Value, source_owner: Option<LazyId>) -> Self {
+    pub(in crate::eval) fn new(
+        access: &EvaluationValueAccess<'_>,
+        value: Value,
+        source_owner: Option<LazyId>,
+    ) -> Self {
         Self {
             state: RegionalKeyConversionState::Demand(regional_whnf(access, value, source_owner)),
             source_owner,
+        }
+    }
+
+    pub(in crate::eval) fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalConversionPoll<Key> {
+        match self.poll_optional_in(access, step_budget) {
+            RegionalConversionPoll::Ready(Some(key)) => RegionalConversionPoll::Ready(key),
+            RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Failed(Arc::new(
+                EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
+            )),
+            RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
+            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
         }
     }
 
@@ -664,7 +684,7 @@ impl RegionalKeyConversion {
         }
     }
 
-    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+    pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match &self.state {
             RegionalKeyConversionState::Demand(work) => work.trace_managed_edges(visitor),
             RegionalKeyConversionState::Dict(dict) => dict.trace_managed_edges(visitor),

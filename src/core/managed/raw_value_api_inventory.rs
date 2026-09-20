@@ -181,6 +181,7 @@ impl ApiOccurrence {
             || self.declaration == "src/core/managed.rs::trace_compatibility_value_managed_edges"
             || self.declaration == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
             || self.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
+            || self.declaration == "src/eval/object_machine.rs::trace_object_values"
             || self.declaration == "src/eval/whnf.rs::trace_whnf_value"
             || self.declaration == "src/eval/whnf.rs::trace_whnf_values"
         {
@@ -1359,13 +1360,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        454,
+        468,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        15_892_277_856_925_202_571,
+        18_035_225_678_864_592_804,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1376,8 +1377,8 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
     let expected = BTreeMap::from([
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 158),
-        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 29),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 171),
+        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 257),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
@@ -1431,6 +1432,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
             || occurrence.declaration
                 == "src/core/managed.rs::trace_compatibility_value_managed_edges"
             || occurrence.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
+            || occurrence.declaration == "src/eval/object_machine.rs::trace_object_values"
             || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_value"
             || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_values"
     }));

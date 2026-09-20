@@ -5771,12 +5771,38 @@ for it:
      retain the existing non-list failure wording and the list/binary and byte
      projection contracts. Back projection remains rooted because no current
      managed checkpoint embeds it.
-   - **W6G.1f.3e.2 — regional object representation.** Convert original spec,
-     self marker, linearization frames, seen specs, dependency sequences,
-     definitions stack, accumulated base, and application state to raw traced
-     edges. Use regional WHNF, key conversion, and list-front children. Add one
-     exhaustive visitor over the complete state and preserve C3 ordering,
-     anonymous-name identity, duplicate-name identity checks, and mix order.
+   - **W6G.1f.3e.2 — regional object representation.** This checkpoint has two
+     compile-safe parts because raw state may not cross a returned poll without
+     a traced owner:
+
+    - **W6G.1f.3e.2a — regional child APIs.** **Complete (2026-09-20).** Expose the already canonical
+       regional key-conversion and structured-application constructors within
+       `crate::eval`; do not introduce a second converter or WHNF frame shape.
+    - **W6G.1f.3e.2b — regional object state and temporary adapter.** **Complete
+      (2026-09-20).** Convert
+       original spec, self marker, linearization frames, seen specs,
+       dependency sequences, definitions stack, accumulated base, and
+       application state to raw traced edges. Use regional WHNF, key
+       conversion, and list-front children. Add one exhaustive visitor over
+       the complete state, then place it behind one temporary managed
+       cell/root so the current parent remains valid until W6G.1f.3e.3. Preserve
+       C3 ordering, anonymous-name identity, duplicate-name identity checks,
+       and mix order. Do not retain a rooted and regional object traversal in
+       parallel.
+
+      `RegionalObjectFixpoint` now owns the complete raw object traversal:
+      original spec, self marker, C3 frames and seen set, dependency-list
+      progress, mix state, and regional WHNF/key/list-front children. Its
+      exhaustive visitor is the single collector contract for those edges.
+      `ObjectFixpointMachine` retains only a seed-or-managed compatibility
+      shell and promotes the seed once into one managed cell, so no rooted and
+      regional traversal coexist. All semantic duplication and identity tests
+      occur under caller-supplied access; boundary translation and durable
+      result publication remain outside it. The exact inventories record the
+      temporary carrier and the reduction from fourteen scoped acquisitions
+      and three durable contexts to one scoped acquisition and two durable
+      contexts. The temporary root is deliberately assigned to the direct
+      lazy checkpoint cutover in W6G.1f.3e.3.
    - **W6G.1f.3e.3 — managed checkpoint and source cutover.** Add the typed
      object-fixpoint arm beneath `ManagedLazyCheckpointEdge`, install it from
      `FixpointComputation::ObjectInstance`, and replace

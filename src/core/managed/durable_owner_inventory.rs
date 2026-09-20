@@ -407,13 +407,13 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/object_machine.rs",
         "object-fixpoint, C3-linearization, and mix progress",
-        "canonical RuntimeValueRoot object/spec/mixin fields plus child WHNF and list-front machines",
+        "raw regional object/spec/mixin fields plus regional WHNF, key-conversion, and list-front child state beneath one temporary managed owner",
         "yielded or dependency-blocked object source evaluation",
         "object recipe admission and bounded child-result publication",
         "object completion, failure, cancellation, or lazy-owner retirement",
         ManagedRootSurface,
         RootSurface,
-        "W3B.2b"
+        "W6G.1f.3e.2a-.2b"
     ),
     closed_durable!(
         "src/eval/object_builtin_machine.rs",
@@ -957,11 +957,13 @@ fn is_production_source(relative: &Path) -> bool {
 // retiring the corresponding per-value runtime-root fields. W6G.1f.3d.2-.3
 // then move computed-access arguments, demand, conversions, and terminal
 // failure into one traced lazy checkpoint, trading three durable root signals
-// for raw managed values plus one exact typed edge.
-const DECLARATION_BASELINE_COUNT: usize = 236;
+// for raw managed values plus one exact typed edge. W6G.1f.3e.2a-.2b then
+// regionalize object-fixpoint child state and place its complete raw edge graph
+// beneath one temporary managed owner pending direct lazy ownership in .3e.3.
+const DECLARATION_BASELINE_COUNT: usize = 240;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([145, 260, 5, 20, 13, 8, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_521_991_096_834_021_463;
+    DeclarationSignals::new([156, 252, 5, 22, 13, 8, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 2_316_785_419_754_961_193;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

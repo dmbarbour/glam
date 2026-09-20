@@ -175,6 +175,29 @@ impl RegionalWhnfWork {
         self
     }
 
+    pub(crate) fn from_application_checkpoint_in(
+        access: &EvaluationValueAccess<'_>,
+        function: Value,
+        arguments: &[Value],
+        source_owner: Option<LazyId>,
+    ) -> Self {
+        assert!(!arguments.is_empty(), "application requires an argument");
+        Self::from_parts(
+            access,
+            function,
+            vec![WhnfContinuation::Application {
+                arguments: arguments
+                    .iter()
+                    .map(|argument| access.values().duplicate_value(argument))
+                    .collect(),
+                next: 0,
+            }],
+            BTreeSet::new(),
+            source_owner,
+            None,
+        )
+    }
+
     fn from_parts(
         _access: &EvaluationValueAccess<'_>,
         focus: Value,
@@ -760,20 +783,11 @@ impl WhnfComputation {
         arguments: &[Value],
         source_owner: Option<LazyId>,
     ) -> Self {
-        assert!(!arguments.is_empty(), "application requires an argument");
-        let work = RegionalWhnfWork::from_parts(
+        let work = RegionalWhnfWork::from_application_checkpoint_in(
             access,
             function,
-            vec![WhnfContinuation::Application {
-                arguments: arguments
-                    .iter()
-                    .map(|argument| access.values().duplicate_value(argument))
-                    .collect(),
-                next: 0,
-            }],
-            BTreeSet::new(),
+            arguments,
             source_owner,
-            None,
         );
         Self::from_structured_work_in(access, work)
     }

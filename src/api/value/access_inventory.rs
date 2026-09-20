@@ -218,9 +218,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/object_machine.rs",
         0,
         0,
-        4,
-        "pollable C3 traversal, composed-definition expansion, and object-mixin completion",
-        "W3B.2b explicit object-fixpoint source owner"
+        1,
+        "temporary managed object-fixpoint checkpoint publication",
+        "W6G.1f.3e.2b regional object state behind one compatibility owner"
     ),
     entry!(
         "src/eval/pattern_machine.rs",
@@ -574,9 +574,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/object_composition_machine.rs::next_override_step"
                 | "src/eval/object_composition_machine.rs::root_application"
                 | "src/eval/object_composition_machine.rs::root_plain_extension_in"
-                | "src/eval/object_machine.rs::composed_defs_parts"
-                | "src/eval/object_machine.rs::finish_object"
-                | "src/eval/object_machine.rs::spec_member_root"
+                | "src/eval/object_machine.rs::impl ManagedObjectFixpointRoot::poll_in"
                 | "src/eval/pattern_machine.rs::pattern_effect_in"
                 | "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
@@ -904,10 +902,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/object_composition_machine.rs::next_override_step#3|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_application#1|surface=access-publication|scope=production",
     "src/eval/object_composition_machine.rs::root_plain_extension_in#1|surface=access-publication|scope=production",
-    "src/eval/object_machine.rs::composed_defs_parts#1|surface=access-publication|scope=production",
-    "src/eval/object_machine.rs::composed_defs_parts#2|surface=access-publication|scope=production",
-    "src/eval/object_machine.rs::finish_object#1|surface=access-publication|scope=production",
-    "src/eval/object_machine.rs::spec_member_root#1|surface=access-publication|scope=production",
+    "src/eval/object_machine.rs::impl ManagedObjectFixpointRoot::poll_in#1|surface=access-publication|scope=production",
     "src/eval/pattern_machine.rs::impl PatternDictTakeMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/pattern_machine.rs::pattern_effect_in#1|surface=access-publication|scope=production",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",

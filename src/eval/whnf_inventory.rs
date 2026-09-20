@@ -665,8 +665,11 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // object owner while preserving base-before-dictionary demand.
 // W6G.1f.3d.1 makes the two regional key/list trace walks explicit access-path
 // loops inside one managed converter checkpoint.
-const EXPECTED_OCCURRENCES: usize = 190;
-const EXPECTED_FINGERPRINT: u64 = 8_928_675_021_845_727_841;
+// W6G.1f.3e.2 replaces recursive rooted object helpers with explicit regional
+// state transitions. Five bounded demand-and-inspect walks become visible to
+// the census while one obsolete recursive helper disappears.
+const EXPECTED_OCCURRENCES: usize = 195;
+const EXPECTED_FINGERPRINT: u64 = 10_061_430_378_926_807_665;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -679,12 +682,12 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 72),
-    (Signal::UserSizedLoop, 51),
+    (Signal::StructuralRecursion, 71),
+    (Signal::UserSizedLoop, 57),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 110),
+    (WorkShape::DemandThenInspect, 115),
     (WorkShape::OrderedOperands, 6),
     (WorkShape::CollectionWalk, 11),
     (WorkShape::KeyConversion, 2),

@@ -1,20 +1,30 @@
 //! Pollable object-fixpoint construction.
 //!
-//! C3 traversal and the definitions fold retain explicit rooted state. No
-//! recursive evaluator call or Rust recursion survives a returned poll.
+//! C3 traversal and the definitions fold retain one traced regional state. No
+//! recursive evaluator call, registered root bundle, or Rust recursion
+//! survives beneath that state.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, TryLockError};
 
-use crate::core::{Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, Value, keys};
+use glam_gc::{Root, Trace, Visitor};
+
+use crate::core::{
+    Builtin, Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, ManagedDropRecord,
+    ManagedFamily, Value, keys, managed_slot_extent, trace_compatibility_value_managed_edges,
+};
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, WhnfOwnerPoll, poll_whnf_computation,
+    EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
+    interpret_whnf_poll,
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::access_machine::{ConversionPoll, KeyConversionMachine};
-use super::list_machine::{ListFrontMachine, ListFrontPoll};
-use super::whnf::WhnfComputation;
+use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion};
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
+use super::whnf::{
+    RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
+    drive_regional_in_place, reduce_semantic_shell,
+};
 
 pub(super) enum ObjectFixpointPoll {
     Ready(RuntimeValueRoot),
@@ -24,9 +34,30 @@ pub(super) enum ObjectFixpointPoll {
 }
 
 pub(super) struct ObjectFixpointMachine {
+    checkpoint: DurableObjectFixpointCheckpoint,
+}
+
+enum DurableObjectFixpointCheckpoint {
+    Seed {
+        source_owner: LazyId,
+        spec: RuntimeValueRoot,
+        self_marker: RuntimeValueRoot,
+    },
+    Managed(ManagedObjectFixpointRoot),
+}
+
+struct ManagedObjectFixpointRoot {
+    root: Root<ManagedObjectFixpointCell>,
+}
+
+struct ManagedObjectFixpointCell {
+    state: Mutex<RegionalObjectFixpoint>,
+}
+
+struct RegionalObjectFixpoint {
     source_owner: LazyId,
-    original_spec: RuntimeValueRoot,
-    self_marker: RuntimeValueRoot,
+    original_spec: Value,
+    self_marker: Value,
     state: ObjectState,
 }
 
@@ -38,7 +69,7 @@ enum ObjectState {
 struct ObjectLinearizationMachine {
     source_owner: LazyId,
     stack: Vec<LinearizationFrame>,
-    seen: BTreeMap<Key, RuntimeValueRoot>,
+    seen: BTreeMap<Key, Value>,
     next_anonymous_id: u64,
 }
 
@@ -47,24 +78,23 @@ struct LinearizationFrame {
 }
 
 enum LinearizationState {
-    DemandSpec(WhnfComputation),
+    DemandSpec(RegionalWhnfWork),
     ConvertName {
-        spec: RuntimeValueRoot,
-        conversion: KeyConversionMachine,
+        spec: Value,
+        conversion: RegionalKeyConversion,
     },
     DemandDeps {
         entry: LinearizedObjectSpec,
-        demand: WhnfComputation,
+        demand: RegionalWhnfWork,
     },
     ReadDeps {
         entry: LinearizedObjectSpec,
-        tail: RuntimeValueRoot,
-        front: Option<ListFrontMachine>,
-        deps: Vec<RuntimeValueRoot>,
+        front: RegionalListFront,
+        deps: Vec<Value>,
     },
     VisitDeps {
         entry: LinearizedObjectSpec,
-        deps: Vec<RuntimeValueRoot>,
+        deps: Vec<Value>,
         next: usize,
         sequences: Vec<Vec<LinearizedObjectSpec>>,
         direct: Vec<LinearizedObjectSpec>,
@@ -74,20 +104,33 @@ enum LinearizationState {
     Transition,
 }
 
-#[derive(Clone)]
 struct LinearizedObjectSpec {
-    spec: RuntimeValueRoot,
+    spec: Value,
     name: Key,
     anonymous_id: Option<u64>,
 }
 
 struct ObjectMixMachine {
-    specs: Vec<RuntimeValueRoot>,
+    specs: Vec<Value>,
     next: usize,
-    base: RuntimeValueRoot,
-    pending_defs: Vec<RuntimeValueRoot>,
+    base: Value,
+    pending_defs: Vec<Value>,
     phase: MixPhase,
-    application: Option<WhnfComputation>,
+    application: Option<RegionalWhnfWork>,
+}
+
+enum RegionalObjectFixpointPoll {
+    Ready(Value),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(Arc<EvaluationFailure>),
+}
+
+enum DurableObjectFixpointPoll {
+    Ready(RuntimeValueRoot),
+    Boundary(RegionalBoundaryRequest),
+    Yielded,
+    Failed(RuntimeFailureRoot),
 }
 
 #[derive(Clone, Copy)]
@@ -105,80 +148,136 @@ impl ObjectFixpointMachine {
         self_marker: RuntimeValueRoot,
     ) -> Self {
         Self {
-            source_owner,
-            original_spec: spec.clone(),
-            self_marker,
-            state: ObjectState::Linearize(ObjectLinearizationMachine::new(spec, source_owner)),
+            checkpoint: DurableObjectFixpointCheckpoint::Seed {
+                source_owner,
+                spec,
+                self_marker,
+            },
         }
     }
 
     pub(super) fn poll(
         &mut self,
         poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
+        _context: &EvaluatorStepContext<'_>,
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> ObjectFixpointPoll {
+        let result = poll_context.with_value_access(durable_context, |access| {
+            self.promote_in(&access);
+            let DurableObjectFixpointCheckpoint::Managed(root) = &self.checkpoint else {
+                unreachable!("object-fixpoint seed must promote under access")
+            };
+            root.poll_in(&access, step_budget)
+        });
+        interpret_durable_object_poll(result, durable_context)
+    }
+
+    fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
+        let DurableObjectFixpointCheckpoint::Seed {
+            source_owner,
+            spec,
+            self_marker,
+        } = &self.checkpoint
+        else {
+            return;
+        };
+        let state = RegionalObjectFixpoint::new_in(
+            access,
+            *source_owner,
+            access.clone_root(spec),
+            access.clone_root(self_marker),
+        );
+        self.checkpoint = DurableObjectFixpointCheckpoint::Managed(
+            ManagedObjectFixpointRoot::new_in(access, state),
+        );
+    }
+}
+
+impl RegionalObjectFixpoint {
+    fn new_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        spec: Value,
+        self_marker: Value,
+    ) -> Self {
+        let original_spec = access.values().duplicate_value(&spec);
+        Self {
+            source_owner,
+            original_spec,
+            self_marker,
+            state: ObjectState::Linearize(ObjectLinearizationMachine::new_in(
+                access,
+                spec,
+                source_owner,
+            )),
+        }
+    }
+
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalObjectFixpointPoll {
         match &mut self.state {
-            ObjectState::Linearize(machine) => {
-                match machine.poll(poll_context, context, durable_context, step_budget) {
-                    LinearizationPoll::Ready(mut entries) => {
-                        entries.reverse();
-                        self.state = ObjectState::Mix(ObjectMixMachine::new(
-                            context,
-                            entries.into_iter().map(|entry| entry.spec).collect(),
-                        ));
-                        ObjectFixpointPoll::Yielded
+            ObjectState::Linearize(machine) => match machine.poll_in(access, step_budget) {
+                LinearizationPoll::Ready(mut entries) => {
+                    entries.reverse();
+                    self.state = ObjectState::Mix(ObjectMixMachine::new_in(
+                        access,
+                        entries.into_iter().map(|entry| entry.spec).collect(),
+                    ));
+                    RegionalObjectFixpointPoll::Yielded
+                }
+                LinearizationPoll::Boundary(request) => {
+                    RegionalObjectFixpointPoll::Boundary(request)
+                }
+                LinearizationPoll::Yielded => RegionalObjectFixpointPoll::Yielded,
+                LinearizationPoll::Failed(failure) => RegionalObjectFixpointPoll::Failed(failure),
+            },
+            ObjectState::Mix(machine) => {
+                match machine.poll_in(access, step_budget, self.source_owner, &self.self_marker) {
+                    RegionalObjectFixpointPoll::Ready(base) => {
+                        match finish_object_in(access, base, &self.original_spec) {
+                            Ok(object) => RegionalObjectFixpointPoll::Ready(object),
+                            Err(error) => {
+                                RegionalObjectFixpointPoll::Failed(error.into_permanent_failure())
+                            }
+                        }
                     }
-                    LinearizationPoll::Pending(dependency) => {
-                        ObjectFixpointPoll::Pending(dependency)
-                    }
-                    LinearizationPoll::Yielded => ObjectFixpointPoll::Yielded,
-                    LinearizationPoll::Failed(failure) => ObjectFixpointPoll::Failed(failure),
+                    other => other,
                 }
             }
-            ObjectState::Mix(machine) => match machine.poll(
-                poll_context,
-                context,
-                durable_context,
-                step_budget,
-                self.source_owner,
-                &self.self_marker,
-            ) {
-                ObjectFixpointPoll::Ready(base) => {
-                    match finish_object(context, base, &self.original_spec) {
-                        Ok(object) => ObjectFixpointPoll::Ready(object),
-                        Err(error) => ObjectFixpointPoll::Failed(root_halt(context, error)),
-                    }
-                }
-                other => other,
-            },
         }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.original_spec, visitor);
+        trace_compatibility_value_managed_edges(&self.self_marker, visitor);
+        self.state.trace_managed_edges(visitor);
     }
 }
 
 enum LinearizationPoll {
     Ready(Vec<LinearizedObjectSpec>),
-    Pending(crate::evaluation::WorkDependency),
+    Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(RuntimeFailureRoot),
+    Failed(Arc<EvaluationFailure>),
 }
 
 impl ObjectLinearizationMachine {
-    fn new(spec: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    fn new_in(access: &EvaluationValueAccess<'_>, spec: Value, source_owner: LazyId) -> Self {
         Self {
             source_owner,
-            stack: vec![LinearizationFrame::new(spec, source_owner)],
+            stack: vec![LinearizationFrame::new_in(access, spec, source_owner)],
             seen: BTreeMap::new(),
             next_anonymous_id: 0,
         }
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> LinearizationPoll {
         let state = std::mem::replace(
@@ -190,91 +289,106 @@ impl ObjectLinearizationMachine {
             LinearizationState::Transition,
         );
         match state {
-            LinearizationState::DemandSpec(mut demand) => {
-                match poll_whnf_computation(&mut demand, poll_context, durable_context, step_budget)
-                {
-                    WhnfOwnerPoll::Ready(spec) => {
-                        let name = match spec_name_root(context, &spec) {
+            LinearizationState::DemandSpec(mut demand) => match drive_regional_in_place(
+                access,
+                &mut demand,
+                step_budget,
+                reduce_semantic_shell,
+            ) {
+                RegionalWhnfStatus::Ready(spec) => {
+                    let name =
+                        match spec_member_in(access, &spec, &keys::NAME, SpecMemberDefault::Name) {
                             Ok(name) => name,
-                            Err(failure) => return LinearizationPoll::Failed(failure),
+                            Err(error) => {
+                                return LinearizationPoll::Failed(error.into_permanent_failure());
+                            }
                         };
-                        self.top_state(LinearizationState::ConvertName {
-                            spec,
-                            conversion: KeyConversionMachine::new(name, Some(self.source_owner)),
-                        });
-                        LinearizationPoll::Yielded
-                    }
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        self.top_state(LinearizationState::DemandSpec(demand));
-                        LinearizationPoll::Pending(dependency)
-                    }
-                    WhnfOwnerPoll::Yielded => {
-                        self.top_state(LinearizationState::DemandSpec(demand));
-                        LinearizationPoll::Yielded
-                    }
-                    WhnfOwnerPoll::Failed(failure) => LinearizationPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("object spec produced an external {boundary:?} boundary")
-                    }
+                    self.top_state(LinearizationState::ConvertName {
+                        spec,
+                        conversion: RegionalKeyConversion::new(
+                            access,
+                            name,
+                            Some(self.source_owner),
+                        ),
+                    });
+                    LinearizationPoll::Yielded
                 }
-            }
+                RegionalWhnfStatus::Boundary(request) => {
+                    self.top_state(LinearizationState::DemandSpec(demand));
+                    LinearizationPoll::Boundary(request)
+                }
+                RegionalWhnfStatus::Yielded => {
+                    self.top_state(LinearizationState::DemandSpec(demand));
+                    LinearizationPoll::Yielded
+                }
+                RegionalWhnfStatus::Failed(failure) => LinearizationPoll::Failed(failure),
+            },
             LinearizationState::ConvertName {
                 spec,
                 mut conversion,
-            } => match conversion.poll(poll_context, context, durable_context, step_budget) {
-                ConversionPoll::Ready(name) => {
+            } => match conversion.poll_in(access, step_budget) {
+                RegionalConversionPoll::Ready(name) => {
                     let anonymous_id = if is_anonymous_object_name(&name) {
                         let id = self.next_anonymous_id;
                         self.next_anonymous_id += 1;
                         Some(id)
                     } else {
                         if let Err(error) =
-                            remember_object_spec(context, &name, &spec, &mut self.seen)
+                            remember_object_spec_in(access, &name, &spec, &mut self.seen)
                         {
-                            return LinearizationPoll::Failed(root_halt(context, error));
+                            return LinearizationPoll::Failed(error.into_permanent_failure());
                         }
                         None
                     };
                     let entry = LinearizedObjectSpec {
-                        spec: spec.clone(),
+                        spec: access.values().duplicate_value(&spec),
                         name,
                         anonymous_id,
                     };
-                    let deps = match spec_member_root(
-                        context,
+                    let deps = match spec_member_in(
+                        access,
                         &spec,
                         &keys::DEPS,
                         SpecMemberDefault::Dependencies,
                     ) {
                         Ok(deps) => deps,
-                        Err(failure) => return LinearizationPoll::Failed(failure),
+                        Err(error) => {
+                            return LinearizationPoll::Failed(error.into_permanent_failure());
+                        }
                     };
                     self.top_state(LinearizationState::DemandDeps {
                         entry,
-                        demand: WhnfComputation::from_root(deps)
+                        demand: RegionalWhnfWork::from_focus(access, deps)
                             .with_source_owner(self.source_owner),
                     });
                     LinearizationPoll::Yielded
                 }
-                ConversionPoll::Pending(dependency) => {
+                RegionalConversionPoll::Boundary(request) => {
                     self.top_state(LinearizationState::ConvertName { spec, conversion });
-                    LinearizationPoll::Pending(dependency)
+                    LinearizationPoll::Boundary(request)
                 }
-                ConversionPoll::Yielded => {
+                RegionalConversionPoll::Yielded => {
                     self.top_state(LinearizationState::ConvertName { spec, conversion });
                     LinearizationPoll::Yielded
                 }
-                ConversionPoll::Failed(failure) => LinearizationPoll::Failed(failure),
+                RegionalConversionPoll::Failed(failure) => LinearizationPoll::Failed(failure),
             },
             LinearizationState::DemandDeps { entry, mut demand } => {
-                match poll_whnf_computation(&mut demand, poll_context, durable_context, step_budget)
-                {
-                    WhnfOwnerPoll::Ready(deps) => match classify_deps(context, &deps) {
+                match drive_regional_in_place(
+                    access,
+                    &mut demand,
+                    step_budget,
+                    reduce_semantic_shell,
+                ) {
+                    RegionalWhnfStatus::Ready(deps) => match classify_deps_in(access, deps) {
                         Ok(Some(list)) => {
                             self.top_state(LinearizationState::ReadDeps {
                                 entry,
-                                tail: list,
-                                front: None,
+                                front: RegionalListFront::new_in(
+                                    access,
+                                    list,
+                                    Some(self.source_owner),
+                                ),
                                 deps: Vec::new(),
                             });
                             LinearizationPoll::Yielded
@@ -283,76 +397,55 @@ impl ObjectLinearizationMachine {
                             self.top_state(empty_visit(entry));
                             LinearizationPoll::Yielded
                         }
-                        Err(error) => LinearizationPoll::Failed(root_halt(context, error)),
+                        Err(error) => LinearizationPoll::Failed(error.into_permanent_failure()),
                     },
-                    WhnfOwnerPoll::Pending(dependency) => {
+                    RegionalWhnfStatus::Boundary(request) => {
                         self.top_state(LinearizationState::DemandDeps { entry, demand });
-                        LinearizationPoll::Pending(dependency)
+                        LinearizationPoll::Boundary(request)
                     }
-                    WhnfOwnerPoll::Yielded => {
+                    RegionalWhnfStatus::Yielded => {
                         self.top_state(LinearizationState::DemandDeps { entry, demand });
                         LinearizationPoll::Yielded
                     }
-                    WhnfOwnerPoll::Failed(failure) => LinearizationPoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!(
-                            "object dependencies produced an external {boundary:?} boundary"
-                        )
-                    }
+                    RegionalWhnfStatus::Failed(failure) => LinearizationPoll::Failed(failure),
                 }
             }
             LinearizationState::ReadDeps {
                 entry,
-                tail,
-                front,
+                mut front,
                 mut deps,
-            } => {
-                let mut front =
-                    front.unwrap_or_else(|| ListFrontMachine::new(tail.clone(), self.source_owner));
-                match front.poll(poll_context, context, durable_context, step_budget) {
-                    ListFrontPoll::Ready(Some((value, tail))) => {
-                        deps.push(value);
-                        self.top_state(LinearizationState::ReadDeps {
-                            entry,
-                            tail,
-                            front: None,
-                            deps,
-                        });
-                        LinearizationPoll::Yielded
-                    }
-                    ListFrontPoll::Ready(None) => {
-                        self.top_state(LinearizationState::VisitDeps {
-                            entry,
-                            deps,
-                            next: 0,
-                            sequences: Vec::new(),
-                            direct: Vec::new(),
-                            saw_named: false,
-                            awaiting_child: false,
-                        });
-                        LinearizationPoll::Yielded
-                    }
-                    ListFrontPoll::Pending(dependency) => {
-                        self.top_state(LinearizationState::ReadDeps {
-                            entry,
-                            tail,
-                            front: Some(front),
-                            deps,
-                        });
-                        LinearizationPoll::Pending(dependency)
-                    }
-                    ListFrontPoll::Yielded => {
-                        self.top_state(LinearizationState::ReadDeps {
-                            entry,
-                            tail,
-                            front: Some(front),
-                            deps,
-                        });
-                        LinearizationPoll::Yielded
-                    }
-                    ListFrontPoll::Failed(failure) => LinearizationPoll::Failed(failure),
+            } => match front.poll_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some((value, tail))) => {
+                    deps.push(value);
+                    self.top_state(LinearizationState::ReadDeps {
+                        entry,
+                        front: RegionalListFront::new_in(access, tail, Some(self.source_owner)),
+                        deps,
+                    });
+                    LinearizationPoll::Yielded
                 }
-            }
+                RegionalListFrontPoll::Ready(None) => {
+                    self.top_state(LinearizationState::VisitDeps {
+                        entry,
+                        deps,
+                        next: 0,
+                        sequences: Vec::new(),
+                        direct: Vec::new(),
+                        saw_named: false,
+                        awaiting_child: false,
+                    });
+                    LinearizationPoll::Yielded
+                }
+                RegionalListFrontPoll::Boundary(request) => {
+                    self.top_state(LinearizationState::ReadDeps { entry, front, deps });
+                    LinearizationPoll::Boundary(request)
+                }
+                RegionalListFrontPoll::Yielded => {
+                    self.top_state(LinearizationState::ReadDeps { entry, front, deps });
+                    LinearizationPoll::Yielded
+                }
+                RegionalListFrontPoll::Failed(failure) => LinearizationPoll::Failed(failure),
+            },
             LinearizationState::VisitDeps {
                 entry,
                 deps,
@@ -366,8 +459,11 @@ impl ObjectLinearizationMachine {
                     !awaiting_child,
                     "a child frame must remain above its parent"
                 );
-                let Some(dep) = deps.get(next).cloned() else {
-                    return self.finish_frame(context, entry, sequences, direct);
+                let Some(dep) = deps
+                    .get(next)
+                    .map(|dep| access.values().duplicate_value(dep))
+                else {
+                    return self.finish_frame(access, entry, sequences, direct);
                 };
                 self.top_state(LinearizationState::VisitDeps {
                     entry,
@@ -379,7 +475,7 @@ impl ObjectLinearizationMachine {
                     awaiting_child: true,
                 });
                 self.stack
-                    .push(LinearizationFrame::new(dep, self.source_owner));
+                    .push(LinearizationFrame::new_in(access, dep, self.source_owner));
                 LinearizationPoll::Yielded
             }
             LinearizationState::Transition => {
@@ -390,16 +486,16 @@ impl ObjectLinearizationMachine {
 
     fn finish_frame(
         &mut self,
-        context: &EvaluatorStepContext<'_>,
+        access: &EvaluationValueAccess<'_>,
         entry: LinearizedObjectSpec,
         mut sequences: Vec<Vec<LinearizedObjectSpec>>,
         direct: Vec<LinearizedObjectSpec>,
     ) -> LinearizationPoll {
         sequences.push(direct);
         let mut result = vec![entry];
-        let merged = match c3_merge(sequences) {
+        let merged = match c3_merge(access, sequences) {
             Ok(merged) => merged,
-            Err(error) => return LinearizationPoll::Failed(root_halt(context, error)),
+            Err(error) => return LinearizationPoll::Failed(error.into_permanent_failure()),
         };
         result.extend(merged);
         self.stack.pop();
@@ -419,16 +515,16 @@ impl ObjectLinearizationMachine {
         debug_assert!(*awaiting_child);
         let dep_entry = result
             .first()
-            .cloned()
+            .map(|entry| entry.duplicate_in(access))
             .expect("object dependency linearization must retain its entry");
         if dep_entry.anonymous_id.is_some() {
             if *saw_named {
-                return LinearizationPoll::Failed(root_halt(
-                    context,
+                return LinearizationPoll::Failed(
                     EvaluationHalt::new(
                         "anonymous object dependencies must appear before named object dependencies",
-                    ),
-                ));
+                    )
+                    .into_permanent_failure(),
+                );
             }
         } else {
             *saw_named = true;
@@ -448,97 +544,102 @@ impl ObjectLinearizationMachine {
 }
 
 impl LinearizationFrame {
-    fn new(spec: RuntimeValueRoot, source_owner: LazyId) -> Self {
+    fn new_in(access: &EvaluationValueAccess<'_>, spec: Value, source_owner: LazyId) -> Self {
         Self {
             state: LinearizationState::DemandSpec(
-                WhnfComputation::from_root(spec).with_source_owner(source_owner),
+                RegionalWhnfWork::from_focus(access, spec).with_source_owner(source_owner),
             ),
         }
     }
 }
 
+impl LinearizedObjectSpec {
+    fn duplicate_in(&self, access: &EvaluationValueAccess<'_>) -> Self {
+        Self {
+            spec: access.values().duplicate_value(&self.spec),
+            name: self.name.clone(),
+            anonymous_id: self.anonymous_id,
+        }
+    }
+}
+
 impl ObjectMixMachine {
-    fn new(context: &EvaluatorStepContext<'_>, specs: Vec<RuntimeValueRoot>) -> Self {
+    fn new_in(_access: &EvaluationValueAccess<'_>, specs: Vec<Value>) -> Self {
         Self {
             specs,
             next: 0,
-            base: context.root_value(Value::Dict(Dict::new_sync())),
+            base: Value::Dict(Dict::new_sync()),
             pending_defs: Vec::new(),
             phase: MixPhase::Start,
             application: None,
         }
     }
 
-    fn poll(
+    fn poll_in(
         &mut self,
-        poll_context: &EvaluationPollContext,
-        context: &EvaluatorStepContext<'_>,
-        durable_context: &EvalContext,
+        access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
         source_owner: LazyId,
-        self_marker: &RuntimeValueRoot,
-    ) -> ObjectFixpointPoll {
+        self_marker: &Value,
+    ) -> RegionalObjectFixpointPoll {
         if let Some(application) = &mut self.application {
-            let value = match poll_whnf_computation(
+            let value = match drive_regional_in_place(
+                access,
                 application,
-                poll_context,
-                durable_context,
                 step_budget,
+                reduce_semantic_shell,
             ) {
-                WhnfOwnerPoll::Ready(value) => value,
-                WhnfOwnerPoll::Pending(dependency) => {
-                    return ObjectFixpointPoll::Pending(dependency);
+                RegionalWhnfStatus::Ready(value) => value,
+                RegionalWhnfStatus::Boundary(request) => {
+                    return RegionalObjectFixpointPoll::Boundary(request);
                 }
-                WhnfOwnerPoll::Yielded => return ObjectFixpointPoll::Yielded,
-                WhnfOwnerPoll::Failed(failure) => return ObjectFixpointPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("object mixin produced an external {boundary:?} boundary")
+                RegionalWhnfStatus::Yielded => return RegionalObjectFixpointPoll::Yielded,
+                RegionalWhnfStatus::Failed(failure) => {
+                    return RegionalObjectFixpointPoll::Failed(failure);
                 }
             };
             self.application = None;
             match self.phase {
                 MixPhase::DemandDefs => {
-                    if let Some((prior, extension)) = composed_defs_parts(context, &value) {
+                    if let Some((prior, extension)) = composed_defs_parts_in(access, &value) {
                         // This is a stack. The prior mixin must run before the
                         // extension, matching ObjectComposedDefs semantics.
                         self.pending_defs.push(extension);
                         self.pending_defs.push(prior);
                         self.phase = MixPhase::Start;
-                        return ObjectFixpointPoll::Yielded;
+                        return RegionalObjectFixpointPoll::Yielded;
                     }
-                    self.application = Some(application_in(
-                        context,
+                    self.application = Some(regional_application_in(
+                        access,
                         value,
                         std::slice::from_ref(&self.base),
                         source_owner,
                     ));
                     self.phase = MixPhase::ApplyBase;
-                    return ObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Yielded;
                 }
                 MixPhase::ApplyBase => {
-                    self.application = Some(application_in(
-                        context,
+                    self.application = Some(regional_application_in(
+                        access,
                         value,
                         std::slice::from_ref(self_marker),
                         source_owner,
                     ));
                     self.phase = MixPhase::ApplySelf;
-                    return ObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Yielded;
                 }
                 MixPhase::ApplySelf => {
-                    if !context.with_value_access(|access| {
-                        matches!(access.clone_root(&value), Value::Dict(_))
-                    }) {
-                        return ObjectFixpointPoll::Failed(root_halt(
-                            context,
+                    if !matches!(value, Value::Dict(_)) {
+                        return RegionalObjectFixpointPoll::Failed(
                             EvaluationHalt::new(
                                 "object definition mixin must produce a dictionary",
-                            ),
-                        ));
+                            )
+                            .into_permanent_failure(),
+                        );
                     }
                     self.base = value;
                     self.phase = MixPhase::Start;
-                    return ObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Yielded;
                 }
                 MixPhase::Start => unreachable!("object mix phase must name its application"),
             }
@@ -546,17 +647,17 @@ impl ObjectMixMachine {
 
         if self.pending_defs.is_empty() {
             let Some(spec) = self.specs.get(self.next) else {
-                return ObjectFixpointPoll::Ready(self.base.clone());
+                return RegionalObjectFixpointPoll::Ready(
+                    access.values().duplicate_value(&self.base),
+                );
             };
-            let defs = match spec_member_root(
-                context,
-                spec,
-                &keys::DEFS,
-                SpecMemberDefault::Definitions,
-            ) {
-                Ok(defs) => defs,
-                Err(failure) => return ObjectFixpointPoll::Failed(failure),
-            };
+            let defs =
+                match spec_member_in(access, spec, &keys::DEFS, SpecMemberDefault::Definitions) {
+                    Ok(defs) => defs,
+                    Err(error) => {
+                        return RegionalObjectFixpointPoll::Failed(error.into_permanent_failure());
+                    }
+                };
             self.next += 1;
             self.pending_defs.push(defs);
         }
@@ -564,60 +665,41 @@ impl ObjectMixMachine {
             .pending_defs
             .pop()
             .expect("an unfinished object spec retains a definitions mixin");
-        self.application = Some(WhnfComputation::from_root(defs).with_source_owner(source_owner));
+        self.application =
+            Some(RegionalWhnfWork::from_focus(access, defs).with_source_owner(source_owner));
         self.phase = MixPhase::DemandDefs;
-        ObjectFixpointPoll::Yielded
+        RegionalObjectFixpointPoll::Yielded
     }
 }
 
-fn composed_defs_parts(
-    context: &EvaluatorStepContext<'_>,
-    defs: &RuntimeValueRoot,
-) -> Option<(RuntimeValueRoot, RuntimeValueRoot)> {
-    context.with_value_access(|access| {
-        let Value::PartialBuiltin(call) = access.clone_root(defs) else {
-            return None;
-        };
-        if call.builtin != Builtin::ObjectComposedDefs || call.arguments.len() != 2 {
-            return None;
-        }
-        Some((
-            access
-                .values()
-                .root_runtime_value(access.values().duplicate_value(&call.arguments[0])),
-            access
-                .values()
-                .root_runtime_value(access.values().duplicate_value(&call.arguments[1])),
-        ))
-    })
+fn composed_defs_parts_in(
+    access: &EvaluationValueAccess<'_>,
+    defs: &Value,
+) -> Option<(Value, Value)> {
+    let Value::PartialBuiltin(call) = defs else {
+        return None;
+    };
+    if call.builtin != Builtin::ObjectComposedDefs || call.arguments.len() != 2 {
+        return None;
+    }
+    Some((
+        access.values().duplicate_value(&call.arguments[0]),
+        access.values().duplicate_value(&call.arguments[1]),
+    ))
 }
 
-fn application_in(
-    context: &EvaluatorStepContext<'_>,
-    function: RuntimeValueRoot,
-    arguments: &[RuntimeValueRoot],
+fn regional_application_in(
+    access: &EvaluationValueAccess<'_>,
+    function: Value,
+    arguments: &[Value],
     source_owner: LazyId,
-) -> WhnfComputation {
-    context.with_value_access(|access| {
-        let function = access.clone_root(&function);
-        let arguments = arguments
-            .iter()
-            .map(|argument| access.clone_root(argument))
-            .collect::<Vec<_>>();
-        WhnfComputation::from_application_checkpoint_in(
-            &access,
-            function,
-            &arguments,
-            Some(source_owner),
-        )
-    })
-}
-
-fn spec_name_root(
-    context: &EvaluatorStepContext<'_>,
-    spec: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
-    spec_member_root(context, spec, &keys::NAME, SpecMemberDefault::Name)
+) -> RegionalWhnfWork {
+    RegionalWhnfWork::from_application_checkpoint_in(
+        access,
+        function,
+        arguments,
+        Some(source_owner),
+    )
 }
 
 enum SpecMemberDefault {
@@ -626,41 +708,38 @@ enum SpecMemberDefault {
     Definitions,
 }
 
-fn spec_member_root(
-    context: &EvaluatorStepContext<'_>,
-    spec: &RuntimeValueRoot,
+fn spec_member_in(
+    access: &EvaluationValueAccess<'_>,
+    spec: &Value,
     key: &Key,
     default: SpecMemberDefault,
-) -> Result<RuntimeValueRoot, RuntimeFailureRoot> {
-    context.with_value_access(|access| {
-        let Value::Dict(spec) = access.clone_root(spec) else {
-            return Err(context.root_failure(Arc::new(EvaluationFailure::message(
-                "object instance builtin requires a specification dictionary",
-            ))));
-        };
-        let value = spec
-            .get(key)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or_else(|| match default {
-                SpecMemberDefault::Name => Value::Dict(Dict::new_sync()),
-                SpecMemberDefault::Dependencies => Value::List(crate::core::List::empty()),
-                SpecMemberDefault::Definitions => Value::Builtin(Builtin::ObjectDefaultDefs),
-            });
-        Ok(access.values().root_runtime_value(value))
-    })
+) -> Result<Value, EvaluationHalt> {
+    let Value::Dict(spec) = spec else {
+        return Err(EvaluationHalt::new(
+            "object instance builtin requires a specification dictionary",
+        ));
+    };
+    Ok(spec
+        .get(key)
+        .map(|value| access.values().duplicate_value(value))
+        .unwrap_or_else(|| match default {
+            SpecMemberDefault::Name => Value::Dict(Dict::new_sync()),
+            SpecMemberDefault::Dependencies => Value::List(crate::core::List::empty()),
+            SpecMemberDefault::Definitions => Value::Builtin(Builtin::ObjectDefaultDefs),
+        }))
 }
 
-fn classify_deps(
-    context: &EvaluatorStepContext<'_>,
-    deps: &RuntimeValueRoot,
-) -> Result<Option<RuntimeValueRoot>, EvaluationHalt> {
-    context.with_value_access(|access| match access.clone_root(deps) {
-        Value::List(_) => Ok(Some(deps.clone())),
+fn classify_deps_in(
+    _access: &EvaluationValueAccess<'_>,
+    deps: Value,
+) -> Result<Option<Value>, EvaluationHalt> {
+    match deps {
+        value @ Value::List(_) => Ok(Some(value)),
         Value::Dict(dict) if dict.is_empty() => Ok(None),
         _ => Err(EvaluationHalt::new(
             "object specification deps must evaluate to a list",
         )),
-    })
+    }
 }
 
 fn empty_visit(entry: LinearizedObjectSpec) -> LinearizationState {
@@ -675,37 +754,29 @@ fn empty_visit(entry: LinearizedObjectSpec) -> LinearizationState {
     }
 }
 
-fn remember_object_spec(
-    context: &EvaluatorStepContext<'_>,
+fn remember_object_spec_in(
+    access: &EvaluationValueAccess<'_>,
     name: &Key,
-    spec: &RuntimeValueRoot,
-    seen: &mut BTreeMap<Key, RuntimeValueRoot>,
+    spec: &Value,
+    seen: &mut BTreeMap<Key, Value>,
 ) -> Result<(), EvaluationHalt> {
     match seen.get(name) {
-        Some(prior) if !same_spec(context, prior, spec) => Err(EvaluationHalt::new(format!(
+        Some(prior) if !same_spec_in(access, prior, spec) => Err(EvaluationHalt::new(format!(
             "object specification name {name:?} identifies multiple specifications"
         ))),
         Some(_) => Ok(()),
         None => {
-            seen.insert(name.clone(), spec.clone());
+            seen.insert(name.clone(), access.values().duplicate_value(spec));
             Ok(())
         }
     }
 }
 
-fn same_spec(
-    context: &EvaluatorStepContext<'_>,
-    left: &RuntimeValueRoot,
-    right: &RuntimeValueRoot,
-) -> bool {
-    context.with_value_access(|access| {
-        let (Value::Dict(left), Value::Dict(right)) =
-            (access.clone_root(left), access.clone_root(right))
-        else {
-            unreachable!("linearized object specs must retain dictionaries")
-        };
-        left.ptr_eq(&right)
-    })
+fn same_spec_in(_access: &EvaluationValueAccess<'_>, left: &Value, right: &Value) -> bool {
+    let (Value::Dict(left), Value::Dict(right)) = (left, right) else {
+        unreachable!("linearized object specs must retain dictionaries")
+    };
+    left.ptr_eq(right)
 }
 
 fn is_anonymous_object_name(name: &Key) -> bool {
@@ -713,6 +784,7 @@ fn is_anonymous_object_name(name: &Key) -> bool {
 }
 
 fn c3_merge(
+    access: &EvaluationValueAccess<'_>,
     mut sequences: Vec<Vec<LinearizedObjectSpec>>,
 ) -> Result<Vec<LinearizedObjectSpec>, EvaluationHalt> {
     let mut result = Vec::new();
@@ -729,14 +801,14 @@ fn c3_merge(
                     .skip(1)
                     .any(|spec| same_linearized_object_spec(spec, candidate))
             }))
-            .then(|| candidate.clone())
+            .then(|| candidate.duplicate_in(access))
         });
         let Some(selected) = selected else {
             return Err(EvaluationHalt::new(
                 "object dependencies have inconsistent C3 linearization",
             ));
         };
-        result.push(selected.clone());
+        result.push(selected.duplicate_in(access));
         for sequence in &mut sequences {
             if sequence
                 .first()
@@ -756,24 +828,230 @@ fn same_linearized_object_spec(left: &LinearizedObjectSpec, right: &LinearizedOb
     }
 }
 
-fn finish_object(
-    context: &EvaluatorStepContext<'_>,
-    base: RuntimeValueRoot,
-    spec: &RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, EvaluationHalt> {
-    context.with_value_access(|access| {
-        let Value::Dict(base) = access.clone_root(&base) else {
-            return Err(EvaluationHalt::new("object base is not a dictionary"));
-        };
-        let spec = access.clone_root(spec);
-        Ok(access
-            .values()
-            .root_runtime_value(Value::Dict(base.insert((*keys::SPEC).clone(), spec))))
-    })
+fn finish_object_in(
+    access: &EvaluationValueAccess<'_>,
+    base: Value,
+    spec: &Value,
+) -> Result<Value, EvaluationHalt> {
+    let Value::Dict(base) = base else {
+        return Err(EvaluationHalt::new("object base is not a dictionary"));
+    };
+    Ok(Value::Dict(base.insert(
+        (*keys::SPEC).clone(),
+        access.values().duplicate_value(spec),
+    )))
 }
 
-fn root_halt(context: &EvaluatorStepContext<'_>, halt: EvaluationHalt) -> RuntimeFailureRoot {
-    context.root_failure(halt.into_permanent_failure())
+impl ManagedObjectFixpointRoot {
+    fn new_in(access: &EvaluationValueAccess<'_>, state: RegionalObjectFixpoint) -> Self {
+        let edge = access
+            .values()
+            .allocator::<ManagedObjectFixpointCell>()
+            .expect("managed object-fixpoint representation must fit one collector run")
+            .alloc(ManagedObjectFixpointCell {
+                state: Mutex::new(state),
+            });
+        Self {
+            root: access.values().root(edge),
+        }
+    }
+
+    fn poll_in(
+        &self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> DurableObjectFixpointPoll {
+        assert!(
+            access.values().admits_root(&self.root),
+            "object-fixpoint checkpoint must share the evaluator value domain"
+        );
+        let owner = access.values().project_root(&self.root);
+        let cell = access.values().get(&self.root);
+        let mut state = match cell.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return DurableObjectFixpointPoll::Failed(access.values().root_runtime_failure(
+                    Arc::new(EvaluationFailure::message(
+                        "managed object-fixpoint state was poisoned by an earlier unwind",
+                    )),
+                ));
+            }
+        };
+        // SAFETY: the registered wrapper root keeps `owner` live in this
+        // exact access region. The cell mutex excludes another transition,
+        // and the same compile-exhaustive visitor reports every raw edge
+        // before and after mutation.
+        let result = unsafe {
+            access.values().with_managed_edge_state_transition(
+                &owner,
+                &mut *state,
+                RegionalObjectFixpoint::trace_managed_edges,
+                RegionalObjectFixpoint::trace_managed_edges,
+                |state| state.poll_in(access, step_budget),
+            )
+        };
+        match result {
+            RegionalObjectFixpointPoll::Ready(value) => {
+                DurableObjectFixpointPoll::Ready(access.values().root_runtime_value(value))
+            }
+            RegionalObjectFixpointPoll::Boundary(request) => {
+                DurableObjectFixpointPoll::Boundary(request)
+            }
+            RegionalObjectFixpointPoll::Yielded => DurableObjectFixpointPoll::Yielded,
+            RegionalObjectFixpointPoll::Failed(failure) => {
+                DurableObjectFixpointPoll::Failed(access.values().root_runtime_failure(failure))
+            }
+        }
+    }
+}
+
+fn interpret_durable_object_poll(
+    result: DurableObjectFixpointPoll,
+    context: &EvalContext,
+) -> ObjectFixpointPoll {
+    match result {
+        DurableObjectFixpointPoll::Ready(value) => ObjectFixpointPoll::Ready(value),
+        DurableObjectFixpointPoll::Boundary(request) => {
+            let poll = match request {
+                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
+                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
+                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
+            };
+            match interpret_whnf_poll(poll, context) {
+                WhnfOwnerPoll::Pending(dependency) => ObjectFixpointPoll::Pending(dependency),
+                WhnfOwnerPoll::Yielded => ObjectFixpointPoll::Yielded,
+                WhnfOwnerPoll::Failed(failure) => ObjectFixpointPoll::Failed(failure),
+                WhnfOwnerPoll::External(boundary) => {
+                    unreachable!("object fixpoint produced an external {boundary:?} boundary")
+                }
+                WhnfOwnerPoll::Ready(_) => {
+                    unreachable!("a semantic boundary cannot produce an immediate value")
+                }
+            }
+        }
+        DurableObjectFixpointPoll::Yielded => ObjectFixpointPoll::Yielded,
+        DurableObjectFixpointPoll::Failed(failure) => ObjectFixpointPoll::Failed(failure),
+    }
+}
+
+impl ObjectState {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Linearize(machine) => machine.trace_managed_edges(visitor),
+            Self::Mix(machine) => machine.trace_managed_edges(visitor),
+        }
+    }
+}
+
+impl ObjectLinearizationMachine {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        for frame in &self.stack {
+            frame.trace_managed_edges(visitor);
+        }
+        for spec in self.seen.values() {
+            trace_compatibility_value_managed_edges(spec, visitor);
+        }
+    }
+}
+
+impl LinearizationFrame {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.state.trace_managed_edges(visitor);
+    }
+}
+
+impl LinearizationState {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::DemandSpec(work) => work.trace_managed_edges(visitor),
+            Self::ConvertName { spec, conversion } => {
+                trace_compatibility_value_managed_edges(spec, visitor);
+                conversion.trace_managed_edges(visitor);
+            }
+            Self::DemandDeps { entry, demand } => {
+                entry.trace_managed_edges(visitor);
+                demand.trace_managed_edges(visitor);
+            }
+            Self::ReadDeps { entry, front, deps } => {
+                entry.trace_managed_edges(visitor);
+                front.trace_managed_edges(visitor);
+                trace_object_values(deps, visitor);
+            }
+            Self::VisitDeps {
+                entry,
+                deps,
+                sequences,
+                direct,
+                ..
+            } => {
+                entry.trace_managed_edges(visitor);
+                trace_object_values(deps, visitor);
+                for sequence in sequences {
+                    for entry in sequence {
+                        entry.trace_managed_edges(visitor);
+                    }
+                }
+                for entry in direct {
+                    entry.trace_managed_edges(visitor);
+                }
+            }
+            Self::Transition => {}
+        }
+    }
+}
+
+impl LinearizedObjectSpec {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.spec, visitor);
+    }
+}
+
+impl ObjectMixMachine {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_object_values(&self.specs, visitor);
+        trace_compatibility_value_managed_edges(&self.base, visitor);
+        trace_object_values(&self.pending_defs, visitor);
+        if let Some(application) = &self.application {
+            application.trace_managed_edges(visitor);
+        }
+    }
+}
+
+fn trace_object_values(values: &[Value], visitor: &mut Visitor<'_>) {
+    for value in values {
+        trace_compatibility_value_managed_edges(value, visitor);
+    }
+}
+
+// SAFETY: the state visitor is compile-exhaustive over the original spec,
+// self marker, every C3 frame/container, the mix stack, and each regional
+// child. Collection runs only after mutator quiescence, so an unpoisoned busy
+// mutex is an invariant failure.
+unsafe impl Trace for ManagedObjectFixpointCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed object-fixpoint state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional reducer state, scalar keys/identities, and ordinary collections.
+// It invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedObjectFixpointCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "temporary managed object-fixpoint checkpoint",
+        "src/eval/object_machine.rs",
+        "no direct Drop implementation",
+        "regional object construction and child state destroy passively",
+    );
 }
 
 #[cfg(test)]

@@ -211,8 +211,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/object_machine.rs",
-        [14, 3],
-        "W3B.2b explicit C3, composed-definition, and object-mixin source owner"
+        [1, 2],
+        "W6G.1f.3e.2 raw regional C3, composed-definition, and object-mixin state beneath one temporary managed owner"
     ),
     context_entry!(
         "src/eval/pattern_machine.rs",
