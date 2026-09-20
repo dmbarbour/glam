@@ -103,15 +103,6 @@ enum RootedListBackStep {
 }
 
 impl ListFrontMachine {
-    pub(super) fn new(list: RuntimeValueRoot, source_owner: LazyId) -> Self {
-        Self {
-            checkpoint: DurableListFrontCheckpoint::Seed {
-                list,
-                source_owner: Some(source_owner),
-            },
-        }
-    }
-
     pub(crate) fn unowned(list: RuntimeValueRoot) -> Self {
         Self {
             checkpoint: DurableListFrontCheckpoint::Seed {

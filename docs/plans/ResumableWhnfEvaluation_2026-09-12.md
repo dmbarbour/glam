@@ -5849,9 +5849,36 @@ for it:
      The remaining list-front adapters stay assigned to W6G.1f.3f/.3g and the
      remaining key-conversion adapters to W6G.1f.3g; no object-private bridge
      remains.
-7. **W6G.1f.3f — list-effect checkpoint.** Preserve sequence/cut/fix progress
-   and convert the fix promise root to a managed promise edge. Prove that
-   route loss cannot manufacture another promise or repeat an assignment.
+7. **W6G.1f.3f — list-effect checkpoint.** This migration is split so the
+   representation cutover and the adversarial schedule proof remain separate
+   reviewable changes:
+
+   - **W6G.1f.3f.1 — regional state and source cutover.** **Complete
+     (2026-09-20).** Replace the registered-root recipe machine with one
+     compile-exhaustive regional reducer beneath a concrete typed lazy
+     checkpoint. Preserve run, sequence, cut, and fix phases; reuse regional
+     WHNF and list-front children; and replace the fix promise root with one
+     traced promise edge. Promise assignment commits beneath matching value
+     access, while completion wakes and terminal lazy publication stay
+     outside the managed transition. The route retains only a state-free
+     `ListEffectCheckpoint` marker.
+
+     This removes eleven list-effect root-publication sites, the temporary
+     list-front adapter from this family, two durable WHNF constructors, and
+     two seed-owner modifiers. The common promise publication implementation
+     now admits either a registered root or an already-traced interior edge;
+     both reach the same cell transition and preserve post-access wake
+     delivery. Exact root-publication, durable-owner, recursive-identity,
+     persistent-edge, evaluator-access, raw-value, producer-family, and WHNF
+     inventories latch the new boundary.
+   - **W6G.1f.3f.2 — forced schedules and family closure.** Force route loss
+     and collection during effect demand, handler application, deferred
+     sequence/cut list chunks, fix-function demand, fix-operation demand, and
+     terminal publication. Count recipe/function evaluation, fix promise
+     construction, and terminal assignment so a later route demonstrably
+     resumes rather than manufacturing another promise or repeating an
+     assignment. Close the list-effect source, checkpoint, collection, and
+     no-replay ledgers before proceeding to the builtin family.
 8. **W6G.1f.3g — builtin checkpoint.** Migrate the compile-exhaustive builtin
    task sum after its shared access, object, list, and WHNF child forms are
    available. Retain spark publication as post-access orchestration rather

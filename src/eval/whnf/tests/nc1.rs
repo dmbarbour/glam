@@ -609,21 +609,22 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
     let source_owner_transition = source_section(
         whnf,
         "pub(crate) fn with_source_owner(",
-        "    fn promote_seed_in(",
+        "    pub(crate) fn from_application_checkpoint_in(",
     );
     assert!(
-        source_owner_transition.contains("DurableWhnfCheckpoint::Seed"),
-        "source-owner modification must remain confined to the access-free seed"
+        source_owner_transition.contains("self.0.source_owner = Some(source_owner)"),
+        "source-owner modification must remain confined to regional WHNF work"
     );
     assert_eq!(
         source_owner_transition
-            .matches("*owner = Some(source_owner)")
+            .matches("self.0.source_owner = Some(source_owner)")
             .count(),
         1,
-        "the seed modifier must install source ownership exactly once"
+        "the regional modifier must install source ownership exactly once"
     );
     assert_eq!(
-        whnf.matches("*owner = Some(source_owner)").count(),
+        whnf.matches("self.0.source_owner = Some(source_owner)")
+            .count(),
         1,
         "new source-owner transitions require an NC5D inventory decision"
     );

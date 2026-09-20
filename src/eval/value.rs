@@ -24,7 +24,9 @@ use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin
 use super::lazy_checkpoint::{
     HostCallCheckpointObservation, ManagedLazyCheckpointEdge, ManagedLazyCheckpointKindTag,
 };
-use super::list_effect_machine::{ListEffectSourceMachine, ListEffectSourcePoll};
+use super::list_effect_machine::{
+    RegionalListEffect, RegionalListEffectPoll, publish_fix_result_in,
+};
 use super::net::*;
 use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
 
@@ -201,8 +203,8 @@ enum LazyTaskWork {
     NetWhnfCheckpoint,
     AccessCheckpoint,
     ObjectFixpointCheckpoint,
+    ListEffectCheckpoint,
     Builtin(Box<BuiltinTaskMachine>),
-    ListEffect(Box<ListEffectSourceMachine>),
     /// Transient one-shot authority held only by the route which installed an
     /// `Invoking` host-call checkpoint.
     HostCallInvoke,
@@ -224,6 +226,7 @@ impl LazyTaskMachine {
             ManagedLazyCheckpointKindTag::NetWhnf => LazyTaskWork::NetWhnfCheckpoint,
             ManagedLazyCheckpointKindTag::Access => LazyTaskWork::AccessCheckpoint,
             ManagedLazyCheckpointKindTag::ObjectFixpoint => LazyTaskWork::ObjectFixpointCheckpoint,
+            ManagedLazyCheckpointKindTag::ListEffect => LazyTaskWork::ListEffectCheckpoint,
         }
     }
 
@@ -616,6 +619,118 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an object boundary cannot produce an immediate value")
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_list_effect_checkpoint(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        enum Transition {
+            Complete(
+                crate::runtime::RuntimeValueRoot,
+                Option<crate::core::ManagedPromisePublication>,
+            ),
+            Failed(crate::runtime::RuntimeFailureRoot),
+            Boundary(super::whnf::RegionalBoundaryRequest),
+            Yielded,
+            Replaced(ManagedLazyCheckpointKindTag),
+        }
+
+        let transition = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            let checkpoint = lazy
+                .checkpoint_snapshot()
+                .expect("list-effect route must retain its managed checkpoint");
+            if checkpoint.kind() != ManagedLazyCheckpointKindTag::ListEffect {
+                return Transition::Replaced(checkpoint.kind());
+            }
+            let poll = checkpoint.with_list_effect_transition_in(&access, step_budget);
+            let (value, publication) = match poll {
+                RegionalListEffectPoll::Ready(value) => (value, None),
+                RegionalListEffectPoll::FixReady { handle, result } => {
+                    match publish_fix_result_in(&access, &handle, result) {
+                        Ok((value, publication)) => (value, Some(publication)),
+                        Err(error) => {
+                            return Transition::Failed(
+                                access
+                                    .values()
+                                    .root_runtime_failure(error.into_permanent_failure()),
+                            );
+                        }
+                    }
+                }
+                RegionalListEffectPoll::Boundary(request) => {
+                    return Transition::Boundary(request);
+                }
+                RegionalListEffectPoll::Yielded => return Transition::Yielded,
+                RegionalListEffectPoll::Failed(failure) => {
+                    return match self.lazy.cache(access.values(), Err(failure)) {
+                        Ok(value) => Transition::Complete(
+                            access.values().root_runtime_value(value.into_value()),
+                            None,
+                        ),
+                        Err(failure) => {
+                            Transition::Failed(access.values().root_runtime_failure(failure))
+                        }
+                    };
+                }
+            };
+            let evaluated = EvaluatedValue::try_from(value)
+                .expect("list-effect construction must produce a WHNF list value");
+            match self.lazy.cache(access.values(), Ok(evaluated)) {
+                Ok(value) => Transition::Complete(
+                    access.values().root_runtime_value(value.into_value()),
+                    publication,
+                ),
+                Err(failure) => Transition::Failed(access.values().root_runtime_failure(failure)),
+            }
+        });
+
+        match transition {
+            Transition::Complete(value, publication) => {
+                if let Some(publication) = publication {
+                    publication.notify();
+                }
+                EvaluationMachinePoll::Complete(value)
+            }
+            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Replaced(kind) => {
+                self.work = Self::work_for_checkpoint_kind(kind);
+                EvaluationMachinePoll::Yielded
+            }
+            Transition::Boundary(request) => {
+                let poll = match request {
+                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
+                        super::whnf::WhnfPoll::Pending(dependency)
+                    }
+                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
+                        super::whnf::WhnfPoll::Deferred(deferred)
+                    }
+                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
+                        super::whnf::WhnfPoll::External(boundary)
+                    }
+                };
+                match interpret_whnf_poll(poll, context.context()) {
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            dependency: Some(dependency),
+                            observed_epoch: None,
+                            error: None,
+                        })
+                    }
+                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::External(boundary) => {
+                        unreachable!("list effect produced an external {boundary:?} boundary")
+                    }
+                    WhnfOwnerPoll::Ready(_) => {
+                        unreachable!("a list-effect boundary cannot produce an immediate value")
                     }
                 }
             }
@@ -1063,11 +1178,31 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             }
                         }
                         LazySource::ListEffectComputation(recipe) => {
-                            LazyTaskWork::ListEffect(Box::new(ListEffectSourceMachine::new(
-                                context,
-                                self.lazy.id(),
-                                &recipe,
-                            )))
+                            let installed = context.with_value_access(|access| {
+                                let state = RegionalListEffect::new_in(
+                                    &access,
+                                    self.lazy.id(),
+                                    &recipe,
+                                );
+                                let checkpoint =
+                                    ManagedLazyCheckpointEdge::allocate_list_effect_in(
+                                        &access, state,
+                                    )
+                                    .expect(
+                                        "managed list-effect state must fit its reviewed slot",
+                                    );
+                                access
+                                    .lazy_root(&self.lazy)
+                                    .install_checkpoint(checkpoint)
+                                    .is_ok()
+                            });
+                            if installed {
+                                LazyTaskWork::ListEffectCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
                         }
                         LazySource::Access { path, arguments }
                             if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
@@ -1186,6 +1321,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_object_fixpoint_checkpoint(context, step_budget);
             }
 
+            if matches!(self.work, LazyTaskWork::ListEffectCheckpoint) {
+                return self.poll_list_effect_checkpoint(context, step_budget);
+            }
+
             if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
                 return match machine.poll(poll_context, context, &durable_context, step_budget) {
                     NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
@@ -1218,23 +1357,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     }
                     BuiltinTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
                     BuiltinTaskPoll::Failed(failure) => {
-                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
-            }
-
-            if let LazyTaskWork::ListEffect(machine) = &mut self.work {
-                return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    ListEffectSourcePoll::Ready(value) => self.complete_root(context, &value),
-                    ListEffectSourcePoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    ListEffectSourcePoll::Yielded => EvaluationMachinePoll::Yielded,
-                    ListEffectSourcePoll::Failed(failure) => {
                         self.fail(context, EvaluationHalt::failure(failure.into_failure()))
                     }
                 };
@@ -1731,11 +1853,9 @@ mod ownership_tests {
             LazyTaskWork::NetWhnfCheckpoint => {}
             LazyTaskWork::AccessCheckpoint => {}
             LazyTaskWork::ObjectFixpointCheckpoint => {}
+            LazyTaskWork::ListEffectCheckpoint => {}
             LazyTaskWork::Builtin(machine) => {
                 let _: &BuiltinTaskMachine = machine;
-            }
-            LazyTaskWork::ListEffect(machine) => {
-                let _: &ListEffectSourceMachine = machine;
             }
             LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
             LazyTaskWork::NetConstruction(machine) => {

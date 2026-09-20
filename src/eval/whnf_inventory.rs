@@ -669,7 +669,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // state transitions. Five bounded demand-and-inspect walks become visible to
 // the census while one obsolete recursive helper disappears.
 const EXPECTED_OCCURRENCES: usize = 195;
-const EXPECTED_FINGERPRINT: u64 = 10_061_430_378_926_807_665;
+const EXPECTED_FINGERPRINT: u64 = 10_413_146_244_316_258_523;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),

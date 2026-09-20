@@ -185,11 +185,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6F.3 durable ordinary extension, composed-definition application, and recursive override ownership"
     ),
     context_entry!(
-        "src/eval/list_effect_machine.rs",
-        [9, 1],
-        "W3D pollable list-effect recipe owner"
-    ),
-    context_entry!(
         "src/eval/list_machine.rs",
         [3, 4],
         "W6G.1f.3e.1 regional logical-list front bridge and W6D.3 rooted back owner"
@@ -231,8 +226,8 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [19, 8],
-        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 directly installs and polls object-fixpoint checkpoints"
+        [20, 8],
+        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints"
     ),
 ];
 

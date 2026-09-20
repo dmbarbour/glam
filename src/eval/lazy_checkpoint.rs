@@ -17,6 +17,7 @@ use crate::core::{
 };
 
 use super::access_machine::AccessMachine;
+use super::list_effect_machine::{RegionalListEffect, RegionalListEffectPoll};
 use super::net::NetWhnfMachine;
 use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
 use super::whnf::managed_state::ManagedLazyCheckpointCell;
@@ -31,6 +32,10 @@ pub(in crate::eval) struct ManagedAccessCheckpointCell {
 
 pub(in crate::eval) struct ManagedObjectFixpointCheckpointCell {
     state: Mutex<RegionalObjectFixpoint>,
+}
+
+pub(in crate::eval) struct ManagedListEffectCheckpointCell {
+    state: Mutex<RegionalListEffect>,
 }
 
 struct ManagedNetWhnfCheckpointState {
@@ -62,6 +67,7 @@ pub(in crate::eval) enum ManagedLazyCheckpointKindTag {
     NetWhnf,
     Access,
     ObjectFixpoint,
+    ListEffect,
 }
 
 pub(crate) struct ManagedLazyCheckpointEdge(ManagedLazyCheckpointKind);
@@ -72,6 +78,7 @@ enum ManagedLazyCheckpointKind {
     NetWhnf(Gc<ManagedNetWhnfCheckpointCell>),
     Access(Gc<ManagedAccessCheckpointCell>),
     ObjectFixpoint(Gc<ManagedObjectFixpointCheckpointCell>),
+    ListEffect(Gc<ManagedListEffectCheckpointCell>),
 }
 
 impl ManagedLazyCheckpointEdge {
@@ -94,6 +101,9 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::ObjectFixpoint(_) => {
                 panic!("an object-fixpoint checkpoint cannot be projected as ordinary WHNF state")
             }
+            ManagedLazyCheckpointKind::ListEffect(_) => {
+                panic!("a list-effect checkpoint cannot be projected as ordinary WHNF state")
+            }
         }
     }
 
@@ -106,6 +116,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::ObjectFixpoint(_) => {
                 ManagedLazyCheckpointKindTag::ObjectFixpoint
             }
+            ManagedLazyCheckpointKind::ListEffect(_) => ManagedLazyCheckpointKindTag::ListEffect,
         }
     }
 
@@ -133,6 +144,10 @@ impl ManagedLazyCheckpointEdge {
                 ManagedLazyCheckpointKind::ObjectFixpoint(left),
                 ManagedLazyCheckpointKind::ObjectFixpoint(right),
             ) => authority.same_edge(left, right),
+            (
+                ManagedLazyCheckpointKind::ListEffect(left),
+                ManagedLazyCheckpointKind::ListEffect(right),
+            ) => authority.same_edge(left, right),
             _ => false,
         }
     }
@@ -147,6 +162,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::NetWhnf(_) => None,
             ManagedLazyCheckpointKind::Access(_) => None,
             ManagedLazyCheckpointKind::ObjectFixpoint(_) => None,
+            ManagedLazyCheckpointKind::ListEffect(_) => None,
         }
     }
 
@@ -207,6 +223,20 @@ impl ManagedLazyCheckpointEdge {
         )))
     }
 
+    pub(in crate::eval) fn allocate_list_effect_in(
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        state: RegionalListEffect,
+    ) -> Result<Self, UnsupportedLayout> {
+        let allocator = authority
+            .values()
+            .allocator::<ManagedListEffectCheckpointCell>()?;
+        Ok(Self(ManagedLazyCheckpointKind::ListEffect(
+            allocator.alloc(ManagedListEffectCheckpointCell {
+                state: Mutex::new(state),
+            }),
+        )))
+    }
+
     pub(in crate::eval) fn with_access_transition_in<R>(
         &self,
         authority: &crate::evaluation::EvaluationValueAccess<'_>,
@@ -262,6 +292,38 @@ impl ManagedLazyCheckpointEdge {
                 &mut *state,
                 RegionalObjectFixpoint::trace_managed_edges,
                 RegionalObjectFixpoint::trace_managed_edges,
+                |state| state.poll_in(authority, step_budget),
+            )
+        }
+    }
+
+    pub(in crate::eval) fn with_list_effect_transition_in(
+        &self,
+        authority: &crate::evaluation::EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalListEffectPoll {
+        let ManagedLazyCheckpointKind::ListEffect(edge) = &self.0 else {
+            panic!("only a list-effect checkpoint has list-effect state")
+        };
+        let cell = authority.values().get_edge(edge);
+        let mut state = match cell.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return RegionalListEffectPoll::Failed(Arc::new(EvaluationFailure::message(
+                    "managed list-effect state was poisoned by an earlier unwind",
+                )));
+            }
+        };
+        // SAFETY: the owning lazy retains this exact checkpoint edge. The
+        // representation mutex excludes another regional transition, and the
+        // same compile-exhaustive visitor reports every list-effect edge
+        // before and after mutation.
+        unsafe {
+            authority.values().with_managed_edge_state_transition(
+                edge,
+                &mut *state,
+                RegionalListEffect::trace_managed_edges,
+                RegionalListEffect::trace_managed_edges,
                 |state| state.poll_in(authority, step_budget),
             )
         }
@@ -397,6 +459,7 @@ impl ManagedLazyCheckpointEdge {
             ManagedLazyCheckpointKind::NetWhnf(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::Access(edge) => visitor.visit(edge),
             ManagedLazyCheckpointKind::ObjectFixpoint(edge) => visitor.visit(edge),
+            ManagedLazyCheckpointKind::ListEffect(edge) => visitor.visit(edge),
         }
     }
 
@@ -416,6 +479,9 @@ impl ManagedLazyCheckpointEdge {
             )),
             ManagedLazyCheckpointKind::ObjectFixpoint(edge) => Self(
                 ManagedLazyCheckpointKind::ObjectFixpoint(authority.duplicate_edge(edge)),
+            ),
+            ManagedLazyCheckpointKind::ListEffect(edge) => Self(
+                ManagedLazyCheckpointKind::ListEffect(authority.duplicate_edge(edge)),
             ),
         }
     }
@@ -565,5 +631,36 @@ unsafe impl ManagedFamily for ManagedObjectFixpointCheckpointCell {
         "src/eval/lazy_checkpoint.rs",
         "no direct Drop implementation",
         "regional object construction and child state destroy passively",
+    );
+}
+
+// SAFETY: the regional list-effect visitor is compile-exhaustive over each
+// recipe phase, its WHNF/list-front children, continuation values, and the
+// managed fixpoint promise edge. Collection runs only after mutator
+// quiescence, so an unpoisoned busy mutex is an invariant failure.
+unsafe impl Trace for ManagedListEffectCheckpointCell {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed list-effect state must be quiescent during tracing")
+            }
+        };
+        state.trace_managed_edges(visitor);
+    }
+}
+
+// SAFETY: direct destruction releases only passive compatibility values,
+// regional reducer state, one inert promise edge, and ordinary collections.
+// It invokes no runtime, evaluator, scheduler, host, or diagnostic capability.
+unsafe impl ManagedFamily for ManagedListEffectCheckpointCell {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "managed list-effect checkpoint cell",
+        "src/eval/lazy_checkpoint.rs",
+        "no direct Drop implementation",
+        "regional list-effect and child state destroy passively",
     );
 }

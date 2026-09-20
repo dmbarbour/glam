@@ -393,9 +393,16 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
     owner!(
         "src/eval/list_effect_machine.rs::ListEffectState",
         [0, 1, 0],
-        DurableRoot,
+        ExactManagedEdge,
         None,
-        "poll-spanning list-effect fix state retains its result promise"
+        "lazy-owned regional list-effect fix state traces its exact result promise edge"
+    ),
+    owner!(
+        "src/eval/list_effect_machine.rs::RegionalListEffectPoll",
+        [0, 1, 0],
+        BoundedAccess,
+        None,
+        "terminal fix publication carries one access-bounded working duplicate out of the checkpoint transition"
     ),
     owner!(
         "src/eval/whnf.rs::WhnfState",
@@ -805,7 +812,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [18, 21, 8],
+        [19, 20, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

@@ -329,7 +329,8 @@ pub(crate) use value_node::PreparedRuntimeValueRoot;
 mod recursive_cells;
 pub(crate) use recursive_cells::{
     ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedLazyAccess,
-    ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge, ManagedPromiseRoot,
+    ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge,
+    ManagedPromisePublication, ManagedPromiseRoot,
 };
 
 // SAFETY: this is the existing scalar collector-access probe. It has no

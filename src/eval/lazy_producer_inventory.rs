@@ -16,7 +16,7 @@ const EXPECTED_VARIANTS: &[&str] = &[
     // before/after state belongs to the managed checkpoint.
     "HostCallCheckpoint",
     "HostCallInvoke",
-    "ListEffect",
+    "ListEffectCheckpoint",
     "NetConstruction",
     // W6G.1f.3c retains the complete driver beneath the managed lazy.
     "NetWhnfCheckpoint",

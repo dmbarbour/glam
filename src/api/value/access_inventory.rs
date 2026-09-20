@@ -167,14 +167,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6E.5-W6E.6 resumable effect dispatch, map, and fixpoint ownership"
     ),
     entry!(
-        "src/eval/list_effect_machine.rs",
-        0,
-        0,
-        11,
-        "pollable list-effect recipes and their lazy sequencing/fixpoint handoffs",
-        "W3D.2 inspectable list-effect source owner"
-    ),
-    entry!(
         "src/eval/list_machine.rs",
         0,
         1,
@@ -250,9 +242,9 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        7,
-        "computed-access terminal publication plus object-fixpoint, resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
-        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3 source or terminal handoff"
+        9,
+        "computed-access, object-fixpoint, and list-effect terminal publication plus resumable builtin, immediate builtin result, and net-construction source arguments published before leaving their access regions",
+        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f source or terminal handoff"
     ),
     entry!(
         "src/eval/whnf.rs",
@@ -539,10 +531,6 @@ impl RootPublicationOccurrence {
                 | "src/eval/effect_machine.rs::root_effect_map"
                 | "src/eval/effect_machine.rs::root_effect_map_continuation"
                 | "src/eval/effect_machine.rs::root_effect_map_sequence"
-                | "src/eval/list_effect_machine.rs::effect_function"
-                | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new"
-                | "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll"
-                | "src/eval/list_effect_machine.rs::publish_fix_result"
                 | "src/eval/list_machine.rs::combine_prefix_and_chunk"
                 | "src/eval/list_machine.rs::impl ListBackMachine::poll"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
@@ -574,6 +562,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint"
+                | "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint"
                 | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::regional_status_poll"
@@ -852,17 +841,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/effect_machine.rs::root_effect_map#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_map_continuation#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::root_effect_map_sequence#1|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::effect_function#1|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#1|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#2|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#3|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#4|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::new#5|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#2|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::impl ListEffectSourceMachine::poll#3|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::publish_fix_result#1|surface=access-publication|scope=production",
-    "src/eval/list_effect_machine.rs::publish_fix_result#2|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::combine_prefix_and_chunk#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/list_machine.rs::impl ListBackMachine::poll#2|surface=access-publication|scope=production",
@@ -911,6 +889,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/value.rs::impl LazyTaskMachine::poll#3|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#1|surface=access-publication|scope=production",
+    "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=compatibility-new|scope=test",

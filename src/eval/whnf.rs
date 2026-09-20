@@ -834,19 +834,6 @@ impl WhnfComputation {
         }
     }
 
-    pub(crate) fn with_source_owner(mut self, source_owner: LazyId) -> Self {
-        match &mut self.checkpoint {
-            DurableWhnfCheckpoint::Seed {
-                source_owner: owner,
-                ..
-            } => *owner = Some(source_owner),
-            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::ManagedDemand { .. } => {
-                panic!("a source owner must be installed before managed demand publication")
-            }
-        }
-        self
-    }
-
     fn promote_seed_in(&mut self, access: &EvaluationValueAccess<'_>) {
         let work = match &self.checkpoint {
             DurableWhnfCheckpoint::Seed {

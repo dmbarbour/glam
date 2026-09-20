@@ -206,6 +206,22 @@ impl EvaluatorStepContext<'_> {
         value
     }
 
+    #[cfg(test)]
+    pub(crate) fn construct_promise(&self, label: impl Into<Arc<str>>) -> PromisedValue {
+        let (value, root) = self.with_value_access(|access| {
+            let root = access
+                .values()
+                .construct_rooted_managed_promise(label)
+                .expect("managed promise representation must fit one collector run");
+            let value = PromisedValue::from_root(&root, access.values());
+            (value, root)
+        });
+        self.pending_managed_publications
+            .borrow_mut()
+            .push(PendingManagedPublication::Promise(root));
+        value
+    }
+
     pub(crate) fn construct_lazy_value(
         &self,
         construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Value,
@@ -221,21 +237,6 @@ impl EvaluatorStepContext<'_> {
         self.pending_managed_publications
             .borrow_mut()
             .push(PendingManagedPublication::Lazy(root));
-        value
-    }
-
-    pub(crate) fn construct_promise(&self, label: impl Into<Arc<str>>) -> PromisedValue {
-        let (value, root) = self.with_value_access(|access| {
-            let root = access
-                .values()
-                .construct_rooted_managed_promise(label)
-                .expect("managed promise representation must fit one collector run");
-            let value = PromisedValue::from_root(&root, access.values());
-            (value, root)
-        });
-        self.pending_managed_publications
-            .borrow_mut()
-            .push(PendingManagedPublication::Promise(root));
         value
     }
 

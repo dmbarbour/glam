@@ -617,36 +617,9 @@ impl ManagedPromiseRoot {
         authority: &RuntimeValueAccess<'_>,
         assignment: ManagedPromiseAssignment,
     ) -> Result<ManagedPromisePublication, ManagedPromiseAssignment> {
-        let producer = self.producer();
-        if let Some(producer) = producer
-            && let Some(coordinator) = producer.coordinator()
-        {
-            let mutation = coordinator.mutation_guard();
-            let published = self.publish_guarded(
-                authority,
-                &coordinator,
-                &mutation,
-                assignment,
-                |assignment| {
-                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
-                },
-            );
-            let (producer, completion) = published?;
-            drop(mutation);
-            return Ok(ManagedPromisePublication {
-                producer: Some(producer),
-                completion: Some(completion),
-            });
-        }
-
-        let producer = self.publish_detached(authority, assignment, |assignment| {
-            self.producer()
-                .map(|producer| producer.publish_assignment_detached(assignment))
-        })?;
-        Ok(ManagedPromisePublication {
-            producer,
-            completion: None,
-        })
+        self.access(authority)
+            .expect("promise root and publication access must share one value domain")
+            .publish_notifying(assignment)
     }
 
     pub(crate) fn install_producer(
@@ -659,6 +632,7 @@ impl ManagedPromiseRoot {
             .install_producer(producer)
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_detached<T>(
         &self,
         authority: &RuntimeValueAccess<'_>,
@@ -973,6 +947,40 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
     pub(crate) fn assignment(&self) -> Option<ManagedPromiseAssignment> {
         self.cell.assignment.get().cloned()
+    }
+
+    /// Publishes one terminal assignment through an already-traced promise
+    /// edge. Registered roots and interior semantic owners use the same cell
+    /// transition; only the route by which the live edge was reached differs.
+    pub(crate) fn publish_notifying(
+        &self,
+        assignment: ManagedPromiseAssignment,
+    ) -> Result<ManagedPromisePublication, ManagedPromiseAssignment> {
+        let producer = self.producer();
+        if let Some(producer) = producer
+            && let Some(coordinator) = producer.coordinator()
+        {
+            let mutation = coordinator.mutation_guard();
+            let published =
+                self.publish_guarded(&coordinator, &mutation, assignment, |assignment| {
+                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
+                });
+            let (producer, completion) = published?;
+            drop(mutation);
+            return Ok(ManagedPromisePublication {
+                producer: Some(producer),
+                completion: Some(completion),
+            });
+        }
+
+        let producer = self.publish_detached(assignment, |assignment| {
+            self.producer()
+                .map(|producer| producer.publish_assignment_detached(assignment))
+        })?;
+        Ok(ManagedPromisePublication {
+            producer,
+            completion: None,
+        })
     }
 
     fn install_producer(
@@ -1768,6 +1776,8 @@ mod tests {
                     "src/eval/list_transform_machine.rs::deferred_map_in",
                     "src/eval/list_transform_machine.rs::invalid_concat_item_in",
                     "src/eval/list_transform_machine.rs::lazy_item_in",
+                    "src/eval/list_effect_machine.rs::RegionalListEffect::poll_in",
+                    "src/eval/list_effect_machine.rs::sequence_result_in",
                     "src/eval/net.rs::attach_net_many_in",
                     "src/eval/operator.rs::apply_core_operator",
                     "src/eval/operator.rs::constant_effect_in",
@@ -1827,9 +1837,6 @@ mod tests {
                     "src/eval/annotation_machine.rs::annotation_error_root",
                     "src/eval/annotation_machine.rs::finish_metadata_update",
                     "src/eval/annotation_machine.rs::root_builtin",
-                    "src/eval/list_effect_machine.rs::ListEffectSourceMachine::poll",
-                    "src/eval/list_effect_machine.rs::sequence_result",
-                    "src/evaluation/access.rs::EvaluatorStepContext::construct_promise",
                     "src/reflection/machine.rs::EffectTask::deliver_step",
                     "src/reflection/machine.rs::encode_reset_frames_in_state",
                     "src/reflection/machine.rs::EffectTask::state_path_step",

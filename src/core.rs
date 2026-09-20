@@ -34,9 +34,9 @@ pub(crate) use managed::{
 pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerRegistry, ManagedCoreNetAccess, ManagedCoreNetEdge,
     ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily, ManagedLazyAccess, ManagedLazyRoot,
-    ManagedPromiseAccess, ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord,
-    PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent,
-    trace_compatibility_value_managed_edges,
+    ManagedPromiseAccess, ManagedPromisePublication, ManagedPromiseRoot, OpaquePayloadFamily,
+    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
+    managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -1078,6 +1078,14 @@ impl PromisedValue {
         access: &'access RuntimeValueAccess<'scope>,
     ) -> managed::ManagedPromiseAccess<'access, 'scope> {
         self.edge.access(access)
+    }
+
+    pub(crate) fn publish_in(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        assignment: PromiseAssignment,
+    ) -> Result<managed::ManagedPromisePublication, PromiseAssignment> {
+        self.access(access).publish_notifying(assignment)
     }
 
     #[cfg(test)]

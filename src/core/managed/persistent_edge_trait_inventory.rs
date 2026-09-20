@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        803,
+        808,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -846,10 +846,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1f.3e.3 exchanges that temporary root pair for the lazy carrier's
     // stored and traced object edge. W6G.1f.3e.4 adds eight test-only roots so
     // future promise, lazy, and function fixtures remain valid across each
-    // deliberately forced collection.
+    // deliberately forced collection. W6G.1f.3f adds the list-effect typed
+    // checkpoint allocation/trace arm and the access-bounded promise working
+    // duplicates used for exactly-once fixpoint publication.
     assert_eq!(
         occurrence_fingerprint(actual),
-        14_803_652_201_065_401_888,
+        17_901_285_226_588_816_835,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -894,7 +896,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 197),
+            ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 556),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
