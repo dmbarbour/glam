@@ -120,20 +120,41 @@ preserving this one historical label.
 forces the left, right, and state promise dependencies in order, destroys the
 route, collects, and eventually observes one wire record. That proves exact
 dependency publication and retained terminal state. It does not prove that a
-resolved left or right operand was observed only once: restarting from an
-earlier phase can consume the now-resolved promise immediately and still
-produce the same dependency sequence and one final journal entry.
+managed builtin checkpoint remains installed across collection before another
+poll has an opportunity to recreate it. Restarting from an earlier phase can
+consume an already resolved promise immediately and still produce the same
+dependency sequence and one final journal entry.
 
 This falls short of PNC4C's explicit rule that terminal equality is not enough
 to prove absence of replay. The same matrix has no forced route-loss case for
 the copy-count operand, and no builder-specific failure fixture at the copy,
 left-wire, right-wire, or state boundary.
 
-Add counted lazy shells around the exact promise dependencies so every
-semantic observation has an independent latch. Cover copy count separately,
-and force each failure position while proving that later operands and state
-remain unobserved. Preserve the current explicit route destruction and
-collection; uncontrolled repetition is not evidence for these schedules.
+Close this entirely in `src/eval/value/tests/w4.rs`; it requires no production
+probe or reflection task:
+
+1. strengthen the builtin route-loss helper to assert that the managed
+   `Builtin` checkpoint exists both before route destruction and immediately
+   after collection and route reconstruction, before the resumed machine is
+   polled;
+2. retain the wire fixture's exact left, right, then state promise-ID sequence
+   and single wire-journal entry;
+3. add the corresponding copy fixture, forcing count then state dependencies
+   across route loss and observing exactly one constructor-journal entry; and
+4. add failure-order fixtures in which copy-count, left-wire, right-wire, and
+   state demands fail in turn, while counted later operands prove that no
+   operation beyond the failure boundary was observed.
+
+Counted `LazyValue::semantic_thunk` shells are useful for the failure-order
+matrix and for proving that underlying operand production is not repeated.
+They do not count later reads of an already memoized value, so they must not be
+presented as independent proof that every cache lookup occurred once. That
+stronger property is neither semantic replay nor required here: the contract
+is retained resumable state, no repeated semantic computation, and no duplicate
+journal publication. If avoiding even cached re-observation later becomes a
+performance requirement, it needs explicit test-only builder-phase
+instrumentation. Uncontrolled repetition is not evidence for any of these
+schedules.
 
 ### PNC4R-003 — Constructor source order is asserted by code, not behavior
 
