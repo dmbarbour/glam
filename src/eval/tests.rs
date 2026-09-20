@@ -3331,7 +3331,14 @@ fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
 
 #[test]
 fn ordinary_observers_do_not_unseal_metadata_carriers() {
-    let carrier = initial_metadata();
+    // The assertions below repeatedly hand the same managed carrier through
+    // independently evaluated fixtures. Keep that carrier rooted while a
+    // parallel test may explicitly collect the shared test value domain.
+    let values = crate::core::test_value_factory();
+    let carrier_root = values.with_runtime_value_access(|access| {
+        access.root_runtime_value(Value::initial_metadata_carrier(&values))
+    });
+    let carrier = carrier_root.clone_core_for_test();
 
     for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
         let error = eval_closed_expr(&builtin2_expr(
@@ -3393,6 +3400,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         key_error.to_string(),
         "dictionary keys must evaluate to keyable values"
     );
+    drop(carrier_root);
 }
 
 #[test]
