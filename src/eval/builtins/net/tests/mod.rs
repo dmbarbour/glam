@@ -791,8 +791,19 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
         Arc::from([Value::binary_from_text("same invocation")]),
     ));
     assert_eq!(
-        run_builder_at(&context, resumed, first_state, 0)[0],
+        run_builder_at(&context, resumed, first_state.clone(), 0)[0],
         Value::binary_from_text("same invocation")
+    );
+
+    let resumed_again = Value::Lazy(LazyValue::from_application(
+        context.values(),
+        continuation.clone(),
+        Arc::from([Value::binary_from_text("same invocation again")]),
+    ));
+    assert_eq!(
+        run_builder_at(&context, resumed_again, first_state, 0)[0],
+        Value::binary_from_text("same invocation again"),
+        "captured builder continuations are deliberately non-affine"
     );
 
     let foreign = Value::Lazy(LazyValue::from_application(
@@ -805,6 +816,54 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
     assert!(
         error.to_string().contains("belongs to another invocation"),
         "{error}"
+    );
+}
+
+#[test]
+fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
+    let context = EvalContext::standalone();
+    let prompt = Value::binary_from_text("branch-local prompt");
+    let (state, operation) = with_access(&context, |access| {
+        let state = encode_builder_state(
+            access,
+            &Arc::new(ConstructionBrand::default()),
+            1,
+            Vec::new(),
+            super::builder::initial_user_state(access),
+        );
+        let left = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                constant_builder_continuation(
+                    access,
+                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                ),
+            ],
+        );
+        let right = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderShift,
+            vec![
+                prompt.clone(),
+                invoke_continuation_with(access, Value::binary_from_text("right retained reset")),
+            ],
+        );
+        let alternatives =
+            partial_builder(access, Builtin::InteractionNetBuilderAlt, vec![left, right]);
+        let operation = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderReset,
+            vec![prompt, alternatives],
+        );
+        (state, operation)
+    });
+
+    assert_eq!(
+        run_builder_at(&context, operation, state, 0)[0],
+        Value::binary_from_text("right retained reset"),
+        "a failed alternative must not leak its consumed reset frame into its sibling"
     );
 }
 

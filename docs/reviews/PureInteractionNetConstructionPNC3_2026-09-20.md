@@ -169,7 +169,7 @@ that each promise is assigned its own selected head. It then demands the
 exhausted tail twice: the first demand records exactly one construction and
 publication, while the second uses the memoized empty result without replay.
 
-### PNC3R-003 — Open: two control-law claims need direct latches
+### PNC3R-003 — Resolved: two control-law claims needed direct latches
 
 **Severity:** low verification
 
@@ -179,8 +179,11 @@ continuation twice within its owner, so the documented non-affine behavior is
 not directly proven. Branch-local ordinary state is covered, but reset-stack
 isolation across alternatives is not.
 
-Add one same-invocation double-resume fixture and one alternative fixture in
-which reset/control changes on a failed branch cannot affect its sibling.
+The captured-continuation fixture now invokes the same continuation twice with
+the same invocation state before separately checking foreign-brand rejection.
+`hidden_builder_reset_scope_is_branch_local_across_alternatives` consumes the
+outer reset frame on a failing left branch and proves that the right sibling
+still receives the original reset scope.
 
 ### PNC3R-004 — Resolved: decoded reset keys used general `Value` equality
 

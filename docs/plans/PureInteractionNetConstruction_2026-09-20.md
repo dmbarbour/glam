@@ -640,6 +640,7 @@ The executable reference matrix is:
 | cut captured by shift | strict `Cut` frame plus reconstructed `FirstResult` stage | `hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut` |
 | reusable same-invocation continuation | branded partial `Resume` builtin | `hidden_builder_captured_continuation_is_reusable_only_with_its_invocation` |
 | foreign invocation rejection | decoded construction-brand identity | `hidden_builder_captured_continuation_is_reusable_only_with_its_invocation` |
+| reset-scope branch isolation | immutable input state per ordered alternative | `hidden_builder_reset_scope_is_branch_local_across_alternatives` |
 | whole-state clear | replace `user_state`; preserve protected sequence | `hidden_builder_whole_state_clear_does_not_erase_the_active_sequence` |
 | whole-state restore | reset frames are ordinary traced data below `CONTROL_KEY` | `hidden_builder_whole_state_checkpoint_restores_reset_scope` |
 | malformed hidden state | strict frame decoders at the evaluator boundary | `hidden_builder_rejects_malformed_control_records` |
