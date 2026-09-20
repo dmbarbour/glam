@@ -623,6 +623,7 @@ impl CoreValueFactory {
         self.clone_cached_root(&self.core_values().error)
     }
 
+    #[cfg(test)]
     pub(crate) fn initial_metadata(&self) -> Value {
         self.clone_cached_root(&self.core_values().initial_metadata)
     }
@@ -2580,6 +2581,15 @@ impl fmt::Debug for DiagnosticByteSegmentDebug<'_> {
 }
 
 impl RuntimeValueAccess<'_> {
+    /// Duplicates the runtime's canonical initial metadata carrier under the
+    /// already-open managed-access region.
+    pub(crate) fn initial_metadata(&self) -> Value {
+        self.values()
+            .core_values()
+            .initial_metadata
+            .clone_core_with(self)
+    }
+
     /// Duplicates one raw value shell while this value domain keeps every
     /// reachable managed edge live.
     ///

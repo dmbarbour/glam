@@ -6231,10 +6231,54 @@ for it:
          removed. Forced path, list, literal, emptiness, and extraction
          schedules plus exact root-publication, owner, access, checkpoint,
          edge, raw-value, and WHNF ledgers close the family.
-     - **W6G.1f.3g.3f — annotations.** Move annotation recognition and its
-       pure, metadata, reflection, and diagnostic-context phases last. Return
-       reflection scheduling only as a post-access boundary intent; never
-       place a reflection checkpoint or registered root in the value graph.
+     - **W6G.1f.3g.3f — annotations.** Annotation kind is known only after
+       demanding the annotation operand, so this family cannot safely cut over
+       one spelling at a time without installing a rooted fallback beneath the
+       managed checkpoint. Build and review the regional family in the
+       following precursor checkpoints, then switch dispatch once the family
+       is compile-exhaustive:
+       - **W6G.1f.3g.3f.1 — Complete (2026-09-20): regional vocabulary and recognition.** Introduce
+         raw annotation arguments, recognized payloads, phase state, exact
+         tracing, and callback-free demand helpers. Keep the regional machine
+         undispatched until every recognized form has a regional continuation.
+       - **W6G.1f.3g.3f.2 — Complete (2026-09-20): pure, assertion, and diagnostic phases.** Move
+         assertion payload/name/value demand, `assert_unit`, error emission,
+         diagnostic-context enrichment, unknown annotations, and `seq`/`spark`
+         construction beneath the checkpoint. Preserve context attachment only
+         for nested demand failures.
+       - **W6G.1f.3g.3f.3 — Complete (2026-09-20): collection phases.** Move array, deque, and binary
+         target/item traversal beneath the checkpoint using the regional list
+         front. Preserve strict byte validation, compact-binary fast paths, and
+         completed-prefix progress across yield and dependency suspension.
+       - **W6G.1f.3g.3f.4 — Complete (2026-09-20): metadata and reflection construction.** Move
+         metadata target/carrier traversal and projection construction beneath
+         the checkpoint. Construct reflection gates and `meta_refl` result
+         lazies as ordinary traced graph values; starting or resuming their
+         autonomous reflection tasks remains a later post-access boundary of
+         those lazy sources, never annotation-checkpoint state.
+       - **W6G.1f.3g.3f.5 — Complete (2026-09-20): dispatcher cutover and closure.** Add the annotation
+         variant to the compile-exhaustive regional family, remove the durable
+         annotation owner and its registered roots, and reconcile the exact
+         inventories. Force collection across assertion, collection, metadata,
+         reflection-gate, and diagnostic-context suspension schedules, with
+         no replay of completed prefixes or reflection reservation.
+         Completion record: annotation recognition, assertion payload/name/
+         value demand, collection traversal, metadata extraction, diagnostic
+         enrichment, and result construction now remain raw traced state in
+         the managed builtin checkpoint. Reflection annotations and
+         `meta_refl` construct only ordinary traced reflection-source lazies;
+         reservation and activation remain the source owner's post-access
+         responsibility, so no reflection checkpoint or registered root was
+         added to the value graph. Forced schedules collect a rooted
+         annotation while waiting on a diagnostic context, binary item,
+         metadata carrier, or reflection completion and prove completed
+         semantic prefixes and reflection work are not replayed. The durable
+         annotation owner, twelve root-publication sites, and fourteen rooted
+         child-WHNF seeds are removed, and the ownership, raw-value, access,
+         checkpoint, and WHNF inventories are reconciled. The library suite,
+         clippy gate, and interaction-net profiling regressions pass; the full
+         gate again reached the separately tracked CLI prepared-session
+         deadlock assigned to W6G.1f.2b.
    - **W6G.1f.3g.4 — effect and object families.** Regionalize effect,
      object-builtin, and object-composition state. Reuse application
      checkpoints and regional child forms rather than embedding a registered

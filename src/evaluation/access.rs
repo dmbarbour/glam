@@ -190,6 +190,7 @@ impl EvaluatorStepContext<'_> {
     /// Constructs a lazy with a temporary exact owner which survives every
     /// access boundary in this evaluator step. `finish` drops that owner only
     /// after the step has published its result or durable blocked state.
+    #[cfg(test)]
     pub(crate) fn construct_lazy(
         &self,
         construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> LazyValue,

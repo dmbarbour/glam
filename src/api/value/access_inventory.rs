@@ -127,14 +127,6 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover; W6G.1f.3g.1b shared path child"
     ),
     entry!(
-        "src/eval/annotation_machine.rs",
-        0,
-        0,
-        12,
-        "durable annotation payload, collection, metadata, and result publication",
-        "W6E.1-W6E.4 resumable annotation ownership"
-    ),
-    entry!(
         "src/eval/effect_machine.rs",
         0,
         0,
@@ -451,12 +443,6 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl CoreValues::new"
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
-                | "src/eval/annotation_machine.rs::annotation_error_root"
-                | "src/eval/annotation_machine.rs::finish_metadata_update"
-                | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized"
-                | "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll"
-                | "src/eval/annotation_machine.rs::recognize_annotation"
-                | "src/eval/annotation_machine.rs::root_builtin"
                 | "src/eval/builtins/net/construction.rs::net_construction_context"
                 | "src/eval/builtins/net/construction.rs::replay"
                 | "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll"
@@ -728,18 +714,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
-    "src/eval/annotation_machine.rs::annotation_error_root#1|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::finish_metadata_update#1|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::begin_recognized#1|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#2|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#3|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#4|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#5|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#6|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::impl AnnotationBuiltinMachine::poll#7|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::recognize_annotation#1|surface=access-publication|scope=production",
-    "src/eval/annotation_machine.rs::root_builtin#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
     "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
     "src/eval/effect_machine.rs::impl EffectBuiltinMachine::poll#1|surface=access-publication|scope=production",

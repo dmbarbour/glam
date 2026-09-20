@@ -135,11 +135,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter; W6G.1f.3g.1b exposes required key-list conversion through that shared regional child; W6G.1f.3g.3e.2a removes the optional durable adapter"
     ),
     context_entry!(
-        "src/eval/annotation_machine.rs",
-        [9, 3],
-        "W6E.1-W6E.4 durable annotation recognition, collection, metadata, and reflection owner"
-    ),
-    context_entry!(
         "src/eval/application.rs",
         [0, 3],
         "W6F.4d.3 ordinary lazy application test constructors and access-qualified leaves"
@@ -494,8 +489,8 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
     let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))
         .expect("annotation machine source should be readable");
     for annotation_boundary in [
-        "pub(crate) struct AnnotationBuiltinMachine",
-        "AnnotationPhase::MetadataItems",
+        "pub(in crate::eval) struct RegionalAnnotationMachine",
+        "RegionalAnnotationPhase::MetadataItems",
         "LazyValue::from_reflection_gate_in",
         "Value::reflection_task_result_in",
         "RecognizedAnnotation::Seq(value)",

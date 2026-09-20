@@ -328,17 +328,6 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.2"
     ),
     closed_durable!(
-        "src/eval/annotation_machine.rs",
-        "annotation recognition, collection, metadata, and reflection progress",
-        "canonical RuntimeValueRoot target, payload, list-item, metadata, and child-WHNF fields",
-        "yielded or dependency-blocked annotation evaluation",
-        "saturated annotation admission and bounded child-result publication",
-        "annotation completion, failure, cancellation, or builtin-source retirement",
-        ManagedRootSurface,
-        RootSurface,
-        "W6E.1-W6E.4"
-    ),
-    closed_durable!(
         "src/eval/effect_machine.rs",
         "effect application, API-name/argument/map-list traversal, and fixpoint progress",
         "canonical RuntimeValueRoot operands, map accumulators, and completed argument prefixes plus child WHNF, key-conversion, and list-front machines",
@@ -505,12 +494,12 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "W6G.1f.3f replaces the registered-root recipe machine and promise root with one exhaustive lazy-owned regional graph; list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand, list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss, and list_effect_fix_checkpoint_constructs_and_assigns_one_promise force route loss and collection across every recipe family"
     ),
     exact_managed!(
-        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs",
+        "src/eval/lazy_checkpoint.rs; src/eval/builtin_machine.rs; src/eval/annotation_machine.rs",
         "managed builtin checkpoint cell",
         "raw builtin arguments, completed scalar prefixes, and regional WHNF child state behind one representation mutex",
         "one concrete typed arm beneath a managed lazy producer edge; scheduler-boundary translation and final-result WHNF handoff occur after its transition closes",
         CompatibilityPayload,
-        "W6G.1f.3g.2a-.2c introduce numeric, assertion, provenance, conditional, and net arms; forced fixtures collect across their exact dependencies, diagnostic phase, deferred list-front state, and completed arity"
+        "W6G.1f.3g.2a-.3f introduce numeric, assertion, provenance, conditional, net, collection, pattern, metadata, and annotation arms; forced fixtures collect across exact dependencies, diagnostic phases, deferred traversals, and completed prefixes"
     ),
     closed_durable!(
         "src/reflection/requests.rs",
@@ -1008,8 +997,8 @@ fn is_production_source(relative: &Path) -> bool {
 // semantic-undefined helper with raw path, frame, leaf, and traversal state.
 const DECLARATION_BASELINE_COUNT: usize = 244;
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([219, 197, 5, 31, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 1_548_482_372_370_961_716;
+    DeclarationSignals::new([239, 177, 5, 31, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 8_533_257_108_846_041_400;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
@@ -1165,7 +1154,7 @@ fn owner_for_declaration(declaration: &str) -> Option<&'static str> {
     {
         "FunctionCode / FunctionValue / NetValue / CoreOperator / synchronized net state"
     } else if declaration.starts_with("src/eval/annotation_machine.rs::") {
-        "annotation recognition, collection, metadata, and reflection progress"
+        "managed builtin checkpoint cell"
     } else if declaration.starts_with("src/eval/effect_machine.rs::") {
         "effect application, API-name/argument/map-list traversal, and fixpoint progress"
     } else if declaration.starts_with("src/eval/access_machine.rs::") {

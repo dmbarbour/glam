@@ -18,7 +18,7 @@ use crate::evaluation::{
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-use super::annotation_machine::AnnotationBuiltinMachine;
+use super::annotation_machine::RegionalAnnotationMachine;
 use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::EffectBuiltinMachine;
@@ -62,6 +62,7 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 /// Compile-exhaustive regional state for builtin families migrated beneath
 /// the lazy-owned checkpoint.
 pub(in crate::eval) enum RegionalBuiltinMachine {
+    Annotation(Box<RegionalAnnotationMachine>),
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
@@ -148,6 +149,7 @@ impl RegionalBuiltinMachine {
         matches!(
             builtin,
             Builtin::AssertUnit
+                | Builtin::Anno
                 | Builtin::IfResult
                 | Builtin::MatchResult
                 | Builtin::Greater
@@ -203,6 +205,11 @@ impl RegionalBuiltinMachine {
         assert!(Self::supports(builtin));
         assert_eq!(arguments.len(), builtin.arity());
         match builtin {
+            Builtin::Anno => Self::Annotation(Box::new(RegionalAnnotationMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            ))),
             Builtin::AssertUnit => {
                 let [diagnostic_context, value, result] = arguments else {
                     unreachable!("unit assertion must retain three operands")
@@ -368,6 +375,7 @@ impl RegionalBuiltinMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         match self {
+            Self::Annotation(machine) => machine.poll_in(access, step_budget),
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
@@ -390,6 +398,7 @@ impl RegionalBuiltinMachine {
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match self {
+            Self::Annotation(machine) => machine.trace_managed_edges(visitor),
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
@@ -846,7 +855,6 @@ impl RegionalStrategyMachine {
 }
 
 pub(crate) enum BuiltinTaskMachine {
-    Annotation(Box<AnnotationBuiltinMachine>),
     Effect(EffectBuiltinMachine),
     Object(Box<ObjectBuiltinMachine>),
     ObjectComposition(Box<ObjectCompositionMachine>),
@@ -900,7 +908,6 @@ impl BuiltinTaskMachine {
                 | Builtin::PatternDictTryTake
                 | Builtin::PatternDictTryTakeOptional
                 | Builtin::PatternEqual
-                | Builtin::Anno
                 | Builtin::ObjectSpec
                 | Builtin::ObjectLocalName
                 | Builtin::DiagnosticObject
@@ -929,7 +936,6 @@ impl BuiltinTaskMachine {
             "a builtin source must contain one saturated call"
         );
         match builtin {
-            Builtin::Anno => Self::Annotation(Box::new(AnnotationBuiltinMachine::new(arguments))),
             builtin if EffectBuiltinMachine::supports(builtin) => {
                 Self::Effect(EffectBuiltinMachine::new(builtin, arguments))
             }
@@ -951,9 +957,6 @@ impl BuiltinTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> BuiltinTaskPoll {
         match self {
-            Self::Annotation(machine) => {
-                machine.poll(poll_context, context, durable_context, step_budget)
-            }
             Self::Effect(machine) => {
                 machine.poll(poll_context, context, durable_context, step_budget)
             }

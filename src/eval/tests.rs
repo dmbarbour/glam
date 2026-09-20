@@ -5556,6 +5556,78 @@ fn assert_unit_annotation_has_optional_diagnostic_context() {
 }
 
 #[test]
+fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_replay() {
+    let (owner, observer, _executor) = same_runtime_contexts();
+    let (diagnostic_context, _owner_task, _owner) = owner
+        .task_owned_promise(Arc::from("annotation diagnostic context"))
+        .expect("the owner should allocate a promised diagnostic context");
+    let value_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&value_demands);
+    let value = Value::semantic_thunk(
+        observer.values(),
+        "instrumented annotation assertion value",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(n(42))
+        },
+    );
+    let annotation = Value::Dict(
+        Dict::new_sync().insert(
+            Key::atom_from_text("assert_unit"),
+            Value::Dict(
+                Dict::new_sync()
+                    .insert((*keys::VALUE).clone(), value)
+                    .insert(
+                        (*keys::CONTEXT).clone(),
+                        Value::Promised(diagnostic_context.clone()),
+                    ),
+            ),
+        ),
+    );
+    let application = apply_values(
+        &observer,
+        Value::Builtin(Builtin::Anno),
+        vec![annotation, n(7)],
+    )
+    .expect("assertion annotation application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated annotation builtin should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
+
+    let blocked = eval_value(&observer, &application)
+        .expect_err("the unresolved diagnostic context should suspend the assertion");
+    assert!(blocked.blocked_on().is_some());
+    assert_eq!(value_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the annotation checkpoint must trace completed assertion work");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact diagnostic-context promise");
+    assert_eq!(value_demands.load(Ordering::SeqCst), 1);
+
+    set_promise(
+        &owner,
+        &diagnostic_context,
+        Value::binary_from_text("assertion result"),
+    )
+    .expect("the owner should resolve the promised diagnostic context");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned annotation checkpoint must remain live");
+    let failure = eval_value(&observer, &application)
+        .expect_err("the resumed non-unit assertion should fail");
+    assert_eq!(
+        failure.to_string(),
+        "assertion result: unit expected, received Number"
+    );
+    assert_eq!(value_demands.load(Ordering::SeqCst), 1);
+    drop(application_root);
+}
+
+#[test]
 fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     let atom = |name| Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(name)));
     let context_annotation = |context| {
@@ -6061,14 +6133,29 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         ],
     )
     .expect("metadata annotation application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated metadata annotation should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved carrier should suspend metadata extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the metadata checkpoint must trace its completed carrier prefix");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised carrier");
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &second, Value::metadata_carrier(n(2)))
         .expect("the owner should resolve the promised carrier");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned metadata checkpoint must remain live");
     let Value::List(carriers) =
         eval_value(&observer, &application).expect("metadata extraction should resume")
     else {
@@ -6088,6 +6175,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         1,
         "resumption must retain the completed metadata carrier"
     );
+    drop(application_root);
 }
 
 #[test]
@@ -6657,14 +6745,29 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
         ],
     )
     .expect("binary annotation application should build");
+    let Value::Lazy(application_lazy) = &application else {
+        panic!("a saturated binary annotation should remain lazy")
+    };
+    let application_root = application_lazy.root(observer.values());
 
     let blocked = eval_value(&observer, &application)
         .expect_err("the unresolved byte should suspend binary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the binary checkpoint must trace its completed byte prefix");
+    eval_value(&observer, &application)
+        .expect_err("a later route must resume the exact promised byte");
+    assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &item, n(i64::from(b'b')))
         .expect("the owner should resolve the promised byte");
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the assigned binary checkpoint must remain live");
     assert_eq!(
         eval_value(&observer, &application).expect("binary extraction should resume"),
         Value::binary_from_text("ab")
@@ -6674,6 +6777,7 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
         1,
         "resumption must retain the completed prefix byte"
     );
+    drop(application_root);
 }
 
 #[test]
@@ -7027,9 +7131,17 @@ fn reflection_gate_waits_before_continuing_target_demand() {
         },
     );
     let gate = reflection_annotation(&context, n(0), target.clone());
+    let Value::Lazy(gate_lazy) = &gate else {
+        panic!("a reflection annotation should construct a lazy gate")
+    };
+    let gate_root = gate_lazy.root(context.values());
 
     assert_eq!(context.reflection_task_count(), 0);
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the waiting reflection gate must remain traced");
 
     let first = eval_value(&context, &gate).expect_err("new reflection task should block");
     let wait = first
@@ -7053,6 +7165,7 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(eval_value(&context, &gate).unwrap(), n(42));
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(gate_root);
 }
 
 #[test]

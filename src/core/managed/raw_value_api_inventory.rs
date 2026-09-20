@@ -303,6 +303,7 @@ impl ApiOccurrence {
             | "src/eval/builtins/pattern.rs" => D2cFamily::CollectionsAndPatterns,
             "src/eval/builtins/annotation.rs"
             | "src/eval/builtins/annotation/implementation.rs"
+            | "src/eval/annotation_machine.rs"
             | "src/eval/builtins/effect.rs"
             | "src/eval/builtins/effect/implementation.rs"
             | "src/eval/builtins/list_effect.rs"
@@ -497,6 +498,25 @@ impl ApiOccurrence {
                 | "metadata_update_inputs"
                 | "metadata_update_outputs",
             ) => W6E3MetadataPure,
+            (
+                AnnotationsAndEffects,
+                "src/eval/annotation_machine.rs",
+                "annotation_error_in"
+                | "annotation_name"
+                | "assertion_name"
+                | "atom_name"
+                | "key_atom_name"
+                | "recognize_annotation"
+                | "recognize_simple_annotation",
+            ) => W6E1AnnotationRecognition,
+            (
+                AnnotationsAndEffects,
+                "src/eval/annotation_machine.rs",
+                "finish_metadata_update_in",
+            ) => W6E3MetadataPure,
+            (AnnotationsAndEffects, "src/eval/annotation_machine.rs", _) => {
+                W6E4AnnotationReflection
+            }
             (
                 AnnotationsAndEffects,
                 "src/eval/builtins/annotation.rs"
@@ -1360,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        507,
+        511,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        996_541_188_970_825_268,
+        15_354_072_187_813_870_318,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1380,9 +1400,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // W6G.1f.3g.1a-.3e.3b expose the regional list/key constructors and
         // builtin family entry points through literal-pattern migration. Each
         // raw value handoff remains tied to caller-supplied value access.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 210),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 215),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 257),
+        ((ApiKind::Function, ApiDisposition::Violation), 256),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1451,7 +1471,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2bCoreCompatibility,
                 ReplacementShape::CoreStructuralOperation,
             ),
-            35,
+            34,
         ),
         (
             (
@@ -1531,7 +1551,6 @@ fn d2b_core_compatibility_declarations_are_exact() {
         "src/core.rs::CoreValueFactory::clone_cached_root",
         "src/core.rs::CoreValueFactory::error",
         "src/core.rs::CoreValueFactory::info",
-        "src/core.rs::CoreValueFactory::initial_metadata",
         "src/core.rs::CoreValueFactory::key_value",
         "src/core.rs::CoreValueFactory::object_reflection_guard",
         "src/core.rs::CoreValueFactory::tuple",
