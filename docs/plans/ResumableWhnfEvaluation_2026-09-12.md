@@ -4898,30 +4898,27 @@ which policy changed.
 
 The checkpoint labels group target contracts, not source order. As of the
 2026-09-21 [interim implementation review](../reviews/ResumableWhnfW6GInterim_2026-09-21.md),
-W6G.1b, W6G.1e.1, W6G.1f.1, W6G.1f.2a, and W6G.1f.3a-h are complete; W6G.3
-is also complete. **W6G.1c is a cross-cutting acceptance target, not one
-additional implementation step:** its lazy-owned state exists, but its
-session-neutral route and causal claim policy remain open. The
+W6G.1b, W6G.1e.1, W6G.1f.1, W6G.1f.2a-b, W6G.1f.3a-i, and W6G.1f.4 are
+complete; W6G.3 is also complete. **W6G.1c is a cross-cutting acceptance
+target, not one additional implementation step:** its lazy-owned state and
+session-neutral route exist, but its causal claim policy remains open. The
 [remaining-work review](../reviews/ResumableWhnfW6GRemainingPlan_2026-09-21.md)
-records the source-backed drift and checkpoint-size judgments. The actual
-remaining dependency order is:
+records the source-backed drift and checkpoint-size judgments. The migration
+dependency order, including completed prerequisites, is:
 
-1. **W6G.1f.3i.0-.4:** finish the remaining state-bearing lazy-route `Whnf`
-   cases and close the producer-family inventory. Do not skip from the
-   completed W6G.1f.3h directly to W6G.1f.4.
-2. **W6G.1f.2b:** split lazy routes from task-owned promise producers where
-   their lifecycles differ; remove the coordinator-owned *lazy-route* machine,
-   first-observer session affinity, and final-subscriber retention. Force the
-   known first-session-close and claim/publication races.
-3. **W6G.1f.4:** verify retention, collection, and mixed-observer sharing on
-   that new route lifecycle. Its evidence census, W6G.1f.4a, may be prepared
-   earlier, but its acceptance schedules must use the post-2b implementation.
-4. **W6G.1e.3b's implicit-child inventory, then W6G.1e.2/e.3b's selector and
-   fallback cutovers:** make causally related reflection children explicit,
-   select background roots and their exact descendants, and remove global
-   deferred and unrelated same-session selection. The inventory may begin
-   alongside earlier work; behavioral retirement follows 2b and its forced
-   route verification.
+1. **W6G.1f.3i.0-.4 — complete:** closed the state-bearing lazy-route `Whnf`
+   producer-family inventory.
+2. **W6G.1f.2b — complete:** split lazy routes from task-owned promise
+   producers and removed first-observer session affinity and final-subscriber
+   route retention.
+3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
+   sharing on the new route lifecycle.
+4. **Next: W6G.1e.3b's remaining implicit-child inventory, then
+   W6G.1e.2/e.3b's selector and fallback cutovers:** make causally related
+   reflection children explicit, select background roots and their exact
+   descendants, and remove global deferred and unrelated same-session
+   selection. Behavioral retirement follows the completed 2b and f.4 route
+   verification.
 5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
    driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
@@ -4934,7 +4931,9 @@ remaining dependency order is:
 W6G.1c closes when steps 1-4 establish its complete session-neutral and
 causal-claim contract. This ordering is a dependency guide, not permission to
 mark a broad checkpoint complete merely because its earlier representation
-work has landed.
+work has landed. Revisit this execution-order summary after each W6G.1
+checkpoint; completed substeps, changed prerequisites, and the next actionable
+checkpoint belong here rather than only in the detailed section below.
 
 Maintain two source-backed audits during the transition:
 
@@ -5158,6 +5157,22 @@ deferred causal traversal:
     (remove same-session fallback and force both sides of child-launch and
     subscription publication). The audit may precede e.2; the removal must
     follow the reviewed child-edge mechanism.
+
+    **Partial closure (2026-09-21; e.3b remains open).** The `refl` and
+    `meta_refl` annotation family is no longer an implicit child of its first
+    observer: source handoff reserves one task-owned completion promise,
+    installs the lazy's exact WHNF dependency, then activates the autonomous
+    runtime-background task. W6G.1f.2b.1 also restored selection of the
+    runtime-default reflection profile for those annotations; `.task.new`
+    still inherits its caller's profile. Profile selection is not causal
+    scheduling. A committed `.task.new` launch is still a distinct route:
+    `create_task` journals `ReflectionUpdate::Launch`, while a parent which
+    later joins publishes its wait only when `.task.join` is polled. The
+    same-session claim in `pump_demand` and its transitional coordinator
+    selector remain. Thus e.3b.0's complete launch/edge census and forced
+    child-before-wait fixtures, e.3b.1's remaining child-edge decision, and
+    e.3b.2's fallback removal **cannot yet be marked complete**. Do not
+    revisit annotation profile ownership as part of that remaining work.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
     `session_has_running_machine` and its compensating busy waits. This is a
@@ -5849,11 +5864,11 @@ for it:
    The source winner roots its inputs, reserves the task in the runtime-owned
    background demand, registers a compile-exhaustive terminal mapper,
    publishes the ordinary WHNF checkpoint focused on that promise, and only
-   then activates. The selected reflection profile remains the source's
-   profile; only lifecycle ownership is session-neutral. Dropping an
-   unactivated permit terminalizes the promise, while closing the first
-   observing session retires only that route and a later session resumes the
-   same autonomous task through a new exact wait.
+   then activates. The selected reflection profile is the runtime default
+   (restored in W6G.1f.2b.1), independent of the observer; lifecycle ownership
+   is also session-neutral. Dropping an unactivated permit terminalizes the
+   promise, while closing the first observing session retires only that route;
+   a later session resumes the same autonomous task through a new exact wait.
 
    The terminal matrix covers return-value and gate success plus failure,
    cancellation, abandonment, killing, and exit. Ordinary promised-failure
