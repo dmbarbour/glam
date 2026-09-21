@@ -6388,7 +6388,8 @@ for it:
      The source-backed producer, root-publication, durable-owner,
      persistent-edge, raw-value, checkpoint, and WHNF inventories pass along
      with the full workspace, clippy, and interaction-net profiling gates.
-9. **W6G.1f.3h — pure net construction over `ListEffect`.** Follow
+9. **W6G.1f.3h — pure net construction over `ListEffect` — Complete
+   (2026-09-21).** Follow
    [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md).
    Do not migrate `IsolatedEffectSearch` or its roots beneath the lazy
    checkpoint. Interpret the construction program as ordinary pure builder
@@ -6398,6 +6399,14 @@ for it:
    hidden callback-free `interaction_net_from_netlist` primitive for validation
    and `NetBuilder` replay. Remove the dedicated net-construction producer
    route after parity and forced route-loss verification.
+   Completion record: PNC0–PNC7 are closed. Source, strict replay, private
+   builder, budget-one route-loss, collection, and no-capability fixtures
+   pass. A source audit confirms one exclusive deferred claim and an atomic
+   replay-to-managed-WHNF-checkpoint transition under one value access;
+   forced route loss followed by repeated demand observes the same cached
+   net identity. Separate completed-construction and suspended-checkpoint
+   backedge fixtures reclaim their cycles after external roots drop. The
+   full format, Clippy, test, and interaction-net profiling gates pass.
 10. **W6G.1f.3i — family closure.** Remove every state-bearing
     *lazy-producer route* variant, make route markers compile-exhaustive over
     the typed checkpoint carrier plus the reflection-to-promise handoff, and

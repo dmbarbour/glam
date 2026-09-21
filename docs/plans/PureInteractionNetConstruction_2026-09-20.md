@@ -1,10 +1,10 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
+Status: complete; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
 remediations, PNC5, and its
 [post-PNC5 review remediations](../reviews/PureInteractionNetConstructionPNC5_2026-09-21.md)
 completed on 2026-09-21. PNC6 legacy removal completed on 2026-09-21; PNC7
-verification and closure is next. The
+verification and closure completed on 2026-09-21. The
 [post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
 found no demonstrated result defect. Its private diagnostic contract,
 no-replay evidence, replay-order/API/malformed-record latches, and future-phase
@@ -1046,6 +1046,56 @@ full `cargo test -q` suite, and the interaction-net profiling script pass.
 Exit: net construction has no dedicated state-bearing lazy-producer route.
 
 ### PNC7 — Verification and closure
+
+Completed 2026-09-21. The closure matrix is covered by these independently
+inspectable groups, rather than one large fixture with hidden scheduling:
+
+- Source-level construction in `src/g_syntax/tests.rs` covers bind/copy/data/
+  wire, ordinary function calls, local state and control, zero/one/multiple
+  results, cut, lazy data, invalid topology, and copy-count boundaries
+  (`constructs_and_observes_an_interaction_net_from_source_effects` through
+  `interaction_net_copy_requires_a_representable_nonnegative_integer`).
+- `src/eval/builtins/net/tests/mod.rs` covers all strict replay forms, source
+  order, fixed-width builder state, malformed compact records and wire IDs,
+  foreign brands, rollback of both journals, state/control parity, invalid
+  builder tokens, and the exact private API. The new
+  `public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop`
+  verifies that `.data` neither forces a promise backedge nor retains the
+  completed construction cycle after its two external roots are dropped. The
+  collector fixture uses a private value heap, so unrelated parallel tests
+  cannot perturb its exact root and mark counts.
+- Budget-one poll and route-loss fixtures in `src/eval/value/tests/w4.rs`
+  collect between handoffs and check exact promise dependencies at list
+  search, state/control, builder operands, result selection, and exposure.
+  They count demanded prefixes and builder/continuation observations so
+  equivalent final values cannot conceal replay. In particular,
+  `public_construction_waits_for_first_result_before_ready_right_branch`
+  fixes the blocked-left ordering, and
+  `public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation`
+  now checks that a fresh demand after collection returns the identical
+  cached runtime net. The new
+  `public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop`
+  separately collects a suspended builder checkpoint and its promise
+  backedge after dropping the three external roots.
+- `semantic_netlist_replay_has_no_effect_or_scheduler_boundary` latches the
+  synchronous replay boundary against effect, evaluator, scheduler, root, and
+  callback entry points. The private API test excludes reflection, task,
+  heap, environment, logger, and exit capabilities.
+
+The production handoff audit found one coordinator work record per deferred
+value (`reserve_deferred` indexes by value); `claim_deferred` removes its
+single machine while marked Running. A builtin checkpoint transition holds
+the managed checkpoint's state mutex, and its Ready path validates/replays
+the selected netlist and replaces the lazy's builtin checkpoint with a WHNF
+checkpoint inside one `with_value_access` call. The later `Yielded` boundary
+does not expose an intermediate replayable source. If replay ever gains a
+yield/callback boundary, this proof and its source latch must be replaced by
+an explicit replay-progress fixture.
+
+The ordinary full suite and the profiling-specific script pass, as do format
+and all-target/all-feature Clippy checks. No new public syntax or semantic
+choice was needed for this closure. W6G.1f.3h is complete; W6G.1f.3i is the
+next parent-plan checkpoint.
 
 Run the full matrix below under ordinary and aggressive-collection fixtures.
 Where scheduling matters, use barriers or explicit poll boundaries to force

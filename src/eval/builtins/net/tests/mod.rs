@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::{Builtin, BuiltinCall, Dict, LazyValue, List, RuntimeValueAccess, Value};
+use crate::core::{
+    Builtin, BuiltinCall, Dict, LazyValue, List, PromisedValue, RuntimeValueAccess, Value,
+};
 use crate::evaluation::EvalContext;
 
 use super::identity::{ConstructionBrand, ConstructionPortId, decode_construction_brand};
@@ -374,6 +376,79 @@ fn replay_copies_a_lazy_data_payload_without_demanding_it() {
     });
 }
 
+#[test]
+fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
+    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
+    let values = context.values();
+    let (construction_root, promise_root) = with_access(&context, |access| {
+        let promise_root = access
+            .construct_rooted_managed_promise("construction data backedge")
+            .expect("the backedge promise should fit a collector run");
+        let promise = PromisedValue::from_root(&promise_root, access);
+        let data = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderData,
+            vec![Value::Promised(promise)],
+        );
+        let sequence = partial_builder(
+            access,
+            Builtin::InteractionNetBuilderSeq,
+            vec![data, return_first_port_continuation(access)],
+        );
+        let Value::Lazy(construction) =
+            Value::builtin_call_in(access, Builtin::InteractionNet, vec![sequence])
+        else {
+            panic!("public interaction-net construction must be lazy")
+        };
+        (construction.root_in(access), promise_root)
+    });
+
+    let construction = with_access(&context, |access| {
+        Value::Lazy(LazyValue::from_root(&construction_root, access))
+    });
+    let Value::Net(net) = crate::eval::eval_value(&context, &construction)
+        .expect("data must not demand its as-yet-unassigned backedge")
+    else {
+        panic!("construction with a lazy backedge must produce a net")
+    };
+    let payload = net.runtime().test_with(values, |runtime| {
+        runtime.interface_data(runtime.exposed()).cloned()
+    });
+    assert!(matches!(payload, Some(Value::Promised(_))));
+
+    let (promise, backedge) = with_access(&context, |access| {
+        (
+            PromisedValue::from_root(&promise_root, access),
+            Value::Lazy(LazyValue::from_root(&construction_root, access)),
+        )
+    });
+    crate::core::set_test_promise(values, &promise, backedge)
+        .expect("the backedge promise should accept the owning construction");
+    let live = values
+        .collect_managed_for_test()
+        .expect("the rooted construction cycle should be collectible");
+
+    drop((
+        construction,
+        net,
+        payload,
+        promise,
+        construction_root,
+        promise_root,
+    ));
+    let dead = values
+        .collect_managed_for_test()
+        .expect("the unrooted construction cycle should be collectible");
+    assert_eq!(dead.root_entries() + 2, live.root_entries());
+    assert!(
+        dead.marked_slots() + 3 <= live.marked_slots(),
+        "the lazy, net, and promise cycle must become unreachable"
+    );
+}
+
 fn partial_builder(
     access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
@@ -659,6 +734,34 @@ fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
             crate::eval::test_support::TestExpr::Value(
                 access.values().key_value(&crate::core::keys::EFF),
             ),
+        ),
+        handler,
+    );
+    crate::eval::test_support::closed_function_value_in(access.values(), 1, effect)
+}
+
+fn return_first_port_continuation(access: &RuntimeValueAccess<'_>) -> Value {
+    use crate::eval::test_support::TestExpr;
+
+    let first = apply_expr(
+        TestExpr::Value(Value::Builtin(Builtin::ListHead)),
+        TestExpr::Local(0),
+    );
+    let handler = apply_expr(
+        apply_expr(
+            TestExpr::Value(Value::Builtin(Builtin::EffectCall)),
+            TestExpr::Value(
+                access
+                    .values()
+                    .key_value(&crate::core::Key::atom_from_text("r")),
+            ),
+        ),
+        TestExpr::List(Arc::from([Arc::new(first)])),
+    );
+    let effect = apply_expr(
+        apply_expr(
+            TestExpr::Value(Value::Builtin(Builtin::DictSingleton)),
+            TestExpr::Value(access.values().key_value(&crate::core::keys::EFF)),
         ),
         handler,
     );

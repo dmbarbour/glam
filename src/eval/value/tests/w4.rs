@@ -2060,7 +2060,21 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
     let (retained, machine) = retained_lazy_machine(&context, effect);
     let mut route_losses = 0;
     let value = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
-    assert!(matches!(value, Value::Net(_)));
+    let Value::Net(first_net) = value else {
+        panic!("construction must complete with a net")
+    };
+    // The route which performed synchronous replay is gone. Collection and a
+    // fresh demand must observe the same cached net, not rerun construction.
+    collect_between_handoffs(&context);
+    let repeated = context
+        .values()
+        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+    let Value::Net(second_net) = crate::eval::eval_value(&context, &repeated)
+        .expect("a second demand should observe the completed construction")
+    else {
+        panic!("memoized construction must remain a net")
+    };
+    assert!(first_net.runtime().ptr_eq(second_net.runtime()));
     assert!(route_losses > 0);
     assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
     assert_eq!(continuation_demands.load(Ordering::SeqCst), 1);
@@ -2334,6 +2348,58 @@ fn public_construction_builder_operand_promise_resumes_same_program() {
     let net = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
     assert!(matches!(net, Value::Net(_)));
     assert!(route_losses >= 2);
+}
+
+#[test]
+fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
+    let context = isolated_context();
+    let values = context.values();
+    let count = PromisedValue::new(values, "construction checkpoint cycle count");
+    let count_owner = count.root(values);
+    let effect = values.with_runtime_value_access(|access| {
+        let copy = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderCopy,
+            arguments: Arc::from([Value::Promised(PromisedValue::from_root(
+                &count_owner,
+                &access,
+            ))]),
+        });
+        let sequence = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderSeq,
+            arguments: Arc::from([
+                builder_effect_value(&context, copy),
+                builder_return_first_port_continuation(&context),
+            ]),
+        });
+        builder_effect_value(&context, sequence)
+    });
+    let call = Value::builtin_call(values, Builtin::InteractionNet, vec![effect]);
+    let (retained, mut machine) = retained_lazy_machine(&context, call);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
+
+    let backedge = values
+        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+    crate::core::set_test_promise(values, &count, backedge)
+        .expect("the count promise should accept a backedge to its construction");
+    let live = values
+        .collect_managed_for_test()
+        .expect("the rooted construction checkpoint cycle should be collectible");
+
+    drop((machine, retained, count, count_owner));
+    let dead = values
+        .collect_managed_for_test()
+        .expect("the unrooted construction checkpoint cycle should be collectible");
+    // The machine, retained lazy handle, and promise owner are distinct roots.
+    assert_eq!(dead.root_entries() + 3, live.root_entries());
+    assert!(
+        dead.marked_slots() + 2 <= live.marked_slots(),
+        "the lazy checkpoint and promise cycle must become unreachable"
+    );
 }
 
 #[test]

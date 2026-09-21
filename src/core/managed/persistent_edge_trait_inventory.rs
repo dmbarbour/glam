@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        854,
+        855,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -919,9 +919,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // test root and is collected deterministically before and after launch.
     // PNC5R-001 adds four test-only promise roots for the public construction
     // first/second result, exposed-port, and nested builder-operand waits.
+    // PNC7 adds one test-only promise root so the suspended construction's
+    // checkpoint backedge remains live during its pre-drop collection.
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_307_469_008_901_358_790,
+        8_727_684_778_990_686_072,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -968,7 +970,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 602),
+            ((SourceScope::Test, EdgeSurface::Typed), 603),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
