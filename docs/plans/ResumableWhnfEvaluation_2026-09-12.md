@@ -4896,24 +4896,45 @@ which policy changed.
 
 ##### W6G.1 execution order and migration audits
 
-The checkpoint labels group the target contracts; they do not impose source
-order. Continue the implementation in this dependency order:
+The checkpoint labels group target contracts, not source order. As of the
+2026-09-21 [interim implementation review](../reviews/ResumableWhnfW6GInterim_2026-09-21.md),
+W6G.1b, W6G.1e.1, W6G.1f.1, W6G.1f.2a, and W6G.1f.3a-h are complete; W6G.3
+is also complete. **W6G.1c is a cross-cutting acceptance target, not one
+additional implementation step:** its lazy-owned state exists, but its
+session-neutral route and causal claim policy remain open. The
+[remaining-work review](../reviews/ResumableWhnfW6GRemainingPlan_2026-09-21.md)
+records the source-backed drift and checkpoint-size judgments. The actual
+remaining dependency order is:
 
-1. **W6G.1b:** separate foreground client records from background/root and
-   producer records while retaining one coordinator mutex and generation.
-2. **W6G.1f.1, W6G.1c, then W6G.1f.2-W6G.1f.4:** give the managed lazy one
-   authoritative source/checkpoint/result state, make producer routes
-   session-neutral, migrate demand-driven producer state into that graph, and
-   hand autonomous reflection work an exact managed completion source before
-   changing how workers discover producers.
-3. **W6G.1d:** layer the internal foreground driver on the separated client
-   registry; keep the public incremental handle deferred unless its drop
-   contract becomes necessary to complete an internal invariant.
-4. **W6G.1e.2-W6G.1e.3 and W6G.1g:** replace global deferred selection with
-   causal traversal, make implicit reflection-child relationships explicit,
-   then narrow session/runtime drains.
-5. **W6G.1h:** remove the temporary session-wide serialization scan and close
-   the forced-order verification matrix.
+1. **W6G.1f.3i.0-.4:** finish the remaining state-bearing lazy-route `Whnf`
+   cases and close the producer-family inventory. Do not skip from the
+   completed W6G.1f.3h directly to W6G.1f.4.
+2. **W6G.1f.2b:** split lazy routes from task-owned promise producers where
+   their lifecycles differ; remove the coordinator-owned *lazy-route* machine,
+   first-observer session affinity, and final-subscriber retention. Force the
+   known first-session-close and claim/publication races.
+3. **W6G.1f.4:** verify retention, collection, and mixed-observer sharing on
+   that new route lifecycle. Its evidence census, W6G.1f.4a, may be prepared
+   earlier, but its acceptance schedules must use the post-2b implementation.
+4. **W6G.1e.3b's implicit-child inventory, then W6G.1e.2/e.3b's selector and
+   fallback cutovers:** make causally related reflection children explicit,
+   select background roots and their exact descendants, and remove global
+   deferred and unrelated same-session selection. The inventory may begin
+   alongside earlier work; behavioral retirement follows 2b and its forced
+   route verification.
+5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
+   driver as an exact-only owner, then narrow session/runtime drains and
+   readiness. Do not introduce a public incremental handle merely to close
+   this phase. The current blocking driver still uses runtime and same-session
+   fallbacks, so its final policy depends on step 4.
+6. **W6G.1h (including W6G.1e.3c):** remove the temporary session-wide
+   serialization scan and compensating busy waits only after causal ownership
+   is authoritative, then close the forced-order matrix and current docs.
+
+W6G.1c closes when steps 1-4 establish its complete session-neutral and
+causal-claim contract. This ordering is a dependency guide, not permission to
+mark a broad checkpoint complete merely because its earlier representation
+work has landed.
 
 Maintain two source-backed audits during the transition:
 
@@ -5029,6 +5050,22 @@ checkpoint, or terminal-result state is currently authoritative.
 
 ##### W6G.1d — Foreground client evaluation lifecycle
 
+As built after W6G.1b/e.1, the private `ClientDemandHandle` and blocking
+driver already claim the exact foreground record. The blocked path still
+helps via runtime-wide work, and `pump_demand` still has an unrelated
+same-session fallback. Those are transitional liveness mechanisms, not the
+target exact-only client policy. Complete this section in two checkpoints:
+
+- **W6G.1d.1 — ownership/drop audit.** Inventory handle retirement,
+  cancellation, parked subscriptions, exact wake, and the two fallback paths
+  against current tests. Keep the public `Evaluation`/`try_advance` handle
+  deferred; an internal representation must not imply a public drop contract.
+- **W6G.1d.2 — exact-only blocking driver.** After W6G.1e.2/e.3b supply causal
+  descendants and explicit child work, remove unrelated runtime and
+  same-session help from ordinary client demand. Force zero-/one-/many-worker
+  schedules for exact dependency progress, owner close, cancellation,
+  subscription-before/after-publication, and stable blocked reporting.
+
 Introduce the client-only registry before deciding whether to expose its
 driver publicly. Shape the internal handle so a later public `Evaluation`
 facade can offer bounded `try_advance` plus blocking `run`/`eval` without
@@ -5079,6 +5116,22 @@ deferred causal traversal:
   one mechanism checkpoint. Current-behavior fixtures cover unrooted promoted
   work and a deferred dependency discovered by a spark; the foreground and
   reflection-rooted fixtures remain ready for the later policy transition.
+  Partition the remaining work:
+  - **W6G.1e.2a — route inventory and dry-run traversal.** After 2b, enumerate
+    background-root entry points, exact dependency edges, yield/requeue
+    behavior, and every current global-ready fallback. Build the traversal
+    helper and forced fixtures without changing production selection yet.
+  - **W6G.1e.2b — selector cutover.** Switch worker and runtime background
+    selectors together to spark/reflection roots and their exact descendants;
+    retire global deferred-ready eligibility in the same coherent change.
+    A busy descendant remains a wait, and a yielded one stays rediscoverable
+    from its root on a later pass. Preserve root fairness without making a
+    descendant an independent background root.
+  - **W6G.1e.2c — forced policy matrix.** Latch foreground-only deferred work
+    against worker search, spark- and reflection-rooted chains, contested
+    claims, zero-/one-/many-worker execution, and a runtime pump which excludes
+    sparks. Count claims to distinguish causal traversal from accidental
+    global selection.
 - **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
   drain and serialization policies cannot be narrowed before the registry
   topology which replaces them exists:
@@ -5088,8 +5141,10 @@ deferred causal traversal:
     schedule where configured `conf.log` depends on reflection work hosted by
     another session. Do not choose between “claim that cross-session root” and
     “represent a different exact dependency” through queue filtering. After
-    the topology migration, add forced configured-logger and client/spark
-    coexistence schedules before narrowing the drain.
+    the topology migration, inventory the actual drain authority and add
+    forced configured-logger and client/spark coexistence schedules. W6G.1g
+    owns the subsequent drain cutover; e.3a is its evidence gate, not a
+    second session-selector implementation.
   - **W6G.1e.3b — implicit-child audit and fallback retirement.** Exact demand
     pumping still has a same-session reflection fallback. The attempted direct
     removal exposed reflection/effect flows which launch causally related
@@ -5097,11 +5152,18 @@ deferred causal traversal:
     routes, make causal child ownership explicit, then remove the fallback;
     do not misclassify those children as arbitrary unrelated work merely to
     preserve the current scheduler heuristic.
+    Split this into **e.3b.0** (source-backed launch/edge census and forced
+    current-behavior fixtures), **e.3b.1** (explicit child ownership or exact
+    dependency publication, with task lifecycle tests), and **e.3b.2**
+    (remove same-session fallback and force both sides of child-launch and
+    subscription publication). The audit may precede e.2; the removal must
+    follow the reviewed child-edge mechanism.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
-    `session_has_running_machine` and its compensating busy waits. This is the
-    implementation part of W6G.1h; do not perform it as an isolated scheduler
-    relaxation.
+    `session_has_running_machine` and its compensating busy waits. This is a
+    prerequisite audit and handoff to W6G.1h, **not a separate removal**;
+    W6G.1h owns the implementation and final forced matrix. Do not perform it
+    as an isolated scheduler relaxation.
 
 Replace the generic executor `select` path with role-specific selectors. A
 worker locates a ready spark or reflection root, or rediscovers the deepest
@@ -5365,6 +5427,46 @@ checkpoint publication, and concurrently with a new subscriber. Verify that
 exactly one route and claim remain authoritative, no registration epoch is
 reused, and a background subscriber outlives closure of the first discovering
 client session.
+
+W6G.1f.2b is too large to treat as one unreviewed edit. Use these checkpoints;
+repartition the mechanism after 2b.0 if the current coordinator shape makes
+an intermediate state unsafe:
+
+- **W6G.1f.2b.0 — lifecycle and representation gate.** Inventory the current
+  `DeferredWork` admission, indexes, claim, release, settlement, cancellation,
+  subscription, session-close, and pure-lazy-cycle paths. Decide how one
+  machine-free lazy route is distinguished from a task-owned promise producer
+  which must keep its task machine. Specify which task and wait IDs remain
+  necessary for exact dependencies and cycle reporting. Record the complete
+  route/root/claim invariant and the smallest coherent cutover boundary;
+  do not silently turn every deferred producer into a lazy route.
+- **W6G.1f.2b.1 — typed route and context groundwork.** Introduce the
+  reviewed lazy-route representation and runtime-owned pure-production
+  context without creating a second authoritative producer machine. Keep
+  task-owned promise records and their terminal obligations intact. Source
+  selection must find the lazy's installed checkpoint or original source
+  through one matching access, not retain another computation in the route.
+- **W6G.1f.2b.2 — coherent admission/poll/release cutover.** Atomically select
+  the machine-free path for lazy producers: first-observer close cannot own
+  their lifetime or profile, a claimed route temporarily retains the exact
+  lazy root, one bounded quantum polls the installed checkpoint, and release
+  publishes terminal cache or exact block/yield state before dropping claim
+  authority. Preserve task-owned promise machine behavior. If admission and
+  release cannot be made independently testable, merge their implementation
+  commit rather than exposing a half-migrated route.
+- **W6G.1f.2b.3 — last-subscriber retirement.** Retire an unclaimed route
+  immediately at zero subscribers; latch retirement of an in-flight claim
+  until its checkpoint or terminal result is published. A concurrent new
+  subscriber must attach to exactly one authoritative route, never reuse a
+  retired subscription epoch, and never lose a completion wake. A reachable
+  lazy may later admit a fresh route over the exact retained checkpoint.
+- **W6G.1f.2b.4 — forced regression gate.** Latch both orders of final
+  subscriber/claim, publication/new subscriber, and first-session
+  close/background subscriber. Reproduce the two historical configured CLI
+  and reflection-descendant schedules above or a narrower deterministic
+  equivalent. Check task-owned promise cancellation and pure lazy cycles,
+  then run ordinary and aggressive-collection focused suites and routine
+  repository gates before W6G.1f.4b-d claims the new lifecycle.
 
 ###### W6G.1f.3 — Complete producer-family ownership migration
 
@@ -6436,15 +6538,18 @@ for it:
       separate code/test checkpoints if their handoffs differ. Force budget
       yield, exact dependency suspension, route loss, collection, and later
       resumption without repeating completed transitions.
-    - **W6G.1f.3i.2 — remaining source results.** Install an immediate
-      callback-free builtin result as a WHNF checkpoint without retaining an
-      intermediate rooted computation in the route. Keep test-only semantic
-      callbacks outside managed access, but hand their returned value or
-      failure into the lazy-owned checkpoint or cache during the same poll;
-      no callback result may remain as durable route state. Count callback
-      executions across route loss, and preserve existing failure and cache
-      behavior. Do not introduce a production callback policy merely to
-      accommodate these test sources.
+    - **W6G.1f.3i.2 — remaining source results.** Keep the production builtin
+      result and test-only callback boundary separate:
+      - **W6G.1f.3i.2a — immediate builtin result.** Install the callback-free
+        builtin result as a WHNF checkpoint without retaining an intermediate
+        rooted computation in the route. Preserve existing failure and cache
+        behavior; force route loss after result production.
+      - **W6G.1f.3i.2b — test-only semantic callback.** Keep the callback
+        outside managed access, but hand its returned value or failure into
+        the lazy-owned checkpoint or cache during the same poll. No callback
+        result may remain as durable route state. Count executions across
+        route loss without introducing a production callback policy merely
+        to accommodate test sources.
     - **W6G.1f.3i.3 — route payload removal.** Delete the state-bearing
       `LazyTaskWork::Whnf` variant and its publish/fallback path. Make source
       selection compile-exhaustive over state-free route markers, the typed
@@ -6472,10 +6577,11 @@ hides replay.
 
 ###### W6G.1f.4 — Retention and collection verification
 
-Start this verification only after W6G.1f.3i closes every state-bearing route
-variant **and W6G.1f.2b removes the coordinator-owned lazy-producer machine**.
-Otherwise the schedules would certify transitional ownership rather than the
-target lifecycle. Partition the work as follows:
+The W6G.1f.4a evidence census may begin before W6G.1f.2b. Run the behavioral
+verification in W6G.1f.4b-d only after W6G.1f.3i closes every state-bearing
+route variant **and W6G.1f.2b removes the coordinator-owned lazy-producer
+machine**. Otherwise those schedules would certify transitional ownership
+rather than the target lifecycle. Partition the work as follows:
 
 - **W6G.1f.4a — evidence matrix and retention baseline.** Map the existing
   family route-loss/collection fixtures, net-construction cycle fixtures,
@@ -6496,11 +6602,11 @@ target lifecycle. Partition the work as follows:
   representative client/spark and client/reflection observer pairings to
   share one authoritative source, checkpoint, or managed completion source;
   add a three-way case only if the source permits all three roles. Cover
-  route/session close
-  before and after checkpoint publication, loss of the final subscriber, and
-  arrival of a new subscriber with latch-controlled orderings. A best-effort
-  spark may be lost before admission, so assert at-most-once admission after
-  admission, not guaranteed execution. A started reflection task remains an
+  route/session close before and after checkpoint publication, loss of the
+  final subscriber, and arrival of a new subscriber with latch-controlled
+  orderings. A best-effort spark may be lost before admission, so assert
+  at-most-once admission once admitted, not guaranteed execution. A started
+  reflection task remains an
   autonomous background root rather than inheriting the lazy route's
   lifetime.
 - **W6G.1f.4d — reflection and final root lifecycle.** Force reservation,
@@ -6523,6 +6629,22 @@ fairness, task lifecycle, and cross-source cycle analysis remain coordinator
 responsibilities unless a separate review proves otherwise.
 
 ##### W6G.1g — Drain and quiescence separation
+
+Partition this after W6G.1e.2/e.3b and the e.3a evidence gate:
+
+- **W6G.1g.1 — session drain authority.** Select session-owned reflection
+  roots and their exact descendants, including a causally required
+  cross-session child. Do not claim unrelated work merely because it shares
+  a session; force the configured `conf.log` ordering from e.3a.
+- **W6G.1g.2 — runtime background drain.** Select runtime-visible reflection
+  roots across sessions and their exact descendants, including autonomous
+  lazy-launched reflection after route loss. Exclude sparks and foreground
+  roots while preserving progress when a worker owns a contested claim.
+- **W6G.1g.3 — observational readiness and final scope matrix.** Separate
+  polling from snapshot construction, specify parked external client-demand
+  activity without calling it background work, and force quiescence,
+  spark-abandonment, cross-session, and route-loss orderings. Keep the
+  existing runtime pump's useful-work/observation sequence explicit.
 
 Narrow session and runtime drains to their documented background scopes.
 Runtime-wide draining may traverse newly created reflection roots across
@@ -6552,6 +6674,21 @@ remain visible independently of the lazy route which awaits their managed
 completion promise.
 
 ##### W6G.1h — Serialization retirement and verification
+
+Keep the scan removal distinct from the final integrated test gate:
+
+- **W6G.1h.1 — scan and compensating-wait census.** Identify every admission
+  and busy/wait check whose sole purpose is the temporary one-ordinary-
+  machine-per-session restriction. Exclude exact claim ownership, terminal
+  publication, causal dependency waits, and task-owned promise lifecycle.
+- **W6G.1h.2 — atomic policy retirement.** Remove the temporary scan and only
+  its compensating checks after W6G.1e/g make role-specific discovery
+  authoritative. Preserve any same-session observation required for
+  reporting rather than conflating it with execution serialization.
+- **W6G.1h.3 — forced closure and documentation.** Run the W6G.1a matrix and
+  the cross-root, cancellation, owner-close, lost-wakeup, readiness, and
+  terminal-publication schedules below; update current architecture only
+  after those policies are observed in the implementation.
 
 After role-specific root discovery is authoritative, delete
 `session_has_running_machine` from global admission and remove only those
