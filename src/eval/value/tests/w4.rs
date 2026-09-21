@@ -489,6 +489,102 @@ fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
     assert!(route_losses > 0);
 }
 
+#[test]
+fn w6g1f3i_immediate_builtin_result_is_installed_before_route_loss() {
+    let context = isolated_context();
+    let left = Value::List(List::from_values(vec![number(3)]));
+    let right = Value::List(List::from_values(vec![number(5)]));
+    let lazy = context.values().with_runtime_value_access(|access| {
+        LazyValue::from_builtin_in(
+            &access,
+            BuiltinCall {
+                builtin: Builtin::Append,
+                arguments: Arc::from([left, right]),
+            },
+        )
+    });
+    let retained = lazy.root(context.values());
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(0)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    let mut route_losses = 1;
+    assert_eq!(
+        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        Value::List(List::from_values(vec![number(3), number(5)])),
+    );
+}
+
+#[test]
+fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
+    let context = isolated_context();
+    let result = PromisedValue::new(context.values(), "semantic thunk result");
+    let _result_root = result.root(context.values());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let captured = result.clone();
+    let lazy = LazyValue::semantic_thunk(context.values(), "counted test thunk", move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Promised(captured.clone()))
+    });
+    let retained = lazy.root(context.values());
+    let machine = lazy_machine(&context, lazy);
+    let mut route_losses = 0;
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(dependency, WorkDependency::Promise(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+
+    crate::core::set_test_promise(context.values(), &result, number(31))
+        .expect("the semantic thunk result promise should accept assignment");
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    assert_eq!(
+        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        number(31),
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+fn return_semantic_capture(
+    _context: &crate::evaluation::EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    Ok(captures[0].clone())
+}
+
+#[test]
+fn w6g1f3i_semantic_computation_result_survives_route_loss() {
+    let context = isolated_context();
+    let result = PromisedValue::new(context.values(), "semantic computation result");
+    let _result_root = result.root(context.values());
+    let lazy = LazyValue::semantic_computation(
+        context.values(),
+        "captured test computation",
+        Arc::from([Value::Promised(result.clone())]),
+        return_semantic_capture,
+    );
+    let retained = lazy.root(context.values());
+    let machine = lazy_machine(&context, lazy);
+    let mut route_losses = 0;
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(dependency, WorkDependency::Promise(_)));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+
+    crate::core::set_test_promise(context.values(), &result, number(37))
+        .expect("the semantic computation result promise should accept assignment");
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    assert_eq!(
+        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        number(37),
+    );
+}
+
 fn retained_lazy_machine(
     context: &EvalContext,
     value: Value,

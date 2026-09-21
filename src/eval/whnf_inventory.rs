@@ -23,7 +23,6 @@ enum Signal {
     EvalPromise,
     ApplyValue,
     ApplyValues,
-    ProduceLazySource,
     ReflectionEvaluate,
     RetryableWait,
     UnassignedPromise,
@@ -340,7 +339,6 @@ fn function_signal(full: &str, name: &str) -> Option<Signal> {
         "eval_promised_in" => Some(Signal::EvalPromise),
         "apply_value_in" => Some(Signal::ApplyValue),
         "apply_values_in" => Some(Signal::ApplyValues),
-        "produce_lazy_source_in" => Some(Signal::ProduceLazySource),
         "evaluate_in" => Some(Signal::ReflectionEvaluate),
         "task_eval_error" | "client_demand_halt_poll" | "client_demand_halt" => {
             Some(Signal::DependencyTranslation)
@@ -419,13 +417,13 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
         OuterOwner::CoordinatorAdapter | OuterOwner::Spark => StableOwner::CoordinatorRecord,
         OuterOwner::PureEvaluator => match signal {
             Signal::EvalPromise | Signal::UnassignedPromise => StableOwner::PromiseIdentity,
-            Signal::EvalLazy | Signal::ProduceLazySource => StableOwner::LazyIdentity,
+            Signal::EvalLazy => StableOwner::LazyIdentity,
             _ => StableOwner::InputValue,
         },
     };
 
     let dependency = match signal {
-        Signal::EvalLazy | Signal::ProduceLazySource => DependencyKind::LazyWait,
+        Signal::EvalLazy => DependencyKind::LazyWait,
         Signal::EvalPromise | Signal::UnassignedPromise => DependencyKind::PromiseAssignment,
         Signal::RetryableWait | Signal::DependencyTranslation | Signal::CoordinatorBoundary => {
             DependencyKind::GenericWait
@@ -698,13 +696,12 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC4 adds the private API assembly loop, ordered operand queue, checked port
 // allocation, journal/result construction, and its test-only operation loops.
 // Semantic operand demand remains one resumable regional state machine.
-const EXPECTED_OCCURRENCES: usize = 209;
-const EXPECTED_FINGERPRINT: u64 = 3_686_729_721_761_985_554;
+const EXPECTED_OCCURRENCES: usize = 208;
+const EXPECTED_FINGERPRINT: u64 = 10_043_443_181_224_580_605;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
     (Signal::EvalPromise, 1),
-    (Signal::ProduceLazySource, 1),
     (Signal::RetryableWait, 9),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
@@ -717,7 +714,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 120),
+    (WorkShape::DemandThenInspect, 119),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),

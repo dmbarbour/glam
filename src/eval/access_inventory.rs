@@ -171,7 +171,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [21, 8],
+        [20, 8],
         "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints; W6G.1f.3g.2a polls the numeric checkpoint under bounded access"
     ),
 ];
@@ -421,8 +421,8 @@ fn builtin_durable_context_downgrades_are_explicit_and_complete() {
         .expect("lazy-source owner should be readable");
     assert!(
         source.contains("apply_builtin_in(&access, call.builtin, arguments, argument)")
-            && source.contains("|value| access.values().root_runtime_value(value)"),
-        "the lazy-source owner must publish an immediate builtin result before regional access closes"
+            && source.contains("self.install_regional_whnf_in(&access, work)"),
+        "the lazy-source owner must install an immediate builtin result beneath the owning lazy before regional access closes"
     );
 
     let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))

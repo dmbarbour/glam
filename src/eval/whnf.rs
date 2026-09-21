@@ -38,11 +38,8 @@ pub(crate) struct WhnfComputation {
 /// Once that source has produced a value, the same computation installs the
 /// ordinary rooted demand checkpoint and never reconstructs the source result.
 enum DurableWhnfCheckpoint {
-    Source {
-        lazy: ManagedLazyRoot,
-        runtime: crate::runtime::EvaluationRuntimeId,
-        result: Option<RuntimeValueRoot>,
-    },
+    /// Protocol fixture only: production lazy sources now install their
+    /// checkpoint beneath the lazy during the same source poll.
     Seed {
         focus: RuntimeValueRoot,
         source_owner: Option<LazyId>,
@@ -724,41 +721,6 @@ impl WhnfComputation {
         }
     }
 
-    pub(crate) fn from_lazy_source(
-        lazy: ManagedLazyRoot,
-        runtime: crate::runtime::EvaluationRuntimeId,
-    ) -> Self {
-        Self {
-            checkpoint: DurableWhnfCheckpoint::Source {
-                lazy,
-                runtime,
-                result: None,
-            },
-        }
-    }
-
-    pub(crate) fn source_root(&self) -> Option<&ManagedLazyRoot> {
-        let DurableWhnfCheckpoint::Source { lazy, result, .. } = &self.checkpoint else {
-            return None;
-        };
-        result.is_none().then_some(lazy)
-    }
-
-    pub(crate) fn install_source_result(&mut self, focus: RuntimeValueRoot) {
-        let DurableWhnfCheckpoint::Source {
-            runtime, result, ..
-        } = &mut self.checkpoint
-        else {
-            panic!("a lazy source result may be installed only once")
-        };
-        assert_eq!(
-            *runtime,
-            focus.runtime_id(),
-            "a lazy source result must belong to its producer runtime"
-        );
-        *result = Some(focus);
-    }
-
     /// Reports whether an application checkpoint failed before consuming all
     /// of its arguments. Terminal failure publishes the last regional state,
     /// so an outer owner can distinguish callable/application failure from a
@@ -768,26 +730,8 @@ impl WhnfComputation {
             DurableWhnfCheckpoint::ManagedDemand { observation, .. } => {
                 observation.application_frame_pending
             }
-            DurableWhnfCheckpoint::Source { .. } | DurableWhnfCheckpoint::Seed { .. } => false,
+            DurableWhnfCheckpoint::Seed { .. } => false,
         }
-    }
-
-    /// Projects the computation's canonical state for installation beneath
-    /// its owning managed lazy. The computation's registered root remains live
-    /// until the caller finishes the source-to-checkpoint transition.
-    pub(crate) fn checkpoint_edge_in(
-        &mut self,
-        access: &EvaluationValueAccess<'_>,
-    ) -> Option<managed_state::ManagedLazyCheckpointEdge> {
-        self.promote_seed_in(access);
-        let DurableWhnfCheckpoint::ManagedDemand { state, .. } = &self.checkpoint else {
-            return None;
-        };
-        Some(
-            state
-                .checkpoint_edge_in(access)
-                .expect("WHNF checkpoint and producer access must share one runtime"),
-        )
     }
 
     pub(crate) fn from_application_checkpoint_in(
@@ -838,7 +782,6 @@ impl WhnfComputation {
 
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
         match &self.checkpoint {
-            DurableWhnfCheckpoint::Source { runtime, .. } => *runtime,
             DurableWhnfCheckpoint::Seed { focus, .. } => focus.runtime_id(),
             DurableWhnfCheckpoint::ManagedDemand { state, .. } => state.runtime_id(),
         }
@@ -857,20 +800,7 @@ impl WhnfComputation {
                 *source_owner,
                 None,
             )),
-            DurableWhnfCheckpoint::Source {
-                lazy,
-                result: Some(result),
-                ..
-            } => Some(RegionalWhnfWork::from_parts(
-                access,
-                access.clone_root(result),
-                Vec::new(),
-                BTreeSet::new(),
-                Some(lazy.id()),
-                None,
-            )),
-            DurableWhnfCheckpoint::Source { result: None, .. }
-            | DurableWhnfCheckpoint::ManagedDemand { .. } => None,
+            DurableWhnfCheckpoint::ManagedDemand { .. } => None,
         };
         let Some(work) = work else {
             return;

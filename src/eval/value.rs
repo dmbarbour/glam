@@ -198,7 +198,6 @@ pub(crate) fn eval_value_in(
 
 enum LazyTaskWork {
     Produce,
-    Whnf(super::whnf::WhnfComputation),
     WhnfCheckpoint,
     NetWhnfCheckpoint,
     AccessCheckpoint,
@@ -283,50 +282,6 @@ impl LazyTaskMachine {
             Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
-    }
-
-    /// Moves an ordinary rooted WHNF computation into the exact checkpoint
-    /// edge retained by this lazy. The old registered root remains live until
-    /// the managed producer transition has published the same allocation.
-    fn publish_whnf_checkpoint(
-        &mut self,
-        context: &EvaluatorStepContext<'_>,
-    ) -> Option<EvaluationMachinePoll> {
-        let ready = matches!(
-            &self.work,
-            LazyTaskWork::Whnf(computation) if computation.source_root().is_none()
-        );
-        if !ready {
-            return None;
-        }
-        let LazyTaskWork::Whnf(mut computation) =
-            std::mem::replace(&mut self.work, LazyTaskWork::Produce)
-        else {
-            unreachable!("a ready WHNF producer must retain its computation")
-        };
-        let installed = context.with_value_access(|access| {
-            let checkpoint = computation
-                .checkpoint_edge_in(&access)
-                .expect("a ready WHNF computation must expose its managed checkpoint");
-            let lazy = access.lazy_root(&self.lazy);
-            match lazy.install_checkpoint(checkpoint) {
-                Ok(()) => true,
-                Err(_checkpoint) => {
-                    if lazy.checkpoint_snapshot().is_some() {
-                        true
-                    } else {
-                        assert!(
-                            lazy.cached().is_some(),
-                            "a rejected checkpoint must find another checkpoint or a terminal cache"
-                        );
-                        false
-                    }
-                }
-            }
-        });
-        drop(computation);
-        self.work = LazyTaskWork::WhnfCheckpoint;
-        (!installed).then(|| self.cached_poll(context))
     }
 
     fn poll_whnf_checkpoint(
@@ -1416,27 +1371,52 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 let argument = arguments
                                     .pop()
                                     .expect("saturated builtin source must contain an argument");
-                                apply_builtin_in(&access, call.builtin, arguments, argument)
-                                    .map(|value| access.values().root_runtime_value(value))
+                                let result =
+                                    apply_builtin_in(&access, call.builtin, arguments, argument)?;
+                                let work = super::whnf::RegionalWhnfWork::from_focus(&access, result);
+                                Ok::<_, EvaluationHalt>(self.install_regional_whnf_in(&access, work))
                             });
                             match result {
-                                Ok(value) => LazyTaskWork::Whnf(
-                                    super::whnf::WhnfComputation::from_root(value),
-                                ),
+                                Ok(true) => LazyTaskWork::WhnfCheckpoint,
+                                Ok(false) => {
+                                    if let Some(work) = self.checkpoint_work(context) {
+                                        work
+                                    } else {
+                                        return self.cached_poll(context);
+                                    }
+                                }
                                 Err(error) => return self.fail(context, error),
                             }
                         }
-                        _ => LazyTaskWork::Whnf(super::whnf::WhnfComputation::from_lazy_source(
-                            self.lazy.clone(),
-                            durable_context.values().runtime_id(),
-                        )),
+                        #[cfg(test)]
+                        source @ (LazySource::SemanticComputation(_)
+                        | LazySource::SemanticThunk(_)) => {
+                            let value = match produce_test_lazy_source_in(context, &source) {
+                                Ok(value) => value,
+                                Err(error) => return self.fail(context, error),
+                            };
+                            // Test callbacks run outside managed access. Retain their result
+                            // only across the handoff, not in a durable producer route.
+                            let result = context.root_value(value);
+                            let installed = context.with_value_access(|access| {
+                                let focus = access.clone_root(&result);
+                                let work = super::whnf::RegionalWhnfWork::from_focus(&access, focus);
+                                self.install_regional_whnf_in(&access, work)
+                            });
+                            drop(result);
+                            if installed {
+                                LazyTaskWork::WhnfCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
+                        }
+                        LazySource::Error => return self.cached_poll(context),
                     };
                 }
                 if matches!(self.work, LazyTaskWork::HostCallInvoke) {
                     return EvaluationMachinePoll::Yielded;
-                }
-                if let Some(poll) = self.publish_whnf_checkpoint(context) {
-                    return poll;
                 }
             }
 
@@ -1464,33 +1444,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_builtin_checkpoint(context, step_budget);
             }
 
-            let source_pending = matches!(
-                &self.work,
-                LazyTaskWork::Whnf(computation) if computation.source_root().is_some()
-            );
-            if source_pending {
-                let source = context
-                    .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
-                let Some(source) = source else {
-                    return self.cached_poll(context);
-                };
-                match produce_lazy_source_in(context, &source) {
-                    Ok(value) => {
-                        let LazyTaskWork::Whnf(computation) = &mut self.work else {
-                            unreachable!("source work must retain its WHNF computation")
-                        };
-                        computation.install_source_result(context.root_value(value));
-                    }
-                    Err(error) => return self.fail(context, error),
-                }
-                if let Some(poll) = self.publish_whnf_checkpoint(context) {
-                    return poll;
-                }
-            }
-
-            if let Some(poll) = self.publish_whnf_checkpoint(context) {
-                return poll;
-            }
             let LazyTaskWork::WhnfCheckpoint = self.work else {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };
@@ -1728,50 +1681,15 @@ fn deferred_task_failure(
         .unwrap_or_else(|| EvaluationHalt::failure(failure.into_failure()))
 }
 
-fn produce_lazy_source_in(
-    _context: &EvaluatorStepContext<'_>,
+#[cfg(test)]
+fn produce_test_lazy_source_in(
+    context: &EvaluatorStepContext<'_>,
     source: &LazySource,
 ) -> Result<Value, EvaluationHalt> {
     match source {
-        LazySource::Error => Err(EvaluationHalt::new(
-            "initialized lazy errors must be returned from their result cache",
-        )),
-        LazySource::ComputedFixpoint(fixpoint) => match fixpoint.as_ref() {
-            FixpointComputation::ObjectInstance(_) => {
-                unreachable!("object fixpoints retain one pollable construction owner")
-            }
-            FixpointComputation::Function(_) => {
-                unreachable!("function fixpoints retain typed WHNF application work")
-            }
-        },
-        #[cfg(test)]
-        LazySource::SemanticComputation(computation) => computation.evaluate(_context),
-        LazySource::ListEffectComputation(_) => {
-            unreachable!("list effects retain one pollable source owner")
-        }
-        #[cfg(test)]
-        LazySource::SemanticThunk(thunk) => thunk(_context),
-        LazySource::HostCall(_) => {
-            unreachable!("a host call must execute outside the evaluator step")
-        }
-        LazySource::ReflectionTask(_) => {
-            unreachable!("reflection tasks retain one pollable source owner")
-        }
-        LazySource::Access { .. } => {
-            unreachable!("access sources retain one pollable access owner")
-        }
-        LazySource::Application(_) => {
-            unreachable!("applications retain typed WHNF application work")
-        }
-        LazySource::Builtin(_) => {
-            unreachable!("builtin sources retain a regional machine or immediate rooted result")
-        }
-        LazySource::NetComputation(_) => {
-            unreachable!("net computations retain one pollable net-WHNF owner")
-        }
-        LazySource::FunctionCall { .. } => {
-            unreachable!("function calls retain one pollable net-WHNF owner")
-        }
+        LazySource::SemanticComputation(computation) => computation.evaluate(context),
+        LazySource::SemanticThunk(thunk) => thunk(context),
+        _ => unreachable!("only test-only semantic sources use this callback boundary"),
     }
 }
 
@@ -1945,9 +1863,6 @@ mod ownership_tests {
     ) {
         match work {
             LazyTaskWork::Produce => {}
-            LazyTaskWork::Whnf(computation) => {
-                let _: &crate::eval::whnf::WhnfComputation = computation;
-            }
             LazyTaskWork::WhnfCheckpoint => {}
             LazyTaskWork::NetWhnfCheckpoint => {}
             LazyTaskWork::AccessCheckpoint => {}

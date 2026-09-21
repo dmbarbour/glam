@@ -396,7 +396,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
     closed_durable!(
         "src/eval/whnf.rs",
         "resumable WHNF durable checkpoints and dependencies",
-        "one source/seed root or one ManagedWhnfRoot, dependency promises, and rooted terminal outcomes",
+        "one demand seed root or one ManagedWhnfRoot, dependency promises, and rooted terminal outcomes; lazy sources retain their canonical state beneath the lazy",
         "one resumable WHNF computation across poll, yield, or dependency boundaries",
         "seed promotion or structured construction publishes one canonical managed state cell before access closes",
         "checkpoint replacement, terminal result handoff, cancellation, or owner retirement",
@@ -984,8 +984,8 @@ const DECLARATION_BASELINE_COUNT: usize = 250;
 // selection phases beneath the same managed builtin checkpoint, accounting for
 // five declarations, five raw values, and three failure fields.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([318, 115, 5, 34, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_078_259_967_659_393_863;
+    DeclarationSignals::new([318, 114, 5, 34, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_037_891_169_917_411_508;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

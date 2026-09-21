@@ -1,9 +1,8 @@
 //! W6G.3a source-backed inventory of the durable WHNF checkpoint boundary.
 //!
-//! The aggregate-cell transition deliberately preserves source-entry
-//! ownership, keeps ordinary access-free construction cheap, and moves only
-//! access-qualified structured construction directly into managed state. This
-//! census makes that migration surface exact before the representation moves.
+//! The aggregate-cell transition keeps ordinary access-free demand construction
+//! cheap and moves access-qualified structured construction directly into
+//! managed state. Lazy source entry now installs state beneath its owning lazy.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,12 +15,9 @@ use syn::{Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum CheckpointApi {
     FromRoot,
-    FromLazySource,
     FromApplicationCheckpoint,
     FromStaticAccessCheckpoint,
     FromPromiseRoot,
-    SourceRoot,
-    InstallSourceResult,
     ApplicationFramePending,
     RuntimeId,
     WithSourceOwner,
@@ -29,7 +25,6 @@ enum CheckpointApi {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BoundaryRole {
-    SourceEntry,
     DemandSeed,
     AccessQualifiedStructuredDemand,
     ScalarObserver,
@@ -38,9 +33,6 @@ enum BoundaryRole {
 
 fn boundary_role(api: CheckpointApi) -> BoundaryRole {
     match api {
-        CheckpointApi::FromLazySource
-        | CheckpointApi::SourceRoot
-        | CheckpointApi::InstallSourceResult => BoundaryRole::SourceEntry,
         CheckpointApi::FromRoot | CheckpointApi::FromPromiseRoot => BoundaryRole::DemandSeed,
         CheckpointApi::FromApplicationCheckpoint | CheckpointApi::FromStaticAccessCheckpoint => {
             BoundaryRole::AccessQualifiedStructuredDemand
@@ -182,22 +174,11 @@ impl<'ast> Visit<'ast> for InventoryVisitor<'_> {
         }
         visit::visit_expr_method_call(self, node);
     }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        // `matches!` hides its guard expression from syn's expression visitor.
-        // Source-entry probing currently uses exactly one such guard, so keep
-        // that boundary visible to the same exact inventory.
-        for _ in 0..node.tokens.to_string().matches("source_root").count() {
-            self.record(CheckpointApi::SourceRoot);
-        }
-        visit::visit_macro(self, node);
-    }
 }
 
 fn constructor_api(name: Option<String>) -> Option<CheckpointApi> {
     match name.as_deref() {
         Some("from_root") => Some(CheckpointApi::FromRoot),
-        Some("from_lazy_source") => Some(CheckpointApi::FromLazySource),
         Some("from_application_checkpoint_in") => Some(CheckpointApi::FromApplicationCheckpoint),
         Some("from_static_access_checkpoint_in") => Some(CheckpointApi::FromStaticAccessCheckpoint),
         Some("from_promise_root") => Some(CheckpointApi::FromPromiseRoot),
@@ -207,8 +188,6 @@ fn constructor_api(name: Option<String>) -> Option<CheckpointApi> {
 
 fn method_api(name: &str, declaration: &str) -> Option<CheckpointApi> {
     match name {
-        "source_root" => Some(CheckpointApi::SourceRoot),
-        "install_source_result" => Some(CheckpointApi::InstallSourceResult),
         "application_frame_pending" => Some(CheckpointApi::ApplicationFramePending),
         "with_source_owner" => Some(CheckpointApi::WithSourceOwner),
         "runtime_id" if declaration.ends_with("ClientDemandOperation::runtime_id") => {
@@ -342,12 +321,11 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // replaces them with two exact source-owned regional seeds.
     // W6G.1f.3g.4c removes six rooted object-composition child demands and
     // one application checkpoint; its five child seeds carry source ownership.
-    (CheckpointApi::FromRoot, 18),
-    (CheckpointApi::FromLazySource, 1),
+    // W6G.1f.3i removes the route-owned source seed and its final rooted
+    // result; all production lazy sources now install under their lazy.
+    (CheckpointApi::FromRoot, 17),
     (CheckpointApi::FromApplicationCheckpoint, 1),
     (CheckpointApi::FromPromiseRoot, 2),
-    (CheckpointApi::SourceRoot, 2),
-    (CheckpointApi::InstallSourceResult, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
     // Fully regional source scanning latches exact source ownership across
@@ -360,8 +338,8 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // construction source owner.
     (CheckpointApi::WithSourceOwner, 51),
 ];
-const EXPECTED_OCCURRENCES: usize = 78;
-const EXPECTED_FINGERPRINT: u64 = 5_251_803_232_790_499_967;
+const EXPECTED_OCCURRENCES: usize = 73;
+const EXPECTED_FINGERPRINT: u64 = 15_245_403_297_860_273_448;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {
@@ -388,7 +366,6 @@ fn checkpoint_boundary_roles_are_compile_exhaustive() {
         .iter()
         .map(|(api, _)| boundary_role(*api))
         .collect::<Vec<_>>();
-    assert!(roles.contains(&BoundaryRole::SourceEntry));
     assert!(roles.contains(&BoundaryRole::DemandSeed));
     assert!(roles.contains(&BoundaryRole::AccessQualifiedStructuredDemand));
     assert!(roles.contains(&BoundaryRole::ScalarObserver));

@@ -24,7 +24,6 @@ const EXPECTED_VARIANTS: &[&str] = &[
     // W6G.1f.3e retains complete C3 and mix progress beneath the lazy.
     "ObjectFixpointCheckpoint",
     "Produce",
-    "Whnf",
     // W6G.1f.2a carries no producer state: it marks that the canonical WHNF
     // state has moved into the owning managed lazy.
     "WhnfCheckpoint",
@@ -53,29 +52,11 @@ fn lazy_task_work_families_are_exact() {
     assert_eq!(variants, EXPECTED_VARIANTS);
 
     for variant in &item.variants {
-        match variant.ident.to_string().as_str() {
-            "Whnf" => {
-                let syn::Fields::Unnamed(fields) = &variant.fields else {
-                    panic!("the transitional WHNF route must retain one explicit payload")
-                };
-                assert_eq!(fields.unnamed.len(), 1);
-                let syn::Type::Path(path) = &fields.unnamed[0].ty else {
-                    panic!("the WHNF route payload must name its owner type")
-                };
-                assert_eq!(
-                    path.path
-                        .segments
-                        .last()
-                        .map(|segment| segment.ident.to_string()),
-                    Some("WhnfComputation".to_owned()),
-                );
-            }
-            _ => assert!(
-                matches!(&variant.fields, syn::Fields::Unit),
-                "{name} must remain a state-free route marker or transient permit",
-                name = variant.ident,
-            ),
-        }
+        assert!(
+            matches!(&variant.fields, syn::Fields::Unit),
+            "{name} must remain a state-free route marker or transient permit",
+            name = variant.ident,
+        );
     }
 }
 

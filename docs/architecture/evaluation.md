@@ -588,10 +588,10 @@ original source to one field-opaque typed edge to the evaluator-owned managed
 WHNF cell. A coordinator machine for this family is only a route adapter: it
 holds no duplicate focus or continuation state, and a later same-runtime
 session polls the exact checkpoint through the lazy. Terminal cache
-publication removes the checkpoint after installing the result. The other
-specialized lazy producer families are still coordinator-owned during the
-current staged migration; they must move behind the same managed checkpoint
-protocol before producer routes can become entirely machine-free.
+publication removes the checkpoint after installing the result. Specialized
+lazy producer progress also lives beneath typed managed lazy checkpoints. The
+coordinator still supplies a temporary producer route machine for admission
+and polling; W6G.1f.2b will remove that machine after lifecycle review.
 
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and

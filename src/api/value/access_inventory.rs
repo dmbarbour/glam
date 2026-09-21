@@ -146,8 +146,8 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/eval/value.rs",
         0,
         0,
-        8,
-        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint and immediate builtin results published before leaving their access regions",
+        7,
+        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint publication; immediate builtin results now install beneath the owning lazy",
         "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d-.4c source or terminal handoff"
     ),
     entry!(
@@ -677,7 +677,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint#1|surface=access-publication|scope=production",

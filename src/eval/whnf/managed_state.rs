@@ -91,22 +91,6 @@ impl ManagedWhnfRoot {
             _thread_bound: PhantomData,
         })
     }
-
-    /// Projects this registered owner as the exact typed edge accepted by a
-    /// managed lazy while the root still protects the allocation.
-    pub(crate) fn checkpoint_edge_in(
-        &self,
-        authority: &EvaluationValueAccess<'_>,
-    ) -> Result<ManagedLazyCheckpointEdge, ManagedWhnfAccessError> {
-        if self.runtime != authority.values().runtime_id()
-            || !authority.values().admits_root(&self.root)
-        {
-            return Err(ManagedWhnfAccessError::RuntimeMismatch);
-        }
-        Ok(ManagedLazyCheckpointEdge::from_whnf(
-            authority.values().project_root(&self.root),
-        ))
-    }
 }
 
 impl ManagedLazyCheckpointEdge {

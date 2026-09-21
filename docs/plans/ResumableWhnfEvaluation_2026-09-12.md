@@ -6599,6 +6599,30 @@ and WHNF API inventories were rebaselined against the reviewed direct
 handoff; all inventory tests pass. The temporary coordinator route machine
 remains unchanged until W6G.1f.2b.
 
+**W6G.1f.3i.2a-.2b and .3 complete (2026-09-21).** Saturated immediate
+builtin results now install a regional WHNF focus directly under the lazy in
+the same access as builtin application. Test-only semantic callbacks execute
+outside managed access and publish their result or failure within that poll;
+their temporary handoff root is dropped before returning. The route now has
+only unit markers, and its former `WhnfComputation` payload and publish path
+are gone. The unused `WhnfComputation::Source` representation and its
+source-entry fixture were retired: the new lazy-source route-loss fixtures
+exercise the production handoff, while `WhnfComputation` remains for rooted
+external demand and reflection work. A zero-budget builtin fixture forces a
+route-loss window after installation; counted semantic callback fixtures show
+that later demand does not rerun them.
+
+**W6G.1f.3i.4 complete (2026-09-21).** Source-backed producer,
+registered-root, durable-owner, recursive-identity, persistent-edge,
+raw-value, mutator, and WHNF inventories were reconciled with the removed
+route/source payloads. The architecture map now describes the still-temporary
+coordinator producer machine separately from the checkpoint ownership it
+routes. All six focused W6G.1f.3i route-loss fixtures pass.
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test -q`, the 116-test source-backed inventory suite, and
+`scripts/check-interaction-net-profiling.sh` pass. W6G.1f.2b remains the next
+coordinator cutover.
+
 Each demand-driven family checkpoint must force budget yield or exact
 dependency suspension, loss of its active route, collection while the lazy
 remains reachable, and resumption from a later authorized route. Host,
@@ -6812,6 +6836,11 @@ it owns a lazy source while its producer runs and may later receive a rooted
 result outside evaluator access. It remains unchanged until its result is
 actually demanded. Only then, beneath matching access, does that result become
 canonical managed demand state.
+
+**Later supersession (W6G.1f.3i, 2026-09-21):** this source-entry target and
+its fixture were retired when all lazy producers began installing their
+progress directly beneath the owning lazy. The seed/managed-demand boundary
+below still applies to external and reflection demand.
 
 Likewise, the common `WhnfComputation::from_root` path must not open hidden or
 nested access merely to allocate the cell. Retain a minimal initial demand

@@ -206,39 +206,6 @@ fn small_and_large_seed_promotions_use_one_managed_root() {
 }
 
 #[test]
-fn source_entry_remains_outside_demand_conversion_accounting() {
-    let context = context();
-    let values = context.values();
-    let (lazy, _) = values.rooted_error_lazy_for_test("W6G.3a source entry");
-    let mut computation = WhnfComputation::from_lazy_source(lazy, values.runtime_id());
-
-    assert!(computation.source_root().is_some());
-
-    let source_result = root(&context, text("source result"));
-    computation.install_source_result(source_result);
-    assert!(computation.source_root().is_none());
-
-    let registrations_before_poll = values.managed_root_registrations_for_test();
-    let mut budget = WhnfStepBudget::new(0);
-    let mut access_entries = 0;
-    assert!(matches!(
-        poll_with(
-            &context,
-            &mut computation,
-            &mut budget,
-            &mut access_entries,
-            |_access, _work| panic!("an empty budget must not enter the reducer"),
-        ),
-        WhnfPoll::Yielded
-    ));
-    assert_eq!(
-        values.managed_root_registrations_for_test() - registrations_before_poll,
-        1,
-        "first demand must publish exactly one managed state root"
-    );
-}
-
-#[test]
 fn structured_constructors_publish_canonical_state_under_existing_access() {
     reset_runtime_value_access_depth_for_test();
     let context = context();
