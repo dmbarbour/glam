@@ -218,6 +218,19 @@ struct LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
+    fn install_regional_whnf_in(
+        &self,
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
+        work: super::whnf::RegionalWhnfWork,
+    ) -> bool {
+        let checkpoint = ManagedLazyCheckpointEdge::allocate_regional_in(access, work)
+            .expect("canonical WHNF state must fit its reviewed managed slot");
+        access
+            .lazy_root(&self.lazy)
+            .install_checkpoint(checkpoint)
+            .is_ok()
+    }
+
     fn work_for_checkpoint_kind(kind: ManagedLazyCheckpointKindTag) -> LazyTaskWork {
         match kind {
             ManagedLazyCheckpointKindTag::Whnf => LazyTaskWork::WhnfCheckpoint,
@@ -1147,30 +1160,46 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             LazyTaskWork::WhnfCheckpoint
                         }
                         LazySource::Application(application) => {
-                            let computation = context.with_value_access(|access| {
-                                super::whnf::WhnfComputation::from_application_checkpoint_in(
+                            let installed = context.with_value_access(|access| {
+                                let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
                                     &access,
                                     application.function().clone(),
                                     application.arguments(),
                                     None,
-                                )
+                                );
+                                self.install_regional_whnf_in(&access, work)
                             });
-                            LazyTaskWork::Whnf(computation)
+                            if installed {
+                                LazyTaskWork::WhnfCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
                         }
                         LazySource::ComputedFixpoint(fixpoint) => {
                             match fixpoint.as_ref() {
                                 FixpointComputation::Function(function) => {
-                                    let computation = context.with_value_access(|access| {
-                                let marker =
-                                    Value::Lazy(LazyValue::from_root(&self.lazy, access.values()));
-                                super::whnf::WhnfComputation::from_application_checkpoint_in(
-                                    &access,
-                                    function.clone(),
-                                    std::slice::from_ref(&marker),
-                                    None,
-                                )
-                            });
-                                    LazyTaskWork::Whnf(computation)
+                                    let installed = context.with_value_access(|access| {
+                                        let marker = Value::Lazy(LazyValue::from_root(
+                                            &self.lazy,
+                                            access.values(),
+                                        ));
+                                        let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
+                                            &access,
+                                            function.clone(),
+                                            std::slice::from_ref(&marker),
+                                            None,
+                                        );
+                                        self.install_regional_whnf_in(&access, work)
+                                    });
+                                    if installed {
+                                        LazyTaskWork::WhnfCheckpoint
+                                    } else if let Some(work) = self.checkpoint_work(context) {
+                                        work
+                                    } else {
+                                        return self.cached_poll(context);
+                                    }
                                 }
                                 FixpointComputation::ObjectInstance(spec) => {
                                     let installed = context.with_value_access(|access| {
@@ -1309,15 +1338,22 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 .first()
                                 .cloned()
                                 .expect("value access must retain its base value");
-                            let computation = context.with_value_access(|access| {
-                                super::whnf::WhnfComputation::from_static_access_checkpoint_in(
+                            let installed = context.with_value_access(|access| {
+                                let work = super::whnf::RegionalWhnfWork::from_static_access_checkpoint_in(
                                     &access,
                                     base,
                                     Arc::from(keys),
                                     Some(self.lazy.id()),
-                                )
+                                );
+                                self.install_regional_whnf_in(&access, work)
                             });
-                            LazyTaskWork::Whnf(computation)
+                            if installed {
+                                LazyTaskWork::WhnfCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
                         }
                         LazySource::Access { path, arguments } => {
                             let installed = context.with_value_access(|access| {

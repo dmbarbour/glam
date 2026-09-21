@@ -6584,6 +6584,21 @@ shapes, not just variant names. The still-open W6G.1f.3i.1-.4 checkpoints
 replace these five constructions and eventually require every route variant
 to be fieldless; this census does not certify their lifecycle yet.
 
+**W6G.1f.3i.1 complete (2026-09-21).** Application, function-fixpoint, and
+static-access sources now allocate `RegionalWhnfWork` directly under the
+owning lazy in one value access, without an intermediate registered WHNF
+root. The function fixpoint still embeds its lazy marker, and static access
+still supplies the owner's `LazyId` for cycle handling. Installation races
+adopt the winning checkpoint or terminal cache. Focused route-loss fixtures
+force budget-one yield, collection, unresolved promises, and later completion
+for all three families; the function-fixpoint fixture hands its resumed work
+to ordinary coordinator demand after dropping the first manual route.
+Existing strict fixpoint-cycle, shared-session result, and regional static
+access tests also pass. Source-backed mutator, raw-value, persistent-edge,
+and WHNF API inventories were rebaselined against the reviewed direct
+handoff; all inventory tests pass. The temporary coordinator route machine
+remains unchanged until W6G.1f.2b.
+
 Each demand-driven family checkpoint must force budget yield or exact
 dependency suspension, loss of its active route, collection while the lazy
 remains reachable, and resumption from a later authorized route. Host,

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        855,
+        860,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -921,9 +921,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // first/second result, exposed-port, and nested builder-operand waits.
     // PNC7 adds one test-only promise root so the suspended construction's
     // checkpoint backedge remains live during its pre-drop collection.
+    // W6G.1f.3i.1 adds three test promise roots and two explicit lazy roots
+    // for direct WHNF source route-loss fixtures. Production typed-edge
+    // counts stay constant as their temporary registered WHNF roots become
+    // direct lazy-owned checkpoint installations.
     assert_eq!(
         occurrence_fingerprint(actual),
-        8_727_684_778_990_686_072,
+        689_329_741_004_712_742,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -970,7 +974,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 603),
+            ((SourceScope::Test, EdgeSurface::Typed), 608),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

@@ -198,6 +198,19 @@ impl RegionalWhnfWork {
         )
     }
 
+    pub(crate) fn from_static_access_checkpoint_in(
+        access: &EvaluationValueAccess<'_>,
+        base: Value,
+        keys: Arc<[crate::core::Key]>,
+        source_owner: Option<LazyId>,
+    ) -> Self {
+        let frames = (!keys.is_empty())
+            .then_some(WhnfContinuation::StaticAccess { keys, next: 0 })
+            .into_iter()
+            .collect();
+        Self::from_parts(access, base, frames, BTreeSet::new(), source_owner, None)
+    }
+
     fn from_parts(
         _access: &EvaluationValueAccess<'_>,
         focus: Value,
@@ -792,18 +805,15 @@ impl WhnfComputation {
         Self::from_structured_work_in(access, work)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_static_access_checkpoint_in(
         access: &EvaluationValueAccess<'_>,
         base: Value,
         keys: Arc<[crate::core::Key]>,
         source_owner: Option<LazyId>,
     ) -> Self {
-        let frames = (!keys.is_empty())
-            .then_some(WhnfContinuation::StaticAccess { keys, next: 0 })
-            .into_iter()
-            .collect();
         let work =
-            RegionalWhnfWork::from_parts(access, base, frames, BTreeSet::new(), source_owner, None);
+            RegionalWhnfWork::from_static_access_checkpoint_in(access, base, keys, source_owner);
         Self::from_structured_work_in(access, work)
     }
 

@@ -393,6 +393,102 @@ fn retained_application_machine(
     (retained, lazy_machine(context, lazy))
 }
 
+#[test]
+fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
+    let context = isolated_context();
+    let function = PromisedValue::new(context.values(), "deferred application function");
+    let _function_root = function.root(context.values());
+    let (retained, machine) = retained_application_machine(
+        &context,
+        Value::Promised(function.clone()),
+        Arc::from([number(2), number(3)]),
+    );
+    let mut route_losses = 0;
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(dependency, WorkDependency::Promise(_)));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+
+    crate::core::set_test_promise(context.values(), &function, Value::Builtin(Builtin::Add))
+        .expect("the function promise should accept its assignment");
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    assert_eq!(
+        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        number(5),
+    );
+    assert!(route_losses > 0);
+}
+
+#[test]
+fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
+    let context = isolated_context();
+    let result = PromisedValue::new(context.values(), "deferred fixpoint result");
+    let _result_root = result.root(context.values());
+    let function = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(Value::Promised(result.clone())),
+    );
+    let lazy = LazyValue::computed_fixpoint(
+        context.values(),
+        "deferred function fixpoint",
+        FixpointComputation::Function(function),
+    );
+    let retained = lazy.root(context.values());
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+    drop(machine);
+    collect_between_handoffs(&context);
+
+    let value = context
+        .values()
+        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+    let blocked = eval_value(&context, &value).expect_err("the result promise is unresolved");
+    assert!(blocked.blocked_on().is_some());
+
+    crate::core::set_test_promise(context.values(), &result, number(17))
+        .expect("the fixpoint result promise should accept its assignment");
+    assert_eq!(
+        eval_value(&context, &value).expect("the resumed fixpoint"),
+        number(17)
+    );
+}
+
+#[test]
+fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
+    let context = isolated_context();
+    let result = PromisedValue::new(context.values(), "deferred static access result");
+    let _result_root = result.root(context.values());
+    let lazy = LazyValue::from_access(
+        context.values(),
+        Arc::from([CoreDataKey::Key(Key::Number(1.into()))]),
+        Arc::from([Value::Dict(
+            Dict::new_sync().insert(Key::Number(1.into()), Value::Promised(result.clone())),
+        )]),
+    );
+    let retained = lazy.root(context.values());
+    let machine = lazy_machine(&context, lazy);
+    let mut route_losses = 0;
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(dependency, WorkDependency::Promise(_)));
+    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
+
+    crate::core::set_test_promise(context.values(), &result, number(23))
+        .expect("the static access result promise should accept its assignment");
+    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    assert_eq!(
+        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        number(23),
+    );
+    assert!(route_losses > 0);
+}
+
 fn retained_lazy_machine(
     context: &EvalContext,
     value: Value,

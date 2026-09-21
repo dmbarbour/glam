@@ -344,8 +344,7 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // one application checkpoint; its five child seeds carry source ownership.
     (CheckpointApi::FromRoot, 18),
     (CheckpointApi::FromLazySource, 1),
-    (CheckpointApi::FromApplicationCheckpoint, 3),
-    (CheckpointApi::FromStaticAccessCheckpoint, 1),
+    (CheckpointApi::FromApplicationCheckpoint, 1),
     (CheckpointApi::FromPromiseRoot, 2),
     (CheckpointApi::SourceRoot, 2),
     (CheckpointApi::InstallSourceResult, 1),
@@ -361,8 +360,8 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // construction source owner.
     (CheckpointApi::WithSourceOwner, 51),
 ];
-const EXPECTED_OCCURRENCES: usize = 81;
-const EXPECTED_FINGERPRINT: u64 = 3_105_569_547_809_583_784;
+const EXPECTED_OCCURRENCES: usize = 78;
+const EXPECTED_FINGERPRINT: u64 = 5_251_803_232_790_499_967;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {
