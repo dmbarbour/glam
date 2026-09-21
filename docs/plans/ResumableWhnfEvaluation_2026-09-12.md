@@ -6407,11 +6407,51 @@ for it:
    net identity. Separate completed-construction and suspended-checkpoint
    backedge fixtures reclaim their cycles after external roots drop. The
    full format, Clippy, test, and interaction-net profiling gates pass.
-10. **W6G.1f.3i — family closure.** Remove every state-bearing
-    *lazy-producer route* variant, make route markers compile-exhaustive over
-    the typed checkpoint carrier plus the reflection-to-promise handoff, and
-    close the source-backed producer, registered-root, persistent-edge,
-    autonomous-obligation, and no-replay inventories before W6G.1f.2b.
+10. **W6G.1f.3i — family closure.** Finish the remaining route-owned WHNF
+    cases in small checkpoints before the coordinator cutover in W6G.1f.2b:
+
+    - **W6G.1f.3i.0 — source and route census.** Enumerate every production
+      and test-only construction of `LazyTaskWork::Whnf`, including application,
+      function fixpoint, static access, immediate builtin results, and
+      semantic callback sources. Record which cases require a source owner,
+      cycle context, or continuation, and which can install a checkpoint
+      directly. Classify `Produce` as source admission and `HostCallInvoke` as
+      a transient one-shot permit, not durable producer state. Check the
+      source-backed producer and route inventories against these actual
+      payloads rather than accepting an exhaustive list of variant names as
+      proof that every variant is state-free.
+    - **W6G.1f.3i.1 — direct WHNF source installation.** Construct and install
+      the existing regional WHNF checkpoint beneath the owning lazy, under
+      one matching value access, for application, function fixpoint, and
+      static-access sources. Preserve each case's current source-owner and
+      cycle context, continuation state, cache-first terminal publication,
+      and rejected-installation handling. Split the three sources into
+      separate code/test checkpoints if their handoffs differ. Force budget
+      yield, exact dependency suspension, route loss, collection, and later
+      resumption without repeating completed transitions.
+    - **W6G.1f.3i.2 — remaining source results.** Install an immediate
+      callback-free builtin result as a WHNF checkpoint without retaining an
+      intermediate rooted computation in the route. Keep test-only semantic
+      callbacks outside managed access, but hand their returned value or
+      failure into the lazy-owned checkpoint or cache during the same poll;
+      no callback result may remain as durable route state. Count callback
+      executions across route loss, and preserve existing failure and cache
+      behavior. Do not introduce a production callback policy merely to
+      accommodate these test sources.
+    - **W6G.1f.3i.3 — route payload removal.** Delete the state-bearing
+      `LazyTaskWork::Whnf` variant and its publish/fallback path. Make source
+      selection compile-exhaustive over state-free route markers, the typed
+      lazy-owned checkpoint carrier, and the reflection-to-promise handoff.
+      Do not remove `WhnfComputation` where it serves other evaluation roles,
+      or remove the coordinator's temporary lazy-producer machine here;
+      W6G.1f.2b owns that machine cutover.
+    - **W6G.1f.3i.4 — closure evidence.** Recheck the source-backed producer,
+      registered-root, durable-owner, persistent-edge,
+      autonomous-obligation, and no-replay inventories against the resulting
+      code, including payload shape rather than only enum names. Update
+      present-tense architecture text that still calls migrated producer
+      families coordinator-owned. Run focused forced schedules and the normal
+      verification gates before starting W6G.1f.2b.
 
 Each demand-driven family checkpoint must force budget yield or exact
 dependency suspension, loss of its active route, collection while the lazy
@@ -6424,23 +6464,49 @@ hides replay.
 
 ###### W6G.1f.4 — Retention and collection verification
 
-Add forced client/spark/reflection schedules showing that all observers share
-one authoritative source, checkpoint, or managed completion source. Losing
-the final demand preserves demand-driven checkpoints while the lazy remains
-semantically reachable; a started reflection task instead remains live as a
-background root and assigns its task-owned promise exactly once. Later demand
-resumes rather than restarting either form. Count semantic transitions,
-host-call invocations, reflection reservations/activations/assignments, and
-spark admissions rather than relying only on terminal equality.
+Start this verification only after W6G.1f.3i closes every state-bearing route
+variant **and W6G.1f.2b removes the coordinator-owned lazy-producer machine**.
+Otherwise the schedules would certify transitional ownership rather than the
+target lifecycle. Partition the work as follows:
 
-Drop every external value root and route while retaining and then releasing a
-semantic path to the lazy. Under aggressive collection, prove respectively
-that the lazy/checkpoint survives and that source/checkpoint cycles reclaim.
-For reflection, also drop every ordinary observer while the autonomous task
-retains only its reviewed effect/target/promise obligations, then prove all
-registered roots return to baseline after terminal assignment. Audit root
-counts so inactive routes, passive external owners, and completed autonomous
-work do not become a new permanent root class.
+- **W6G.1f.4a — evidence matrix and retention baseline.** Map the existing
+  family route-loss/collection fixtures, net-construction cycle fixtures,
+  client-demand and spark lifecycle fixtures, and reflection task/ledger
+  fixtures to the remaining gaps. Identify which roots are expected while a
+  terminal result handle, detached report, or unacknowledged failure ledger
+  still retains a value. Distinguish loss of the final active demand or route
+  from loss of semantic reachability; neither alone proves collection.
+- **W6G.1f.4b — demand-backed checkpoint schedules.** With no active route
+  or subscriber, retain only a semantic path to the lazy and force collection;
+  the lazy-owned checkpoint must survive and later authorized demand must
+  resume it without replay. Then release that path and force collection of
+  representative source/checkpoint cycles. Count completed semantic
+  transitions and one-shot host actions rather than accepting terminal
+  equality as no-replay evidence. Reuse each family's prior forced schedules
+  rather than multiplying every family by every observer role.
+- **W6G.1f.4c — mixed-observer and last-subscriber schedules.** Force
+  representative client/spark and client/reflection observer pairings to
+  share one authoritative source, checkpoint, or managed completion source;
+  add a three-way case only if the source permits all three roles. Cover
+  route/session close
+  before and after checkpoint publication, loss of the final subscriber, and
+  arrival of a new subscriber with latch-controlled orderings. A best-effort
+  spark may be lost before admission, so assert at-most-once admission after
+  admission, not guaranteed execution. A started reflection task remains an
+  autonomous background root rather than inheriting the lazy route's
+  lifetime.
+- **W6G.1f.4d — reflection and final root lifecycle.** Force reservation,
+  activation, terminal promise assignment, route loss, and first-session
+  close in both relevant orderings, including result/gate backedges and
+  abnormal task dispositions. Count each reservation, activation, and
+  assignment. Drop ordinary observers while the started task retains exactly
+  its reviewed effect, target, and promise obligations. Assert the exact
+  expected roots while result handles, detached reports, or failure ledgers
+  remain; require return to baseline only after those named owners are
+  released or acknowledged. Finish with ordinary and aggressive collection
+  and a registered-root, persistent-edge, autonomous-obligation, and
+  no-replay audit so inactive routes and completed autonomous work do not
+  become permanent root classes.
 
 After this boundary is stable, investigate whether the lazy should also own
 its exclusive claim flag, current blocker, or completion subscriptions. That
