@@ -4739,6 +4739,13 @@ conversion.
 
 ### Phase W6G — Pump Ownership and Residual Resumable-Machine Overhead
 
+The interim **as-built** audit after completed W6G.1 family migrations
+through W6G.1f.3h and completed W6G.3 is recorded in
+[`ResumableWhnfW6GInterim_2026-09-21.md`](../reviews/ResumableWhnfW6GInterim_2026-09-21.md).
+It does not close W6G.1 or replace the integrated W6G.5 review; its known
+transitional risks and verification gaps retain their existing checkpoint
+owners.
+
 The checkpoint numbers group related work; they do not impose implementation
 order. W6G.3 completed first because its aggregate demand-checkpoint transition
 was independent of scheduling and effect-driver policy. Next establish the
@@ -6450,7 +6457,8 @@ for it:
       autonomous-obligation, and no-replay inventories against the resulting
       code, including payload shape rather than only enum names. Update
       present-tense architecture text that still calls migrated producer
-      families coordinator-owned. Run focused forced schedules and the normal
+      families coordinator-owned, and the source module map's stale W6G.3
+      "pending aggregation" wording. Run focused forced schedules and the normal
       verification gates before starting W6G.1f.2b.
 
 Each demand-driven family checkpoint must force budget yield or exact
