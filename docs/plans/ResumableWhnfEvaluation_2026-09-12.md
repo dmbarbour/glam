@@ -6566,6 +6566,24 @@ for it:
       "pending aggregation" wording. Run focused forced schedules and the normal
       verification gates before starting W6G.1f.2b.
 
+**W6G.1f.3i.0 complete (2026-09-21).** The remaining `Whnf` constructors and
+their current route payloads are:
+
+| Source | Current route-owned state | Handoff requirement |
+| --- | --- | --- |
+| Application | Managed WHNF root with application continuation; no `source_owner` | Install its exact regional state under the lazy while one matching value access is open. |
+| Function fixpoint | Same continuation, with the lazy marker as argument; no `source_owner` | Preserve the marker backedge through the managed checkpoint. |
+| Static access | Managed WHNF root with key-path continuation and `source_owner = lazy.id()` | Preserve owner-aware cycle detection and partial path progress. |
+| Immediate builtin result | Rooted result in a `WhnfComputation::Seed`, without a continuation | Install the result as lazy-owned WHNF focus without retaining a second route root. |
+| Test-only semantic computation/thunk | `WhnfComputation::Source` holds a lazy root until the callback returns; then a rooted result | Invoke outside managed access and publish the result/failure before ending that poll. |
+
+`Produce` is a source-admission marker; `HostCallInvoke` is an ephemeral
+one-shot invocation permit. All other `LazyTaskWork` variants are fieldless
+checkpoint markers. The source-backed inventory now checks those payload
+shapes, not just variant names. The still-open W6G.1f.3i.1-.4 checkpoints
+replace these five constructions and eventually require every route variant
+to be fieldless; this census does not certify their lifecycle yet.
+
 Each demand-driven family checkpoint must force budget yield or exact
 dependency suspension, loss of its active route, collection while the lazy
 remains reachable, and resumption from a later authorized route. Host,
