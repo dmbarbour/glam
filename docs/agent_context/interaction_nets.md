@@ -18,9 +18,10 @@ of the interaction-net migration.
 - `src/eval/builtins/net/builder.rs` owns the evaluator-private pure
   state-over-list handler, including the fixed-width protected state, compact
   construction transitions, and exact private API.
+- `src/eval/builtins/net/identity.rs` owns invocation-local brands and opaque
+  logical port handles; its token family is edge-free.
 - `src/eval/builtins/net/netlist.rs` validates and replays the selected strict
-  semantic netlist. `construction.rs` is the unreachable legacy producer
-  retained only until PNC6 removes it.
+  semantic netlist.
 - `src/eval/net.rs` and `src/eval/operator.rs` drive specialization work.
 
 Keep syntax and core policy out of the generic interaction-net modules.
@@ -56,8 +57,7 @@ shapes, and topology before lowering through `NetBuilder`; it performs no
 demand, effect dispatch, callback, wait, or root retention. Constructor
 records omit their derivable ports and wire records contain only logical ID
 pairs. The semantic netlist is a checked replay protocol, not a second mutable
-graph IR. The unreachable legacy construction search machine remains pending
-PNC6 removal.
+graph IR. No dedicated lazy-source construction machine remains.
 
 `interaction_net Effect` is lazy and memoized. Its pure runner applies the
 effect's `eff` handler to a private API providing `.bind`, `.copy`, `.data`,

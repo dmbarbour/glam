@@ -415,7 +415,6 @@ fn assert_lazy_source_active_destruction_paths(source: &LazySource) {
         | LazySource::Access { .. }
         | LazySource::Application(_)
         | LazySource::Builtin(_)
-        | LazySource::NetConstruction(_)
         | LazySource::NetComputation(_)
         | LazySource::FunctionCall { .. } => {}
         #[cfg(test)]
@@ -866,7 +865,7 @@ fn opaque_external_lifecycle_matches_active_raii_inventory() {
     );
     assert!(!active.contains_key("src/reflection/requests.rs::TaskHandleCell"));
     assert!(!active.contains_key("src/diagnostic.rs::CompilationOrigin"));
-    assert!(!active.contains_key("src/eval/builtins/net/construction.rs::ConstructionPort"));
+    assert!(!active.contains_key("src/eval/builtins/net/identity.rs::ConstructionToken"));
 }
 
 #[test]

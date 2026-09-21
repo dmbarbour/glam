@@ -1619,10 +1619,6 @@ pub(crate) enum LazySource {
     },
     Application(Arc<LazyApplication>),
     Builtin(BuiltinCall),
-    /// A closed freer-effect program that constructs one interaction net.
-    /// Mutable interpreter state belongs to the observing evaluation task.
-    #[allow(dead_code, reason = "PNC6 removes the legacy construction source")]
-    NetConstruction(Arc<Value>),
     NetComputation(NetValue),
     FunctionCall {
         function: FunctionValue,
@@ -2015,20 +2011,6 @@ impl LazyValue {
 
     pub(crate) fn from_builtin_in(access: &RuntimeValueAccess<'_>, call: BuiltinCall) -> Self {
         Self::with_source_in(access, "builtin call", LazySource::Builtin(call))
-    }
-
-    #[allow(dead_code, reason = "PNC6 removes the legacy construction source")]
-    pub(crate) fn from_net_construction_in(access: &RuntimeValueAccess<'_>, effect: Value) -> Self {
-        Self::with_source_in(
-            access,
-            "interaction-net construction",
-            LazySource::NetConstruction(Arc::new(effect)),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_net_construction(values: &CoreValueFactory, effect: Value) -> Self {
-        values.with_runtime_value_access(|access| Self::from_net_construction_in(&access, effect))
     }
 
     pub(crate) fn from_function_call_in(

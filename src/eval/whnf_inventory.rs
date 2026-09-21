@@ -44,7 +44,6 @@ enum OuterOwner {
     Spark,
     ReflectionMachine,
     NetWorklist,
-    NetConstruction,
     CoordinatorAdapter,
 }
 
@@ -379,15 +378,12 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
     let declaration_lower = declaration.to_ascii_lowercase();
     let is_reflection = path_text.starts_with("src/reflection/");
     let is_net = path_text == "src/eval/net.rs";
-    let is_net_construction = path_text.contains("builtins/net/construction.rs");
     let is_value = path_text == "src/eval/value.rs";
     let is_client = declaration.contains("ClientDemand") || declaration.contains("client_demand");
     let is_spark = declaration.contains("spark");
 
     let outer = if is_reflection {
         OuterOwner::ReflectionMachine
-    } else if is_net_construction {
-        OuterOwner::NetConstruction
     } else if is_net {
         OuterOwner::NetWorklist
     } else if is_client {
@@ -410,7 +406,7 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
             ResultDisposition::ParseReflectionRequest
         }
         OuterOwner::ReflectionMachine => ResultDisposition::ContinueReflectionPhase,
-        OuterOwner::NetWorklist | OuterOwner::NetConstruction => ResultDisposition::ContinueNetWork,
+        OuterOwner::NetWorklist => ResultDisposition::ContinueNetWork,
         OuterOwner::CoordinatorAdapter => ResultDisposition::TranslateDependency,
         OuterOwner::PureEvaluator => ResultDisposition::ReturnWhnf,
     };
@@ -419,7 +415,7 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
         OuterOwner::LazyTask => StableOwner::LazyIdentity,
         OuterOwner::ClientDemand => StableOwner::ClientDemandRecord,
         OuterOwner::ReflectionMachine => StableOwner::ReflectionTaskRecord,
-        OuterOwner::NetWorklist | OuterOwner::NetConstruction => StableOwner::NetMachine,
+        OuterOwner::NetWorklist => StableOwner::NetMachine,
         OuterOwner::CoordinatorAdapter | OuterOwner::Spark => StableOwner::CoordinatorRecord,
         OuterOwner::PureEvaluator => match signal {
             Signal::EvalPromise | Signal::UnassignedPromise => StableOwner::PromiseIdentity,
@@ -702,26 +698,26 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC4 adds the private API assembly loop, ordered operand queue, checked port
 // allocation, journal/result construction, and its test-only operation loops.
 // Semantic operand demand remains one resumable regional state machine.
-const EXPECTED_OCCURRENCES: usize = 217;
-const EXPECTED_FINGERPRINT: u64 = 15_516_517_519_633_011_924;
+const EXPECTED_OCCURRENCES: usize = 209;
+const EXPECTED_FINGERPRINT: u64 = 3_686_729_721_761_985_554;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
     (Signal::EvalPromise, 1),
     (Signal::ProduceLazySource, 1),
-    (Signal::RetryableWait, 10),
+    (Signal::RetryableWait, 9),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
     (Signal::CoordinatorBoundary, 21),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 58),
-    (Signal::UserSizedLoop, 92),
+    (Signal::StructuralRecursion, 55),
+    (Signal::UserSizedLoop, 88),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 128),
+    (WorkShape::DemandThenInspect, 120),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),

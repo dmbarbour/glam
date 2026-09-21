@@ -72,7 +72,7 @@ const INVENTORY: &[InventoryEntry] = &[
         owner: "I4B non-value compilation provenance",
     },
     InventoryEntry {
-        path: "src/eval/builtins/net/construction.rs",
+        path: "src/eval/builtins/net/identity.rs",
         counts: ContainmentCounts::new([0, 0, 0, 1, 1]),
         owner: "I4B edge-free construction-local port token",
     },
@@ -251,7 +251,7 @@ const OPAQUE_FAMILY_INVENTORY: &[OpaqueFamilyInventoryEntry] = &[
     },
     OpaqueFamilyInventoryEntry {
         family: "ConstructionToken",
-        path: "src/eval/builtins/net/construction.rs",
+        path: "src/eval/builtins/net/identity.rs",
         admission: "OpaquePayloadFamily for ConstructionToken",
         constructor: "OpaqueValue::new(",
         downcast: ".downcast::<ConstructionToken>",

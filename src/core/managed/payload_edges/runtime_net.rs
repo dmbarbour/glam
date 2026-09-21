@@ -51,8 +51,7 @@ pub(crate) fn trace_lazy_source_managed_net_edges(source: &LazySource, visitor: 
         | LazySource::ReflectionTask(_)
         | LazySource::Access { .. }
         | LazySource::Application(_)
-        | LazySource::Builtin(_)
-        | LazySource::NetConstruction(_) => {}
+        | LazySource::Builtin(_) => {}
         #[cfg(test)]
         LazySource::SemanticComputation(_) => {}
         #[cfg(test)]

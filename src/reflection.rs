@@ -16,9 +16,7 @@ pub use lifecycle::{
     EffectLifecycle, EffectLifecycleStatus, EffectLifecycleTerminal, EffectRun, ScheduledEffectRun,
     run, run_standard,
 };
-#[cfg(test)]
-pub(crate) use machine::isolated_effect_api_for_test;
-pub(crate) use machine::{task_eval_error, volume_effects};
+pub(crate) use machine::volume_effects;
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,

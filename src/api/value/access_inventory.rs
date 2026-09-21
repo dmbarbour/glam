@@ -143,19 +143,11 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6C.6 shared durable strategy-demand owner"
     ),
     entry!(
-        "src/eval/builtins/net/construction.rs",
-        0,
-        1,
-        2,
-        "interaction-net diagnostic context and completed replay publication plus the PNC0 deterministic route-loss fixture",
-        "W6F.6-W6F.7 rooted net-construction lifecycle and context; PNC0 test-only construction input"
-    ),
-    entry!(
         "src/eval/value.rs",
         0,
         0,
-        9,
-        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint, immediate builtin result, and net-construction source arguments published before leaving their access regions",
+        8,
+        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint and immediate builtin results published before leaving their access regions",
         "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d-.4c source or terminal handoff"
     ),
     entry!(
@@ -419,8 +411,6 @@ impl RootPublicationOccurrence {
                 | "src/core.rs::impl CoreValues::new"
                 | "src/core.rs::impl HostCallRootBundle::from_captures"
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
-                | "src/eval/builtins/net/construction.rs::net_construction_context"
-                | "src/eval/builtins/net/construction.rs::replay"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll"
@@ -671,9 +661,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
-    "src/eval/builtins/net/construction.rs::net_construction_context#1|surface=access-publication|scope=production",
-    "src/eval/builtins/net/construction.rs::replay#1|surface=access-publication|scope=production",
-    "src/eval/builtins/net/construction.rs::tests::rooted_construction_effect#1|surface=scoped-factory|scope=test",
     "src/eval/builtins/net/tests/mod.rs::public_construction_adds_one_context_at_each_early_failure_boundary#1|surface=access-publication|scope=test",
     "src/eval/builtins/net/tests/mod.rs::public_construction_does_not_demand_its_effect_until_observed#1|surface=compatibility-new|scope=test",
     "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
@@ -691,7 +678,6 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
     "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
     "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint#1|surface=access-publication|scope=production",

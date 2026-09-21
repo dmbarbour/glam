@@ -28,8 +28,7 @@ impl ConstructionPortId {
 
 #[derive(Default)]
 pub(super) struct ConstructionBrand {
-    #[cfg(test)]
-    pub(super) probe: std::sync::OnceLock<Arc<super::construction::ConstructionProbe>>,
+    _private: (),
 }
 
 struct ConstructionToken {

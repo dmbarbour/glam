@@ -125,8 +125,6 @@ enum D2cCheckpoint {
     W6F3ObjectComposition,
     W6F4ObjectInstantiation,
     W6F5NetDispatch,
-    W6F6NetConstructionLifecycle,
-    W6F7NetConstructionValues,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,9 +311,7 @@ impl ApiOccurrence {
             "src/eval/builtins/object.rs"
             | "src/eval/builtins/object/implementation.rs"
             | "src/eval/object_machine.rs" => D2cFamily::Objects,
-            "src/eval/builtins/net.rs" | "src/eval/builtins/net/construction.rs" => {
-                D2cFamily::NetBuiltins
-            }
+            "src/eval/builtins/net.rs" => D2cFamily::NetBuiltins,
             _ => panic!("{} has no reviewed GCI11R-002D.2c family", self.declaration),
         };
         Some(family)
@@ -538,10 +534,6 @@ impl ApiOccurrence {
             (Objects, _, _) => W6F4ObjectInstantiation,
 
             (NetBuiltins, "src/eval/builtins/net.rs", _) => W6F5NetDispatch,
-            (NetBuiltins, "src/eval/builtins/net/construction.rs", "new" | "poll" | "replay") => {
-                W6F6NetConstructionLifecycle
-            }
-            (NetBuiltins, "src/eval/builtins/net/construction.rs", _) => W6F7NetConstructionValues,
             _ => panic!(
                 "{} has no reviewed resumable-WHNF W6/W8 checkpoint",
                 self.declaration
@@ -1380,13 +1372,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        594,
+        593,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        13_116_510_646_589_370_933,
+        8_754_209_011_420_760_525,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1414,7 +1406,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // Raw production values never cross the caller-owned evaluator region.
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 298),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 297),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

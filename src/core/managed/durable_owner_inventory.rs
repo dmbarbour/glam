@@ -628,7 +628,7 @@ const OWNER_INVENTORY: &[OwnerEntry] = &[
         "I4F.2e.4"
     ),
     edge_free!(
-        "src/core.rs; src/eval/builtins/net/construction.rs; src/reflection/requests.rs",
+        "src/core.rs; src/eval/builtins/net/identity.rs; src/reflection/requests.rs",
         "admitted opaque token families",
         "EffectToken, ConstructionPort, TaskHandleCell, CompilationOrigin",
         "external capability/token lifetime",
@@ -968,7 +968,7 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.4b removes the durable object-builtin owner and keeps its raw
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 251;
+const DECLARATION_BASELINE_COUNT: usize = 250;
 // PNC1 gives the managed builtin checkpoint one additional traced raw value:
 // the already-selected strict semantic netlist consumed by hidden replay.
 // PNC2C adds three nested regional builder declarations and eight raw values
@@ -984,8 +984,8 @@ const DECLARATION_BASELINE_COUNT: usize = 251;
 // selection phases beneath the same managed builtin checkpoint, accounting for
 // five declarations, five raw values, and three failure fields.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([319, 116, 5, 34, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_097_513_943_617_754_230;
+    DeclarationSignals::new([318, 115, 5, 34, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 10_078_259_967_659_393_863;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

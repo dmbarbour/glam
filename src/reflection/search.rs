@@ -293,16 +293,6 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         self.map_poll(poll)
     }
 
-    pub(crate) fn poll_with_budget(
-        &mut self,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> IsolatedSearchPoll<S> {
-        let context =
-            super::super::evaluation::EvaluationPollContext::for_context(&self.task.eval_context);
-        let poll = self.task.poll_with_context(&context, step_budget);
-        self.map_poll(poll)
-    }
-
     fn map_poll(&mut self, poll: EffectTaskPoll) -> IsolatedSearchPoll<S> {
         match poll {
             EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,

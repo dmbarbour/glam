@@ -3,7 +3,8 @@
 Status: active; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
 remediations, PNC5, and its
 [post-PNC5 review remediations](../reviews/PureInteractionNetConstructionPNC5_2026-09-21.md)
-completed on 2026-09-21. PNC6 legacy removal is next. The
+completed on 2026-09-21. PNC6 legacy removal completed on 2026-09-21; PNC7
+verification and closure is next. The
 [post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
 found no demonstrated result defect. Its private diagnostic contract,
 no-replay evidence, replay-order/API/malformed-record latches, and future-phase
@@ -1007,6 +1008,12 @@ scope test passes before removal of the old route.
 
 #### PNC6B — Remove the legacy producer route
 
+Completed 2026-09-21: the old isolated search, construction journal and
+machine, `LazySource::NetConstruction`, and its `LazyTaskWork` route are gone.
+The pure builder and replay path remains the sole production route. The
+obsolete private `copy_count` frame disappeared with the machine; public
+`net_construction` context is unchanged.
+
 - Remove `NetConstructionMachine`, `NetConstructionPoll`,
   `NetConstructionState`, and `InteractionNetEffects`.
 - Remove `LazyTaskWork::NetConstruction` and
@@ -1016,6 +1023,16 @@ scope test passes before removal of the old route.
   `net_construction` frame remains authoritative.
 
 #### PNC6C — Inventory and documentation closure
+
+Completed 2026-09-21: compile-exhaustive source, producer, root-publication,
+edge, access, and WHNF inventories reflect the pure route. The current
+descriptions in `docs/Syntax.md` and `docs/architecture/evaluation.md` needed
+no change; the interaction-net invariant note and source map now name the
+identity module instead of the removed producer. A source search found no
+live legacy machine, journal, isolated host, or private `copy_count` frame;
+the one remaining `copy_count` spelling is a negative diagnostic assertion.
+`cargo fmt --check`, all-target/all-feature Clippy with warnings denied, the
+full `cargo test -q` suite, and the interaction-net profiling script pass.
 
 - Reconcile compile-exhaustive lazy-source, producer-route, registered-root,
   persistent-edge, and autonomous-obligation inventories.

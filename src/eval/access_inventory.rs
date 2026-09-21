@@ -145,11 +145,6 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
         "W6C.1b regional dispatcher and test-only durable compatibility wrapper"
     ),
     context_entry!(
-        "src/eval/builtins/net/construction.rs",
-        [4, 1],
-        "I3D.4/W6F.6-W6F.7 scoped result decoding and replay with one durable exposed-port WHNF owner"
-    ),
-    context_entry!(
         "src/eval/list_machine.rs",
         [1, 3],
         "W6G.1f.3e.1 retains the regional logical-list front bridge while W6G.1f.3g.3e.1 removes the final durable back owner after pattern-list embedding"
@@ -360,7 +355,6 @@ fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
         "src/reflection/protocol.rs",
         "src/reflection/requests.rs",
         "src/g_syntax/macro_expansion/effects.rs",
-        "src/eval/builtins/net/construction.rs",
         "src/bin/glam/configuration/logger/effects.rs",
         "src/bin/glam/command_line/configured/effects.rs",
         "src/bin/glam/command_line/configured/token/effects.rs",
@@ -384,7 +378,6 @@ fn specialization_callbacks_have_no_nested_semantic_evaluator() {
     for relative in [
         "src/reflection/requests.rs",
         "src/g_syntax/macro_expansion/effects.rs",
-        "src/eval/builtins/net/construction.rs",
         "src/bin/glam/configuration/logger/effects.rs",
         "src/bin/glam/command_line/configured/effects.rs",
         "src/bin/glam/command_line/configured/token/effects.rs",
@@ -404,40 +397,6 @@ fn specialization_callbacks_have_no_nested_semantic_evaluator() {
             );
         }
     }
-}
-
-#[test]
-fn net_construction_callbacks_have_no_direct_compatibility_entry() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let relative = "src/eval/builtins/net/construction.rs";
-    let source = fs::read_to_string(manifest.join(relative))
-        .expect("net-construction source should be readable");
-
-    for forbidden in [
-        "eval_value(",
-        "eval_index_number(",
-        "with_direct_evaluator(",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "{relative} must demand callback arguments through owned request work, not `{forbidden}`"
-        );
-    }
-    assert!(
-        !source.contains("context.evaluate("),
-        "construction callbacks must own semantic demand as resumable request work"
-    );
-    assert!(
-        source.contains("SpecializationRequestPoll::Demand(outputs)")
-            && source.contains("Self::WireRight { left }"),
-        "copy and ordered wire preparation must remain explicit request-work phases"
-    );
-    assert!(
-        source.contains("NetConstructionState::Exposed { journal, demand }")
-            && source.contains("demand: WhnfComputation::from_root")
-            && source.contains("construction_port_value(&access, &value, &self.brand)"),
-        "the completed construction result must retain an explicit durable WHNF owner and inspect its port only under evaluator access"
-    );
 }
 
 #[test]

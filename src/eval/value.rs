@@ -20,7 +20,7 @@ use crate::number::Number;
 
 use super::access_machine::{AccessMachine, AccessRegionalPoll};
 use super::builtin_machine::{RegionalBuiltinMachine, RegionalBuiltinPoll};
-use super::builtins::{NetConstructionMachine, NetConstructionPoll, apply_builtin_in};
+use super::builtins::apply_builtin_in;
 use super::lazy_checkpoint::{
     HostCallCheckpointObservation, ManagedLazyCheckpointEdge, ManagedLazyCheckpointKindTag,
 };
@@ -209,7 +209,6 @@ enum LazyTaskWork {
     /// `Invoking` host-call checkpoint.
     HostCallInvoke,
     HostCallCheckpoint,
-    NetConstruction(Box<NetConstructionMachine>),
 }
 
 struct LazyTaskMachine {
@@ -1057,21 +1056,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 }
                 if let Some(source) = source {
                     self.work = match source {
-                        LazySource::NetConstruction(effect) => {
-                            let effect = context.with_value_access(|access| {
-                                access.values().root_runtime_value(
-                                    access.values().duplicate_value(effect.as_ref()),
-                                )
-                            });
-                            let machine = match NetConstructionMachine::new(
-                                durable_context.clone(),
-                                effect,
-                            ) {
-                                Ok(machine) => machine,
-                                Err(error) => return self.fail(context, error),
-                            };
-                            LazyTaskWork::NetConstruction(Box::new(machine))
-                        }
                         LazySource::HostCall(producer) => {
                             let installed = context.with_value_access(|access| {
                                 let checkpoint = ManagedLazyCheckpointEdge::allocate_host_call_in(
@@ -1412,10 +1396,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         )),
                     };
                 }
-                if matches!(
-                    self.work,
-                    LazyTaskWork::NetConstruction(_) | LazyTaskWork::HostCallInvoke
-                ) {
+                if matches!(self.work, LazyTaskWork::HostCallInvoke) {
                     return EvaluationMachinePoll::Yielded;
                 }
                 if let Some(poll) = self.publish_whnf_checkpoint(context) {
@@ -1445,23 +1426,6 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
             if matches!(self.work, LazyTaskWork::BuiltinCheckpoint) {
                 return self.poll_builtin_checkpoint(context, step_budget);
-            }
-
-            if let LazyTaskWork::NetConstruction(machine) = &mut self.work {
-                return match machine.poll(poll_context, context, &durable_context, step_budget) {
-                    NetConstructionPoll::Ready(value) => self.complete_root(context, &value),
-                    NetConstructionPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                            dependency: Some(dependency),
-                            observed_epoch: None,
-                            error: None,
-                        })
-                    }
-                    NetConstructionPoll::Yielded => EvaluationMachinePoll::Yielded,
-                    NetConstructionPoll::Failed(failure) => {
-                        self.fail(context, EvaluationHalt::failure(failure.into_failure()))
-                    }
-                };
             }
 
             let source_pending = matches!(
@@ -1766,9 +1730,6 @@ fn produce_lazy_source_in(
         LazySource::Builtin(_) => {
             unreachable!("builtin sources retain a regional machine or immediate rooted result")
         }
-        LazySource::NetConstruction(_) => {
-            unreachable!("net construction must retain its pollable effect machine")
-        }
         LazySource::NetComputation(_) => {
             unreachable!("net computations retain one pollable net-WHNF owner")
         }
@@ -1958,9 +1919,6 @@ mod ownership_tests {
             LazyTaskWork::ListEffectCheckpoint => {}
             LazyTaskWork::BuiltinCheckpoint => {}
             LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
-            LazyTaskWork::NetConstruction(machine) => {
-                let _: &NetConstructionMachine = machine;
-            }
         }
 
         let LazyTaskMachine {

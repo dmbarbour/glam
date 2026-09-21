@@ -1720,28 +1720,6 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
 }
 
 #[test]
-fn interaction_net_construction_dependency_does_not_poison_its_lazy_value() {
-    let session = test_context();
-    let (promise, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("pending net effect"))
-        .unwrap();
-    let observer = session.with_new_task().unwrap();
-    let lazy = LazyValue::from_net_construction(
-        &crate::core::test_value_factory(),
-        Value::Promised(promise),
-    );
-    let value = Value::Lazy(lazy.clone());
-
-    let blocked = eval_value(&observer, &value)
-        .expect_err("net construction should block on its unresolved effect");
-    assert!(blocked.blocked_on().is_some());
-    assert!(
-        lazy.cached(session.values()).is_none(),
-        "a retryable construction dependency must not become a cached failure"
-    );
-}
-
-#[test]
 fn interaction_net_builtin_dispatches_into_the_construction_owner() {
     let session = test_context();
     let (promise, _owner_task, _owner) = session
@@ -1760,6 +1738,13 @@ fn interaction_net_builtin_dispatches_into_the_construction_owner() {
     let blocked = eval_value(&observer, &construction)
         .expect_err("builtin dispatch should reach the net-construction demand");
     assert!(blocked.blocked_on().is_some());
+    let Value::Lazy(lazy) = construction else {
+        panic!("interaction-net construction must remain memoized as a lazy value")
+    };
+    assert!(
+        lazy.cached(session.values()).is_none(),
+        "a retryable construction dependency must not become a cached failure"
+    );
 }
 
 #[test]

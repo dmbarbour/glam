@@ -589,7 +589,7 @@ fn callable_checkpoint_reachability_inventory_starts_frame_free() {
     let producer_dispatch = source_section(
         value,
         "match source {",
-        "if matches!(\n                    self.work,",
+        "if matches!(self.work, LazyTaskWork::HostCallInvoke)",
     );
     for producer_owned_family in [
         "LazySource::Application(application)",

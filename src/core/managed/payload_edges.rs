@@ -200,7 +200,6 @@ impl CompatibilityValueEdges for LazySource {
                 application.visit_compatibility_value_edges(visit);
             }
             Self::Builtin(call) => call.visit_compatibility_value_edges(visit),
-            Self::NetConstruction(effect) => visit(effect),
             Self::FunctionCall {
                 function: _,
                 arguments,
@@ -328,10 +327,6 @@ mod tests {
         );
         assert_eq!(
             edges(&MetadataCarrier::new(second.clone())),
-            vec![second.clone()]
-        );
-        assert_eq!(
-            edges(&LazySource::NetConstruction(Arc::new(second.clone()))),
             vec![second.clone()]
         );
 

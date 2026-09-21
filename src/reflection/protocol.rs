@@ -12,7 +12,6 @@ use super::search::IsolatedEffectSearch;
 use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{Diagnostic, Error as ApiError, EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, Value};
-use crate::core_net::CoreWaitToken;
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{EvalContext, EvaluationWaitToken};
@@ -635,13 +634,6 @@ impl TaskHalt {
         }
     }
 
-    pub(crate) fn into_evaluation_halt(self) -> EvaluationHalt {
-        match self.0 {
-            TaskHaltKind::Failure(failure) => EvaluationHalt::failure(failure.into_failure()),
-            TaskHaltKind::Blocked(wait) => EvaluationHalt::blocked(CoreWaitToken(wait)),
-        }
-    }
-
     pub(super) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
             TaskHaltKind::Failure(failure) => Some(failure.as_failure()),
@@ -1052,7 +1044,6 @@ mod root_inventory_tests {
             include_str!("machine/tests.rs"),
             include_str!("search.rs"),
             include_str!("../g_syntax/macro_expansion/effects.rs"),
-            include_str!("../eval/builtins/net/construction.rs"),
             include_str!("../bin/glam/configuration/logger/effects.rs"),
             include_str!("../bin/glam/command_line/configured/effects.rs"),
             include_str!("../bin/glam/command_line/configured/token/effects.rs"),
@@ -1065,11 +1056,11 @@ mod root_inventory_tests {
                 .sum::<usize>()
         };
 
-        assert_eq!(count(concat!("impl Task", "Specialization for ")), 11);
-        assert_eq!(count(concat!("type Request", "Work =")), 11);
+        assert_eq!(count(concat!("impl Task", "Specialization for ")), 10);
+        assert_eq!(count(concat!("type Request", "Work =")), 10);
         // One declaration belongs to the trait; every implementation supplies
-        // the remaining eleven constructors.
-        assert_eq!(count(concat!("fn start", "_request(")), 12);
+        // the remaining ten constructors.
+        assert_eq!(count(concat!("fn start", "_request(")), 11);
         assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 0);
         assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 0);
         assert_eq!(

@@ -1591,7 +1591,6 @@ mod tests {
                 | "from_access_in"
                 | "from_application_in"
                 | "from_builtin_in"
-                | "from_net_construction_in"
                 | "from_function_call_in"
                 | "from_net_computation_in"
                 | "from_reflection_gate_in"
@@ -2129,7 +2128,10 @@ mod tests {
             let root = access
                 .construct_rooted_managed_lazy(
                     "transitioning lazy",
-                    LazySource::NetConstruction(Value::Lazy(sentinel.clone()).into()),
+                    LazySource::Access {
+                        path: Arc::from([]),
+                        arguments: Arc::from([Value::Lazy(sentinel.clone())]),
+                    },
                 )
                 .expect("the managed lazy cell should fit a run");
             let result =
@@ -2163,7 +2165,10 @@ mod tests {
             let root = access
                 .construct_rooted_managed_lazy(
                     "failing lazy",
-                    LazySource::NetConstruction(Value::Promised(source).into()),
+                    LazySource::Access {
+                        path: Arc::from([]),
+                        arguments: Arc::from([Value::Promised(source)]),
+                    },
                 )
                 .expect("the managed lazy cell should fit a run");
             let failure = Arc::new(EvaluationFailure::emission(Value::List(List::from_values(
@@ -2799,13 +2804,6 @@ mod tests {
                 function: backedge,
                 arguments: Arc::from([]),
             }))
-        });
-    }
-
-    #[test]
-    fn managed_cycle_through_net_construction_is_traced_and_reclaimed() {
-        assert_lazy_promise_cycle_through_source("net construction compatibility", |backedge| {
-            LazySource::NetConstruction(Arc::new(backedge))
         });
     }
 

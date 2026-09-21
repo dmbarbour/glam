@@ -14,7 +14,6 @@ use crate::evaluation::EvaluationValueAccess;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
 pub(in crate::eval) use net::interaction_net_from_netlist_in;
-pub(super) use net::{NetConstructionMachine, NetConstructionPoll};
 pub(in crate::eval) use net::{
     RegionalBuilderBuiltinMachine, RegionalBuilderEffectPoll, RegionalBuilderEffectRunner,
     RegionalNetConstruction, RegionalNetConstructionPoll,

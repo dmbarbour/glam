@@ -19,7 +19,6 @@ const EXPECTED_VARIANTS: &[&str] = &[
     "HostCallCheckpoint",
     "HostCallInvoke",
     "ListEffectCheckpoint",
-    "NetConstruction",
     // W6G.1f.3c retains the complete driver beneath the managed lazy.
     "NetWhnfCheckpoint",
     // W6G.1f.3e retains complete C3 and mix progress beneath the lazy.
@@ -69,7 +68,6 @@ fn lazy_task_work_external_boundaries_remain_visible() {
     for boundary in [
         "ManagedHostCallCheckpointState::Invoking",
         "reserve_reflection_completion_activation",
-        "NetConstructionMachine",
         "ManagedPromiseRoot",
     ] {
         assert!(

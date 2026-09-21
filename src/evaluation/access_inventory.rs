@@ -485,7 +485,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core.rs::impl LazyValue::from_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl LazyValue::from_application#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl LazyValue::from_net_computation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::from_net_construction#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl LazyValue::from_reflection_gate#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl LazyValue::id#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl LazyValue::root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -862,7 +861,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // non-demanding recursive diagnostic-rendering region.
         // D.2b.2 constructs the canonical runtime roots in one additional
         // shared region.
-        ("src/core.rs", GatewayCounts::new(36, 5)),
+        ("src/core.rs", GatewayCounts::new(35, 5)),
         // I5D scopes every managed core-net construction, root handoff, and
         // source-frontier traversal through matching value-domain authority.
         // GCI5R-008's test-only prepared-source bridge reopens the matching

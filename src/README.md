@@ -70,7 +70,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/whnf_checkpoint_inventory.rs` | Test-only W6G.3 census of durable WHNF constructors, source-entry operations, observers, and seed modifiers before aggregate-cell migration |
 | `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
 | `eval/builtins/` | Builtin implementations by semantic family; saturation uses the caller's bounded `EvaluationValueAccess`, immediate constructors publish before that region closes, and `ManagedBuiltinCheckpointCell` traces every demand-capable family's regional state across yield, dependency, failure, and completion |
-| `eval/builtins/net/construction.rs` | Legacy source interaction-net construction search and selected-journal semantic adapter pending PNC6 removal |
+| `eval/builtins/net/identity.rs` | Invocation-local construction brands and edge-free opaque logical port handles |
 | `eval/builtins/net/runner.rs` | Pure source construction effect runner, retained first-two selector, exposed-port demand, and selected netlist replay |
 | `eval/builtins/net/builder.rs` | Private pure state-over-list construction handler, protected fixed-width builder state, resumable state/control/construction operations, and exact private API |
 | `eval/builtins/net/netlist.rs` | Strict ordinary-value construction schema and evaluator-private callback-free checked replay through `NetBuilder` |
