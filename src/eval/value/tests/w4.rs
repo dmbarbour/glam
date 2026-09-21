@@ -94,7 +94,7 @@ fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWait
                 panic!("deterministic W6G.1 fixture unexpectedly found a claimed producer")
             }
             crate::evaluation::EvaluationPumpOutcome::NoProgress => {
-                panic!("deterministic W6G.1 fixture lost its producer")
+                panic!("deterministic W6G.1 fixture lost its producer: {wait:?}")
             }
         }
         assert_ne!(attempt, 63, "W6G.1 fixture exhausted its pump bound");
@@ -265,6 +265,26 @@ fn builder_effect_value(context: &EvalContext, operation: Value) -> Value {
         crate::eval::test_support::TestExpr::Value(operation),
     );
     list_effect_value(handler)
+}
+
+fn construction_results_effect(context: &EvalContext, results: List) -> Value {
+    let handler = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        2,
+        crate::eval::test_support::TestExpr::Value(Value::List(results)),
+    );
+    list_effect_value(handler)
+}
+
+fn assert_construction_promise_dependency(
+    context: &EvalContext,
+    dependency: WorkDependency,
+    promise: &PromisedValue,
+) {
+    let WorkDependency::Promise(dependency) = dependency else {
+        panic!("public construction must publish an exact promise dependency")
+    };
+    assert_eq!(dependency.id(), promise.id(context.values()));
 }
 
 fn builder_return_first_port_continuation(context: &EvalContext) -> Value {
@@ -466,6 +486,53 @@ fn poll_until_blocked_after_route_loss(
         assert_ne!(attempt, 511, "the fixture did not reach its dependency");
     }
     unreachable!("the bounded fixture must block or panic")
+}
+
+fn poll_until_stalled_child_wait_after_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+    route_losses: &mut usize,
+) -> (LazyTaskMachine, crate::evaluation::EvaluationWaitToken) {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..512 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_lazy_route_loss(context, retained, machine);
+                *route_losses += 1;
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                let Some(WorkDependency::Wait(wait)) = block.dependency else {
+                    panic!("nested construction must expose its exact child wait")
+                };
+                match context.pump_wait(&wait, 256) {
+                    crate::evaluation::EvaluationPumpOutcome::NoProgress => return (machine, wait),
+                    crate::evaluation::EvaluationPumpOutcome::TargetReady
+                    | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {
+                        machine = resume_after_lazy_route_loss(context, retained, machine);
+                        *route_losses += 1;
+                    }
+                    crate::evaluation::EvaluationPumpOutcome::Busy => {
+                        panic!("deterministic nested construction found a claimed producer")
+                    }
+                }
+            }
+            EvaluationMachinePoll::Complete(_) => panic!("construction completed before its wait"),
+            EvaluationMachinePoll::Failed(failure) => {
+                panic!("construction failed before its wait: {failure}")
+            }
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("construction crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(
+            attempt, 511,
+            "nested construction did not reach its stalled wait"
+        );
+    }
+    unreachable!("bounded nested construction must block or panic")
 }
 
 fn drive_after_route_loss(
@@ -2085,6 +2152,188 @@ fn public_pure_construction_retains_exposed_port_demand_across_route_loss() {
             .count(),
         1
     );
+}
+
+#[test]
+fn public_construction_waits_for_first_result_before_ready_right_branch() {
+    let context = isolated_context();
+    let first = PromisedValue::new(context.values(), "first construction result promise");
+    let _first_owner = first.root(context.values());
+    let right_demands = Arc::new(AtomicUsize::new(0));
+    let right = counted_success(
+        &context,
+        "ready right construction result",
+        &right_demands,
+        Value::List(List::from_values(vec![number(2)])),
+    );
+    let Value::Lazy(right) = right else {
+        unreachable!("counted right result must be lazy")
+    };
+    let results = List::concat(
+        List::from_thunk(ListThunk::Promised(first.clone())),
+        List::from_thunk(right.into()),
+    );
+    let effect = construction_results_effect(&context, results);
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert_construction_promise_dependency(&context, dependency, &first);
+    assert_eq!(
+        right_demands.load(Ordering::SeqCst),
+        0,
+        "a ready right branch cannot overtake a blocked first result"
+    );
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(
+        context.values(),
+        &first,
+        Value::List(List::from_values(vec![number(1)])),
+    )
+    .expect("the first construction result should accept its assignment");
+
+    let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(failure.to_string().contains("produced multiple results"));
+    assert_eq!(right_demands.load(Ordering::SeqCst), 1);
+    assert!(route_losses >= 2);
+}
+
+#[test]
+fn public_construction_retains_first_result_while_second_promise_blocks() {
+    let context = isolated_context();
+    let second = PromisedValue::new(context.values(), "second construction result promise");
+    let _second_owner = second.root(context.values());
+    let first_demands = Arc::new(AtomicUsize::new(0));
+    let first = counted_success(
+        &context,
+        "counted first construction result before second promise",
+        &first_demands,
+        Value::List(List::from_values(vec![number(1)])),
+    );
+    let Value::Lazy(first) = first else {
+        unreachable!("counted first result must be lazy")
+    };
+    let results = List::concat(
+        List::from_thunk(first.into()),
+        List::from_thunk(ListThunk::Promised(second.clone())),
+    );
+    let effect = construction_results_effect(&context, results);
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert_construction_promise_dependency(&context, dependency, &second);
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(
+        context.values(),
+        &second,
+        Value::List(List::from_values(vec![number(2)])),
+    )
+    .expect("the second construction result should accept its assignment");
+
+    let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(failure.to_string().contains("produced multiple results"));
+    assert_eq!(
+        first_demands.load(Ordering::SeqCst),
+        1,
+        "the first result must not be recomputed after the second wait"
+    );
+    assert!(route_losses >= 2);
+}
+
+#[test]
+fn public_construction_exposed_port_promise_retains_one_context_after_route_loss() {
+    let context = isolated_context();
+    let exposed = PromisedValue::new(context.values(), "exposed construction port promise");
+    let exposed_owner = exposed.root(context.values());
+    let effect = context.values().with_runtime_value_access(|access| {
+        let return_port = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderReturn,
+            arguments: Arc::from([Value::Promised(PromisedValue::from_root(
+                &exposed_owner,
+                &access,
+            ))]),
+        });
+        builder_effect_value(&context, return_port)
+    });
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    let (machine, dependency) =
+        poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert_construction_promise_dependency(&context, dependency, &exposed);
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(context.values(), &exposed, number(42))
+        .expect("the exposed-port promise should accept its assignment");
+
+    let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(failure.to_string().contains("requires a construction port"));
+    let frame = crate::diagnostic::evaluation_context_frame("net_construction");
+    assert_eq!(
+        failure
+            .contexts()
+            .iter()
+            .filter(|context| *context == &frame)
+            .count(),
+        1
+    );
+    assert!(route_losses >= 2);
+}
+
+#[test]
+fn public_construction_builder_operand_promise_resumes_same_program() {
+    let context = isolated_context();
+    let count = PromisedValue::new(context.values(), "construction copy count promise");
+    let count_owner = count.root(context.values());
+    let effect = context.values().with_runtime_value_access(|access| {
+        let copy = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderCopy,
+            arguments: Arc::from([Value::Promised(PromisedValue::from_root(
+                &count_owner,
+                &access,
+            ))]),
+        });
+        let sequence = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderSeq,
+            arguments: Arc::from([
+                builder_effect_value(&context, copy),
+                builder_return_first_port_continuation(&context),
+            ]),
+        });
+        builder_effect_value(&context, sequence)
+    });
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    let (machine, wait) = poll_until_stalled_child_wait_after_route_loss(
+        &context,
+        &retained,
+        machine,
+        &mut route_losses,
+    );
+    assert!(
+        wait.terminal_poll().is_none(),
+        "the child wait must remain pending on the unassigned copy count"
+    );
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
+    route_losses += 1;
+    crate::core::set_test_promise(context.values(), &count, number(0))
+        .expect("the copy-count promise should accept its assignment");
+    pump_to_ready(&context, &wait);
+
+    let net = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(net, Value::Net(_)));
+    assert!(route_losses >= 2);
 }
 
 #[test]

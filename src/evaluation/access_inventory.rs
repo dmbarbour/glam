@@ -676,6 +676,8 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::public_construction_builder_operand_promise_resumes_same_program#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::public_construction_exposed_port_promise_retains_one_context_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::resume_after_list_effect_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::resume_after_lazy_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -922,7 +924,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // operands, state, and the final outcome inspection. PNC4R-001/002 add
         // eight bounded test regions for copy dependency publication, exact
         // journal inspection, and transparent operand-failure assertions.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(42, 0)),
+        // PNC5R-001 adds two bounded regions to project promised operands
+        // into public construction fixtures before forced route loss.
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(44, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the

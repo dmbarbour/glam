@@ -1,7 +1,9 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
 Status: active; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
-remediations and PNC5 completed on 2026-09-21. PNC6 legacy removal is next. The
+remediations, PNC5, and its
+[post-PNC5 review remediations](../reviews/PureInteractionNetConstructionPNC5_2026-09-21.md)
+completed on 2026-09-21. PNC6 legacy removal is next. The
 [post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
 found no demonstrated result defect. Its private diagnostic contract,
 no-replay evidence, replay-order/API/malformed-record latches, and future-phase
@@ -923,7 +925,10 @@ checkpoint.
 #### PNC5B — Retained first-two selector
 
 Status: complete on 2026-09-21. The selector retains the first outcome and
-list-front progress, and does not observe a third result after ambiguity.
+list-front progress, and does not observe a third result after ambiguity. The
+[post-PNC5 review](../reviews/PureInteractionNetConstructionPNC5_2026-09-21.md)
+found the exact-dependency part of this verification incomplete; the public
+promise-wait fixtures now force it separately from budget-yield route loss.
 
 - Implement uniqueness by observing at most the first two outcomes: none is a
   failed construction, one is selected, and two proves ambiguity without
@@ -1009,9 +1014,10 @@ from public construction until PNC6 removes them.
 
 - Reconcile compile-exhaustive lazy-source, producer-route, registered-root,
   persistent-edge, and autonomous-obligation inventories.
-- Update the automatic-context inventory in `docs/Syntax.md` plus
-  `docs/agent_context/interaction_nets.md` and source architecture notes to
-  describe the implemented pure boundary.
+- Re-audit `docs/Syntax.md`, `docs/agent_context/interaction_nets.md`,
+  `docs/architecture/evaluation.md`, and `src/README.md` after legacy removal.
+  Their present-tense descriptions were updated in the post-PNC5 remediation;
+  remove any remaining references that treat the old producer as live.
 - Search for the legacy machine, journal, isolated host, and `copy_count`
   spelling, then run the full routine and profiling checks.
 
@@ -1036,12 +1042,19 @@ both relevant orderings.
 - yield and exact dependency suspension in list search, state/control,
   builder argument evaluation, unique selection, and exposed-port demand;
 - route loss and collection at each suspension boundary;
-- one-shot construction execution and one-shot hidden replay;
+- one-shot construction execution and an atomic synchronous replay-to-WHNF-
+  checkpoint handoff;
 - collection of construction/checkpoint cycles after external roots drop; and
 - absence of reflection, task, heap, environment, logger, and host I/O caps.
 
-Count completed branch prefixes, builder transitions, unique selections, and
-replay calls so terminal-value equality cannot hide duplicated work.
+Count completed branch prefixes, builder transitions, and unique selections
+so terminal-value equality cannot hide duplicated work. For replay, audit the
+exclusive lazy-claim admission and same-access transition from synchronous
+replay to the managed WHNF checkpoint, then force route loss at the next poll
+boundary and assert memoized net identity on repeated demand. Replay has no
+yield or callback boundary, so a production replay-call probe is not needed.
+If replay becomes interruptible, add explicit test-only counting or resumable
+replay state then.
 
 Then run:
 

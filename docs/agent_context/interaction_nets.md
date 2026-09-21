@@ -13,12 +13,14 @@ of the interaction-net migration.
   reduction, cursors, and runtime tests.
 - `src/core_net.rs` supplies core `Value` and `CoreOperator` semantics.
 - `src/g_syntax/net_lowering.rs` lowers front-end functions and applications.
-- `src/eval/builtins/net/construction.rs` interprets source construction
-  effects and replays the selected journal.
+- `src/eval/builtins/net/runner.rs` interprets source construction effects
+  against the pure builder, selects one result, and reaches replay.
 - `src/eval/builtins/net/builder.rs` owns the evaluator-private pure
-  state-over-list handler assembled by PNC2-PNC4, including the fixed-width
-  protected state, compact construction transitions, and exact private API;
-  production construction does not enter it until PNC5.
+  state-over-list handler, including the fixed-width protected state, compact
+  construction transitions, and exact private API.
+- `src/eval/builtins/net/netlist.rs` validates and replays the selected strict
+  semantic netlist. `construction.rs` is the unreachable legacy producer
+  retained only until PNC6 removes it.
 - `src/eval/net.rs` and `src/eval/operator.rs` drive specialization work.
 
 Keep syntax and core policy out of the generic interaction-net modules.
@@ -45,8 +47,8 @@ that finalization splices into a direct wire, and larger copies use a balanced
 binary fan tree. Tunnels never enter a template or runtime.
 
 `Assembler::net` is a lifetime-scoped, core-specialized facade over this same
-builder. Source `interaction_net` still searches with a branch-local
-write-only transaction journal. After selecting one branch, it encodes a
+builder. Source `interaction_net` searches with a pure, branch-local builder
+state over ordered lazy lists. After selecting one result, it encodes a
 strict ordinary-value netlist and passes that to the evaluator-private
 `InteractionNetFromNetlist` builtin. That synchronous boundary validates
 brands, a derived monotonic port cursor, compact constructor and wire journal
@@ -54,18 +56,19 @@ shapes, and topology before lowering through `NetBuilder`; it performs no
 demand, effect dispatch, callback, wait, or root retention. Constructor
 records omit their derivable ports and wire records contain only logical ID
 pairs. The semantic netlist is a checked replay protocol, not a second mutable
-graph IR. PNC2-PNC5 make the pure builder produce it directly; PNC6 removes
-the then-unreachable legacy construction search machine.
+graph IR. The unreachable legacy construction search machine remains pending
+PNC6 removal.
 
-`interaction_net Effect` is lazy and memoized. Its isolated freer machine
-provides `.bind`, `.copy`, `.data`, and `.wire` together with the standard
-task-local effects, but no reflection, shared heap, environment, logging, or
-task capabilities. Each invocation brands its opaque logical port handles;
-operations reject handles from another invocation. Alternatives cheaply share
-a persistent journal prefix. No partial graph is built while searching.
+`interaction_net Effect` is lazy and memoized. Its pure runner applies the
+effect's `eff` handler to a private API providing `.bind`, `.copy`, `.data`,
+and `.wire` together with the standard task-local effects, but no reflection,
+shared heap, environment, logging, or task capabilities. Each invocation
+brands its opaque logical port handles; operations reject handles from another
+invocation. Alternatives cheaply share persistent builder-state and journal
+prefixes. No partial graph is built while searching.
 
 At completion, zero successful branches fail, more than one is ambiguous, and
-exactly one must return a branded port to expose. Only that branch is encoded
+exactly one must return a branded port to expose. Only that result is encoded
 and replayed in order through the hidden semantic-netlist boundary, then
 instantiated once as the runtime memoized by the construction lazy. Failed
 alternatives are never finalized, so their partial topology cannot produce

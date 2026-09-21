@@ -22,6 +22,10 @@ tests=(
   eval::value::w4_tests::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation
   eval::value::w4_tests::public_pure_construction_retains_both_selector_observations_across_route_loss
   eval::value::w4_tests::public_pure_construction_retains_exposed_port_demand_across_route_loss
+  eval::value::w4_tests::public_construction_waits_for_first_result_before_ready_right_branch
+  eval::value::w4_tests::public_construction_retains_first_result_while_second_promise_blocks
+  eval::value::w4_tests::public_construction_exposed_port_promise_retains_one_context_after_route_loss
+  eval::value::w4_tests::public_construction_builder_operand_promise_resumes_same_program
   g_syntax::tests::interaction_net_construction_backtracks_and_requires_one_result
   eval::tests::wrapper_returning_function_then_accepts_remaining_application
   eval::tests::wrapper_application_budget_probe_yields_without_publishing_a_cache

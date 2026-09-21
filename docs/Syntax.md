@@ -1075,8 +1075,10 @@ Automatic evaluator context uses the tagged form
 defined `Arguments` is a dictionary of named fields. Argument-free frames omit
 `args`. Current operations identify annotation, reflection-annotation,
 log-message, log-severity, list-index/count, net-arity, and interaction-net
-copy-count demand. These frames decorate a nested failure that the operation
-forced; the operation's own validation errors remain self-describing.
+construction. Most frames decorate a nested failure that the operation
+forced; the operation's own validation errors remain self-describing. The
+public `net_construction` frame instead covers the complete construction
+pipeline, including selection and topology validation errors.
 
 The built-in `g0` compiler also places a shallow context around each source
 definition while its value is first demanded:

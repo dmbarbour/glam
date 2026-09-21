@@ -4,11 +4,10 @@ Baseline: `26675624` completes PNC5A.0–D. The legacy construction producer is
 still compiled but is no longer selected by the public `interaction_net`
 builtin; its removal is PNC6 work.
 
-Status: no semantic result defect was demonstrated. The pure cutover has the
-intended ownership and selection shape. One promised exact-dependency test
-matrix remains unproved, and current-architecture documentation now describes
-the obsolete producer. These are review findings, not evidence that the new
-runner returns the wrong result.
+Status: review and remediations complete on 2026-09-21. No semantic result
+defect was demonstrated. The pure cutover has the intended ownership and
+selection shape. The exact-dependency gap, current-architecture drift, and
+PNC7 replay-proof inconsistency found below are now closed.
 
 ## Scope and method
 
@@ -31,9 +30,13 @@ cargo test -q --lib interaction_net_construction_backtracks_and_requires_one_res
 cargo test -q --lib interaction_net_finalization_reports_invalid_topology
 ```
 
-The PNC5 completion record reports a passing full ordinary suite, clippy,
-formatting, aggressive-collection fixtures, and the profiling script. This
-review did not rerun those broad gates; no Rust source was changed here.
+The original review did not rerun the broad gates. After its test-only
+remediation, `cargo fmt --check`, all-target/all-feature clippy with denied
+warnings, `cargo test -q`, and
+`scripts/check-interaction-net-profiling.sh` all pass. The first full test run
+identified four expected source-inventory count/ledger changes from the new
+fixtures; those exact test-only root and access occurrences were reconciled
+before the passing rerun.
 
 ## Implementation and semantic accounting
 
@@ -93,13 +96,14 @@ the public runner-to-selector-to-exposure handoffs.
 Add a small public fixture matrix before declaring this acceptance criterion
 closed: block first result-list fragment while a right alternative is ready,
 then block the second fragment after the first is retained, and block the
-selected exposed port. At each boundary assert the expected exact promise
+selected exposed port. For those direct waits, assert the exact promise
 identity, lose the route, collect, assign the promise, resume, and count the
 already-completed prefix. Include one public builder operand wait to cover the
-nested runner handoff; lower-level builder fixtures remain useful but are not
-a substitute for it. A failed assignment should still carry the single public
-context frame. Explicit barriers or poll boundaries are required; repeating
-an uncontrolled test would not prove these schedules.
+nested runner handoff; that boundary may expose a child-task wait rather than
+the child's promise directly. Lower-level builder fixtures remain useful but
+are not a substitute for it. A failed exposed-port continuation should still
+carry the single public context frame. Explicit barriers or poll boundaries
+are required; repeating an uncontrolled test would not prove these schedules.
 
 ### PNC5R-002 — Current architecture prose still names the old producer
 
@@ -157,7 +161,32 @@ fixture, since the current legacy `LazySource::NetConstruction` cycle test
 does not prove the new graph. No new semantic decision is needed for either
 item.
 
-Recommended order: close PNC5R-001's deterministic tests, perform PNC6A–C,
-update PNC7's replay wording and run its final matrix. Re-review only if the
-exact-dependency fixtures expose a real behavioral mismatch or PNC6 reveals a
-new ownership seam.
+## Resolution — 2026-09-21
+
+**PNC5R-001 — resolved.** Four new public W4 fixtures force first-fragment,
+second-fragment, exposed-port, and nested copy-count waits with explicit
+budget-one poll boundaries, route loss, and collection. The first-fragment
+fixture proves a ready right result is not observed before the blocked left;
+the second-fragment fixture counts the retained first prefix. The exposed-port
+fixture checks that post-wait validation has exactly one public context frame.
+The nested copy-count fixture exposed an important distinction: the public
+construction sees an exact wait on a child evaluation task while that child is
+blocked on the promise. The fixture now asserts the pending child wait,
+assigns the copy count, pumps that same wait to completion, and resumes the
+original route. Requiring a direct public `WorkDependency::Promise` there
+would have encoded the wrong scheduler boundary. All focused public fixtures
+pass, including the existing counted-thunk and source-level parity tests.
+
+**PNC5R-002 — resolved.** The current interaction-net invariant note,
+evaluation architecture, syntax context inventory, and source module map now
+describe the pure public runner and label `construction.rs` as legacy. PNC6C
+retains a final re-audit after deletion, rather than postponing correction of
+present-tense claims.
+
+**PNC5R-003 — resolved.** PNC7 now requires a source-claim and same-access
+replay-to-WHNF-checkpoint audit, forced route loss at the next poll boundary,
+and memoized net identity. It no longer asks for a replay-call counter while
+replay remains one synchronous transition.
+
+Next implementation step: PNC6A–C, followed by the separate PNC7 closure
+matrix. Re-review if legacy deletion reveals a new ownership seam.
