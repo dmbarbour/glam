@@ -3104,6 +3104,125 @@ fn pump_follows_a_lazy_dependency_to_its_producer() {
 }
 
 #[test]
+fn same_session_fallback_runs_queued_task_without_exact_child_wait() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let promise = PromisedValue::new(context.values(), "parent before child wait");
+    let promise_root = promise.root(context.values());
+    let parent = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            }))
+        })
+        .expect("parent should schedule before its child");
+    let (child_ran, child_observer) = mpsc::channel();
+    let child = context
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(child_ran)))))
+        .expect("child should launch without an exact parent wait");
+
+    assert_eq!(
+        context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+    assert!(matches!(
+        context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .task_dependency(parent.id()),
+        Some(WorkDependency::Promise(_))
+    ));
+    assert!(child_observer.try_recv().is_err());
+
+    assert_eq!(
+        context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the current fallback should poll a same-session child before its parent has a child wait"
+    );
+    child_observer
+        .try_recv()
+        .expect("the fallback should have run the child");
+    assert!(matches!(
+        context.poll_reflection_task(&child),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(matches!(
+        context.poll_reflection_task(&parent),
+        EvaluationWaitPoll::Pending(_)
+    ));
+
+    set_promise(&context, &promise, context.values().unit())
+        .expect("the parent should resume after its separate promise resolves");
+    assert_eq!(
+        context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+}
+
+#[test]
+fn published_child_wait_claims_exact_cross_session_child_before_unrelated_work() {
+    let fixture = SameRuntimeFixture::new();
+    let parent_context = fixture.context();
+    let child_context = fixture.context();
+    let child_wait = Arc::new(OnceLock::new());
+    let parent = parent_context
+        .schedule_task({
+            let child_wait = child_wait.clone();
+            move |task_context| {
+                Ok(Box::new(AwaitCell {
+                    context: task_context,
+                    dependency: child_wait,
+                }))
+            }
+        })
+        .expect("parent should schedule before child publication");
+    let (unrelated_ran, unrelated_observer) = mpsc::channel();
+    let unrelated = parent_context
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(unrelated_ran)))))
+        .expect("unrelated same-session task should schedule");
+    let (child_ran, child_observer) = mpsc::channel();
+    let child = child_context
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(child_ran)))))
+        .expect("cross-session child should launch");
+    child_wait
+        .set(child.wait().clone())
+        .expect("the parent's child wait should publish once");
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+    assert!(matches!(
+        parent_context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .task_dependency(parent.id()),
+        Some(WorkDependency::Wait(wait)) if wait == *child.wait()
+    ));
+    assert!(child_observer.try_recv().is_err());
+    assert!(unrelated_observer.try_recv().is_err());
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the published exact wait should claim its cross-session child"
+    );
+    child_observer
+        .try_recv()
+        .expect("the exact child should run before unrelated same-session work");
+    assert!(unrelated_observer.try_recv().is_err());
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert!(matches!(
+        parent_context.poll_reflection_task(&unrelated),
+        EvaluationWaitPoll::Pending(_)
+    ));
+}
+
+#[test]
 fn completed_deferred_tasks_release_their_machines() {
     let context = EvalContext::standalone();
     let lazy = inert_lazy("terminal machine");

@@ -4913,12 +4913,12 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **Next: W6G.1e.3b's remaining implicit-child inventory, then
-   W6G.1e.2/e.3b's selector and fallback cutovers:** make causally related
-   reflection children explicit, select background roots and their exact
-   descendants, and remove global deferred and unrelated same-session
-   selection. Behavioral retirement follows the completed 2b and f.4 route
-   verification.
+4. **Next: W6G.1e.3b.1 and W6G.1e.2a, then e.2b-c/e.3b.2:** make causally
+   related `.task.new` children explicit, inventory and dry-run background
+   traversal, then select background roots and their exact descendants and
+   remove global deferred and unrelated same-session selection. The e.3b.0
+   launch/edge census and forced current-behavior fixtures are complete;
+   behavioral retirement follows the completed 2b and f.4 route verification.
 5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
    driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
@@ -5169,10 +5169,41 @@ deferred causal traversal:
     `create_task` journals `ReflectionUpdate::Launch`, while a parent which
     later joins publishes its wait only when `.task.join` is polled. The
     same-session claim in `pump_demand` and its transitional coordinator
-    selector remain. Thus e.3b.0's complete launch/edge census and forced
-    child-before-wait fixtures, e.3b.1's remaining child-edge decision, and
-    e.3b.2's fallback removal **cannot yet be marked complete**. Do not
-    revisit annotation profile ownership as part of that remaining work.
+    selector remain. Do not revisit annotation profile ownership as part of
+    that remaining work.
+
+    **W6G.1e.3b.0 complete (2026-09-21).** The production launch/edge census is:
+
+    | Route | Launch and authority | Edge before execution / remaining gap |
+    | --- | --- | --- |
+    | `EffectRun::schedule` (including configured `conf.log`) | `lifecycle.rs::schedule_with_capabilities` prepares a coordinator-owned reflection root in a fresh session. | Explicit background root; no parent edge required. |
+    | `EffectRun::run` | `lifecycle.rs::run` drives a direct effect task in its own session. | Client-driven root rather than a coordinator record; its `.task.new` children still need lifecycle/causal accounting. |
+    | `refl`/`meta_refl` annotations | `eval/value.rs::LazyTaskWork::ReflectionTask` reserves and activates through `session.rs::reserve_reflection_completion_activation`. | Managed completion promise is registered before the lazy's WHNF checkpoint publishes its exact dependency, and activation follows publication. This family is closed for e.3b. |
+    | `.task.new` in an effect task | `requests.rs::create_task` reserves a task and journals `ReflectionUpdate::Launch`; `ReflectionJournal::commit_updates` activates only after commit. | The returned handle is plain effect data. A pending `.task.join` later publishes an exact wait; launch alone supplies no parent dependency. A child can be queued while its parent blocks on something else or has not reached the join. |
+
+    Test-only `EvalContext::schedule_task` and direct coordinator reservations
+    exercise these mechanisms but are not additional production launch forms.
+    `reflection_task_launch_is_buffered_until_cut_commit` and
+    `failed_transaction_discards_its_reflection_task_launch_and_cancellation`
+    cover the transactional boundary; `reflection_task_returns_a_joinable_result`
+    and `configured_logger_can_join_a_restricted_reflection_task` cover the
+    eventual join. Two new zero-worker, single-quantum fixtures force the
+    intervening scheduler states without relying on thread races:
+    `same_session_fallback_runs_queued_task_without_exact_child_wait`
+    models the pre-join window and records that an unrelated pending parent
+    dependency currently lets the same-session fallback advance another
+    queued task, while
+    `published_child_wait_claims_exact_cross_session_child_before_unrelated_work`
+    records that a published wait advances the exact child ahead of unrelated
+    same-session work. The former is deliberately a current-behavior assertion
+    to revise at e.3b.2, not a permanent semantic contract.
+
+    **Still open:** e.3b.1 must represent causal launch ownership without
+    making `.task.new` an implicit join, for both direct and scheduled effect
+    roots, and test child return/failure/cancel/abandonment. e.3b.2 then removes
+    the same-session fallback and forces both sides of child-launch and
+    subscription publication under the new mechanism. None of those claims
+    follows from the profile repair or the e.3b.0 fixtures alone.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
     `session_has_running_machine` and its compensating busy waits. This is a
