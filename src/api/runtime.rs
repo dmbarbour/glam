@@ -1128,22 +1128,6 @@ impl EvaluationRuntime {
         ))
     }
 
-    pub(crate) fn new_evaluation_session_with_profile(
-        &self,
-        profile: Arc<ReflectionTaskProfile>,
-    ) -> Result<Arc<EvaluationSession>, Error> {
-        if !profile.is_sealed() {
-            return Err(Error::new(
-                "evaluation session reflection task profile must be sealed before use",
-            ));
-        }
-        Ok(EvaluationSession::shared_with_default_profile(
-            &self.state.work,
-            self.state.shared_resources.values.core().clone(),
-            profile,
-        ))
-    }
-
     pub(super) fn seal_default_reflection_profile(
         &self,
         launcher: Arc<dyn crate::evaluation::ReflectionTaskLauncher>,

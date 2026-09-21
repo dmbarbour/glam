@@ -2014,7 +2014,10 @@ mod ownership_tests {
 
     #[test]
     fn stale_net_route_observes_terminal_cache_after_checkpoint_loss() {
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            crate::runtime::RuntimeIds::new(),
+        ));
         let mut builder =
             crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
         let exposed = builder.data(Value::Number(0.into()));
@@ -2035,6 +2038,10 @@ mod ownership_tests {
                 .expect("a number is already in WHNF")),
         );
         assert!(result.is_ok(), "the fixture lazy should cache a number");
+        context
+            .values()
+            .collect_managed_for_test()
+            .expect("stale checkpoint storage should be collectible");
 
         crate::eval::with_direct_evaluator(&context, |evaluator| {
             let EvaluationMachinePoll::Complete(value) = machine.poll_net_whnf_checkpoint(

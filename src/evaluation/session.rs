@@ -534,15 +534,19 @@ impl EvalContext {
 
     pub(crate) fn for_runtime_background(&self) -> Result<Self, Arc<str>> {
         let coordinator = self.coordinator_for_admission()?;
-        // Ordinary production sessions carry the runtime's selected default
-        // profile; role-specific contexts such as macro execution carry their
-        // explicitly selected profile. Preserve that semantic capability
-        // while replacing only the lifecycle identity with the runtime-owned
-        // background domain.
-        let task_profile = self.task_profile.clone();
+        // Carry the demand domain's default, never its role-specific task
+        // profile. Production sessions share one immutable runtime default;
+        // isolated evaluator fixtures may provide a private default launcher.
+        let task_profile = self.session.default_reflection_profile.clone();
         let session = coordinator
             .background_demand()
             .ok_or_else(|| Arc::from("evaluation runtime has no background demand domain"))?;
+        debug_assert!(
+            !self.session.require_default_reflection_profile
+                || !session.require_default_reflection_profile
+                || Arc::ptr_eq(&task_profile, &session.default_reflection_profile),
+            "production background work must share the runtime's default profile"
+        );
         Ok(Self {
             task_profile,
             session,
@@ -1635,6 +1639,9 @@ impl EvalContext {
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<ReflectionTaskReservation, Arc<str>> {
         let coordinator = self.coordinator_for_admission()?;
+        // The background annotation context carries its demand domain's
+        // default profile, not the role-specific profile of its first caller.
+        // Ordinary `.task.new` uses the caller's profile in `prepare_machine`.
         let task_profile = self.task_profile.clone();
         if !task_profile.is_sealed() && self.session.require_default_reflection_profile {
             return Err(Arc::from(

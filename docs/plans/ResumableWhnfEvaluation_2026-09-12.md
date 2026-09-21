@@ -5614,6 +5614,34 @@ an intermediate state unsafe:
   task-owned promise records and their terminal obligations intact. Source
   selection must find the lazy's installed checkpoint or original source
   through one matching access, not retain another computation in the route.
+
+  **Profile correction (2026-09-21; repair during this checkpoint).**
+  `refl` and `meta_refl` annotations must use the runtime's immutable default
+  reflection profile regardless of the first observer. Only `.task.new`
+  inherits its caller's profile. I3D.1 originally implemented this rule, and
+  W6G.1f.3b.2 explicitly retained it for autonomous reflection handoff.
+  However, the W6G.1f.3b implementation changed completion reservation to
+  copy `EvalContext::task_profile`, and `for_runtime_background` likewise
+  preserves the observer's profile. A macro demand can therefore select the
+  macro profile for an annotation task. This is implementation drift, not an
+  open profile-policy question. Restore runtime-default selection for
+  annotation completion before admitting machine-free lazy routes; add
+  forced first-observer tests for both annotation forms and keep a separate
+  test proving `.task.new` inherits its parent profile. Revisit the macro
+  reflection diagnostic-count expectations changed by W6G.1f.3b, since the
+  selected profile also controls the diagnostic destination. Do not use the
+  observer's profile as a fallback when the default is unsealed.
+
+  **Profile correction complete (2026-09-21).** Background annotation contexts
+  select their demand domain's default profile, which is the one immutable
+  runtime profile in production; isolated evaluator fixtures may provide a
+  private default. Annotation completion reservation uses that selected
+  profile. Custom effect-run profiles now belong to their `EvalContext`, not
+  to a replacement session default, so ordinary `.task.new` still inherits
+  the caller's profile. A macro-first result and source-level `refl`/`meta_refl`
+  regressions exercise the boundary, and macro diagnostic destinations again
+  match the runtime default. The existing `.task.new` inheritance test remains
+  in force.
 - **W6G.1f.2b.2 — coherent admission/poll/release cutover.** Atomically select
   the machine-free path for lazy producers: first-observer close cannot own
   their lifetime or profile, a claimed route temporarily retains the exact

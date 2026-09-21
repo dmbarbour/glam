@@ -459,8 +459,8 @@ impl<S: TaskSpecialization> EffectRun<S> {
             host.clone(),
         )));
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
-        let session = runtime.new_evaluation_session_with_profile(task_profile)?;
-        let context = EvalContext::new(&session);
+        let session = runtime.new_evaluation_session()?;
+        let context = EvalContext::with_task_profile(&session, task_profile);
         let session = Arc::new(Mutex::new(Some(session)));
         let prepared = context
             .prepare_machine(

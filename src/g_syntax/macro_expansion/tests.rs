@@ -253,6 +253,37 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 }
 
 #[test]
+fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() {
+    let (assembler, reflection) = compile_effects(".env ['glam,'reasoning,'role]");
+    let execution = assembler.test_compilation_execution();
+    let result = eval::eval_value(
+        execution.macro_context(),
+        &Value::reflection_task_result(&assembler.core_values(), reflection.clone_core_for_test()),
+    )
+    .expect("a macro-started reflection result should complete");
+
+    assert_eq!(
+        result,
+        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+            "assembler"
+        )))
+    );
+}
+
+#[test]
+fn reflection_annotations_use_runtime_default_profile_from_macro_demand() {
+    for source in [
+        "anno refl:(.env ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r ())) (.r ())",
+        "anno seq:(list.at 0 (anno meta_refl:(\\_ -> .env ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r [()])) [anno 'meta_init ()])) (.r ())",
+    ] {
+        let (assembler, effect) = compile_effects(source);
+        let execution = assembler.test_compilation_execution();
+        run(&execution, &effect, Value::Dict(Dict::new_sync()))
+            .expect("reflection annotation should use the runtime default profile");
+    }
+}
+
+#[test]
 fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let (assembler, reflection) = compile_effects(".cut (.heap.get '.missing >>= (\\_ -> .fail))");
     let execution = assembler.test_compilation_execution();
@@ -290,7 +321,7 @@ fn committed_reflection_log_survives_failed_macro_alternative() {
     let result = run(&execution, &effect, Value::Dict(Dict::new_sync()))
         .expect("fallback macro branch should succeed");
     assert!(result.diagnostics().is_empty());
-    assert_eq!(execution.macro_diagnostic_counts().warnings(), 1);
+    assert_eq!(execution.macro_diagnostic_counts().warnings(), 0);
     assert_eq!(assembler.diagnostic_bus().counts().warnings(), 1);
 }
 
@@ -316,8 +347,8 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
     }
     assert!(!execution.drain_for_test());
     let counts = execution.macro_diagnostic_counts();
-    assert_eq!(counts.info(), 1);
-    assert_eq!(counts.warnings(), 1);
+    assert_eq!(counts.info(), 0);
+    assert_eq!(counts.warnings(), 0);
     let assembler_counts = assembler.diagnostic_bus().counts();
     assert_eq!(assembler_counts.info(), 2);
     assert_eq!(assembler_counts.warnings(), 1);
