@@ -6,11 +6,12 @@ implementation spans `e77ec006` through `8b92767b`. The later `e6f58772` and
 verification happened to expose; they do not change interaction-net
 construction semantics.
 
-Status: review complete; remediation pending. No result defect was demonstrated
-in the private PNC4 construction transitions or compact replay. PNC5 should not
-cut production over to the pure runner, however, until PNC4R-001 and
-PNC4R-002 close the user-visible diagnostic and no-replay proof gaps. The
-remaining findings are lower-risk verification and transition-plan cleanup.
+Status: review and pre-PNC5 remediation complete. No result defect was
+demonstrated in the private PNC4 construction transitions or compact replay.
+The private diagnostic contract, retained-checkpoint/no-replay evidence,
+source-order/API/malformed-record latches, and future phase partitions are now
+explicit. The one public diagnostic wrapper remains correctly scheduled as
+PNC5C implementation rather than being added to the private PNC4 builder.
 
 ## Scope and Method
 
@@ -216,8 +217,63 @@ Two future seams also need explicit checkpoints:
   small pure-construction identity module before deleting the legacy journal,
   effect specialization, and machine.
 
-The review leaves those detailed plan edits until the findings are accepted,
-so checkpoint boundaries can be revised together rather than piecemeal.
+The accepted resolution applies those future-phase edits together, as recorded
+below, so their ownership boundaries remain coherent.
+
+## Resolution — 2026-09-21
+
+### PNC4R-001 — resolved for the pre-cutover boundary
+
+`builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands`
+now latches failed copy-count and all three wire-operand positions, while
+`builder_control_key_failures_are_transparent_and_precede_later_operands`
+does the same for reset and shift keys. Each fixture crosses route loss,
+observes the failing semantic thunk exactly once, leaves all later operands
+unobserved, preserves the original failure message, and asserts an empty
+private context stack. Immediate validation messages remain the current pure
+builder messages rather than compatibility promises for the legacy helper.
+
+The general public-program failure and its single
+`eval:{op:'net_construction}` frame require the not-yet-implemented public
+runner. PNC5 is now partitioned so PNC5A first latches raw runner propagation,
+PNC5C installs the frame once around the complete public pipeline, and PNC5D
+forces every named failure boundary. This is phase work, not an incomplete
+PNC4 operand remediation.
+
+### PNC4R-002 — resolved
+
+The exact-dependency handoff now uses a builtin-specific route-loss helper.
+It asserts the managed `Builtin` checkpoint immediately before destroying the
+old machine and immediately after collection and route reconstruction, before
+the replacement machine is polled. The existing wire fixture retains its
+left/right/state promise order and single wire record. A matching copy fixture
+now retains count/state order and one constructor record. The failure matrix
+described under PNC4R-001 supplies the copy-count, left-wire, right-wire, and
+state stopping points with counted later operands.
+
+### PNC4R-003 — resolved
+
+`compact_replay_assigns_logical_ports_in_constructor_source_order` replays the
+mixed bind/data/copy program and inspects the read-only result topology. It
+requires logical port seven to be the final copy's fan output, so reversing
+constructor iteration no longer passes merely because some closed net can
+still be built. The broader all-operations success fixture remains separate.
+
+### PNC4R-004 — resolved
+
+The private API fixture now asserts the complete name-to-builtin-to-arity
+table. The fix fixture enters its adapter with one constructor and one wire
+and observes both afterward. The malformed replay matrix now includes an
+unknown constructor tag, wrong wire arity, and nonnumeric wire endpoint.
+
+### PNC4R-005 — resolved
+
+PNC5 is split into private runner assembly, retained first-two selection,
+public lazy composition/cutover, and route-loss/diagnostic closure. The
+selector explicitly owns retained regional list-front state. PNC6 is split
+into construction-identity relocation, legacy producer removal, and final
+inventory/documentation closure, preventing deletion of the brand and port
+protocol still shared by the pure builder and replay.
 
 ## No Accidental Semantic Drift Found
 
@@ -235,15 +291,10 @@ so checkpoint boundaries can be revised together rather than piecemeal.
 
 ## Future-Phase Assessment
 
-PNC5 remains the correct next behavioral phase after PNC4R-001 through
-PNC4R-004. Its first checkpoint should compose an effect function with the
-exact PNC4 API and one runner-owned brand/state without changing production.
-A second checkpoint should implement and force-test a resumable first-two
-selector. A third should compose exposed-port validation and replay beneath
-the public construction lazy, preserve the outer diagnostic context, and cut
-production over. A final checkpoint should unignore the legacy route-loss
-regression in its pure replacement form and prove one operation, selection,
-and replay.
+PNC5 remains the correct next behavioral phase. Its accepted PNC5A-PNC5D
+partition now records private runner assembly, retained first-two selection,
+public lazy composition/cutover, and route-loss plus diagnostic closure as
+separate checkpoints.
 
 PNC6 should first relocate the identity/token protocol, then remove the
 legacy producer route and root-bearing journal, and finally reconcile its
@@ -253,7 +304,7 @@ replace it.
 
 ## Verification Baseline
 
-The reviewed PNC4 implementation passed before this documentation-only review:
+The remediated PNC4 implementation passed:
 
 ```text
 cargo fmt --check
@@ -262,7 +313,8 @@ cargo test -q
 scripts/check-interaction-net-profiling.sh
 ```
 
-The ordinary suite reported 1,778 passed library tests and three ignored,
+The ordinary suite reported 1,782 passed library tests and three ignored,
 plus every workspace partition. The profiling script passed all thirteen
-named profiling fixtures. This review does not treat those broad passes as
-evidence for the specific missing schedules above.
+named profiling fixtures. The focused fixtures recorded in the resolution
+section, rather than these broad passes, are the evidence for the formerly
+missing schedules.

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        848,
+        850,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -911,12 +911,15 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // PNC4C adds three test-only registered value roots so left port, right
     // port, and state can be published independently across forced route loss
     // and collection while the managed builder checkpoint preserves progress.
+    // PNC4R-002 adds the corresponding count and state promise roots for the
+    // forced copy-operand handoff; fixture payload roots remain outside this
+    // managed-edge inventory.
     // The full PNC4 gate exposed a parallel-test lifetime hole in the
     // structured reflection-failure fixture. Its gate now has one explicit
     // test root and is collected deterministically before and after launch.
     assert_eq!(
         occurrence_fingerprint(actual),
-        1_031_747_767_230_750_502,
+        10_060_457_971_902_897_924,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -963,7 +966,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 202),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 596),
+            ((SourceScope::Test, EdgeSurface::Typed), 598),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

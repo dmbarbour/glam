@@ -1,10 +1,11 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
-Status: active; PNC0-PNC4 completed on 2026-09-20. The
+Status: active; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
+remediations completed on 2026-09-21. The
 [post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
-found no demonstrated result defect, but its diagnostic-parity, no-replay,
-and focused verification remediations remain open. PNC5 follows those
-remediations. This is the focused
+found no demonstrated result defect. Its private diagnostic contract,
+no-replay evidence, replay-order/API/malformed-record latches, and future-phase
+partitioning are now closed. PNC5 is next. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -872,44 +873,93 @@ remains PNC5 work.
 
 ### PNC5 — Unique selection and public composition
 
+#### PNC5A — Private runner assembly
+
 - Allocate one construction brand and one fixed initial builder state for each
-  public `interaction_net` application. Apply the construction effect's
-  handler to the private PNC4 API, then run the returned builder operation on
-  that state.
-- Implement the first-two-outcomes uniqueness check in ordinary evaluation.
-- Validate and extract the exposed branded port from the selected outcome.
-- Change public `interaction_net` application to construct the pure runner,
-  selector, and hidden replay pipeline.
+  runner instance. Apply the construction effect to the exact PNC4 private API,
+  then apply the resulting builder operation to that state.
+- Keep this composition private and non-authoritative while verifying zero,
+  one, and multiple ordinary list-effect outcomes, exact operation arities,
+  and unchanged propagation of failures from effect application and builder
+  execution.
+- Keep the runner evaluator-owned, independent of `g_syntax`, and suitable for
+  eventual expression in `.g`; do not introduce a cached compiler-owned
+  semantic object merely to package its outcome stream.
+
+#### PNC5B — Retained first-two selector
+
+- Implement uniqueness by observing at most the first two outcomes: none is a
+  failed construction, one is selected, and two proves ambiguity without
+  traversing the remainder.
+- Give the selector an explicit retained regional state containing its current
+  list-front work and first outcome. Do not hide it in a large edit to
+  `RegionalNetMachine` or restart list observation after yield, dependency,
+  route loss, or collection.
+- Force empty, unique, multiple, yielded, exact-dependency, failed, and
+  route-loss schedules. Count list-front production so equal terminal failures
+  cannot conceal replay.
+
+#### PNC5C — Public lazy composition and cutover
+
+- Validate the selected outcome, demand and decode its exposed branded port,
+  and pass the strict selected record to hidden replay.
+- Change public `interaction_net` application to construct this runner,
+  selector, exposed-port, and replay pipeline lazily. Constructing
+  `interaction_net Effect` must not run `Effect`; demanding the result runs the
+  selected construction and replay at most once.
 - Add `eval:{op:'net_construction}` exactly once at this public boundary for
   failures from effect application, builder execution, selection, exposed-port
   demand, and replay. Keep private operand demands transparent: the legacy
   `copy_count` frame is not a compatibility requirement, and the builder does
   not introduce parallel wire-port, reset/shift-key, path, state, or exposed-
   port frames.
-- Preserve laziness and memoization: constructing `interaction_net Effect`
-  does not itself run `Effect`, and demanding the resulting lazy runs and
-  replays the selected construction at most once.
-- Keep the runner and selector evaluator-owned, independent of `g_syntax`,
-  and suitable for eventual expression in `.g`; do not introduce a cached
-  compiler-owned semantic object merely to package the already selected
-  representation.
+- Cut production over only after the public result and failure baselines agree
+  with this selected policy.
+
+#### PNC5D — Route-loss and diagnostic closure
+
+- Replace the ignored legacy route-loss regression with a pure-runner fixture
+  and force loss plus collection at effect application, builder execution,
+  first- and second-outcome observation, exposed-port demand, and replay.
+- Count construction-program evaluation, committed builder transitions,
+  selector observations, and replay calls. Assert the public
+  `net_construction` frame is present exactly once at every failure boundary
+  and that no private operand-role frame leaks through it.
+- Re-run the ordinary, aggressive-collection, profiling, and source-inventory
+  verification before closing the production cutover.
 
 Exit: production construction no longer enters `IsolatedEffectSearch`.
 
 ### PNC6 — Legacy route removal
 
+#### PNC6A — Preserve the pure construction identity protocol
+
+- Move `ConstructionBrand`, `ConstructionPortId`, the edge-free opaque token
+  family, and their codecs out of legacy `construction.rs` into a small pure
+  construction-identity module.
+- Migrate the PNC4 builder, compact replay, tests, and the still-live legacy
+  adapter to that module first. Compile and run the focused brand/token tests
+  before deleting any producer route.
+
+#### PNC6B — Remove the legacy producer route
+
 - Remove `NetConstructionMachine`, `NetConstructionPoll`,
   `NetConstructionState`, and `InteractionNetEffects`.
 - Remove `LazyTaskWork::NetConstruction` and
-  `LazySource::NetConstruction` once no compatibility caller remains.
-- Remove the root-bearing Rust construction journal and its isolated host.
-- Remove the legacy `copy_count` evaluator frame and update the automatic-
-  context inventory in `docs/Syntax.md`; the public `net_construction` frame
-  remains authoritative.
+  `LazySource::NetConstruction` once no compatibility caller remains, followed
+  by the root-bearing Rust construction journal and its isolated host.
+- Remove the legacy `copy_count` evaluator frame; the public
+  `net_construction` frame remains authoritative.
+
+#### PNC6C — Inventory and documentation closure
+
 - Reconcile compile-exhaustive lazy-source, producer-route, registered-root,
   persistent-edge, and autonomous-obligation inventories.
-- Update `docs/agent_context/interaction_nets.md`, `docs/Syntax.md`, and source
-  architecture notes to describe the implemented pure boundary.
+- Update the automatic-context inventory in `docs/Syntax.md` plus
+  `docs/agent_context/interaction_nets.md` and source architecture notes to
+  describe the implemented pure boundary.
+- Search for the legacy machine, journal, isolated host, and `copy_count`
+  spelling, then run the full routine and profiling checks.
 
 Exit: net construction has no dedicated state-bearing lazy-producer route.
 

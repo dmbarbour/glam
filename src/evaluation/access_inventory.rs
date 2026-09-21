@@ -644,11 +644,19 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::assert_lazy_checkpoint_kind#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::assert_list_effect_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::assert_object_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::assert_transparent_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_control_key_failures_are_transparent_and_precede_later_operands#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#4|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#3|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -910,8 +918,10 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // PNC3R-001/002 add bounded retained builder-route, list-front, and
         // promise-identity observations; none escape their test access.
         // PNC4C adds four bounded regions for independently published wire
-        // operands, state, and the final outcome inspection.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(33, 0)),
+        // operands, state, and the final outcome inspection. PNC4R-001/002 add
+        // eight bounded test regions for copy dependency publication, exact
+        // journal inspection, and transparent operand-failure assertions.
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(41, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the

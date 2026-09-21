@@ -128,6 +128,31 @@ fn hidden_builtin_replays_all_strict_operation_forms() {
 }
 
 #[test]
+fn compact_replay_assigns_logical_ports_in_constructor_source_order() {
+    let context = EvalContext::standalone();
+    with_access(&context, |access| {
+        let Value::Net(net) =
+            interaction_net_from_netlist_in(access, &valid_all_operations(access))
+                .expect("the source-ordered compact program must replay")
+        else {
+            panic!("compact replay must produce a net")
+        };
+        net.runtime().test_with(context.values(), |runtime| {
+            let exposed_neighbor = runtime
+                .interface_neighbor(runtime.exposed())
+                .expect("the replayed net must wire its exposed interface");
+            assert!(
+                matches!(
+                    runtime.node(exposed_neighbor.node()),
+                    Some(crate::interaction_net::RuntimeNode::Fan { .. })
+                ),
+                "source logical port 7 must remain the second output of the final copy"
+            );
+        });
+    });
+}
+
+#[test]
 fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence() {
     let context = EvalContext::standalone();
     with_access(&context, |access| {
@@ -264,6 +289,52 @@ fn replay_rejects_malformed_compact_records() {
                     port(1),
                 ),
                 "wrong number of fields",
+            ),
+            (
+                selected(
+                    access,
+                    &brand,
+                    1,
+                    vec![Value::List(List::from_values(vec![
+                        access
+                            .values()
+                            .key_value(&crate::core::Key::abstract_global_path([
+                                "test",
+                                "interaction_net",
+                                "unknown_constructor",
+                            ])),
+                    ]))],
+                    Vec::new(),
+                    port(1),
+                ),
+                "constructor descriptor tag is not recognized",
+            ),
+            (
+                selected(
+                    access,
+                    &brand,
+                    4,
+                    vec![encode_bind(access)],
+                    vec![Value::List(List::from_values(vec![Value::Number(
+                        1.into(),
+                    )]))],
+                    port(3),
+                ),
+                "wire pair has the wrong number of fields",
+            ),
+            (
+                selected(
+                    access,
+                    &brand,
+                    4,
+                    vec![encode_bind(access)],
+                    vec![Value::List(List::from_values(vec![
+                        Value::binary_from_text("not a port"),
+                        Value::Number(2.into()),
+                    ]))],
+                    port(3),
+                ),
+                "wire port ID must be a number",
             ),
         ];
 
@@ -757,14 +828,37 @@ fn private_builder_api_exposes_only_pure_task_local_and_construction_operations(
             panic!("private builder API must be a dictionary")
         };
         let expected = [
-            "r", "seq", "alt", "fail", "cut", "fix", "get", "set", "reset", "shift", "bind",
-            "copy", "data", "wire",
+            ("r", Builtin::InteractionNetBuilderReturn, 2),
+            ("seq", Builtin::InteractionNetBuilderSeq, 3),
+            ("alt", Builtin::InteractionNetBuilderAlt, 3),
+            ("fail", Builtin::InteractionNetBuilderFail, 1),
+            ("cut", Builtin::InteractionNetBuilderCut, 2),
+            ("fix", Builtin::InteractionNetBuilderFix, 2),
+            ("get", Builtin::InteractionNetBuilderGet, 2),
+            ("set", Builtin::InteractionNetBuilderSet, 3),
+            ("reset", Builtin::InteractionNetBuilderReset, 3),
+            ("shift", Builtin::InteractionNetBuilderShift, 3),
+            ("bind", Builtin::InteractionNetBuilderBind, 1),
+            ("copy", Builtin::InteractionNetBuilderCopy, 2),
+            ("data", Builtin::InteractionNetBuilderData, 2),
+            ("wire", Builtin::InteractionNetBuilderWire, 3),
         ];
         assert_eq!(api.iter().count(), expected.len());
-        for name in expected {
-            assert!(
-                api.get(&crate::core::Key::atom_from_text(name)).is_some(),
-                "private builder API must expose `{name}`"
+        for (name, expected_builtin, expected_arity) in expected {
+            let value = api
+                .get(&crate::core::Key::atom_from_text(name))
+                .unwrap_or_else(|| panic!("private builder API must expose `{name}`"));
+            let Value::Builtin(actual_builtin) = value else {
+                panic!("private builder API `{name}` must map directly to a builtin")
+            };
+            assert_eq!(
+                *actual_builtin, expected_builtin,
+                "wrong builtin for `{name}`"
+            );
+            assert_eq!(
+                actual_builtin.arity(),
+                expected_arity,
+                "wrong operation arity for `{name}`"
             );
         }
         for name in ["heap", "exit", "task", "log", "env", "refl"] {
@@ -843,19 +937,31 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
         );
     });
 
-    let [_ports, after_bind] = run_builder_at(
+    let [ports, after_bind] = run_builder_at(
         &context,
         Value::Builtin(Builtin::InteractionNetBuilderBind),
         initial,
         0,
     );
-    let [value, after_fix] = run_builder_at(&context, fixed, after_bind, 0);
+    let ports = strict_fields(&context, &ports, "bind result ports");
+    let wire = with_access(&context, |access| {
+        partial_builder(
+            access,
+            Builtin::InteractionNetBuilderWire,
+            vec![
+                duplicate(&context, &ports[0]),
+                duplicate(&context, &ports[1]),
+            ],
+        )
+    });
+    let [_unit, after_wire] = run_builder_at(&context, wire, after_bind, 0);
+    let [value, after_fix] = run_builder_at(&context, fixed, after_wire, 0);
     assert_eq!(value, Value::binary_from_text("fixed"));
     with_access(&context, |access| {
         assert_eq!(
             super::builder::construction_journal_lengths_for_test(access, &after_fix)
                 .expect("fixed builder state must retain strict journals"),
-            (1, 0),
+            (1, 1),
             "fix must preserve the construction state supplied by its caller"
         );
     });

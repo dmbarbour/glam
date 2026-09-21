@@ -374,6 +374,17 @@ fn assert_lazy_checkpoint_kind(
     });
 }
 
+fn resume_after_builtin_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    machine: LazyTaskMachine,
+) -> LazyTaskMachine {
+    assert_lazy_checkpoint_kind(context, &machine, ManagedLazyCheckpointKindTag::Builtin);
+    let machine = resume_after_lazy_route_loss(context, retained, machine);
+    assert_lazy_checkpoint_kind(context, &machine, ManagedLazyCheckpointKindTag::Builtin);
+    machine
+}
+
 fn poll_until_blocked_after_route_loss(
     context: &EvalContext,
     retained: &ManagedLazyRoot,
@@ -460,6 +471,115 @@ fn drive_after_route_loss(
         assert_ne!(attempt, 2047, "the fixture exhausted its route-loss bound");
     }
     unreachable!("the bounded fixture must complete or panic")
+}
+
+fn drive_failure_after_route_loss(
+    context: &EvalContext,
+    retained: &ManagedLazyRoot,
+    mut machine: LazyTaskMachine,
+    route_losses: &mut usize,
+) -> Arc<EvaluationFailure> {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    for attempt in 0..2048 {
+        match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
+            EvaluationMachinePoll::Yielded => {
+                machine = resume_after_lazy_route_loss(context, retained, machine);
+                *route_losses += 1;
+            }
+            EvaluationMachinePoll::Blocked(block) => {
+                let dependency = block
+                    .dependency
+                    .expect("the blocked failure fixture must expose an exact dependency");
+                match dependency {
+                    WorkDependency::Wait(wait) => {
+                        pump_to_ready(context, &wait);
+                        machine = resume_after_lazy_route_loss(context, retained, machine);
+                        *route_losses += 1;
+                    }
+                    WorkDependency::Promise(_) => {
+                        panic!("the failure fixture left an unresolved promise")
+                    }
+                    WorkDependency::Test(_) => {
+                        panic!("the failure fixture exposed a synthetic dependency")
+                    }
+                }
+            }
+            EvaluationMachinePoll::Failed(failure) => return failure.into_failure(),
+            EvaluationMachinePoll::Complete(_) => {
+                panic!("the failure fixture unexpectedly completed")
+            }
+            EvaluationMachinePoll::ScheduleSpark(_)
+            | EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled => {
+                panic!("the failure fixture crossed an unexpected orchestration boundary")
+            }
+        }
+        assert_ne!(
+            attempt, 2047,
+            "the failure fixture exhausted its route-loss bound"
+        );
+    }
+    unreachable!("the bounded fixture must fail or panic")
+}
+
+fn counted_success(
+    context: &EvalContext,
+    label: &'static str,
+    count: &Arc<AtomicUsize>,
+    value: Value,
+) -> Value {
+    let value = crate::runtime::RuntimeValueRoot::new(context.values(), value);
+    let observed = Arc::clone(count);
+    Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        label,
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(value.clone_core_for_test())
+        },
+    ))
+}
+
+fn counted_failure(
+    context: &EvalContext,
+    label: &'static str,
+    count: &Arc<AtomicUsize>,
+    message: &'static str,
+) -> Value {
+    let observed = Arc::clone(count);
+    Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        label,
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Err(EvaluationHalt::new(message))
+        },
+    ))
+}
+
+fn assert_transparent_failure(
+    context: &EvalContext,
+    failure: &EvaluationFailure,
+    expected_message: &str,
+) {
+    assert!(failure.to_string().contains(expected_message), "{failure}");
+    context.values().with_runtime_value_access(|access| {
+        assert!(
+            failure.contexts_in(&access).is_empty(),
+            "private builder operands must propagate failures without operation-local contexts"
+        );
+    });
+}
+
+fn builder_failure_across_route_loss(context: &EvalContext, call: Value) -> Arc<EvaluationFailure> {
+    let (retained, machine) = retained_lazy_machine(context, call);
+    let mut route_losses = 0;
+    let failure = drive_failure_after_route_loss(context, &retained, machine, &mut route_losses);
+    assert!(
+        route_losses > 0,
+        "the builder failure must cross a forced route loss"
+    );
+    failure
 }
 
 fn poll_object_until_blocked(
@@ -1311,12 +1431,11 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
 
     let (machine, dependency) =
         poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
-    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
     let WorkDependency::Promise(dependency) = dependency else {
         panic!("builder path demand must publish its exact promise dependency")
     };
     assert_eq!(dependency.id(), path_promise.id(context.values()));
-    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
     route_losses += 1;
     crate::core::set_test_promise(
         context.values(),
@@ -1327,12 +1446,11 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
 
     let (machine, dependency) =
         poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
-    assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
     let WorkDependency::Promise(dependency) = dependency else {
         panic!("builder state demand must publish its exact promise dependency")
     };
     assert_eq!(dependency.id(), state_promise.id(context.values()));
-    let machine = resume_after_lazy_route_loss(&context, &retained, machine);
+    let machine = resume_after_builtin_route_loss(&context, &retained, machine);
     route_losses += 1;
     crate::core::set_test_promise(
         context.values(),
@@ -1401,12 +1519,11 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
     ] {
         let (blocked, dependency) =
             poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
-        assert_lazy_checkpoint_kind(&context, &blocked, ManagedLazyCheckpointKindTag::Builtin);
         let WorkDependency::Promise(dependency) = dependency else {
             panic!("builder wire demand must publish its exact promise dependency")
         };
         assert_eq!(dependency.id(), expected);
-        machine = resume_after_lazy_route_loss(&context, &retained, blocked);
+        machine = resume_after_builtin_route_loss(&context, &retained, blocked);
         route_losses += 1;
         crate::core::set_test_promise(context.values(), promise, value.clone_core_for_test())
             .expect("the builder wire dependency should accept its assignment");
@@ -1432,6 +1549,210 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
         route_losses >= 4,
         "the fixture must lose routes around all three exact dependencies"
     );
+}
+
+#[test]
+fn builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay() {
+    let context = isolated_context();
+    let count_promise = PromisedValue::new(context.values(), "builder copy count dependency");
+    let count_owner = count_promise.root(context.values());
+    let state_promise = PromisedValue::new(context.values(), "builder copy state dependency");
+    let state_owner = state_promise.root(context.values());
+    let state = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
+    });
+    let count_root = crate::runtime::RuntimeValueRoot::new(context.values(), number(2));
+    let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
+    let call = context.values().with_runtime_value_access(|access| {
+        Value::builtin_call_in(
+            &access,
+            Builtin::InteractionNetBuilderCopy,
+            vec![
+                Value::Promised(PromisedValue::from_root(&count_owner, &access)),
+                Value::Promised(PromisedValue::from_root(&state_owner, &access)),
+            ],
+        )
+    });
+    let (retained, mut machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+
+    for (expected, promise, value) in [
+        (
+            count_promise.id(context.values()),
+            &count_promise,
+            &count_root,
+        ),
+        (
+            state_promise.id(context.values()),
+            &state_promise,
+            &state_root,
+        ),
+    ] {
+        let (blocked, dependency) =
+            poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
+        let WorkDependency::Promise(dependency) = dependency else {
+            panic!("builder copy demand must publish its exact promise dependency")
+        };
+        assert_eq!(dependency.id(), expected);
+        machine = resume_after_builtin_route_loss(&context, &retained, blocked);
+        route_losses += 1;
+        crate::core::set_test_promise(context.values(), promise, value.clone_core_for_test())
+            .expect("the builder copy dependency should accept its assignment");
+    }
+
+    let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    let (outcome, tail) =
+        list_front(&context, results).expect("builder copy must return one outcome");
+    assert!(list_front(&context, tail).is_none());
+    let [ports, state] = context.values().with_runtime_value_access(|access| {
+        crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
+            .expect("builder copy must retain the strict outcome schema")
+    });
+    let mut remaining_ports = ports;
+    for _ in 0..3 {
+        let (_port, tail) = list_front(&context, remaining_ports)
+            .expect("builder copy must return all requested ports");
+        remaining_ports = tail;
+    }
+    assert!(
+        list_front(&context, remaining_ports).is_none(),
+        "builder copy must return exactly input plus two output ports"
+    );
+    context.values().with_runtime_value_access(|access| {
+        assert_eq!(
+            crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
+                .expect("builder copy state must retain strict journals"),
+            (1, 0)
+        );
+    });
+    assert!(
+        route_losses >= 3,
+        "the fixture must lose routes around both exact dependencies"
+    );
+}
+
+#[test]
+fn builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands() {
+    let context = isolated_context();
+
+    {
+        let count_demands = Arc::new(AtomicUsize::new(0));
+        let state_demands = Arc::new(AtomicUsize::new(0));
+        let state = context.values().with_runtime_value_access(|access| {
+            crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
+        });
+        let call = Value::builtin_call(
+            context.values(),
+            Builtin::InteractionNetBuilderCopy,
+            vec![
+                counted_failure(
+                    &context,
+                    "failed builder copy count",
+                    &count_demands,
+                    "copy count failure",
+                ),
+                counted_success(&context, "later builder copy state", &state_demands, state),
+            ],
+        );
+        let failure = builder_failure_across_route_loss(&context, call);
+        assert_transparent_failure(&context, &failure, "copy count failure");
+        assert_eq!(count_demands.load(Ordering::SeqCst), 1);
+        assert_eq!(state_demands.load(Ordering::SeqCst), 0);
+    }
+
+    for failed_position in 0..3 {
+        let left_demands = Arc::new(AtomicUsize::new(0));
+        let right_demands = Arc::new(AtomicUsize::new(0));
+        let state_demands = Arc::new(AtomicUsize::new(0));
+        let (state, [left, right]) = context.values().with_runtime_value_access(|access| {
+            crate::eval::builtins::construction_state_and_ports_for_test(&access)
+        });
+        let counts = [&left_demands, &right_demands, &state_demands];
+        let labels = [
+            "builder wire left",
+            "builder wire right",
+            "builder wire state",
+        ];
+        let values = [left, right, state];
+        let arguments = values
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| {
+                if position == failed_position {
+                    counted_failure(
+                        &context,
+                        labels[position],
+                        counts[position],
+                        "wire operand failure",
+                    )
+                } else {
+                    counted_success(&context, labels[position], counts[position], value)
+                }
+            })
+            .collect();
+        let call = Value::builtin_call(
+            context.values(),
+            Builtin::InteractionNetBuilderWire,
+            arguments,
+        );
+        let failure = builder_failure_across_route_loss(&context, call);
+        assert_transparent_failure(&context, &failure, "wire operand failure");
+        let observed = [
+            left_demands.load(Ordering::SeqCst),
+            right_demands.load(Ordering::SeqCst),
+            state_demands.load(Ordering::SeqCst),
+        ];
+        assert_eq!(
+            observed,
+            std::array::from_fn(|position| usize::from(position <= failed_position)),
+            "wire operands must be observed left-to-right only through the failure boundary"
+        );
+    }
+}
+
+#[test]
+fn builder_control_key_failures_are_transparent_and_precede_later_operands() {
+    let context = isolated_context();
+    for builtin in [
+        Builtin::InteractionNetBuilderReset,
+        Builtin::InteractionNetBuilderShift,
+    ] {
+        let key_demands = Arc::new(AtomicUsize::new(0));
+        let operation_demands = Arc::new(AtomicUsize::new(0));
+        let state_demands = Arc::new(AtomicUsize::new(0));
+        let state = context.values().with_runtime_value_access(|access| {
+            crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
+        });
+        let call = Value::builtin_call(
+            context.values(),
+            builtin,
+            vec![
+                counted_failure(
+                    &context,
+                    "failed builder control key",
+                    &key_demands,
+                    "control key failure",
+                ),
+                counted_success(
+                    &context,
+                    "later builder control operation",
+                    &operation_demands,
+                    context.values().unit(),
+                ),
+                counted_success(
+                    &context,
+                    "later builder control state",
+                    &state_demands,
+                    state,
+                ),
+            ],
+        );
+        let failure = builder_failure_across_route_loss(&context, call);
+        assert_transparent_failure(&context, &failure, "control key failure");
+        assert_eq!(key_demands.load(Ordering::SeqCst), 1);
+        assert_eq!(operation_demands.load(Ordering::SeqCst), 0);
+        assert_eq!(state_demands.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]
