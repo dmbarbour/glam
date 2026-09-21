@@ -7153,6 +7153,99 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
 }
 
 #[test]
+fn reflection_completion_activation_and_first_session_close_have_both_orders() {
+    for close_before_activation in [true, false] {
+        let (owner, observer, _executor) = same_runtime_contexts();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let result_policies = Arc::new(Mutex::new(Vec::new()));
+        owner
+            .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
+                terminal: FixtureTaskTerminal::Complete(n(43)),
+                builds: builds.clone(),
+                result_policies: result_policies.clone(),
+            }))
+            .expect("the runtime default reflection profile should seal once");
+        let baseline = owner
+            .values()
+            .collect_managed_for_test()
+            .expect("the reflection fixture should start collectible");
+        let lifecycle_before = owner.values().managed_promise_lifecycle_counts_for_test();
+        let background = owner
+            .for_runtime_background()
+            .expect("the autonomous task should use the runtime background demand");
+        let (promise, completion, effect, retained) =
+            owner.values().with_runtime_value_access(|access| {
+                let completion = access
+                    .construct_rooted_managed_promise("ordered reflection completion")
+                    .expect("the completion promise should fit its managed slot");
+                let promise = PromisedValue::from_root(&completion, &access);
+                let retained =
+                    access.root_runtime_value(Value::Promised(promise.duplicate_in(&access)));
+                let effect = access.root_runtime_value(n(0));
+                (promise, completion, effect, retained)
+            });
+        let reservation = background
+            .reserve_reflection_completion_activation(
+                effect,
+                None,
+                completion,
+                ReflectionTaskResultPolicy::ReturnValue,
+            )
+            .expect("the task and its completion promise should reserve together");
+        assert_eq!(background.task_registry_counts().reflection_active, 1);
+        let mut owner = Some(owner);
+        if close_before_activation {
+            drop(owner.take());
+        }
+        observer
+            .values()
+            .collect_managed_for_test()
+            .expect("reservation must survive collection across session closure");
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+
+        reservation.activate();
+        drop(owner.take());
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            background.run_until_quiescent(),
+            crate::evaluation::EvaluationSessionRun::Complete(_)
+        ));
+        assert_eq!(background.task_registry_counts().reflection_active, 0);
+        assert_eq!(
+            promise.assignment(observer.values()),
+            Some(Ok(n(43))),
+            "terminal publication should assign the completion promise exactly once"
+        );
+        let lifecycle_after = observer
+            .values()
+            .managed_promise_lifecycle_counts_for_test();
+        assert_eq!(lifecycle_after.0 - lifecycle_before.0, 1);
+        assert_eq!(lifecycle_after.1 - lifecycle_before.1, 1);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *result_policies
+                .lock()
+                .expect("fixture policies were poisoned"),
+            [ReflectionTaskResultPolicy::ReturnValue]
+        );
+        let retained_snapshot = observer
+            .values()
+            .collect_managed_for_test()
+            .expect("the observer root should keep the assigned completion readable");
+        assert_eq!(
+            retained_snapshot.root_entries(),
+            baseline.root_entries() + 1
+        );
+        drop(retained);
+        let released = observer
+            .values()
+            .collect_managed_for_test()
+            .expect("the terminal task and last observer should release their roots");
+        assert_eq!(released.root_entries(), baseline.root_entries());
+    }
+}
+
+#[test]
 fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let failure = Arc::new(EvaluationFailure::message(

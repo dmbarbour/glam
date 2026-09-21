@@ -630,6 +630,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::ordinary_observers_do_not_unseal_metadata_carriers#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::promised_list_chunks_remain_assignable_after_early_observation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -916,7 +917,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // parallel collector cannot retire the fixture during observation.
         // The metadata-carrier observer fixture likewise roots its shared
         // carrier across independently evaluated observations.
-        ("src/eval/tests.rs", GatewayCounts::new(16, 0)),
+        // W6G.1f.4d constructs and roots a reflection completion in one
+        // bounded test region before forcing both session-close orders.
+        ("src/eval/tests.rs", GatewayCounts::new(17, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
         // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a

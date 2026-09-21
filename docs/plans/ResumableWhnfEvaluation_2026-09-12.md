@@ -6904,6 +6904,51 @@ rather than the target lifecycle. Partition the work as follows:
   no-replay audit so inactive routes and completed autonomous work do not
   become permanent root classes.
 
+**W6G.1f.4a evidence census (2026-09-21).** The existing route-loss fixtures
+in `eval/value/tests/w4.rs` cover direct WHNF, host calls, net WHNF, object
+linearization, list effects/fix, and pure net construction; they force
+collection between handoffs and count the relevant one-shot callbacks or
+promise allocations. The pure-construction backedge fixture additionally
+reclaims an unrooted lazy/checkpoint cycle. The same-runtime evaluation suite
+already forces last-subscriber retirement and in-flight reattachment, shared
+cross-session client demand, spark queued/claimed/blocked roots, pending
+reflection activation, terminal waits, detached reports, and failure-ledger
+retention. These are evidence for their *named* owners, not for collection
+merely because a route or subscriber disappeared.
+
+The remaining focused gaps are: (b) collect after the final lazy route retires
+while only a semantic value root remains, then resume without replay and
+release that root; (c) force client/spark and client/reflection sharing with
+explicit observer-loss orders; (d) tie reflection reservation/activation and
+terminal assignment to route/session loss, including abnormal dispositions,
+then audit root retirement. A terminal client handle, detached report, or
+unacknowledged failure ledger intentionally retains its result/failure root;
+the collection baseline is expected only after that precise owner is dropped
+or acknowledged. Tests must not infer collection from `Gc` facade drops alone.
+
+**W6G.1f.4b-d complete (2026-09-21).** The route-retirement fixture now
+collects with no active route and only the lazy's semantic root plus its
+assignable promise owner, resumes without replay, then releases both owners
+and returns to the root baseline. The existing pure-construction backedge
+fixture supplies the unrooted source/checkpoint-cycle reclamation half of 4b.
+The new same-runtime client/spark fixture forces admission, blockage, client
+abandonment, spark abandonment, collection, and later fresh demand in that
+order. The client/background-reflection fixture forces shared lazy progress,
+first-session close, collection, and autonomous task completion. Existing
+claimed-route reattachment covers the pre-publication subscriber order; the
+last-subscriber fixture covers post-publication route retirement. No
+uncontrolled repetition is treated as race evidence.
+
+For 4d, the new reflection-completion fixture forces both session-close vs.
+activation orders and checks one launcher build, one managed completion
+promise allocation and assignment, and return to the root baseline after the
+last observer drops. Existing reflection-result route-loss, dropped-permit,
+failure/cancellation, result/gate backedge, terminal-wait, detached-report,
+and failure-ledger fixtures cover the other named owners and abnormal
+dispositions. The registered-root and persistent-edge inventories remain
+authoritative for the complete graph; this phase adds behavioral evidence,
+not another permanent root class or a duplicate structural census.
+
 After this boundary is stable, investigate whether the lazy should also own
 its exclusive claim flag, current blocker, or completion subscriptions. That
 may eliminate the transient producer route, but queues, root-role policy,

@@ -674,6 +674,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::ordinary_observers_do_not_unseal_metadata_carriers#1|surface=access-publication|scope=test",
+    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#1|surface=access-publication|scope=test",
+    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#2|surface=access-publication|scope=test",
     "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",

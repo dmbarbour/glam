@@ -4091,33 +4091,50 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let (promise, _promise_root, _promise_value) =
+    let baseline = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the isolated route fixture should collect before admission");
+    let (promise, promise_root, promise_value) =
         rooted_promise_value(context.values(), "route retirement gate");
+    drop(promise_value);
     let source_polls = Arc::new(AtomicUsize::new(0));
     let observed = source_polls.clone();
     let followed = promise.clone();
-    let (lazy, _lazy_value) =
+    let (lazy, lazy_value) =
         rooted_semantic_lazy_value(context.values(), "retirable route", move |_| {
             observed.fetch_add(1, Ordering::AcqRel);
             Ok(Value::Promised(followed.clone()))
         });
     let root = lazy.root(context.values());
+    drop(lazy_value);
     let first = crate::eval::lazy_root_wait(&context, &root).expect("first route should admit");
     let first_id = first.get();
+    let mut blocked = false;
     for _ in 0..8 {
         if matches!(
             context.pump_wait(&first, 64),
             EvaluationPumpOutcome::NoProgress
         ) {
+            blocked = true;
             break;
         }
     }
+    assert!(
+        blocked,
+        "the source should reach its exact promise dependency"
+    );
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
     assert!(lazy.source_snapshot(context.values()).is_none());
     assert!(coordinator.work_for_wait(&first).is_some());
 
     drop(first);
     assert!(coordinator.deferred_wait(root.id().into()).is_none());
+    let route_gone = context
+        .values()
+        .collect_managed_for_test()
+        .expect("the lazy checkpoint must survive collection without an active route");
+    assert_eq!(route_gone.root_entries(), baseline.root_entries() + 2);
     assert!(context.values().with_runtime_value_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")
@@ -4134,6 +4151,18 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
         Value::Number(53.into())
     );
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
+    drop(second);
+    drop(root);
+    drop(promise_root);
+    let released = context
+        .values()
+        .collect_managed_for_test()
+        .expect("releasing the semantic lazy and promise owners should reclaim them");
+    assert_eq!(released.root_entries(), baseline.root_entries());
+    assert!(
+        released.marked_slots() + 2 <= route_gone.marked_slots(),
+        "route retirement alone must preserve the lazy and checkpoint; releasing the semantic path must reclaim them"
+    );
 }
 
 #[test]
@@ -4174,6 +4203,149 @@ fn claimed_lazy_route_survives_last_demand_and_accepts_new_subscriber() {
         context.poll_wait(&third),
         EvaluationWaitPoll::Complete(_)
     ));
+}
+
+#[test]
+fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    coordinator.executor_started(1);
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "client-spark gate");
+    let source_polls = Arc::new(AtomicUsize::new(0));
+    let observed = source_polls.clone();
+    let followed = promise.clone();
+    let (lazy, value) =
+        rooted_semantic_lazy_value(context.values(), "client-spark source", move |_| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Promised(followed.clone()))
+        });
+    let root = lazy.root(context.values());
+    let client = context
+        .demand_whnf(value.clone())
+        .expect("the client should admit its lazy demand");
+    let first = crate::eval::lazy_root_wait(&context, &root)
+        .expect("the client source should have a route");
+    let mut blocked = false;
+    for _ in 0..8 {
+        if matches!(
+            context.pump_wait(&first, 64),
+            EvaluationPumpOutcome::NoProgress
+        ) {
+            blocked = true;
+            break;
+        }
+    }
+    assert!(
+        blocked,
+        "the shared source should reach its exact promise dependency"
+    );
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(client.poll().is_none());
+
+    context.spark_root(value);
+    let claimed = claim_next_spark(&coordinator);
+    coordinator.poll_claimed_spark(claimed);
+    assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+
+    client.abandon();
+    drop(first);
+    assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
+    assert_eq!(coordinator.abandon_quiescent_sparks(), 1);
+    assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+    assert!(coordinator.deferred_wait(root.id().into()).is_none());
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the semantic lazy root should retain progress after both observers leave");
+
+    set_promise(&context, &promise, Value::Number(73.into()))
+        .expect("the source gate should settle once");
+    assert_eq!(
+        crate::eval::eval_value(&context, &Value::Lazy(lazy)).unwrap(),
+        Value::Number(73.into())
+    );
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn client_and_background_reflection_share_lazy_progress_after_first_session_closes() {
+    let fixture = SameRuntimeFixture::new();
+    let owner = fixture.context();
+    let observer = fixture.context();
+    let background = owner
+        .for_runtime_background()
+        .expect("the runtime should retain its background demand");
+    let coordinator = owner.coordinator().expect("coordinator should be live");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(owner.values(), "client-reflection gate");
+    let source_polls = Arc::new(AtomicUsize::new(0));
+    let observed = source_polls.clone();
+    let followed = promise.clone();
+    let (lazy, value) =
+        rooted_semantic_lazy_value(owner.values(), "client-reflection source", move |_| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Promised(followed.clone()))
+        });
+    let root = lazy.root(owner.values());
+    let client = owner
+        .demand_whnf(value)
+        .expect("the client should admit its lazy demand");
+    let claimed = coordinator
+        .claim_ready_client_demand_for_test()
+        .expect("the client should be claimable before its background observer");
+    coordinator.poll_claimed_client_demand(claimed);
+    assert!(client.poll().is_none());
+
+    let route = crate::eval::lazy_root_wait(&background, &root)
+        .expect("the background task should subscribe to the same source");
+    let dependency = Arc::new(OnceLock::new());
+    let task = background
+        .schedule_task({
+            let dependency = dependency.clone();
+            move |task_context| {
+                Ok(Box::new(AwaitCell {
+                    context: task_context,
+                    dependency,
+                }))
+            }
+        })
+        .expect("the background reflection task should schedule");
+    dependency
+        .set(route.clone())
+        .expect("the background route should be installed once");
+    assert_eq!(
+        background.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::NoProgress
+    );
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+    drop(route);
+    drop(dependency);
+    client.abandon();
+    drop(owner);
+    assert!(matches!(
+        observer.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    observer
+        .values()
+        .collect_managed_for_test()
+        .expect("the autonomous reflection task must retain its lazy dependency");
+
+    set_promise(&observer, &promise, Value::Number(79.into()))
+        .expect("the shared promise should settle once");
+    assert_eq!(
+        background.pump_wait(task.wait(), 256),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert!(matches!(
+        observer.poll_reflection_task(&task),
+        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == Value::Number(79.into())
+    ));
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
 }
 
 #[test]
