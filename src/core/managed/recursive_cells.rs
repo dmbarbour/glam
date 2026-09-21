@@ -1782,6 +1782,7 @@ mod tests {
                     "src/eval/builtins/net/builder.rs::RegionalBuilderBuiltinMachine::poll_set_in",
                     "src/eval/builtins/net/builder.rs::RegionalBuilderBuiltinMachine::poll_shift_in",
                     "src/eval/builtins/net/builder.rs::application_list",
+                    "src/eval/builtins/net/builder.rs::builder_effect_results",
                     "src/eval/builtins/net/builder.rs::dispatch_return",
                     "src/eval/dict_machine.rs::builtin_apply3_value_in",
                     "src/eval/dict_machine.rs::finish_merge_duplicate_in",

@@ -1011,68 +1011,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "PNC5 must move partial construction progress into ordinary managed values"]
-    fn construction_search_survives_route_loss_without_replaying_completed_operations() {
-        let context = EvalContext::standalone();
-        let effect = rooted_construction_effect(&context);
-        let probe = Arc::new(ConstructionProbe::default());
-        let mut first = NetConstructionMachine::new_with_probe(
-            EvalContext::clone(&context),
-            effect.clone(),
-            probe.clone(),
-        )
-        .expect("the first construction route should initialize");
-
-        for _ in 0..512 {
-            let poll = poll_construction(&context, &mut first, 1);
-            if probe.completed_operations.load(Ordering::SeqCst) == 1 {
-                assert!(
-                    matches!(poll, NetConstructionPoll::Yielded),
-                    "the fixture must lose its route after the operation and before replay"
-                );
-                break;
-            }
-            match poll {
-                NetConstructionPoll::Yielded => {}
-                NetConstructionPoll::Pending(WorkDependency::Wait(wait)) => {
-                    pump_construction_wait(&context, &wait)
-                }
-                NetConstructionPoll::Pending(_) => {
-                    panic!("construction route exposed a non-wait dependency")
-                }
-                NetConstructionPoll::Ready(_) => {
-                    panic!("construction route completed before its forced handoff")
-                }
-                NetConstructionPoll::Failed(failure) => {
-                    panic!("construction route failed: {failure}")
-                }
-            }
-        }
-        assert_eq!(probe.completed_operations.load(Ordering::SeqCst), 1);
-
-        drop(first);
-        context
-            .values()
-            .collect_managed_for_test()
-            .expect("dropping a route must leave no managed access active");
-
-        let mut later = NetConstructionMachine::new_with_probe(
-            EvalContext::clone(&context),
-            effect,
-            probe.clone(),
-        )
-        .expect("a later construction route should initialize");
-        let value = finish_construction(&context, &mut later);
-        assert!(matches!(value.clone_core_for_test(), Value::Net(_)));
-        assert_eq!(
-            probe.completed_operations.load(Ordering::SeqCst),
-            1,
-            "a later route must resume after the completed `.data` transition"
-        );
-        assert_eq!(probe.replays.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn exposed_port_demand_suspends_without_losing_the_selected_journal() {
         let context = EvalContext::standalone();
         let brand = Arc::new(ConstructionBrand::default());

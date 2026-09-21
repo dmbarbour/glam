@@ -6181,30 +6181,24 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
         Some(&Value::Number(n(7)))
     );
 
-    let dispatch = crate::diagnostic::evaluation_context_frame_with_args(
-        "effect_dispatch",
-        Dict::new_sync().insert(
-            Key::binary_from_text("stage"),
-            Value::Atom(Atom::from_key(&Key::binary_from_text("function"))),
-        ),
-    );
     let net = crate::diagnostic::evaluation_context_frame("net_construction");
-    let net_index = failure
+    let net_indices = failure
         .contexts()
         .iter()
-        .position(|context| context == &net)
-        .expect("net construction should add an outer context");
-    let dispatch_index = failure
-        .contexts()
-        .iter()
-        .position(|context| context == &dispatch)
-        .expect("effect dispatch should retain its stage");
+        .enumerate()
+        .filter_map(|(index, context)| (context == &net).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        net_indices.len(),
+        1,
+        "net construction adds one outer frame"
+    );
     let source_index = failure
         .contexts()
         .iter()
         .position(|context| context == &Value::binary_from_text("net effect"))
         .expect("the original effect context should survive");
-    assert!(net_index < dispatch_index && dispatch_index < source_index);
+    assert!(net_indices[0] < source_index);
 }
 
 #[test]
@@ -6257,8 +6251,19 @@ fn interaction_net_finalization_reports_invalid_topology() {
         ("duplicate", "is wired more than once"),
     ] {
         let value = value_at_atom_path(&definitions, &[name]).unwrap();
+        let failure = fully_evaluated_error(value).into_permanent_failure();
+        let frame = crate::diagnostic::evaluation_context_frame("net_construction");
+        assert_eq!(
+            failure
+                .contexts()
+                .iter()
+                .filter(|context| *context == &frame)
+                .count(),
+            1,
+            "{name} should retain one public construction frame"
+        );
         assert!(
-            fully_evaluated_error(value).to_string().contains(expected),
+            failure.to_string().contains(expected),
             "{name} should report `{expected}`"
         );
     }
@@ -6313,7 +6318,7 @@ fn interaction_net_copy_requires_a_representable_nonnegative_integer() {
         let value = value_at_atom_path(&definitions, &[name]).unwrap();
         let error = fully_evaluated_error(value).to_string();
         assert!(
-            error.contains("requires non-negative integer indices"),
+            error.contains("copy count must be a nonnegative integer"),
             "unexpected {name} error: {error}"
         );
     }

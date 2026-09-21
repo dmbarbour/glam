@@ -15,8 +15,8 @@ use crate::core::{
 };
 use crate::evaluation::EvaluationValueAccess;
 
+use super::effect_machine::effect_function_in;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
-use super::value::is_undefined_dict_value;
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
     reduce_semantic_shell,
@@ -168,14 +168,15 @@ impl RegionalListEffect {
                 };
                 match phase {
                     RunPhase::Effect => {
-                        let function = match effect_function_in(access, &value) {
-                            Ok(function) => function,
-                            Err(error) => {
-                                return RegionalListEffectPoll::Failed(
-                                    error.into_permanent_failure(),
-                                );
-                            }
-                        };
+                        let function =
+                            match effect_function_in(access, &value, "list effect handler") {
+                                Ok(function) => function,
+                                Err(error) => {
+                                    return RegionalListEffectPoll::Failed(
+                                        error.into_permanent_failure(),
+                                    );
+                                }
+                            };
                         *demand = RegionalWhnfWork::from_application_checkpoint_in(
                             access,
                             function,
@@ -380,28 +381,6 @@ impl ListEffectState {
             }
         }
     }
-}
-
-fn effect_function_in(
-    access: &EvaluationValueAccess<'_>,
-    effect: &Value,
-) -> Result<Value, EvaluationHalt> {
-    let Value::Dict(dict) = effect else {
-        return Err(EvaluationHalt::new(format!(
-            "list effect handler requires an effect dictionary, got {effect:?}"
-        )));
-    };
-    let Some(function) = dict.get(&*keys::EFF) else {
-        return Err(EvaluationHalt::new(
-            "list effect handler requires an `eff` member",
-        ));
-    };
-    if is_undefined_dict_value(access.values(), function) {
-        return Err(EvaluationHalt::new(
-            "list effect handler requires an `eff` member",
-        ));
-    }
-    Ok(access.values().duplicate_value(function))
 }
 
 fn deferred_run_list_in(access: &EvaluationValueAccess<'_>, operation: &Value) -> Value {

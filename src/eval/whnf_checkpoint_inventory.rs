@@ -357,10 +357,12 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // same exact lazy source owner as their managed builtin checkpoint.
     // PNC4C adds one ordered construction-operand demand queue under that
     // same checkpoint and source owner.
-    (CheckpointApi::WithSourceOwner, 49),
+    // PNC5 retains effect application and exposed-port demand under the
+    // construction source owner.
+    (CheckpointApi::WithSourceOwner, 51),
 ];
-const EXPECTED_OCCURRENCES: usize = 80;
-const EXPECTED_FINGERPRINT: u64 = 16_928_895_838_830_441_123;
+const EXPECTED_OCCURRENCES: usize = 82;
+const EXPECTED_FINGERPRINT: u64 = 1_726_995_525_816_241_668;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

@@ -189,7 +189,9 @@ pub(in crate::eval) fn apply_builder_builtin_in(
                 .sequence
                 .insert(0, BuilderSequenceFrame::Continue(continuation));
             let state = encode_builder_state(access, state);
-            Ok(Value::List(application_list(access, operation, [state])))
+            Ok(Value::List(builder_effect_results(
+                access, operation, state,
+            )))
         }
         Builtin::InteractionNetBuilderContinue => {
             let [remaining_cuts, outcome] = exact(access, arguments, "builder continuation")?;
@@ -208,8 +210,8 @@ pub(in crate::eval) fn apply_builder_builtin_in(
         }
         Builtin::InteractionNetBuilderAlt => {
             let [left, right, state] = exact(access, arguments, "builder alt")?;
-            let left = application_list(access, left, [access.duplicate_value(&state)]);
-            let right = application_list(access, right, [state]);
+            let left = builder_effect_results(access, left, access.duplicate_value(&state));
+            let right = builder_effect_results(access, right, state);
             Ok(Value::List(List::concat(left, right)))
         }
         Builtin::InteractionNetBuilderFail => {
@@ -221,7 +223,7 @@ pub(in crate::eval) fn apply_builder_builtin_in(
             let mut state = decode_builder_state(access, &state)?;
             state.sequence.insert(0, BuilderSequenceFrame::Cut);
             let state = encode_builder_state(access, state);
-            let results = application_list(access, operation, [state]);
+            let results = builder_effect_results(access, operation, state);
             let selected = deferred_results(
                 access,
                 "builder cut",
@@ -240,9 +242,18 @@ pub(in crate::eval) fn apply_builder_builtin_in(
             ))
         }
         Builtin::InteractionNetBuilderResume => {
-            let [brand, sequence, resets, value, state] =
+            let [brand, sequence, resets, value, _api, state] =
                 exact(access, arguments, "builder continuation invocation")?;
             resume_continuation(access, brand, sequence, resets, value, state)
+        }
+        Builtin::InteractionNetBuilderResumeApply => {
+            let [brand, sequence, resets, value] =
+                exact(access, arguments, "builder continuation application")?;
+            let handler = Value::PartialBuiltin(BuiltinCall {
+                builtin: Builtin::InteractionNetBuilderResume,
+                arguments: Arc::from([brand, sequence, resets, value]),
+            });
+            Ok(crate::eval::application::effect_value(access, handler))
         }
         Builtin::InteractionNetBuilderFix => {
             let [function, state] = exact(access, arguments, "builder fix")?;
@@ -271,7 +282,9 @@ pub(in crate::eval) fn apply_builder_builtin_in(
                 function,
                 Arc::from([projected]),
             ));
-            Ok(Value::List(application_list(access, operation, [state])))
+            Ok(Value::List(builder_effect_results(
+                access, operation, state,
+            )))
         }
         Builtin::InteractionNetBuilderFixRestore => {
             let [sequence, resets, outcome] = exact(access, arguments, "builder fix restoration")?;
@@ -406,6 +419,17 @@ fn application_list(
     arguments: impl Into<Arc<[Value]>>,
 ) -> List {
     List::from_thunk(LazyValue::from_application_in(access, function, arguments.into()).into())
+}
+
+fn builder_effect_results(access: &RuntimeValueAccess<'_>, effect: Value, state: Value) -> List {
+    let Value::Lazy(results) = Value::builtin_call_in(
+        access,
+        Builtin::InteractionNetBuilderRun,
+        vec![effect, state],
+    ) else {
+        unreachable!("a saturated builder-effect runner must remain lazy")
+    };
+    List::from_thunk(results.into())
 }
 
 fn exact<const N: usize>(
@@ -915,10 +939,10 @@ impl RegionalBuilderBuiltinMachine {
             }
         };
         let state = encode_builder_state(access.values(), state);
-        RegionalBuiltinPoll::Ready(Value::List(application_list(
+        RegionalBuiltinPoll::Ready(Value::List(builder_effect_results(
             access.values(),
             operation,
-            [state],
+            state,
         )))
     }
 
@@ -973,8 +997,8 @@ impl RegionalBuilderBuiltinMachine {
                 return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
             }
         };
-        let continuation = Value::PartialBuiltin(BuiltinCall {
-            builtin: Builtin::InteractionNetBuilderResume,
+        let continuation_handler = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderResumeApply,
             arguments: Arc::from([
                 access.values().duplicate_value(&state.brand),
                 captured_sequence,
@@ -984,13 +1008,13 @@ impl RegionalBuilderBuiltinMachine {
         let operation = Value::Lazy(LazyValue::from_application_in(
             access.values(),
             function,
-            Arc::from([continuation]),
+            Arc::from([continuation_handler]),
         ));
         let state = encode_builder_state(access.values(), state);
-        RegionalBuiltinPoll::Ready(Value::List(application_list(
+        RegionalBuiltinPoll::Ready(Value::List(builder_effect_results(
             access.values(),
             operation,
-            [state],
+            state,
         )))
     }
 
@@ -1336,7 +1360,9 @@ fn dispatch_return(
                     continuation,
                     Arc::from([value]),
                 ));
-                Ok(Value::List(application_list(access, operation, [state])))
+                Ok(Value::List(builder_effect_results(
+                    access, operation, state,
+                )))
             }
             BuilderSequenceFrame::Cut => Ok(Value::List(List::from_values(vec![outcome(
                 access, value, state,

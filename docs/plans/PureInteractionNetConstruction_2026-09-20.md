@@ -1,11 +1,11 @@
 # Pure Interaction-Net Construction Plan — 2026-09-20
 
 Status: active; PNC0-PNC4 completed on 2026-09-20, and the post-PNC4 focused
-remediations completed on 2026-09-21. The
+remediations and PNC5 completed on 2026-09-21. PNC6 legacy removal is next. The
 [post-PNC4 review](../reviews/PureInteractionNetConstructionPNC4_2026-09-20.md)
 found no demonstrated result defect. Its private diagnostic contract,
 no-replay evidence, replay-order/API/malformed-record latches, and future-phase
-partitioning are now closed. PNC5 is next. This is the focused
+partitioning are now closed. This is the focused
 W6G.1f.3h transition from the generic reflection-task interpreter used by
 `interaction_net` to ordinary pure evaluation composed with the existing
 `ListEffect` search primitives. The parent plan is
@@ -74,7 +74,7 @@ mutable journal beside it.
 
 ## Current Implementation and Defect Boundary
 
-`interaction_net` currently creates `LazySource::NetConstruction`. Its
+Before PNC5, `interaction_net` created `LazySource::NetConstruction`. Its
 `NetConstructionMachine` owns an `IsolatedEffectSearch<InteractionNetEffects>`
 and a persistent Rust `ConstructionJournal`. The generic task interpreter
 provides standard task-local effects; specialized requests implement
@@ -93,8 +93,9 @@ the W6G transition:
 - construction receives a much larger reflection interpreter than its pure
   semantics require.
 
-The plan does not migrate `IsolatedEffectSearch` into the GC graph. It removes
-that dependency from net construction.
+The plan does not migrate `IsolatedEffectSearch` into the GC graph. PNC5C has
+removed that dependency from production net construction; the legacy source
+and machine remain only until PNC6 deletes them.
 
 ## Selected Semantics
 
@@ -873,7 +874,40 @@ remains PNC5 work.
 
 ### PNC5 — Unique selection and public composition
 
+#### PNC5A.0 — Recursive effect-to-builder interpretation
+
+Status: complete on 2026-09-21. The captured `shift` continuation is an
+ordinary callable returning an effect, not an effect itself.
+
+- Add the state-threading analogue of the canonical list-effect `Run` rule:
+  `run_builder_effect Effect State = Effect.eff PrivateApi State`. This is not
+  a second effect protocol. The `eff` header still distinguishes effects from
+  ordinary functions. A continuation may use `eff:(\api value -> ...)` as a
+  source-level convenience, but applying that function still produces an
+  effect for the runner to interpret; `EffectApply` is not a separate builder
+  protocol.
+- Treat the effect operands of `seq`, `alt`, `cut`, `reset`, `shift`, and
+  `fix` exactly as list-effect operands are treated: interpret them recursively
+  against the same private API before supplying builder state. Keep the lower
+  return dispatcher and protected-state transitions as ordinary internal
+  state-transformer operations.
+- Present a captured shift continuation as an ordinary callable
+  `Value -> Effect`. Applying it produces an `eff` value for the same runner
+  to interpret, rather than exposing the evaluator's raw builder-state
+  callable or treating the continuation itself as an effect.
+- Add effect-wrapped nested-operation fixtures before public cutover. Retain
+  the existing direct builder fixtures as lower-layer checks only where they
+  do not cross an effect-operand boundary.
+
+Exit: nested construction effects obey the same recursive `eff` discipline as
+`ListEffect`; no source-level branch or continuation is accidentally treated
+as an already-lowered builder operation.
+
 #### PNC5A — Private runner assembly
+
+Status: complete on 2026-09-21. The runner retains effect-header demand and
+application to the private builder API and initial state beneath the source
+checkpoint.
 
 - Allocate one construction brand and one fixed initial builder state for each
   runner instance. Apply the construction effect to the exact PNC4 private API,
@@ -888,6 +922,9 @@ remains PNC5 work.
 
 #### PNC5B — Retained first-two selector
 
+Status: complete on 2026-09-21. The selector retains the first outcome and
+list-front progress, and does not observe a third result after ambiguity.
+
 - Implement uniqueness by observing at most the first two outcomes: none is a
   failed construction, one is selected, and two proves ambiguity without
   traversing the remainder.
@@ -900,6 +937,10 @@ remains PNC5 work.
   cannot conceal replay.
 
 #### PNC5C — Public lazy composition and cutover
+
+Status: complete on 2026-09-21. Public construction now runs through the
+pure builder, selector, exposed-port demand, and compact replay. The legacy
+source is temporarily allowed as dead code pending PNC6 removal.
 
 - Validate the selected outcome, demand and decode its exposed branded port,
   and pass the strict selected record to hidden replay.
@@ -918,17 +959,30 @@ remains PNC5 work.
 
 #### PNC5D — Route-loss and diagnostic closure
 
+Status: complete on 2026-09-21. The obsolete ignored legacy route-loss test was
+retired after adding pure-runner route-loss and collection fixtures.
+
 - Replace the ignored legacy route-loss regression with a pure-runner fixture
   and force loss plus collection at effect application, builder execution,
   first- and second-outcome observation, exposed-port demand, and replay.
-- Count construction-program evaluation, committed builder transitions,
-  selector observations, and replay calls. Assert the public
+- Count construction-program and continuation demand, first and second
+  selector chunks, and exposed-port demand through externally visible lazy
+  callbacks. Replay itself is a synchronous terminal transition with no yield
+  or callback boundary; assert memoized net identity after completion rather
+  than introducing a production probe solely to count replay calls. Assert the public
   `net_construction` frame is present exactly once at every failure boundary
   and that no private operand-role frame leaks through it.
 - Re-run the ordinary, aggressive-collection, profiling, and source-inventory
   verification before closing the production cutover.
 
 Exit: production construction no longer enters `IsolatedEffectSearch`.
+
+Completion record: the source-level construction fixtures, focused public
+failure/context matrix, budget-one route-loss/collection fixtures, first-two
+tail non-observation test, aggressive-GC construction fixtures, profiling
+script, source inventories, and full ordinary test suite pass. The old
+`LazySource::NetConstruction` and `NetConstructionMachine` remain unreachable
+from public construction until PNC6 removes them.
 
 ### PNC6 — Legacy route removal
 

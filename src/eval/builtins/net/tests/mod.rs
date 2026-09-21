@@ -375,15 +375,176 @@ fn replay_copies_a_lazy_data_payload_without_demanding_it() {
 }
 
 fn partial_builder(
-    _access: &RuntimeValueAccess<'_>,
+    access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     arguments: Vec<Value>,
 ) -> Value {
     assert!(arguments.len() < builtin.arity());
-    Value::PartialBuiltin(BuiltinCall {
+    let operation = Value::PartialBuiltin(BuiltinCall {
         builtin,
         arguments: Arc::from(arguments),
-    })
+    });
+    builder_effect(access, operation)
+}
+
+fn builder_effect(access: &RuntimeValueAccess<'_>, operation: Value) -> Value {
+    let handler = crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(operation),
+    );
+    crate::eval::application::effect_value(access, handler)
+}
+
+fn effect_returning_results(access: &RuntimeValueAccess<'_>, results: List) -> Value {
+    let handler = crate::eval::test_support::closed_function_value_in(
+        access.values(),
+        2,
+        crate::eval::test_support::TestExpr::Value(Value::List(results)),
+    );
+    Value::Dict(Dict::new_sync().insert((*crate::core::keys::EFF).clone(), handler))
+}
+
+fn assert_one_net_construction_context(context: &EvalContext, effect: Value) {
+    let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let failure = crate::eval::eval_value(context, &construction)
+        .expect_err("the construction fixture must fail")
+        .into_permanent_failure();
+    let frame = crate::diagnostic::evaluation_context_frame("net_construction");
+    assert_eq!(
+        failure
+            .contexts()
+            .iter()
+            .filter(|context| *context == &frame)
+            .count(),
+        1,
+        "public construction must add exactly one outer frame: {failure}"
+    );
+    for role in [
+        "copy_count",
+        "wire_port",
+        "reset_key",
+        "shift_key",
+        "builder_state",
+        "exposed_port",
+    ] {
+        let private = crate::diagnostic::evaluation_context_frame(role);
+        assert!(
+            !failure.contexts().contains(&private),
+            "private `{role}` frame leaked through construction: {failure}"
+        );
+    }
+}
+
+#[test]
+fn public_construction_adds_one_context_at_each_early_failure_boundary() {
+    let context = EvalContext::standalone();
+    assert_one_net_construction_context(&context, Value::Number(1.into()));
+
+    let effects = with_access(&context, |access| {
+        vec![
+            partial_builder(
+                access,
+                Builtin::InteractionNetBuilderCopy,
+                vec![Value::Number((-1).into())],
+            ),
+            effect_returning_results(
+                access,
+                List::from_thunk(LazyValue::error_in(access, "first result failed").into()),
+            ),
+            effect_returning_results(
+                access,
+                List::concat(
+                    List::from_values(vec![Value::Number(1.into())]),
+                    List::from_thunk(LazyValue::error_in(access, "second result failed").into()),
+                ),
+            ),
+            partial_builder(
+                access,
+                Builtin::InteractionNetBuilderReturn,
+                vec![Value::Lazy(LazyValue::error_in(
+                    access,
+                    "exposed port failed",
+                ))],
+            ),
+        ]
+        .into_iter()
+        .map(|effect| access.root_runtime_value(effect))
+        .collect::<Vec<_>>()
+    });
+    for effect in effects {
+        assert_one_net_construction_context(&context, effect.clone_core_for_test());
+    }
+}
+
+#[test]
+fn public_construction_selects_only_the_first_two_results() {
+    let context = EvalContext::standalone();
+    let tail_demands = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_tail = Arc::clone(&tail_demands);
+    let effect = with_access(&context, |access| {
+        let tail = LazyValue::semantic_thunk(
+            access.values(),
+            "unobserved construction result tail",
+            move |_| {
+                observed_tail.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::core::EvaluationHalt::new(
+                    "third result was demanded",
+                ))
+            },
+        );
+        effect_returning_results(
+            access,
+            List::concat(
+                List::from_values(vec![Value::Number(1.into()), Value::Number(2.into())]),
+                List::from_thunk(tail.into()),
+            ),
+        )
+    });
+    let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let error = crate::eval::eval_value(&context, &construction)
+        .expect_err("two construction results must be ambiguous");
+    assert!(
+        error.to_string().contains("produced multiple results"),
+        "{error}"
+    );
+    assert_eq!(tail_demands.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn public_construction_does_not_demand_its_effect_until_observed() {
+    let context = EvalContext::standalone();
+    let effect_demands = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_effect = Arc::clone(&effect_demands);
+    let effect = with_access(&context, |access| {
+        let empty = effect_returning_results(access, List::empty());
+        let empty = crate::runtime::RuntimeValueRoot::new(access.values(), empty);
+        Value::Lazy(LazyValue::semantic_thunk(
+            access.values(),
+            "counted construction effect",
+            move |_| {
+                observed_effect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(empty.clone_core_for_test())
+            },
+        ))
+    });
+    let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let error =
+        crate::eval::eval_value(&context, &construction).expect_err("empty construction must fail");
+    assert!(
+        error.to_string().contains("produced no successful result"),
+        "{error}"
+    );
+    assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let repeated = crate::eval::eval_value(&context, &construction)
+        .expect_err("failed construction remains memoized");
+    assert!(
+        repeated
+            .to_string()
+            .contains("produced no successful result")
+    );
+    assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 fn constant_builder_continuation(access: &RuntimeValueAccess<'_>, builder: Value) -> Value {
@@ -400,11 +561,11 @@ fn run_builder_at(
     state: Value,
     index: usize,
 ) -> [Value; 2] {
-    let results = Value::Lazy(LazyValue::from_application(
+    let results = Value::builtin_call(
         context.values(),
-        operation,
-        Arc::from([state]),
-    ));
+        Builtin::InteractionNetBuilderRun,
+        vec![operation, state],
+    );
     let selected = Value::builtin_call(
         context.values(),
         Builtin::ListAt,
@@ -435,11 +596,11 @@ fn builder_result_at(
     state: Value,
     index: usize,
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let results = Value::Lazy(LazyValue::from_application(
+    let results = Value::builtin_call(
         context.values(),
-        operation,
-        Arc::from([state]),
-    ));
+        Builtin::InteractionNetBuilderRun,
+        vec![operation, state],
+    );
     let selected = Value::builtin_call(
         context.values(),
         Builtin::ListAt,
@@ -478,16 +639,30 @@ fn invoke_continuation_with(access: &RuntimeValueAccess<'_>, value: Value) -> Va
 }
 
 fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
-    crate::eval::test_support::closed_function_value_in(
-        access.values(),
-        1,
+    let arguments = crate::eval::test_support::TestExpr::List(Arc::from([Arc::new(
+        crate::eval::test_support::TestExpr::Local(0),
+    )]));
+    let handler = apply_expr(
         apply_expr(
-            crate::eval::test_support::TestExpr::Value(Value::Builtin(
-                Builtin::InteractionNetBuilderReturn,
-            )),
-            crate::eval::test_support::TestExpr::Local(0),
+            crate::eval::test_support::TestExpr::Value(Value::Builtin(Builtin::EffectCall)),
+            crate::eval::test_support::TestExpr::Value(
+                access
+                    .values()
+                    .key_value(&crate::core::Key::atom_from_text("r")),
+            ),
         ),
-    )
+        arguments,
+    );
+    let effect = apply_expr(
+        apply_expr(
+            crate::eval::test_support::TestExpr::Value(Value::Builtin(Builtin::DictSingleton)),
+            crate::eval::test_support::TestExpr::Value(
+                access.values().key_value(&crate::core::keys::EFF),
+            ),
+        ),
+        handler,
+    );
+    crate::eval::test_support::closed_function_value_in(access.values(), 1, effect)
 }
 
 #[test]
@@ -531,7 +706,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
                 mutate,
                 constant_builder_continuation(
                     access,
-                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                    builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderFail)),
                 ),
             ],
         );
@@ -642,12 +817,10 @@ fn hidden_builder_bind_and_data_append_compact_constructors_without_demanding_pa
         )
     });
 
-    let [bind_ports, after_bind] = run_builder_at(
-        &context,
-        Value::Builtin(Builtin::InteractionNetBuilderBind),
-        initial,
-        0,
-    );
+    let bind = with_access(&context, |access| {
+        builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind))
+    });
+    let [bind_ports, after_bind] = run_builder_at(&context, bind, initial, 0);
     assert_eq!(strict_fields(&context, &bind_ports, "bind result").len(), 3);
     let bind_state = strict_fields(&context, &after_bind, "bind state");
     assert!(
@@ -678,12 +851,10 @@ fn hidden_builder_copy_and_wire_complete_one_replayable_compact_netlist() {
     let initial = with_access(&context, |access| {
         super::builder::initial_builder_state(access, &Arc::new(ConstructionBrand::default()))
     });
-    let [bind_ports, state] = run_builder_at(
-        &context,
-        Value::Builtin(Builtin::InteractionNetBuilderBind),
-        initial,
-        0,
-    );
+    let bind = with_access(&context, |access| {
+        builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind))
+    });
+    let [bind_ports, state] = run_builder_at(&context, bind, initial, 0);
     let bind_ports = strict_fields(&context, &bind_ports, "bind ports");
     let data = with_access(&context, |access| {
         partial_builder(
@@ -794,13 +965,11 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
         assert!(error.to_string().contains(expected), "{error}");
     }
 
-    let error = builder_result_at(
-        &context,
-        Value::Builtin(Builtin::InteractionNetBuilderBind),
-        exhausted,
-        0,
-    )
-    .expect_err("port allocation must reject cursor exhaustion");
+    let bind = with_access(&context, |access| {
+        builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind))
+    });
+    let error = builder_result_at(&context, bind, exhausted, 0)
+        .expect_err("port allocation must reject cursor exhaustion");
     assert!(error.to_string().contains("port IDs exhausted"), "{error}");
 
     for (left, expected) in [
@@ -889,7 +1058,7 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
                 wire,
                 constant_builder_continuation(
                     access,
-                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                    builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderFail)),
                 ),
             ],
         );
@@ -897,7 +1066,7 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
             access,
             Builtin::InteractionNetBuilderSeq,
             vec![
-                Value::Builtin(Builtin::InteractionNetBuilderBind),
+                builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind)),
                 constant_builder_continuation(access, wire_then_fail),
             ],
         );
@@ -937,12 +1106,10 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
         );
     });
 
-    let [ports, after_bind] = run_builder_at(
-        &context,
-        Value::Builtin(Builtin::InteractionNetBuilderBind),
-        initial,
-        0,
-    );
+    let bind = with_access(&context, |access| {
+        builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind))
+    });
+    let [ports, after_bind] = run_builder_at(&context, bind, initial, 0);
     let ports = strict_fields(&context, &ports, "bind result ports");
     let wire = with_access(&context, |access| {
         partial_builder(
@@ -1341,7 +1508,7 @@ fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
                 prompt.clone(),
                 constant_builder_continuation(
                     access,
-                    Value::Builtin(Builtin::InteractionNetBuilderFail),
+                    builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderFail)),
                 ),
             ],
         );
@@ -1695,16 +1862,7 @@ fn hidden_builder_fix_reports_recursive_future_observation() {
             Vec::new(),
             super::builder::initial_user_state(access),
         );
-        let function = crate::eval::test_support::closed_function_value_in(
-            access.values(),
-            1,
-            apply_expr(
-                crate::eval::test_support::TestExpr::Value(Value::Builtin(
-                    Builtin::InteractionNetBuilderReturn,
-                )),
-                crate::eval::test_support::TestExpr::Local(0),
-            ),
-        );
+        let function = return_continuation(access);
         let fixed = partial_builder(access, Builtin::InteractionNetBuilderFix, vec![function]);
         (state, fixed)
     });

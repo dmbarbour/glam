@@ -1380,13 +1380,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        591,
+        594,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        6_285_521_300_826_810_630,
+        13_116_510_646_589_370_933,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1412,7 +1412,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // helpers. Even immediate journal/value constructors retain explicit
         // regional authority so the production access rule has no exception.
         // Raw production values never cross the caller-owned evaluator region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 295),
+        // PNC5 adds the shared effect-header projection and two retained
+        // runner constructors; each requires caller-owned value access.
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 298),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
         ((ApiKind::Function, ApiDisposition::Violation), 256),
         (

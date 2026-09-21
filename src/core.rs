@@ -1621,6 +1621,7 @@ pub(crate) enum LazySource {
     Builtin(BuiltinCall),
     /// A closed freer-effect program that constructs one interaction net.
     /// Mutable interpreter state belongs to the observing evaluation task.
+    #[allow(dead_code, reason = "PNC6 removes the legacy construction source")]
     NetConstruction(Arc<Value>),
     NetComputation(NetValue),
     FunctionCall {
@@ -2016,6 +2017,7 @@ impl LazyValue {
         Self::with_source_in(access, "builtin call", LazySource::Builtin(call))
     }
 
+    #[allow(dead_code, reason = "PNC6 removes the legacy construction source")]
     pub(crate) fn from_net_construction_in(access: &RuntimeValueAccess<'_>, effect: Value) -> Self {
         Self::with_source_in(
             access,
@@ -2181,9 +2183,19 @@ pub enum Builtin {
     InteractionNetBuilderWire,
     #[allow(
         dead_code,
+        reason = "PNC5 interprets nested construction effects through the pure builder"
+    )]
+    InteractionNetBuilderRun,
+    #[allow(
+        dead_code,
         reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
     )]
     InteractionNetBuilderResume,
+    #[allow(
+        dead_code,
+        reason = "PNC5 presents captured builder continuations as functions returning effects"
+    )]
+    InteractionNetBuilderResumeApply,
     #[allow(
         dead_code,
         reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
@@ -2304,7 +2316,9 @@ impl Builtin {
             Self::InteractionNetBuilderCopy => 2,
             Self::InteractionNetBuilderData => 2,
             Self::InteractionNetBuilderWire => 3,
-            Self::InteractionNetBuilderResume => 5,
+            Self::InteractionNetBuilderRun => 2,
+            Self::InteractionNetBuilderResume => 6,
+            Self::InteractionNetBuilderResumeApply => 4,
             Self::InteractionNetBuilderFix => 2,
             Self::InteractionNetBuilderFixApply => 3,
             Self::InteractionNetBuilderFixRun => 4,

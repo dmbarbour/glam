@@ -9,8 +9,8 @@ use std::sync::Arc;
 use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, BuiltinCall, EvaluationFailure, FixpointComputation, Key, LazyId, LazyValue, List,
-    Value, keys, trace_compatibility_value_managed_edges,
+    Builtin, BuiltinCall, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazyId,
+    LazyValue, List, Value, keys, trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
 use crate::evaluation::EvaluationValueAccess;
@@ -18,6 +18,7 @@ use crate::evaluation::EvaluationValueAccess;
 use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion};
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
+use super::value::is_undefined_dict_value;
 use super::whnf::{
     RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
@@ -25,6 +26,29 @@ use super::whnf::{
 pub(in crate::eval) struct RegionalEffectMachine {
     phase: EffectPhase,
     source_owner: LazyId,
+}
+
+pub(in crate::eval) fn effect_function_in(
+    access: &EvaluationValueAccess<'_>,
+    effect: &Value,
+    purpose: &str,
+) -> Result<Value, EvaluationHalt> {
+    let Value::Dict(dict) = effect else {
+        return Err(EvaluationHalt::new(format!(
+            "{purpose} requires an effect dictionary, got {effect:?}"
+        )));
+    };
+    let Some(function) = dict.get(&*keys::EFF) else {
+        return Err(EvaluationHalt::new(format!(
+            "{purpose} requires an `eff` member"
+        )));
+    };
+    if is_undefined_dict_value(access.values(), function) {
+        return Err(EvaluationHalt::new(format!(
+            "{purpose} requires an `eff` member"
+        )));
+    }
+    Ok(access.values().duplicate_value(function))
 }
 
 enum EffectPhase {

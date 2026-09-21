@@ -258,6 +258,45 @@ fn list_effect_value(function: Value) -> Value {
     Value::Dict(Dict::new_sync().insert((*crate::core::keys::EFF).clone(), function))
 }
 
+fn builder_effect_value(context: &EvalContext, operation: Value) -> Value {
+    let handler = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        1,
+        crate::eval::test_support::TestExpr::Value(operation),
+    );
+    list_effect_value(handler)
+}
+
+fn builder_return_first_port_continuation(context: &EvalContext) -> Value {
+    use crate::eval::test_support::TestExpr;
+
+    let first = TestExpr::Apply(
+        Arc::new(TestExpr::Value(Value::Builtin(Builtin::ListHead))),
+        Arc::new(TestExpr::Local(0)),
+    );
+    let call = TestExpr::Apply(
+        Arc::new(TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(Builtin::EffectCall))),
+            Arc::new(TestExpr::Value(
+                context
+                    .values()
+                    .key_value(&crate::core::Key::atom_from_text("r")),
+            )),
+        )),
+        Arc::new(TestExpr::List(Arc::from([Arc::new(first)]))),
+    );
+    let effect = TestExpr::Apply(
+        Arc::new(TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(Builtin::DictSingleton))),
+            Arc::new(TestExpr::Value(
+                context.values().key_value(&crate::core::keys::EFF),
+            )),
+        )),
+        Arc::new(call),
+    );
+    crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
+}
+
 fn list_front(context: &EvalContext, list: Value) -> Option<(Value, Value)> {
     let mut machine = ListFrontMachine::unowned(crate::runtime::RuntimeValueRoot::new(
         context.values(),
@@ -1775,6 +1814,7 @@ fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
         builtin: Builtin::InteractionNetBuilderReturn,
         arguments: Arc::from([number(74)]),
     });
+    let operation = builder_effect_value(&context, operation);
     let call = Value::builtin_call(
         context.values(),
         Builtin::InteractionNetBuilderReset,
@@ -1815,12 +1855,15 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
         };
         let choices = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderAlt,
-            arguments: Arc::from([returned(81), returned(82)]),
+            arguments: Arc::from([
+                builder_effect_value(&context, returned(81)),
+                builder_effect_value(&context, returned(82)),
+            ]),
         });
         let function = crate::eval::test_support::closed_function_value_in(
             context.values(),
             1,
-            crate::eval::test_support::TestExpr::Value(choices),
+            crate::eval::test_support::TestExpr::Value(builder_effect_value(&context, choices)),
         );
         let function = crate::runtime::RuntimeValueRoot::new(context.values(), function);
         let observed_function = Arc::clone(&function_demands);
@@ -1841,10 +1884,25 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
             context.values(),
             1,
             crate::eval::test_support::TestExpr::Apply(
-                Arc::new(crate::eval::test_support::TestExpr::Value(Value::Builtin(
-                    Builtin::InteractionNetBuilderReturn,
-                ))),
-                Arc::new(crate::eval::test_support::TestExpr::Local(0)),
+                Arc::new(crate::eval::test_support::TestExpr::Value(
+                    Value::PartialBuiltin(BuiltinCall {
+                        builtin: Builtin::DictSingleton,
+                        arguments: Arc::from([context.values().key_value(&crate::core::keys::EFF)]),
+                    }),
+                )),
+                Arc::new(crate::eval::test_support::TestExpr::Apply(
+                    Arc::new(crate::eval::test_support::TestExpr::Value(
+                        Value::PartialBuiltin(BuiltinCall {
+                            builtin: Builtin::EffectCall,
+                            arguments: Arc::from([context
+                                .values()
+                                .key_value(&crate::core::Key::atom_from_text("r"))]),
+                        }),
+                    )),
+                    Arc::new(crate::eval::test_support::TestExpr::List(Arc::from([
+                        Arc::new(crate::eval::test_support::TestExpr::Local(0)),
+                    ]))),
+                )),
             ),
         );
         let continuation = crate::runtime::RuntimeValueRoot::new(context.values(), continuation);
@@ -1859,7 +1917,7 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
         ));
         let operation = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderSeq,
-            arguments: Arc::from([fixed, continuation]),
+            arguments: Arc::from([builder_effect_value(&context, fixed), continuation]),
         });
         (operation, access.duplicate_value(&state))
     });
@@ -1891,6 +1949,141 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
     assert!(
         route_losses > 0,
         "the later builder-fix alternative must survive at least one forced route loss"
+    );
+}
+
+#[test]
+fn public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation() {
+    let context = isolated_context();
+    let effect_demands = Arc::new(AtomicUsize::new(0));
+    let continuation_demands = Arc::new(AtomicUsize::new(0));
+    let effect = context.values().with_runtime_value_access(|access| {
+        let continuation = builder_return_first_port_continuation(&context);
+        let continuation = crate::runtime::RuntimeValueRoot::new(context.values(), continuation);
+        let observed_continuation = Arc::clone(&continuation_demands);
+        let continuation = Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "counted construction continuation",
+            move |_| {
+                observed_continuation.fetch_add(1, Ordering::SeqCst);
+                Ok(continuation.clone_core_for_test())
+            },
+        ));
+        let data = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderData,
+            arguments: Arc::from([Value::binary_from_text("route-loss data")]),
+        });
+        let sequence = Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::InteractionNetBuilderSeq,
+            arguments: Arc::from([builder_effect_value(&context, data), continuation]),
+        });
+        let effect = builder_effect_value(&context, sequence);
+        let effect = crate::runtime::RuntimeValueRoot::new(context.values(), effect);
+        let observed_effect = Arc::clone(&effect_demands);
+        let effect = Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            "counted construction effect",
+            move |_| {
+                observed_effect.fetch_add(1, Ordering::SeqCst);
+                Ok(effect.clone_core_for_test())
+            },
+        ));
+        Value::builtin_call_in(&access, Builtin::InteractionNet, vec![effect])
+    });
+    let (retained, machine) = retained_lazy_machine(&context, effect);
+    let mut route_losses = 0;
+    let value = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(matches!(value, Value::Net(_)));
+    assert!(route_losses > 0);
+    assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(continuation_demands.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn public_pure_construction_retains_both_selector_observations_across_route_loss() {
+    let context = isolated_context();
+    let first_demands = Arc::new(AtomicUsize::new(0));
+    let second_demands = Arc::new(AtomicUsize::new(0));
+    let observed_first = Arc::clone(&first_demands);
+    let first = LazyValue::semantic_thunk(
+        context.values(),
+        "counted first construction result",
+        move |_| {
+            observed_first.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::List(List::from_values(vec![number(1)])))
+        },
+    );
+    let observed_second = Arc::clone(&second_demands);
+    let second = LazyValue::semantic_thunk(
+        context.values(),
+        "counted second construction result",
+        move |_| {
+            observed_second.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::List(List::from_values(vec![number(2)])))
+        },
+    );
+    let results = Value::List(List::concat(
+        List::from_thunk(first.into()),
+        List::from_thunk(second.into()),
+    ));
+    let handler = crate::eval::test_support::closed_function_value_in(
+        context.values(),
+        2,
+        crate::eval::test_support::TestExpr::Value(results),
+    );
+    let effect = list_effect_value(handler);
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+    let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(failure.to_string().contains("produced multiple results"));
+    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(second_demands.load(Ordering::SeqCst), 1);
+    assert!(route_losses >= 2);
+    let frame = crate::diagnostic::evaluation_context_frame("net_construction");
+    assert_eq!(
+        failure
+            .contexts()
+            .iter()
+            .filter(|context| *context == &frame)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn public_pure_construction_retains_exposed_port_demand_across_route_loss() {
+    let context = isolated_context();
+    let port_demands = Arc::new(AtomicUsize::new(0));
+    let observed_port = Arc::clone(&port_demands);
+    let port = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        "counted exposed construction port",
+        move |_| {
+            observed_port.fetch_add(1, Ordering::SeqCst);
+            Err(EvaluationHalt::new("exposed port failed"))
+        },
+    ));
+    let operation = Value::PartialBuiltin(BuiltinCall {
+        builtin: Builtin::InteractionNetBuilderReturn,
+        arguments: Arc::from([port]),
+    });
+    let effect = builder_effect_value(&context, operation);
+    let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
+    let (retained, machine) = retained_lazy_machine(&context, call);
+    let mut route_losses = 0;
+    let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
+    assert!(failure.to_string().contains("exposed port failed"));
+    assert_eq!(port_demands.load(Ordering::SeqCst), 1);
+    assert!(route_losses > 0);
+    let frame = crate::diagnostic::evaluation_context_frame("net_construction");
+    assert_eq!(
+        failure
+            .contexts()
+            .iter()
+            .filter(|context| *context == &frame)
+            .count(),
+        1
     );
 }
 

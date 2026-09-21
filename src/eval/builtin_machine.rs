@@ -16,7 +16,10 @@ use crate::evaluation::EvaluationValueAccess;
 use crate::number::Number;
 
 use super::annotation_machine::RegionalAnnotationMachine;
-use super::builtins::RegionalBuilderBuiltinMachine;
+use super::builtins::{
+    RegionalBuilderBuiltinMachine, RegionalBuilderEffectPoll, RegionalBuilderEffectRunner,
+    RegionalNetConstruction, RegionalNetConstructionPoll,
+};
 use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::RegionalEffectMachine;
@@ -55,6 +58,7 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
 pub(in crate::eval) enum RegionalBuiltinMachine {
     Annotation(Box<RegionalAnnotationMachine>),
     Builder(Box<RegionalBuilderBuiltinMachine>),
+    BuilderEffect(Box<RegionalBuilderEffectRunner>),
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
@@ -109,7 +113,7 @@ pub(in crate::eval) struct RegionalNumericMachine {
 }
 
 enum RegionalNetPhase {
-    Construction { effect: Value },
+    Construction(Box<RegionalNetConstruction>),
     FromNetlist { selected: Option<Value> },
     Arity { arity: RegionalWhnfWork, net: Value },
     Net { arity: usize, net: RegionalWhnfWork },
@@ -171,6 +175,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::InteractionNetBuilderCopy
                 | Builtin::InteractionNetBuilderData
                 | Builtin::InteractionNetBuilderWire
+                | Builtin::InteractionNetBuilderRun
                 | Builtin::NetArity
                 | Builtin::Seq
                 | Builtin::Spark
@@ -288,9 +293,9 @@ impl RegionalBuiltinMachine {
                     unreachable!("interaction-net construction must retain one effect")
                 };
                 Self::Net(RegionalNetMachine {
-                    phase: RegionalNetPhase::Construction {
-                        effect: access.values().duplicate_value(effect),
-                    },
+                    phase: RegionalNetPhase::Construction(Box::new(
+                        RegionalNetConstruction::new_in(access, source_owner, effect),
+                    )),
                     source_owner,
                 })
             }
@@ -315,6 +320,17 @@ impl RegionalBuiltinMachine {
             | Builtin::InteractionNetBuilderWire => Self::Builder(Box::new(
                 RegionalBuilderBuiltinMachine::new_in(access, source_owner, builtin, arguments),
             )),
+            Builtin::InteractionNetBuilderRun => {
+                let [effect, state] = arguments else {
+                    unreachable!("builder effect runner must retain its effect and state")
+                };
+                Self::BuilderEffect(Box::new(RegionalBuilderEffectRunner::new_in(
+                    access,
+                    source_owner,
+                    effect,
+                    state,
+                )))
+            }
             Builtin::NetArity => {
                 let [arity, net] = arguments else {
                     unreachable!("net arity must retain its arity and net operands")
@@ -434,6 +450,14 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Annotation(machine) => machine.poll_in(access, step_budget),
             Self::Builder(machine) => machine.poll_in(access, step_budget),
+            Self::BuilderEffect(machine) => match machine.poll_in(access, step_budget) {
+                RegionalBuilderEffectPoll::Ready(value) => RegionalBuiltinPoll::Ready(value),
+                RegionalBuilderEffectPoll::Boundary(request) => {
+                    RegionalBuiltinPoll::Boundary(request)
+                }
+                RegionalBuilderEffectPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalBuilderEffectPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
+            },
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
@@ -461,6 +485,7 @@ impl RegionalBuiltinMachine {
         match self {
             Self::Annotation(machine) => machine.trace_managed_edges(visitor),
             Self::Builder(machine) => machine.trace_managed_edges(visitor),
+            Self::BuilderEffect(machine) => machine.trace_managed_edges(visitor),
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
@@ -702,11 +727,21 @@ impl RegionalNetMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         match &mut self.phase {
-            RegionalNetPhase::Construction { effect } => {
-                RegionalBuiltinPoll::Ready(Value::Lazy(LazyValue::from_net_construction_in(
-                    access.values(),
-                    access.values().duplicate_value(effect),
-                )))
+            RegionalNetPhase::Construction(construction) => {
+                match construction.poll_in(access, step_budget) {
+                    RegionalNetConstructionPoll::Ready(value) => RegionalBuiltinPoll::Ready(value),
+                    RegionalNetConstructionPoll::Boundary(request) => {
+                        RegionalBuiltinPoll::Boundary(request)
+                    }
+                    RegionalNetConstructionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalNetConstructionPoll::Failed(failure) => {
+                        let failure = EvaluationHalt::failure(failure).with_context(
+                            access.values(),
+                            evaluation_context_frame_in(access.values(), "net_construction"),
+                        );
+                        RegionalBuiltinPoll::Failed(failure.into_permanent_failure())
+                    }
+                }
             }
             RegionalNetPhase::FromNetlist { selected } => {
                 let selected = selected
@@ -789,8 +824,8 @@ impl RegionalNetMachine {
 
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match &self.phase {
-            RegionalNetPhase::Construction { effect } => {
-                trace_compatibility_value_managed_edges(effect, visitor);
+            RegionalNetPhase::Construction(construction) => {
+                construction.trace_managed_edges(visitor)
             }
             RegionalNetPhase::FromNetlist { selected } => {
                 if let Some(selected) = selected {

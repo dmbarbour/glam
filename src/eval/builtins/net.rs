@@ -3,6 +3,7 @@
 mod builder;
 mod construction;
 mod netlist;
+mod runner;
 
 #[cfg(test)]
 mod netlist_inventory;
@@ -20,3 +21,5 @@ pub(in crate::eval) use builder::{
 pub(crate) use construction::assert_construction_port_family_shape;
 pub(in crate::eval) use construction::{NetConstructionMachine, NetConstructionPoll};
 pub(in crate::eval) use netlist::interaction_net_from_netlist_in;
+pub(in crate::eval) use runner::{RegionalBuilderEffectPoll, RegionalBuilderEffectRunner};
+pub(in crate::eval) use runner::{RegionalNetConstruction, RegionalNetConstructionPoll};

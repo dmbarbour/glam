@@ -11,11 +11,14 @@ pub(in crate::eval) use net::{
 use super::sequence::append_values;
 use super::*;
 use crate::evaluation::EvaluationValueAccess;
-pub(in crate::eval) use net::RegionalBuilderBuiltinMachine;
 #[cfg(test)]
 pub(crate) use net::assert_construction_port_family_shape;
 pub(in crate::eval) use net::interaction_net_from_netlist_in;
 pub(super) use net::{NetConstructionMachine, NetConstructionPoll};
+pub(in crate::eval) use net::{
+    RegionalBuilderBuiltinMachine, RegionalBuilderEffectPoll, RegionalBuilderEffectRunner,
+    RegionalNetConstruction, RegionalNetConstructionPoll,
+};
 
 #[cfg(test)]
 pub(super) fn apply_builtin(
@@ -189,6 +192,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderFail
         | Builtin::InteractionNetBuilderCut
         | Builtin::InteractionNetBuilderResume
+        | Builtin::InteractionNetBuilderResumeApply
         | Builtin::InteractionNetBuilderFix
         | Builtin::InteractionNetBuilderFixApply
         | Builtin::InteractionNetBuilderFixRun
@@ -202,7 +206,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderBind
         | Builtin::InteractionNetBuilderCopy
         | Builtin::InteractionNetBuilderData
-        | Builtin::InteractionNetBuilderWire => Ok(deferred(arguments)),
+        | Builtin::InteractionNetBuilderWire
+        | Builtin::InteractionNetBuilderRun => Ok(deferred(arguments)),
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),
