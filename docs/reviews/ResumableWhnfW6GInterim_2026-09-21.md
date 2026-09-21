@@ -4,6 +4,26 @@ Baseline: `e7cf6e0a`. Status: mid-phase review complete; W6G remains open.
 Review procedure:
 [`ResumableWhnfW6GInterimReviewPlan_2026-09-21.md`](../plans/ResumableWhnfW6GInterimReviewPlan_2026-09-21.md).
 
+## Resolution status — rechecked 2026-09-21
+
+The later [remaining-work plan review](ResumableWhnfW6GRemainingPlan_2026-09-21.md)
+settled the *disposition and order* for these findings. It did not implement
+their remedies. In this table, **planned** means the responsible checkpoint is
+now explicit; **open** means the underlying finding remains observable in the
+current code or documentation. Do not treat a plan edit as a passing
+verification gate.
+
+| Finding | Disposition | Substantive status and next gate |
+| --- | --- | --- |
+| W6GIR-001 — session-affine deferred producer | Planned | **Open.** The first observer's session and boxed lazy-route machine remain in coordinator records. W6G.1f.3i must remove the last state-bearing route payload; W6G.1f.2b.0-.4 then changes and verifies the coordinator lifecycle; W6G.1e.2/e.3 retires broad selection. |
+| W6GIR-002 — name-only producer inventory | Planned | **Open.** The inventory still checks variant names rather than payload ownership. W6G.1f.3i.0 inventories constructors and payloads; f.3i.3-.4 removes the remaining `Whnf` payload and checks the resulting ownership shape. |
+| W6GIR-003 — missing coordinator-level retention races | Planned | **Open.** Family-level route-loss fixtures still do not exercise real coordinator subscription/claim retirement. W6G.1f.2b.4 forces those races; W6G.1f.4b-d supplies integrated mixed-observer and collection evidence. |
+| W6GIR-004 — present-tense architecture drift | Planned | **Open.** The stale wording remains in `docs/architecture/evaluation.md` and `src/README.md`. W6G.1f.3i.4 owns the synchronization, describing the still-transitional route machine accurately until f.2b lands. |
+
+Thus none of W6GIR-001–004 is marked substantively resolved by the recent
+plan-only edits. The first three depend on code and forced verification; the
+fourth is a small documentation correction deliberately assigned to f.3i.4.
+
 ## Scope and outcome
 
 This audits completed W6G.1 implementation and completed W6G.3 against the
