@@ -993,6 +993,11 @@ from public construction until PNC6 removes them.
 
 #### PNC6A — Preserve the pure construction identity protocol
 
+Completed 2026-09-21: the port/brand token family and codecs now live in
+`eval/builtins/net/identity.rs`. The pure builder, netlist replay, runner, tests,
+and temporary legacy adapter all use that identity; the focused invocation
+scope test passes before removal of the old route.
+
 - Move `ConstructionBrand`, `ConstructionPortId`, the edge-free opaque token
   family, and their codecs out of legacy `construction.rs` into a small pure
   construction-identity module.

@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crate::core::{Builtin, BuiltinCall, Dict, LazyValue, List, RuntimeValueAccess, Value};
 use crate::evaluation::EvalContext;
 
-use super::construction::{ConstructionBrand, ConstructionPortId, decode_construction_brand};
+use super::identity::{ConstructionBrand, ConstructionPortId, decode_construction_brand};
 use super::netlist::{
     encode_bind, encode_builder_state, encode_copy, encode_data, encode_empty_copy_for_test,
     encode_selected_netlist, encode_wire, interaction_net_from_netlist_in,
@@ -937,8 +937,8 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
                 Vec::new(),
                 super::builder::initial_user_state(access),
             ),
-            super::construction::encode_construction_port(access, &brand, port(1)),
-            super::construction::encode_construction_port(access, &foreign, port(1)),
+            super::identity::encode_construction_port(access, &brand, port(1)),
+            super::identity::encode_construction_port(access, &foreign, port(1)),
         )
     });
 

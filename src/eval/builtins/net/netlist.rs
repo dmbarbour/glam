@@ -8,7 +8,7 @@ use crate::interaction_net::{NetBuilder, Port};
 use crate::list::LogicalListPart;
 use crate::number::Number;
 
-use super::construction::{
+use super::identity::{
     ConstructionBrand, ConstructionPortId, decode_construction_brand, decode_construction_port,
     encode_construction_brand, encode_construction_port,
 };

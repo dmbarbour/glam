@@ -59,7 +59,7 @@ pub(super) fn initial_user_state(_access: &RuntimeValueAccess<'_>) -> Value {
 )]
 pub(super) fn initial_builder_state(
     access: &RuntimeValueAccess<'_>,
-    brand: &Arc<super::construction::ConstructionBrand>,
+    brand: &Arc<super::identity::ConstructionBrand>,
 ) -> Value {
     super::netlist::encode_builder_state(
         access,
@@ -120,7 +120,7 @@ pub(in crate::eval) fn initial_state_for_test(
 ) -> Value {
     super::netlist::encode_builder_state(
         access,
-        &Arc::new(super::construction::ConstructionBrand::default()),
+        &Arc::new(super::identity::ConstructionBrand::default()),
         1,
         Vec::new(),
         Vec::new(),
@@ -140,21 +140,19 @@ pub(in crate::eval) fn decode_outcome_for_test(
 pub(in crate::eval) fn construction_state_and_ports_for_test(
     access: &RuntimeValueAccess<'_>,
 ) -> (Value, [Value; 2]) {
-    let brand = Arc::new(super::construction::ConstructionBrand::default());
+    let brand = Arc::new(super::identity::ConstructionBrand::default());
     (
         initial_builder_state(access, &brand),
         [
-            super::construction::encode_construction_port(
+            super::identity::encode_construction_port(
                 access,
                 &brand,
-                super::construction::ConstructionPortId::new(1)
-                    .expect("fixture port IDs are positive"),
+                super::identity::ConstructionPortId::new(1).expect("fixture port IDs are positive"),
             ),
-            super::construction::encode_construction_port(
+            super::identity::encode_construction_port(
                 access,
                 &brand,
-                super::construction::ConstructionPortId::new(2)
-                    .expect("fixture port IDs are positive"),
+                super::identity::ConstructionPortId::new(2).expect("fixture port IDs are positive"),
             ),
         ],
     )
@@ -1113,7 +1111,7 @@ impl RegionalBuilderBuiltinMachine {
             ports
                 .into_iter()
                 .map(|port| {
-                    super::construction::encode_construction_port(access.values(), &brand, port)
+                    super::identity::encode_construction_port(access.values(), &brand, port)
                 })
                 .collect(),
         ));
@@ -1142,7 +1140,7 @@ impl RegionalBuilderBuiltinMachine {
                     "interaction-net operation requires a construction port",
                 ));
             };
-            super::construction::decode_construction_port(access.values().values(), &port, &brand)
+            super::identity::decode_construction_port(access.values().values(), &port, &brand)
         });
         let [left, right] = match ports {
             [Ok(left), Ok(right)] => [left, right],
@@ -1250,13 +1248,13 @@ impl RegionalBuilderBuiltinMachine {
 fn decode_builder_brand(
     access: &RuntimeValueAccess<'_>,
     state: &DecodedBuilderState,
-) -> Result<Arc<super::construction::ConstructionBrand>, EvaluationHalt> {
+) -> Result<Arc<super::identity::ConstructionBrand>, EvaluationHalt> {
     let Value::Opaque(brand) = &state.brand else {
         return Err(EvaluationHalt::new(
             "interaction-net builder brand must be opaque",
         ));
     };
-    super::construction::decode_construction_brand(access.values(), brand)
+    super::identity::decode_construction_brand(access.values(), brand)
 }
 
 fn allocate_builder_ports(
@@ -1265,8 +1263,8 @@ fn allocate_builder_ports(
     count: usize,
 ) -> Result<
     (
-        Arc<super::construction::ConstructionBrand>,
-        Vec<super::construction::ConstructionPortId>,
+        Arc<super::identity::ConstructionBrand>,
+        Vec<super::identity::ConstructionPortId>,
     ),
     EvaluationHalt,
 > {
@@ -1298,7 +1296,7 @@ fn allocate_builder_ports(
         .map_err(|_| EvaluationHalt::new("interaction-net port allocation is too large"))?;
     for id in next_port..end {
         ports.push(
-            super::construction::ConstructionPortId::new(id)
+            super::identity::ConstructionPortId::new(id)
                 .expect("builder port allocation starts from a positive cursor"),
         );
     }
@@ -1401,14 +1399,14 @@ fn resume_continuation(
             "interaction-net builder continuation brand must be opaque",
         ));
     };
-    let captured_brand = super::construction::decode_construction_brand(access.values(), &brand)?;
+    let captured_brand = super::identity::decode_construction_brand(access.values(), &brand)?;
     let mut state = decode_builder_state(access, &state)?;
     let Value::Opaque(state_brand) = &state.brand else {
         return Err(EvaluationHalt::new(
             "interaction-net builder state brand must be opaque",
         ));
     };
-    let state_brand = super::construction::decode_construction_brand(access.values(), state_brand)?;
+    let state_brand = super::identity::decode_construction_brand(access.values(), state_brand)?;
     if !Arc::ptr_eq(&captured_brand, &state_brand) {
         return Err(EvaluationHalt::new(
             "interaction-net builder continuation belongs to another invocation",

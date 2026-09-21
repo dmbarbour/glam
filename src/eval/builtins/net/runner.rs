@@ -18,7 +18,7 @@ use super::super::super::whnf::{
     reduce_semantic_shell,
 };
 use super::builder::{decode_outcome, initial_builder_state, private_builder_api};
-use super::construction::{ConstructionBrand, decode_construction_port};
+use super::identity::{ConstructionBrand, decode_construction_port};
 use super::netlist::{encode_selected_netlist, interaction_net_from_netlist_in};
 
 pub(in crate::eval) enum RegionalBuilderEffectPoll {
