@@ -1,28 +1,30 @@
 # Resumable WHNF W6G Interim Implementation Review — 2026-09-21
 
-Baseline: `e7cf6e0a`. Status: mid-phase review complete; W6G remains open.
+Baseline: `e7cf6e0a`. Status: review closed by planned resolutions; W6G
+implementation remains open.
+
 Review procedure:
 [`ResumableWhnfW6GInterimReviewPlan_2026-09-21.md`](../plans/ResumableWhnfW6GInterimReviewPlan_2026-09-21.md).
 
-## Resolution status — rechecked 2026-09-21
+## Resolution status — closed 2026-09-21
 
 The later [remaining-work plan review](ResumableWhnfW6GRemainingPlan_2026-09-21.md)
-settled the *disposition and order* for these findings. It did not implement
-their remedies. In this table, **planned** means the responsible checkpoint is
-now explicit; **open** means the underlying finding remains observable in the
-current code or documentation. Do not treat a plan edit as a passing
-verification gate.
+settled the disposition and order for these findings. Each finding is **closed
+as a review item by an explicit corrective step and verification gate** in the
+[parent plan](../plans/ResumableWhnfEvaluation_2026-09-12.md). The implementation
+is still pending; closing this review is not evidence that the current code or
+documentation already satisfies the target contract.
 
-| Finding | Disposition | Substantive status and next gate |
+| Finding | Review resolution | Pending plan gate |
 | --- | --- | --- |
-| W6GIR-001 — session-affine deferred producer | Planned | **Open.** The first observer's session and boxed lazy-route machine remain in coordinator records. W6G.1f.3i must remove the last state-bearing route payload; W6G.1f.2b.0-.4 then changes and verifies the coordinator lifecycle; W6G.1e.2/e.3 retires broad selection. |
-| W6GIR-002 — name-only producer inventory | Planned | **Open.** The inventory still checks variant names rather than payload ownership. W6G.1f.3i.0 inventories constructors and payloads; f.3i.3-.4 removes the remaining `Whnf` payload and checks the resulting ownership shape. |
-| W6GIR-003 — missing coordinator-level retention races | Planned | **Open.** Family-level route-loss fixtures still do not exercise real coordinator subscription/claim retirement. W6G.1f.2b.4 forces those races; W6G.1f.4b-d supplies integrated mixed-observer and collection evidence. |
-| W6GIR-004 — present-tense architecture drift | Planned | **Open.** The stale wording remains in `docs/architecture/evaluation.md` and `src/README.md`. W6G.1f.3i.4 owns the synchronization, describing the still-transitional route machine accurately until f.2b lands. |
+| W6GIR-001 — session-affine deferred producer | **Closed by plan.** The route lifecycle and global-selector dependencies have explicit owners. | W6G.1f.3i removes the last state-bearing route payload; W6G.1f.2b.0-.4 changes and forces the coordinator lifecycle; W6G.1e.2/e.3 retires broad selection. |
+| W6GIR-002 — name-only producer inventory | **Closed by plan.** The audit now requires constructor and payload-shape evidence, not just names. | W6G.1f.3i.0 inventories constructors and payloads; f.3i.3-.4 removes `Whnf` route state and checks the remaining ownership shape. |
+| W6GIR-003 — missing coordinator-level retention races | **Closed by plan.** The route and mixed-observer schedules have explicit forced-order gates. | W6G.1f.2b.4 forces coordinator subscriber/claim races; W6G.1f.4b-d supplies integrated retention, mixed-observer, and collection evidence. |
+| W6GIR-004 — present-tense architecture drift | **Closed by plan.** The two stale descriptions have a named documentation checkpoint. | W6G.1f.3i.4 updates `docs/architecture/evaluation.md` and `src/README.md` to describe the actual transitional route and completed W6G.3 state. |
 
-Thus none of W6GIR-001–004 is marked substantively resolved by the recent
-plan-only edits. The first three depend on code and forced verification; the
-fourth is a small documentation correction deliberately assigned to f.3i.4.
+W6GIR-001–004 require no further review-specific action. Their implementation
+and verification remain obligations of those plan checkpoints, which should
+not be marked complete on the strength of this review closure.
 
 ## Scope and outcome
 
