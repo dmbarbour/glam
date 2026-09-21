@@ -5440,6 +5440,174 @@ an intermediate state unsafe:
   necessary for exact dependencies and cycle reporting. Record the complete
   route/root/claim invariant and the smallest coherent cutover boundary;
   do not silently turn every deferred producer into a lazy route.
+
+  **Lifecycle inventory complete (2026-09-21).**
+  `EvalContext::{lazy_root_task,promise_root_task}` currently join at
+  `deferred_root_task`: both allocate a task ID and wait token, construct a
+  boxed machine using the first demand session and its task profile, and
+  reserve one `DeferredWork` keyed by producer value. The reservation race
+  discards a losing candidate machine after releasing coordinator locks.
+  `WorkRecord` requires a `demand_session`, and `DeferredWork` holds the task,
+  wait, producer root, machine slot, block, and running-demand latch. Its
+  indexes are `by_value`, `by_wait`, and `by_task`, plus the coordinator's
+  `work_by_session`; ready queues and task-directed pumping also find it
+  through those indexes. The lazy's managed checkpoint is now the semantic
+  computation state, so the lazy's boxed machine is an orchestration shell;
+  the promise follower still needs its task machine.
+
+  Claim upgrades the first session's weak registration, refuses a closed
+  session, detaches the machine, and marks the record running. Release
+  reattaches the machine and either queues, dormants, blocks with an exact
+  dependency/subscription epoch, or terminalizes. Terminal settlement consumes
+  the deferred producer obligation once, publishes the wait terminal and
+  settles any task-owned promises; retirement then removes all deferred
+  indexes. An unclaimed deferred wait can also be abandoned and settled.
+  Session close traverses `work_by_session` and abandons both lazy and promise
+  records (or latches closure for a running claim). Explicit task cancellation
+  is a reflection-task path, not a separate lazy-route cancellation API.
+
+  Blocked deferred dependencies are traversed through wait-token and promise
+  producer edges. A cycle is poisoned only when every member is a blocked
+  lazy and no promise edge occurs; the current cycle path extracts a machine
+  from each member before terminal settlement. `EvaluationWaitToken` itself
+  records a producer task ID and owner session ID. The task ID currently
+  supports task-directed claim/status/dependency lookup and reports, including
+  `reported_dependency` and targeted pumping; it is not intrinsically needed
+  to identify a lazy's exact completion source. Work ID identifies the
+  scheduler record and cycle member, while a distinct wait token supplies
+  exact dependency identity, terminal publication, and wakes. Task-owned
+  promise producers still require a task ID for their machine and dynamically
+  registered promise obligations.
+
+  **Subscriber-count gap.** `CompletionSubscriptions` stores epoch-tagged
+  registrations and filters stale ones at wake. Client demand explicitly
+  unsubscribes, but other registrations can remain stale until source
+  terminalization. Consequently `has_exact_subscriptions()`/`len()` is not an
+  authoritative live-subscriber count, and neither wait-token clones nor the
+  first session's lifetime can decide last-subscriber retirement. Checkpoint
+  2b.3 needs an explicit active-demand/registration protocol and its own
+  forced race tests.
+
+  **Representation decision (2026-09-21).** Give the machine-free lazy route
+  its own `WorkKind::LazyRoute`; retain a distinct task-owned promise-producer
+  kind and its machine/settlement obligations. Reuse the coordinator work map,
+  exact completion protocol, and mutation/settlement gate. A tagged arm inside
+  the old `DeferredWork` would preserve accidental task/session paths; a
+  separate scheduler would duplicate too much machinery. The runtime-owned
+  lazy route is not a synthetic background-session task.
+
+  **ID-use inventory (2026-09-21).**
+
+  | Identity | Current use | Semantic disposition for lazy routes |
+  | --- | --- | --- |
+  | `LazyId` / `DeferredValueId` | `by_value` deduplicates admission | Keep `LazyId` as the stable semantic cell identity; re-admission of a reachable lazy may make a new route. Keep `PromiseId` for the separate promise producer. |
+  | `EvaluationWorkId` | Work map, ready queue, wake epoch, cycle member, settlement | Keep one fresh work ID per admitted route. It is scheduler identity, not a task or source identity. |
+  | Wait ID / `EvaluationWaitToken` | Exact dependency, terminal cell, subscriptions, `by_wait`, cross-route wake | Keep one fresh wait ID per route admission; an old terminal token stays observable after retirement. The token does **not** need a task ID to identify completion. |
+  | `EvaluationTaskId` | `by_task`, direct claim, task-owned promise registration, task reports | Keep for reflection and promise-producing tasks. Lazy routes need no semantic task ID; task-directed pumping and reporting are migration clients. |
+  | `EvaluationSessionId` | `WorkRecord.demand_session`, `work_by_session`, wait owner, closure, reports | Keep for actual session-owned work and task-owned promises. A lazy route has no first-observer owner session. |
+
+  **Concrete migration clients.** `producer_for_wait`, `task_dependency`,
+  `task_is_claimable/busy`, `task_observed_epoch`, and `claim_task` currently
+  turn a wait into a task and back into work. `prioritized_task_for`,
+  `pump_demand`, the client-demand pump, yielded-exact continuation,
+  `target_has_running_producer`, and runtime-observation checks follow that
+  task chain. The existing `work_for_wait_locked` lookup and work IDs can
+  instead carry lazy-route causal progress; real tasks may continue to use
+  `by_task`. `EvalContext::poll_wait` only needs to know whether an active
+  producer exists, but currently tests that through `producer_for_wait`.
+
+  `EvaluationWaitToken` presently stores `producer: EvaluationTaskId` and
+  `owner_id: EvaluationSessionId`. Both are consumed by `reported_dependency`,
+  `wait_for_claimed_task`, `abandon_deferred_producer`, runtime dependency
+  snapshots, and task-handle/promise-obligation checks. The latter must keep
+  task provenance, but already have their own task/owner fields or receive
+  those separately. The chosen model makes the generic wait token only a
+  runtime-local completion identity; the active coordinator record supplies
+  producer kind, while task handles and promise obligations retain their
+  actual task/session IDs. No task/session/lazy origin tag or dummy IDs belong
+  on the token: after producer retirement its terminal result is sufficient.
+  The `abandon_deferred_producer` owner-session stop rule (also reached when
+  spark dependencies are abandoned) and `reported_dependency` cross-session
+  classification particularly require route-aware replacement, not just
+  field optionality.
+
+  This reaches the public readiness API: `RuntimeDependency::TaskWait`,
+  `RuntimeTaskWait`, `RuntimeDeadlockWork::session_id`, and killed
+  `RuntimeDisposition::session_id` assume every producer is session-owned;
+  the default logger projects those fields. A runtime-owned lazy route needs
+  an explicitly distinct wait/deadlock origin and no invented session or
+  task ID. The session report path for actual reflection tasks retains task
+  IDs while following a lazy dependency. The source-structure registry test
+  fixes the current `WorkKind` variant list, and about fourteen coordinator
+  fixtures construct
+  lazy deferred records directly; these are migration fixtures, not evidence
+  that lazy work needs task identity. Four WHNF fixtures construct wait tokens
+  directly and will need adjustment if the token constructor changes.
+
+  `EvaluationUnfinishedTask` also carries optional dependency task and
+  session IDs plus a wait ID; a reflection task blocked on a lazy can keep
+  its own task ID and report the lazy wait without inventing a dependency
+  task/session. Its `Quiescent` versus `Deadlocked` classification must follow
+  actual runtime-owned progress or an eventual task owner, not the lazy's
+  first observer. `wait_for_claimed_task` currently returns early for a
+  different wait owner session and likewise needs route-aware progress checks.
+
+  **Scope assessment.** This is a medium-sized, cross-layer cutover rather
+  than a local rename: coordinator indexes/selectors and claim/release;
+  wait-token simplification and exact-chain pumping; session closure/abandonment;
+  readiness/deadlock projection and logger; then direct coordinator fixtures.
+  There are about 44 `allocate_wait_token` occurrences across production and
+  tests, but most are mechanical constructor call sites rather than distinct
+  ID semantics; four tests call `EvaluationWaitToken::new` directly.
+  It does **not** require changing the runtime's global ID allocators,
+  promise producer identity, failure-ledger keys, or the exact-subscription
+  protocol. The smallest coherent boundary keeps work/wait IDs and converts
+  lazy chains to wait/work-directed lookup while splitting the producer
+  kinds; a temporary synthetic task ID would save some edits but leave the
+  misleading public and lifecycle assumptions in place.
+
+  **ID decision (2026-09-21).** Keep `EvaluationWaitToken` minimal: unique wait
+  ID, runtime/value-domain observer needed for terminal publication, terminal
+  cell, and exact subscriptions. Resolve an active wait's producer through
+  the coordinator's wait-to-work index; keep task/session IDs in actual
+  task contexts, handles, promise obligations, and session-owned work records.
+  Readiness projection must consult work state. Recursive abandonment must
+  consult the producer kind and its live demand instead of a token
+  owner-session rule. This also avoids giving completed, retained wait tokens
+  stale producer provenance. Synthetic lazy task/session IDs and a tagged
+  wait origin are not part of the target model.
+
+  **Interim report decision (2026-09-21).** The current public deadlock report
+  is an ad hoc bootstrap view, not a semantic contract for private scheduler
+  identities or a promise of stable numeric IDs. Distinguish `LazyRoute` from
+  promise-producing task work in the reported kind. A lazy route reports its
+  available `LazyId`; existing work/wait IDs may remain as incidental debug
+  fields, not its primary description. Its task and session fields are absent;
+  a wait on that route is not a `TaskWait`.
+  Make the relevant session fields optional for runtime-owned work (including
+  killed dispositions), and give lazy-wait dependencies a separate reported
+  shape carrying the wait and lazy IDs. Task-owned promise/reflection reports
+  keep their genuine task/session provenance. Project this information from
+  the active coordinator record, never by restoring provenance fields to
+  `EvaluationWaitToken`. Update the default logger and tests for the new
+  distinction without freezing an incidental text or numeric-ID schema.
+
+  A future reporting/reflection API should inspect and describe the
+  computation itself instead of using these private IDs as its primary
+  explanation. That is deferred and must not complicate this lifecycle
+  cutover.
+
+  **Route/root/claim invariant.** An active route retains the lazy root needed
+  while subscribed or claimed; a detached claim temporarily retains that
+  exact root. The route never owns a second semantic checkpoint or durable
+  task machine. It publishes checkpoint/terminal and exact block state before
+  releasing its exclusive claim. A terminal wait remains observable after
+  route retirement; a still-reachable lazy can later admit a fresh route over
+  its checkpoint.
+
+  **W6G.1f.2b.0 complete (2026-09-21).** The lazy/promise work-kind split,
+  minimal wait-token identity, interim report distinction, and coherent
+  route/root/claim boundary are selected. Implementation begins at 2b.1.
 - **W6G.1f.2b.1 — typed route and context groundwork.** Introduce the
   reviewed lazy-route representation and runtime-owned pure-production
   context without creating a second authoritative producer machine. Keep
