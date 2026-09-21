@@ -220,6 +220,13 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
         verification: "client_demand_retirement_publishes_after_runtime_unlock",
     },
     ActiveRaiiEntry {
+        path: "src/evaluation/coordinator/task.rs",
+        owner: "LazyRouteDemandLease",
+        disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,
+        retirement: "release one subscriber and retire an unclaimed route at zero demand",
+        verification: "last_lazy_route_demand_retires_without_losing_its_checkpoint",
+    },
+    ActiveRaiiEntry {
         path: "src/api/runtime.rs",
         owner: "RuntimeState",
         disposition: ActiveRaiiDisposition::RuntimeInfrastructure,

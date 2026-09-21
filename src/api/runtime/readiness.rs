@@ -88,7 +88,7 @@ impl RuntimeReadinessStamp {
 #[derive(Clone, Debug)]
 pub struct RuntimeDisposition {
     work_id: u64,
-    session_id: u64,
+    session_id: Option<u64>,
     task_id: Option<u64>,
     kind: RuntimeDispositionKind,
 }
@@ -98,7 +98,7 @@ impl RuntimeDisposition {
         self.work_id
     }
 
-    pub fn session_id(&self) -> u64 {
+    pub fn session_id(&self) -> Option<u64> {
         self.session_id
     }
 
@@ -342,6 +342,7 @@ impl QuiescenceReport {
 pub enum RuntimeWorkKind {
     ReflectionTask,
     DeferredEvaluation,
+    LazyRoute,
     ClientDemand,
     Spark,
 }
@@ -361,6 +362,10 @@ pub enum RuntimeDependency {
         wait_id: u64,
         task_id: u64,
         session_id: u64,
+    },
+    LazyWait {
+        wait_id: u64,
+        lazy_id: u64,
     },
     Promise {
         promise_id: u64,
@@ -397,8 +402,9 @@ impl RuntimeTaskWait {
 #[derive(Clone, Debug)]
 pub struct RuntimeDeadlockWork {
     work_id: u64,
-    session_id: u64,
+    session_id: Option<u64>,
     task_id: Option<u64>,
+    lazy_id: Option<u64>,
     kind: RuntimeWorkKind,
     state: RuntimeWorkState,
     dependency: Option<RuntimeDependency>,
@@ -412,8 +418,12 @@ impl RuntimeDeadlockWork {
         self.work_id
     }
 
-    pub fn session_id(&self) -> u64 {
+    pub fn session_id(&self) -> Option<u64> {
         self.session_id
+    }
+
+    pub fn lazy_id(&self) -> Option<u64> {
+        self.lazy_id
     }
 
     pub fn task_id(&self) -> Option<u64> {
@@ -550,7 +560,7 @@ pub(super) fn runtime_disposition_from_snapshot(
 ) -> RuntimeDisposition {
     RuntimeDisposition {
         work_id: snapshot.work.get(),
-        session_id: snapshot.session.get(),
+        session_id: Some(snapshot.session.get()),
         task_id: Some(snapshot.task.get()),
         kind: match snapshot.intent {
             ExitIntent::Success => RuntimeDispositionKind::ExitSuccess,
@@ -600,6 +610,10 @@ fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> Runt
             task_id: producer.get(),
             session_id: session.get(),
         },
+        RuntimeDependencySnapshot::LazyWait { wait, lazy } => RuntimeDependency::LazyWait {
+            wait_id: wait,
+            lazy_id: lazy.get(),
+        },
         RuntimeDependencySnapshot::Promise { promise, producer } => RuntimeDependency::Promise {
             promise_id: promise,
             producer: producer.map(|(wait_id, task, session)| RuntimeTaskWait {
@@ -620,11 +634,13 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
     let blocked_failure = snapshot.blocked_error;
     RuntimeDeadlockWork {
         work_id: snapshot.work.get(),
-        session_id: snapshot.session.get(),
+        session_id: snapshot.session.map(|session| session.get()),
         task_id: snapshot.task.map(EvaluationTaskId::get),
+        lazy_id: snapshot.lazy.map(|lazy| lazy.get()),
         kind: match snapshot.kind {
             RuntimeWorkKindSnapshot::ReflectionTask => RuntimeWorkKind::ReflectionTask,
             RuntimeWorkKindSnapshot::DeferredEvaluation => RuntimeWorkKind::DeferredEvaluation,
+            RuntimeWorkKindSnapshot::LazyRoute => RuntimeWorkKind::LazyRoute,
             RuntimeWorkKindSnapshot::ClientDemand => RuntimeWorkKind::ClientDemand,
             RuntimeWorkKindSnapshot::Spark => RuntimeWorkKind::Spark,
         },

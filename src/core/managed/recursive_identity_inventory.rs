@@ -615,6 +615,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         "parked dependency actively observes and subscribes to assignment"
     ),
     owner!(
+        "src/evaluation/coordinator/deferred.rs::ClaimedLazyRoute",
+        [1, 0, 0],
+        DurableRoot,
+        None,
+        "one bounded route poll retains the exact lazy while its checkpoint is claimed"
+    ),
+    owner!(
         "src/evaluation/coordinator/deferred.rs::DeferredLazyCycleMember",
         [1, 0, 0],
         DurableRoot,
@@ -627,6 +634,13 @@ const DIRECT_IDENTITY_INVENTORY: &[IdentityOwnerEntry] = &[
         DurableRoot,
         None,
         "coordinator-held deferred producer survives a mutator scope"
+    ),
+    owner!(
+        "src/evaluation/coordinator/deferred.rs::LazyRouteWork",
+        [1, 0, 0],
+        DurableRoot,
+        None,
+        "runtime route holds its lazy while demand or an in-flight claim keeps the route active"
     ),
     owner!(
         "src/evaluation/coordinator/task.rs::LocalPromiseObligation",
@@ -805,7 +819,7 @@ fn compatibility_graph_cycle_sources_are_classified() {
         });
     assert_eq!(
         counts,
-        [19, 19, 9],
+        [19, 21, 9],
         "every direct identity occurrence remains assigned to the reviewed M/R/A split"
     );
 }

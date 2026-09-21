@@ -45,11 +45,12 @@ pub(crate) use completion::{
     WorkDependencyKey,
 };
 pub(super) use deferred::{
-    AbandonedDeferredWork, ClaimedDeferredWork, DeferredLazyCycleMember, DeferredProducer,
-    DeferredWorkPoll, DeferredWorkReservation,
+    AbandonedDeferredWork, ClaimedDeferredWork, ClaimedLazyRoute, DeferredLazyCycleMember,
+    DeferredProducer, DeferredWorkPoll, DeferredWorkReservation,
 };
 use deferred::{
-    DeferredIndexes, DeferredWork, begin_deferred_abandonment, claim_deferred, deferred_work_mut,
+    DeferredIndexes, DeferredWork, LazyRouteWork, begin_deferred_abandonment, claim_deferred,
+    claim_lazy_route, deferred_work_mut,
 };
 #[cfg(test)]
 pub(super) use reflection::ReflectionWorkSnapshot;
@@ -422,6 +423,7 @@ enum WorkKind {
     Spark(SparkWork),
     Reflection(ReflectionWork),
     Deferred(DeferredWork),
+    LazyRoute(LazyRouteWork),
 }
 
 struct WorkRecord {
@@ -490,20 +492,23 @@ struct ObservationRegistration {
 pub(super) enum ClaimedTaskWork {
     Reflection(ClaimedReflectionWork),
     Deferred(ClaimedDeferredWork),
+    LazyRoute(ClaimedLazyRoute),
 }
 
 impl ClaimedTaskWork {
+    pub(in crate::evaluation) fn id(&self) -> EvaluationWorkId {
+        match self {
+            Self::Reflection(work) => work.id,
+            Self::Deferred(work) => work.id,
+            Self::LazyRoute(work) => work.id,
+        }
+    }
+
     pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
         match self {
             Self::Reflection(work) => &work.demand,
             Self::Deferred(work) => &work.demand,
-        }
-    }
-
-    pub(in crate::evaluation) fn task(&self) -> EvaluationTaskId {
-        match self {
-            Self::Reflection(work) => work.task,
-            Self::Deferred(work) => work.task,
+            Self::LazyRoute(work) => &work.demand,
         }
     }
 }
@@ -958,6 +963,9 @@ impl EvaluationWorkCoordinator {
                         deferred.push(begin_deferred_abandonment(&mut state, id));
                         changed = true;
                     }
+                    WorkKind::LazyRoute(_) => {
+                        unreachable!("runtime-owned lazy route entered session closure")
+                    }
                     WorkKind::Spark(_) => {
                         if running {
                             let record = state
@@ -1157,12 +1165,12 @@ impl EvaluationWorkCoordinator {
                 claim_ready_spark(&mut state, self.runtime)
                     .map(CoordinatorSelection::Spark)
                     .or_else(|| {
-                        claim_ready_task(&mut state, self.runtime, None)
+                        claim_ready_task(&mut state, self.runtime, None, false, false)
                             .map(CoordinatorSelection::Task)
                     })
                     .unwrap_or(CoordinatorSelection::None)
             } else {
-                claim_ready_task(&mut state, self.runtime, None)
+                claim_ready_task(&mut state, self.runtime, None, false, false)
                     .map(CoordinatorSelection::Task)
                     .or_else(|| {
                         claim_ready_spark(&mut state, self.runtime).map(CoordinatorSelection::Spark)
@@ -1199,7 +1207,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
-            let selection = claim_ready_task(&mut state, self.runtime, None)
+            let selection = claim_ready_task(&mut state, self.runtime, None, false, false)
                 .map(CoordinatorSelection::Task)
                 .unwrap_or(CoordinatorSelection::None);
             if !matches!(selection, CoordinatorSelection::None) {
@@ -1260,6 +1268,19 @@ impl EvaluationWorkCoordinator {
                     record.state = WorkState::Queued;
                     claimed.id
                 }
+                ClaimedTaskWork::LazyRoute(claimed) => {
+                    let record = state
+                        .work
+                        .get_mut(&claimed.id)
+                        .expect("unpolled lazy route must remain registered");
+                    assert!(matches!(record.state, WorkState::Running));
+                    let WorkKind::LazyRoute(route) = &mut record.kind else {
+                        unreachable!()
+                    };
+                    route.block = claimed.prior_block;
+                    record.state = WorkState::Queued;
+                    claimed.id
+                }
             };
             queue_task(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
@@ -1280,7 +1301,59 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, Some(session));
+            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), false, false);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    /// Cooperative demand may advance an exact dependency of a blocked task
+    /// in this session. Session-wide quiescence deliberately uses the
+    /// session-owned selector above instead.
+    pub(super) fn claim_ready_exact_dependency_for_session(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Option<ClaimedTaskWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), true, false);
+            if claimed.is_some() {
+                state.work_generation = state.work_generation.wrapping_add(1);
+            }
+            claimed
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    /// A session-wide drain can advance an exact runtime-owned lazy route,
+    /// but does not take another session's reflection task. The latter must
+    /// remain visible as resumable cross-session quiescence.
+    pub(super) fn claim_ready_lazy_route_dependency_for_session(
+        &self,
+        session: EvaluationSessionId,
+    ) -> Option<ClaimedTaskWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), true, true);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1305,7 +1378,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, None);
+            let claimed = claim_ready_task(&mut state, self.runtime, None, false, false);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1321,6 +1394,7 @@ impl EvaluationWorkCoordinator {
     /// Claims one exact task dependency and detaches its opaque machine from
     /// the coordinator record. All reporting identity remains in the stable
     /// work record while the machine is claimed.
+    #[cfg(test)]
     pub(super) fn claim_task(&self, task: EvaluationTaskId) -> Option<ClaimedTaskWork> {
         let mutation = self.admission.mutation_guard();
         let claimed = {
@@ -1338,6 +1412,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::Reflection(_) => claim_reflection_task(&mut state, self.runtime, id),
                 WorkKind::Deferred(_) => claim_deferred(&mut state, self.runtime, id, false)
                     .map(ClaimedTaskWork::Deferred),
+                WorkKind::LazyRoute(_) => None,
                 WorkKind::Spark(_) => None,
             }?;
             state.work_generation = state.work_generation.wrapping_add(1);
@@ -1350,6 +1425,40 @@ impl EvaluationWorkCoordinator {
         claimed
     }
 
+    pub(super) fn claim_work(&self, id: EvaluationWorkId) -> Option<ClaimedTaskWork> {
+        let mutation = self.admission.mutation_guard();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let work = match state.work.get(&id)?.kind {
+                WorkKind::Reflection(_) => claim_reflection_task(&mut state, self.runtime, id),
+                WorkKind::Deferred(_) => claim_deferred(&mut state, self.runtime, id, false)
+                    .map(ClaimedTaskWork::Deferred),
+                WorkKind::LazyRoute(_) => claim_lazy_route(&mut state, self.runtime, id, false)
+                    .map(ClaimedTaskWork::LazyRoute),
+                WorkKind::Spark(_) => None,
+            }?;
+            state.work_generation = state.work_generation.wrapping_add(1);
+            Some(work)
+        };
+        drop(mutation);
+        if claimed.is_some() {
+            self.work_available.notify_all();
+        }
+        claimed
+    }
+
+    pub(super) fn work_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationWorkId> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        work_for_wait_locked(&state, wait)
+    }
+
+    #[cfg(test)]
     pub(super) fn producer_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationTaskId> {
         let state = self
             .state
@@ -1358,6 +1467,18 @@ impl EvaluationWorkCoordinator {
         work_for_wait_locked(&state, wait)
             .and_then(|id| state.work.get(&id))
             .and_then(task_for_record)
+    }
+
+    pub(super) fn task_origin_for_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> Option<(EvaluationTaskId, EvaluationSessionId)> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let record = state.work.get(&work_for_wait_locked(&state, wait)?)?;
+        Some((task_for_record(record)?, record.demand_session))
     }
 
     pub(super) fn register_task_promise(
@@ -1417,7 +1538,12 @@ impl EvaluationWorkCoordinator {
                 ));
             }
             let producer = Arc::new(PromiseProducerObligation::coordinator_owned(
-                task, &wait, work, promise, self,
+                task,
+                record.demand_session,
+                &wait,
+                work,
+                promise,
+                self,
             ));
             record
                 .obligations
@@ -1601,27 +1727,56 @@ impl EvaluationWorkCoordinator {
         match &record.kind {
             WorkKind::Reflection(work) => work.block.as_ref(),
             WorkKind::Deferred(work) => work.block.as_ref(),
+            WorkKind::LazyRoute(work) => work.block.as_ref(),
             WorkKind::Spark(_) => None,
         }
         .and_then(|block| block.dependency.clone())
     }
 
-    pub(super) fn task_observed_epoch(
+    pub(super) fn work_dependency_by_id(&self, id: EvaluationWorkId) -> Option<WorkDependency> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state.work.get(&id).and_then(work_dependency).cloned()
+    }
+
+    pub(super) fn work_observed_epoch(
         &self,
-        task: EvaluationTaskId,
+        id: EvaluationWorkId,
     ) -> Option<RuntimeObservationEpoch> {
         let state = self
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        let id = state
-            .reflection
-            .by_task
-            .get(&task)
-            .or_else(|| state.deferred.by_task.get(&task))?;
-        state.work.get(id).and_then(task_observation_epoch)
+        state.work.get(&id).and_then(task_observation_epoch)
     }
 
+    pub(super) fn work_is_claimable(&self, id: EvaluationWorkId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .work
+            .get(&id)
+            .is_some_and(|record| matches!(record.state, WorkState::Dormant | WorkState::Queued))
+    }
+
+    pub(super) fn work_is_busy(&self, id: EvaluationWorkId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state.work.get(&id).is_some_and(|record| {
+            matches!(
+                record.state,
+                WorkState::Reserved | WorkState::Running | WorkState::Terminalizing
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn task_is_claimable(&self, task: EvaluationTaskId) -> bool {
         let state = self
             .state
@@ -1636,35 +1791,17 @@ impl EvaluationWorkCoordinator {
             .is_some_and(|record| matches!(record.state, WorkState::Dormant | WorkState::Queued))
     }
 
-    pub(super) fn task_is_busy(&self, task: EvaluationTaskId) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let id = state
-            .reflection
-            .by_task
-            .get(&task)
-            .or_else(|| state.deferred.by_task.get(&task));
-        id.and_then(|id| state.work.get(id)).is_some_and(|record| {
-            matches!(
-                record.state,
-                WorkState::Reserved | WorkState::Running | WorkState::Terminalizing
-            )
-        })
-    }
-
     pub(super) fn target_has_running_producer(&self, target: &EvaluationWaitToken) -> bool {
         let mut seen = HashSet::new();
         let mut wait = target.clone();
-        while let Some(task) = self.producer_for_wait(&wait) {
-            if !seen.insert(task) {
+        while let Some(work) = self.work_for_wait(&wait) {
+            if !seen.insert(work) {
                 return false;
             }
-            if self.task_is_busy(task) {
+            if self.work_is_busy(work) {
                 return true;
             }
-            let Some(dependency) = self.task_dependency(task) else {
+            let Some(dependency) = self.work_dependency_by_id(work) else {
                 return false;
             };
             let Some(dependency_wait) = dependency.producer_wait() else {
@@ -1679,13 +1816,13 @@ impl EvaluationWorkCoordinator {
         let mut seen = HashSet::new();
         let mut wait = target.clone();
         while seen.insert(wait.get()) {
-            let Some(task) = self.producer_for_wait(&wait) else {
+            let Some(work) = self.work_for_wait(&wait) else {
                 return false;
             };
-            if self.task_observed_epoch(task).is_some() {
+            if self.work_observed_epoch(work).is_some() {
                 return true;
             }
-            let Some(dependency) = self.task_dependency(task) else {
+            let Some(dependency) = self.work_dependency_by_id(work) else {
                 return false;
             };
             let Some(dependency_wait) = dependency.producer_wait() else {
@@ -1943,6 +2080,7 @@ fn task_for_record(record: &WorkRecord) -> Option<EvaluationTaskId> {
     match &record.kind {
         WorkKind::Reflection(work) => Some(work.task),
         WorkKind::Deferred(work) => Some(work.task),
+        WorkKind::LazyRoute(_) => None,
         WorkKind::Spark(_) => None,
     }
 }
@@ -1951,6 +2089,7 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
     match &record.kind {
         WorkKind::Reflection(work) => work.block.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref(),
+        WorkKind::LazyRoute(work) => work.block.as_ref(),
         WorkKind::Spark(_) => None,
     }
 }
@@ -1970,6 +2109,7 @@ fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
         WorkKind::Spark(work) => work.dependency.as_ref(),
         WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref(),
         WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref(),
+        WorkKind::LazyRoute(work) => work.block.as_ref()?.dependency.as_ref(),
     }
 }
 
@@ -2070,6 +2210,7 @@ fn publish_task_block_locked(
     match &mut record.kind {
         WorkKind::Reflection(work) => work.block = Some(block),
         WorkKind::Deferred(work) => work.block = Some(block),
+        WorkKind::LazyRoute(work) => work.block = Some(block),
         WorkKind::Spark(_) => panic!("spark work cannot publish a task block"),
     }
     record.state = WorkState::Blocked;
@@ -2167,6 +2308,8 @@ fn claim_ready_task(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
     session: Option<EvaluationSessionId>,
+    allow_exact_dependency: bool,
+    exact_lazy_only: bool,
 ) -> Option<ClaimedTaskWork> {
     loop {
         let eligible = |id: &EvaluationWorkId| {
@@ -2193,6 +2336,20 @@ fn claim_ready_task(
                             .get(id)
                             .is_some_and(|record| record.demand_session == session && eligible(id))
                     })
+                })
+                .or_else(|| {
+                    allow_exact_dependency
+                        .then(|| {
+                            state.ready_tasks.iter().position(|id| {
+                                eligible(id)
+                                    && (!exact_lazy_only
+                                        || state.work.get(id).is_some_and(|record| {
+                                            matches!(record.kind, WorkKind::LazyRoute(_))
+                                        }))
+                                    && session_has_exact_dependency_on(state, session, *id)
+                            })
+                        })
+                        .flatten()
                 })?,
             None => state.ready_tasks.iter().position(eligible)?,
         };
@@ -2206,12 +2363,51 @@ fn claim_ready_task(
             WorkKind::Deferred(_) => {
                 claim_deferred(state, runtime, id, true).map(ClaimedTaskWork::Deferred)
             }
+            WorkKind::LazyRoute(_) => {
+                claim_lazy_route(state, runtime, id, true).map(ClaimedTaskWork::LazyRoute)
+            }
             WorkKind::Spark(_) => None,
         };
         if let Some(claimed) = claimed {
             return Some(claimed);
         }
     }
+}
+
+/// A task in this session may be blocked on runtime-owned work whose route
+/// deliberately has no session owner. Let a caller pumping that session
+/// execute the exact dependency, but not arbitrary background work.
+fn session_has_exact_dependency_on(
+    state: &WorkCoordinatorState,
+    session: EvaluationSessionId,
+    candidate: EvaluationWorkId,
+) -> bool {
+    state
+        .work_by_session
+        .get(&session)
+        .into_iter()
+        .flatten()
+        .any(|root| {
+            let mut current = *root;
+            let mut seen = HashSet::new();
+            while seen.insert(current) {
+                let Some(record) = state.work.get(&current) else {
+                    break;
+                };
+                let Some(wait) = work_dependency(record).and_then(WorkDependency::producer_wait)
+                else {
+                    break;
+                };
+                let Some(next) = work_for_wait_locked(state, &wait) else {
+                    break;
+                };
+                if next == candidate {
+                    return true;
+                }
+                current = next;
+            }
+            false
+        })
 }
 
 fn claim_reflection_task(
@@ -2285,7 +2481,9 @@ fn queue_current_registration(
         record.state = WorkState::Queued;
         match record.kind {
             WorkKind::Spark(_) => ReadyQueue::Spark,
-            WorkKind::Reflection(_) | WorkKind::Deferred(_) => ReadyQueue::Task,
+            WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::LazyRoute(_) => {
+                ReadyQueue::Task
+            }
         }
     };
     state.observation_waiters.remove(&registration.work);

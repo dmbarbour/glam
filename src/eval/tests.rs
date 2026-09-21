@@ -2341,17 +2341,22 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
 }
 
 #[test]
-fn deferred_values_use_the_context_that_forces_them() {
+fn deferred_values_use_the_runtime_default_context() {
     let context = test_context();
     let expected_context = context.clone();
     let value = Value::semantic_thunk(
         &crate::core::test_value_factory(),
         "context-sensitive test value",
         move |actual_context| {
+            assert_eq!(
+                actual_context.context().values().runtime_id(),
+                expected_context.values().runtime_id(),
+            );
             assert!(
-                actual_context
+                !actual_context
                     .context()
-                    .shares_session_with(&expected_context)
+                    .shares_session_with(&expected_context),
+                "lazy production must not be owned by its first observer",
             );
             Ok(n(42))
         },
@@ -6518,7 +6523,7 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
 
 #[test]
 fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
-    let context = test_context();
+    let context = annotation_test_context();
     let builds = Arc::new(AtomicUsize::new(0));
     let result_policies = Arc::new(Mutex::new(Vec::new()));
     context
@@ -6566,7 +6571,7 @@ fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
 
 #[test]
 fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
-    let context = test_context();
+    let context = annotation_test_context();
     let outputs = run_metadata_reflection_update(
         &context,
         Value::error(&crate::core::test_value_factory(), "unlaunched effect"),
@@ -6589,7 +6594,7 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
         EvaluationFailure::message("metadata reflection task failed")
             .with_context(evaluation_context_frame("metadata_producer")),
     );
-    let failed_context = test_context();
+    let failed_context = annotation_test_context();
     failed_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Failed(failure),
@@ -6610,7 +6615,7 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
         "the demanding metadata projection owns reporting responsibility"
     );
 
-    let cancelled_context = test_context();
+    let cancelled_context = annotation_test_context();
     cancelled_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Cancelled,
@@ -6628,7 +6633,7 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
 
 #[test]
 fn metadata_reflection_update_preserves_projection_semantics_and_input_validation() {
-    let short_context = test_context();
+    let short_context = annotation_test_context();
     short_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![n(7)]))),
@@ -6650,7 +6655,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         "list at builtin index is out of bounds"
     );
 
-    let long_context = test_context();
+    let long_context = annotation_test_context();
     let unused_extra = Value::semantic_thunk(
         &crate::core::test_value_factory(),
         "unused effectful metadata result",
@@ -6670,7 +6675,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         .expect("an extra result should be ignored");
     assert_eq!(evaluated_metadata(&long_context, &long[0]).unwrap(), n(8));
 
-    let non_list_context = test_context();
+    let non_list_context = annotation_test_context();
     non_list_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(n(42)),
@@ -6688,7 +6693,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         "list at builtin requires a list or binary value"
     );
 
-    let partial_context = test_context();
+    let partial_context = annotation_test_context();
     partial_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
@@ -6720,7 +6725,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         "one failed result must not poison a sibling projection"
     );
 
-    let invalid_context = test_context();
+    let invalid_context = annotation_test_context();
     let error = run_metadata_reflection_update(&invalid_context, n(0), vec![n(1)])
         .expect_err("ordinary values must be rejected before task launch");
     assert_eq!(
@@ -6748,7 +6753,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
 
 #[test]
 fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
-    let seq_context = test_context();
+    let seq_context = annotation_test_context();
     let seq_builds = Arc::new(AtomicUsize::new(0));
     seq_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
@@ -7003,7 +7008,7 @@ fn reflection_source_reserves_inside_and_activates_after_evaluator_access_closes
 
 #[test]
 fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise() {
-    let context = test_context();
+    let context = annotation_test_context();
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
@@ -7075,7 +7080,7 @@ fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle()
 }
 #[test]
 fn reflection_task_result_returns_arbitrary_lazy_value_once() {
-    let context = test_context();
+    let context = annotation_test_context();
     let result_forces = Arc::new(AtomicUsize::new(0));
     let counted_result_forces = result_forces.clone();
     let result = Value::semantic_thunk(
@@ -7139,9 +7144,9 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
     let resumed_wait = resumed
         .blocked_on()
         .expect("the resumed checkpoint should expose its autonomous task dependency");
-    assert_ne!(
+    assert_eq!(
         resumed_wait, owner_wait,
-        "closing the first demand session retires its route without changing the autonomous task"
+        "closing the first demand session must not retire the runtime-owned lazy route"
     );
     observer.complete_wait_with_value(&resumed_wait.0, n(43));
     assert_eq!(eval_value(&observer, &computation).unwrap(), n(43));
@@ -7206,7 +7211,7 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
 
 #[test]
 fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibility() {
-    let context = test_context();
+    let context = annotation_test_context();
     let producer_frame = evaluation_context_frame("reflection_result_producer");
     let failure = Arc::new(
         EvaluationFailure::message("reflection result failed").with_context(producer_frame.clone()),
@@ -7238,7 +7243,7 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
 
 #[test]
 fn reflection_task_result_propagates_cancellation() {
-    let context = test_context();
+    let context = annotation_test_context();
     context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Cancelled,
@@ -7257,7 +7262,7 @@ fn reflection_task_result_propagates_cancellation() {
 
 #[test]
 fn reflection_gate_waits_before_continuing_target_demand() {
-    let context = test_context();
+    let context = annotation_test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
     let target = Value::semantic_thunk(
@@ -7330,7 +7335,7 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
 
 #[test]
 fn reflection_gate_memoizes_task_failure() {
-    let context = test_context();
+    let context = annotation_test_context();
     let gate = reflection_annotation(&context, n(0), n(42));
     let blocked = eval_value(&context, &gate).expect_err("new reflection task should block");
     let wait = blocked
@@ -7441,7 +7446,7 @@ fn reflection_gate_preserves_structured_post_launch_failure() {
 
 #[test]
 fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
-    let context = test_context();
+    let context = annotation_test_context();
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
         builder.wire(argument, result);
@@ -7491,7 +7496,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
 
 #[test]
 fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
-    let context = test_context();
+    let context = annotation_test_context();
     let function = closed_function_value(1, TestExpr::Local(0));
     let gate = reflection_annotation(&context, n(0), function);
     let applied = closed_net(|builder| {
@@ -7535,7 +7540,7 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
 
 #[test]
 fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
-    let context = test_context();
+    let context = annotation_test_context();
     let key = Key::atom_from_text("answer");
     let target = closed_function_value(1, TestExpr::Value(n(42)));
     let gate = reflection_annotation(&context, n(0), target);

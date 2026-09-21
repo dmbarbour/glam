@@ -697,7 +697,9 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // allocation, journal/result construction, and its test-only operation loops.
 // Semantic operand demand remains one resumable regional state machine.
 const EXPECTED_OCCURRENCES: usize = 208;
-const EXPECTED_FINGERPRINT: u64 = 10_043_443_181_224_580_605;
+// W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
+// the retained test-only lazy-task helper is no longer a production boundary.
+const EXPECTED_FINGERPRINT: u64 = 2_813_285_538_239_211_418;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -705,22 +707,22 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::RetryableWait, 9),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 21),
+    (Signal::CoordinatorBoundary, 20),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 55),
-    (Signal::UserSizedLoop, 88),
+    (Signal::UserSizedLoop, 89),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 119),
+    (WorkShape::DemandThenInspect, 120),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 51),
+    (WorkShape::OrchestrationHandoff, 50),
 ];
 
 #[test]

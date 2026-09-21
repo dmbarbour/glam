@@ -703,7 +703,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/executor.rs::tests::worker_termination_releases_inactive_collector_caches#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::reserve_reflection_completion_activation#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -719,6 +719,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::rooted_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::synchronous_client_demand_waits_for_worker_owned_runtime_progress#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::task_owned_promise_lazy_cycle_fails_in_both_publication_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::project_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/diagnostic_formatter.rs::value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -977,7 +978,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // their recursive values under three additional bounded regions.
         // W6G.1f.2a forces cross-session resumption through the exact
         // lazy-owned checkpoint under one additional bounded test region.
-        ("src/evaluation/tests.rs", GatewayCounts::new(14, 0)),
+        ("src/evaluation/tests.rs", GatewayCounts::new(16, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
@@ -1155,7 +1156,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        24
+        23
     );
 }
 

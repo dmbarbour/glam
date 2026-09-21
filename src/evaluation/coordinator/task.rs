@@ -341,8 +341,6 @@ pub(crate) type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, 
 struct EvaluationWaitState {
     id: NonZeroU64,
     values: crate::core::RuntimeValueObserver,
-    owner_id: EvaluationSessionId,
-    producer: EvaluationTaskId,
     terminal: OnceLock<EvaluationWaitTerminal>,
     completion: CompletionSubscriptions,
 }
@@ -358,52 +356,87 @@ pub(crate) enum EvaluationWaitTerminal {
 }
 
 #[derive(Clone)]
-pub(crate) struct EvaluationWaitToken(Arc<EvaluationWaitState>);
+pub(crate) struct EvaluationWaitToken(Arc<EvaluationWaitHandle>);
+
+struct EvaluationWaitHandle {
+    state: Arc<EvaluationWaitState>,
+    _lease: Option<LazyRouteDemandLease>,
+}
+
+/// One logical demand on a runtime-owned lazy route. Cloning its wait handle
+/// retains this lease but does not register another subscriber. Coordinator
+/// records themselves keep an unleased wait handle.
+pub(super) struct LazyRouteDemandLease {
+    coordinator: Weak<EvaluationWorkCoordinator>,
+    work: super::EvaluationWorkId,
+}
+
+impl LazyRouteDemandLease {
+    pub(super) fn new(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        work: super::EvaluationWorkId,
+    ) -> Self {
+        Self {
+            coordinator: Arc::downgrade(coordinator),
+            work,
+        }
+    }
+}
+
+impl Drop for LazyRouteDemandLease {
+    fn drop(&mut self) {
+        if let Some(coordinator) = self.coordinator.upgrade() {
+            coordinator.release_lazy_route_demand(self.work);
+        }
+    }
+}
 
 impl EvaluationWaitToken {
     pub(crate) fn new(
         id: NonZeroU64,
         values: &crate::core::CoreValueFactory,
-        owner_id: EvaluationSessionId,
-        producer: EvaluationTaskId,
         completion: CompletionSubscriptions,
     ) -> Self {
-        Self(Arc::new(EvaluationWaitState {
-            id,
-            values: values.runtime_value_observer(),
-            owner_id,
-            producer,
-            terminal: OnceLock::new(),
-            completion,
+        Self(Arc::new(EvaluationWaitHandle {
+            state: Arc::new(EvaluationWaitState {
+                id,
+                values: values.runtime_value_observer(),
+                terminal: OnceLock::new(),
+                completion,
+            }),
+            _lease: None,
+        }))
+    }
+
+    pub(super) fn with_lazy_route_lease(&self, lease: LazyRouteDemandLease) -> Self {
+        Self(Arc::new(EvaluationWaitHandle {
+            state: self.0.state.clone(),
+            _lease: Some(lease),
         }))
     }
 
     pub(crate) fn get(&self) -> u64 {
-        self.0.id.get()
-    }
-
-    pub(crate) fn owner_id(&self) -> EvaluationSessionId {
-        self.0.owner_id
+        self.0.state.id.get()
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.values.runtime_id()
+        self.0.state.values.runtime_id()
     }
 
     pub(crate) fn value_observer(&self) -> &crate::core::RuntimeValueObserver {
-        &self.0.values
-    }
-
-    pub(crate) fn producer(&self) -> EvaluationTaskId {
-        self.0.producer
+        &self.0.state.values
     }
 
     fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
-        self.0.completion.coordinator()
+        self.0.state.completion.coordinator()
     }
 
     pub(crate) fn terminal_poll(&self) -> Option<EvaluationWaitPoll> {
-        self.0.terminal.get().map(EvaluationWaitTerminal::to_poll)
+        self.0
+            .state
+            .terminal
+            .get()
+            .map(EvaluationWaitTerminal::to_poll)
     }
 
     pub(crate) fn publish_terminal(
@@ -421,14 +454,15 @@ impl EvaluationWaitToken {
             | EvaluationWaitTerminal::Abandoned
             | EvaluationWaitTerminal::Exited => {}
         }
-        if let Err(candidate) = self.0.terminal.set(terminal) {
+        if let Err(candidate) = self.0.state.terminal.set(terminal) {
             debug_assert_eq!(
-                self.0.terminal.get(),
+                self.0.state.terminal.get(),
                 Some(&candidate),
                 "a wait token received conflicting terminal results"
             );
         }
         self.0
+            .state
             .terminal
             .get()
             .expect("terminal publication must initialize the wait cell")
@@ -442,6 +476,7 @@ impl EvaluationWaitToken {
         terminal: EvaluationWaitTerminal,
     ) -> (EvaluationWaitTerminal, CompletionWake) {
         self.0
+            .state
             .completion
             .publish_guarded(coordinator, mutation, || {
                 Ok::<_, std::convert::Infallible>(self.publish_terminal(terminal))
@@ -450,18 +485,22 @@ impl EvaluationWaitToken {
     }
 
     pub(crate) fn notify_terminal(&self) {
-        debug_assert!(self.0.terminal.get().is_some());
-        self.0.completion.notify_published();
+        debug_assert!(self.0.state.terminal.get().is_some());
+        self.0.state.completion.notify_published();
     }
 
     pub(super) fn abandon_deferred_producer(&self) {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
-        let owner = self.owner_id();
+        let Some(owner) = coordinator.deferred_owner_for_wait(self) else {
+            return;
+        };
         let mut wait = self.clone();
         loop {
-            if wait.owner_id() != owner || wait.terminal_poll().is_some() {
+            if wait.terminal_poll().is_some()
+                || coordinator.deferred_owner_for_wait(&wait) != Some(owner)
+            {
                 return;
             }
             let Some(abandoned) = coordinator.abandon_deferred_wait(&wait) else {
@@ -488,26 +527,29 @@ impl EvaluationWaitToken {
         registration: WakeRegistration,
     ) -> CompletionSubscriptionOutcome {
         self.0
+            .state
             .completion
-            .subscribe(runtime, registration, || self.0.terminal.get().is_some())
+            .subscribe(runtime, registration, || {
+                self.0.state.terminal.get().is_some()
+            })
     }
 
     pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {
-        self.0.completion.unsubscribe(registration)
+        self.0.state.completion.unsubscribe(registration)
     }
 
     pub(crate) fn has_exact_subscriptions(&self) -> bool {
-        self.0.completion.len() != 0
+        self.0.state.completion.len() != 0
     }
 
     #[cfg(test)]
     pub(crate) fn exact_subscription_count(&self) -> usize {
-        self.0.completion.len()
+        self.0.state.completion.len()
     }
 
     #[cfg(test)]
     pub(crate) fn terminal_for_test(&self) -> Option<&EvaluationWaitTerminal> {
-        self.0.terminal.get()
+        self.0.state.terminal.get()
     }
 
     #[cfg(test)]
@@ -533,17 +575,15 @@ impl fmt::Debug for EvaluationWaitToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EvaluationWaitToken")
-            .field("wait", &self.0.id)
-            .field("session", &self.0.owner_id)
-            .field("producer", &self.0.producer)
-            .field("terminal", &self.0.terminal.get().is_some())
+            .field("wait", &self.0.state.id)
+            .field("terminal", &self.0.state.terminal.get().is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl PartialEq for EvaluationWaitToken {
     fn eq(&self, other: &Self) -> bool {
-        self.0.id == other.0.id
+        self.0.state.id == other.0.state.id
     }
 }
 
@@ -551,7 +591,7 @@ impl Eq for EvaluationWaitToken {}
 
 impl Hash for EvaluationWaitToken {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.id.hash(state);
+        self.0.state.id.hash(state);
     }
 }
 
@@ -726,6 +766,7 @@ impl PromiseProducerPublication {
 impl PromiseProducerObligation {
     pub(crate) fn coordinator_owned(
         owner: EvaluationTaskId,
+        owner_session: EvaluationSessionId,
         wait: &EvaluationWaitToken,
         work: EvaluationWorkId,
         promise: PromiseId,
@@ -733,8 +774,8 @@ impl PromiseProducerObligation {
     ) -> Self {
         Self {
             owner,
-            owner_session: wait.owner_id(),
-            wait: Arc::downgrade(&wait.0),
+            owner_session,
+            wait: Arc::downgrade(&wait.0.state),
             source: PromiseProducerSource::Coordinator {
                 work,
                 promise,
@@ -745,14 +786,15 @@ impl PromiseProducerObligation {
 
     pub(crate) fn local_owned(
         owner: EvaluationTaskId,
+        owner_session: EvaluationSessionId,
         wait: &EvaluationWaitToken,
         promise: PromiseId,
         local_owner: &Arc<LocalPromiseOwner>,
     ) -> Self {
         Self {
             owner,
-            owner_session: wait.owner_id(),
-            wait: Arc::downgrade(&wait.0),
+            owner_session,
+            wait: Arc::downgrade(&wait.0.state),
             source: PromiseProducerSource::Local {
                 promise,
                 owner: Arc::downgrade(local_owner),
@@ -780,7 +822,12 @@ impl PromiseProducerObligation {
     }
 
     pub(crate) fn try_wait(&self) -> Option<EvaluationWaitToken> {
-        self.wait.upgrade().map(EvaluationWaitToken)
+        self.wait.upgrade().map(|state| {
+            EvaluationWaitToken(Arc::new(EvaluationWaitHandle {
+                state,
+                _lease: None,
+            }))
+        })
     }
 
     #[cfg(test)]
@@ -875,8 +922,6 @@ impl EvaluationTaskHandle {
         wait: EvaluationWaitToken,
     ) -> Self {
         debug_assert_eq!(coordinator.runtime_id(), wait.runtime_id());
-        debug_assert_eq!(owner_session, wait.owner_id());
-        debug_assert_eq!(id, wait.producer());
         Self {
             id,
             work,

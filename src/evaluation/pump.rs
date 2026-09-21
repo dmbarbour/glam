@@ -4,11 +4,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::coordinator::{
-    self, ClaimedDeferredWork, ClaimedReflectionWork, ClaimedTaskWork, ClientDemandOperation,
-    DeferredLazyCycleMember, DeferredWorkPoll, EvaluationMachinePoll, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitTerminal,
-    EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ReflectionWorkPoll,
-    ReflectionWorkState, WorkDependency,
+    self, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork, ClaimedTaskWork,
+    ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll, EvaluationMachinePoll,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
+    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId,
+    ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -60,10 +60,10 @@ pub(super) fn test_reflection_dependency(
     let mut wait = wait.clone();
     let mut seen = HashSet::new();
     while seen.insert(wait.get()) {
-        let Some(producer) = coordinator.producer_for_wait(&wait) else {
+        let Some(producer) = coordinator.work_for_wait(&wait) else {
             break;
         };
-        let Some(dependency) = coordinator.task_dependency(producer) else {
+        let Some(dependency) = coordinator.work_dependency_by_id(producer) else {
             break;
         };
         let Some(dependency_wait) = dependency.producer_wait() else {
@@ -127,8 +127,8 @@ impl ReleasedTaskMachine {
 }
 
 struct ReportedDependency {
-    task: EvaluationTaskId,
-    session: EvaluationSessionId,
+    task: Option<EvaluationTaskId>,
+    session: Option<EvaluationSessionId>,
     wait: u64,
     live_cross_session: bool,
 }
@@ -141,6 +141,7 @@ struct ClaimedTask {
 enum ClaimedTaskKind {
     Reflection(ClaimedReflectionWork),
     Deferred(ClaimedDeferredWork),
+    LazyRoute(ClaimedLazyRoute),
 }
 
 impl ClaimedTask {
@@ -149,6 +150,7 @@ impl ClaimedTask {
         let kind = match work {
             ClaimedTaskWork::Reflection(claim) => ClaimedTaskKind::Reflection(claim),
             ClaimedTaskWork::Deferred(claim) => ClaimedTaskKind::Deferred(claim),
+            ClaimedTaskWork::LazyRoute(claim) => ClaimedTaskKind::LazyRoute(claim),
         };
         Self { coordinator, kind }
     }
@@ -158,6 +160,7 @@ impl ClaimedTask {
         match &mut self.kind {
             ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
             ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
+            ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
         }
     }
 
@@ -174,6 +177,7 @@ impl ClaimedTask {
                 release_reflection_task(&self.coordinator, task, poll)
             }
             ClaimedTaskKind::Deferred(task) => release_deferred_task(&self.coordinator, task, poll),
+            ClaimedTaskKind::LazyRoute(route) => release_lazy_route(&self.coordinator, route, poll),
         };
         if let Some(value) = spark {
             self.coordinator.submit_spark_root(
@@ -190,8 +194,57 @@ impl ClaimedTaskKind {
         match self {
             Self::Reflection(task) => task.demand(),
             Self::Deferred(task) => task.demand(),
+            Self::LazyRoute(route) => route.demand(),
         }
     }
+}
+
+fn release_lazy_route(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    claimed: ClaimedLazyRoute,
+    poll: EvaluationMachinePoll,
+) -> (bool, bool, Option<ReleasedTaskMachine>) {
+    let work = claimed.id();
+    let (work_poll, terminal) = match poll {
+        EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
+        EvaluationMachinePoll::ScheduleSpark(_) => {
+            unreachable!("claimed-task release must externalize spark requests")
+        }
+        EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
+        EvaluationMachinePoll::Exit(_) => unreachable!("lazy route cannot vote to exit"),
+        EvaluationMachinePoll::Complete(value) => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Complete(value)),
+        ),
+        EvaluationMachinePoll::Failed(error) => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Failed(error)),
+        ),
+        EvaluationMachinePoll::Cancelled => unreachable!("lazy route cannot be canceled as a task"),
+    };
+    let mut release = coordinator.release_lazy_route(claimed, work_poll);
+    if !release.cycle.is_empty() {
+        poison_lazy_cycle(
+            coordinator,
+            std::mem::take(&mut release.cycle),
+            release.cycle_error.take(),
+        );
+        return (release.made_progress, false, None);
+    }
+    if !release.terminal {
+        return (release.made_progress, release.remains_blocked, None);
+    }
+    let terminal = terminal.expect("terminal lazy route poll must carry a terminal result");
+    let failure = match &terminal {
+        EvaluationWaitTerminal::Complete(_) => {
+            evaluation_failure("lazy route completed without fulfilling its fixpoint")
+        }
+        EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
+        _ => unreachable!("lazy route terminal is complete or failed"),
+    };
+    coordinator.settle_terminal_work(work, terminal, failure);
+    coordinator.retire_lazy_route(work);
+    (release.made_progress, false, None)
 }
 
 impl EvaluationDemandState {
@@ -265,8 +318,10 @@ impl EvaluationDemandState {
             unfinished.push(EvaluationUnfinishedTask {
                 task: snapshot.task,
                 state,
-                dependency: dependency.as_ref().map(|dependency| dependency.task),
-                dependency_session: dependency.as_ref().map(|dependency| dependency.session),
+                dependency: dependency.as_ref().and_then(|dependency| dependency.task),
+                dependency_session: dependency
+                    .as_ref()
+                    .and_then(|dependency| dependency.session),
                 wait: dependency.as_ref().map(|dependency| dependency.wait),
                 observed_epoch: block
                     .and_then(|block| block.observed_epoch)
@@ -298,27 +353,36 @@ impl EvaluationDemandState {
         let mut wait = initial.producer_wait()?.clone();
         let mut seen = HashSet::new();
         loop {
-            if !seen.insert(wait.get()) || wait.owner_id() != self.id {
+            coordinator.work_for_wait(&wait)?;
+            let Some((task, session)) = coordinator.task_origin_for_wait(&wait) else {
                 return Some(ReportedDependency {
-                    task: wait.producer(),
-                    session: wait.owner_id(),
+                    task: None,
+                    session: None,
                     wait: wait.get(),
-                    live_cross_session: wait.owner_id() != self.id
-                        && coordinator.demand_session_is_open(wait.owner_id()),
+                    live_cross_session: true,
+                });
+            };
+            if !seen.insert(wait.get()) || session != self.id {
+                return Some(ReportedDependency {
+                    task: Some(task),
+                    session: Some(session),
+                    wait: wait.get(),
+                    live_cross_session: session != self.id
+                        && coordinator.demand_session_is_open(session),
                 });
             }
-            let Some(next) = coordinator.task_dependency(wait.producer()) else {
+            let Some(next) = coordinator.task_dependency(task) else {
                 return Some(ReportedDependency {
-                    task: wait.producer(),
-                    session: wait.owner_id(),
+                    task: Some(task),
+                    session: Some(session),
                     wait: wait.get(),
                     live_cross_session: false,
                 });
             };
             let Some(next_wait) = next.producer_wait() else {
                 return Some(ReportedDependency {
-                    task: wait.producer(),
-                    session: wait.owner_id(),
+                    task: Some(task),
+                    session: Some(session),
                     wait: wait.get(),
                     live_cross_session: false,
                 });
@@ -331,16 +395,16 @@ impl EvaluationDemandState {
 pub(super) fn prioritized_task_for(
     coordinator: &EvaluationWorkCoordinator,
     target: &EvaluationWaitToken,
-) -> Option<EvaluationTaskId> {
+) -> Option<EvaluationWorkId> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut wait = target.clone();
-    while let Some(task) = coordinator.producer_for_wait(&wait) {
-        if !seen.insert(task) {
+    while let Some(work) = coordinator.work_for_wait(&wait) {
+        if !seen.insert(work) {
             break;
         }
-        chain.push(task);
-        let Some(dependency) = coordinator.task_dependency(task) else {
+        chain.push(work);
+        let Some(dependency) = coordinator.work_dependency_by_id(work) else {
             break;
         };
         let Some(dependency_wait) = dependency.producer_wait() else {
@@ -351,7 +415,7 @@ pub(super) fn prioritized_task_for(
     chain
         .into_iter()
         .rev()
-        .find(|task| coordinator.task_is_claimable(*task))
+        .find(|work| coordinator.work_is_claimable(*work))
 }
 
 pub(super) fn pump_demand(
@@ -383,8 +447,9 @@ pub(super) fn pump_demand(
             .take()
             .or_else(|| prioritized_task_for(coordinator, target));
         let claimed = prioritized
-            .and_then(|task| coordinator.claim_task(task))
-            .or_else(|| coordinator.claim_ready_task_for_session(session));
+            .and_then(|work| coordinator.claim_work(work))
+            .or_else(|| coordinator.claim_ready_task_for_session(session))
+            .or_else(|| coordinator.claim_ready_exact_dependency_for_session(session));
         let Some(work) = claimed else {
             if coordinator.target_has_running_producer(target) {
                 return EvaluationPumpOutcome::Busy;
@@ -403,7 +468,7 @@ pub(super) fn pump_demand(
             return EvaluationPumpOutcome::NoProgress;
         };
 
-        let task = work.task();
+        let work_id = work.id();
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
         let quantum = step_budget.min(TASK_POLL_QUANTUM);
         step_budget -= quantum;
@@ -424,7 +489,7 @@ pub(super) fn pump_demand(
             // continuation only in this bounded demand pump. Globally queuing
             // it would turn speculative demand from an abandoned alternative
             // into unbounded eager evaluation by background workers.
-            yielded_exact = Some(task);
+            yielded_exact = Some(work_id);
         }
     }
 }
@@ -457,6 +522,13 @@ fn release_reflection_task(
     };
 
     let mut release = coordinator.release_reflection(claimed, work_poll);
+    if !release.cycle.is_empty() {
+        poison_lazy_cycle(
+            coordinator,
+            std::mem::take(&mut release.cycle),
+            release.cycle_error.take(),
+        );
+    }
     if !release.terminal {
         if !release.exit_waiting {
             debug_assert!(release.machine.is_none());
@@ -548,7 +620,11 @@ fn release_deferred_task(
 
     let mut release = coordinator.release_deferred(claimed, work_poll);
     if !release.cycle.is_empty() {
-        poison_lazy_cycle(coordinator, std::mem::take(&mut release.cycle));
+        poison_lazy_cycle(
+            coordinator,
+            std::mem::take(&mut release.cycle),
+            release.cycle_error.take(),
+        );
         return (release.made_progress, false, None);
     }
     if !release.terminal {
@@ -594,7 +670,8 @@ fn release_deferred_task(
 
 fn poison_lazy_cycle(
     coordinator: &Arc<EvaluationWorkCoordinator>,
-    members: Vec<DeferredLazyCycleMember>,
+    mut members: Vec<DeferredLazyCycleMember>,
+    cycle_error: Option<String>,
 ) {
     let cycle = Arc::new(LazyCycle {
         members: members
@@ -605,7 +682,9 @@ fn poison_lazy_cycle(
             })
             .collect(),
     });
-    let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
+    let failure = cycle_error
+        .map(evaluation_failure)
+        .unwrap_or_else(|| Arc::new(EvaluationFailure::dependency_cycle(cycle)));
     let values = coordinator
         .value_observer()
         .upgrade()
@@ -641,13 +720,22 @@ fn poison_lazy_cycle(
     }
     for (member, terminal) in &terminals {
         debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
-        coordinator.retire_deferred(member.work);
+        if member.route {
+            coordinator.retire_lazy_route(member.work);
+        } else {
+            coordinator.retire_deferred(member.work);
+        }
     }
     drop(terminals);
+    let blocks = members
+        .iter_mut()
+        .filter_map(|member| member.retired_block.take())
+        .collect::<Vec<_>>();
     let machines = members
         .into_iter()
-        .map(|member| member.machine)
+        .filter_map(|member| member.machine)
         .collect::<Vec<_>>();
+    drop(blocks);
     drop(machines);
 }
 
@@ -737,7 +825,9 @@ impl EvaluationDemandState {
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
     ) -> Option<ClaimedTask> {
-        let work = coordinator.claim_ready_task_for_session(self.id)?;
+        let work = coordinator
+            .claim_ready_task_for_session(self.id)
+            .or_else(|| coordinator.claim_ready_lazy_route_dependency_for_session(self.id))?;
         Some(ClaimedTask::new(coordinator.clone(), work))
     }
 

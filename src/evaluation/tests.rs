@@ -565,10 +565,11 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
+    let promise = PromisedValue::new(context.values(), "producer before subscription gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer before subscription",
-        Value::Number(31.into()),
+        Value::Promised(promise.clone()),
     );
     let handle = context
         .demand_whnf(root)
@@ -586,17 +587,18 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
         panic!("uncached lazy demand should expose its canonical producer wait")
     };
     let wait = wait.clone();
-    assert_eq!(context.deferred_task_count(), 1);
+    assert!(coordinator.work_for_wait(&wait).is_some());
     assert_eq!(wait.exact_subscription_count(), 0);
 
-    assert!(coordinator.promote_deferred_wait(&wait));
-    let producer = coordinator
-        .producer_for_wait(&wait)
-        .expect("canonical lazy wait should name its producer");
-    let work = coordinator
-        .claim_task(producer)
-        .expect("promoted lazy producer should be claimable");
-    coordinator.poll_claimed_task(work);
+    set_promise(&context, &promise, Value::Number(31.into()))
+        .expect("producer gate should resolve once");
+    coordinator.promote_deferred_wait(&wait);
+    for _ in 0..8 {
+        if matches!(context.poll_wait(&wait), EvaluationWaitPoll::Complete(_)) {
+            break;
+        }
+        assert!(coordinator.poll_runtime_work());
+    }
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Complete(_)
@@ -623,10 +625,11 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
+    let promise = PromisedValue::new(context.values(), "subscription before producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "subscription before producer",
-        Value::Number(37.into()),
+        Value::Promised(promise.clone()),
     );
     let handle = context
         .demand_whnf(root)
@@ -642,10 +645,17 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
     else {
         panic!("uncached lazy demand should block on its producer")
     };
-    assert_eq!(context.deferred_task_count(), 1);
+    assert!(coordinator.work_for_wait(&wait).is_some());
     assert_eq!(wait.exact_subscription_count(), 1);
 
-    assert!(poll_one_runtime_work(&coordinator));
+    set_promise(&context, &promise, Value::Number(37.into()))
+        .expect("producer gate should resolve once");
+    for _ in 0..8 {
+        if matches!(context.poll_wait(&wait), EvaluationWaitPoll::Complete(_)) {
+            break;
+        }
+        assert!(coordinator.poll_runtime_work());
+    }
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(wait.exact_subscription_count(), 0);
     assert!(matches!(
@@ -666,10 +676,11 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
+    let promise = PromisedValue::new(context.values(), "claimed producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer claimed before stable abandonment",
-        Value::Number(41.into()),
+        Value::Promised(promise.clone()),
     );
     let mut handle = context
         .demand_whnf(root)
@@ -687,11 +698,13 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     };
     assert_eq!(wait.exact_subscription_count(), 1);
 
+    set_promise(&context, &promise, Value::Number(41.into()))
+        .expect("claimed producer gate should resolve");
     let producer = coordinator
-        .producer_for_wait(&wait)
-        .expect("canonical lazy wait should name its producer");
+        .work_for_wait(&wait)
+        .expect("canonical lazy wait should name its work");
     let work = coordinator
-        .claim_task(producer)
+        .claim_work(producer)
         .expect("the exact producer should be claimable");
     assert!(coordinator.target_has_running_producer(&wait));
 
@@ -723,10 +736,11 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
+    let promise = PromisedValue::new(context.values(), "dormant producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "dormant causal tail before stable abandonment",
-        Value::Number(43.into()),
+        Value::Promised(promise.clone()),
     );
     let mut handle = context
         .demand_whnf(root)
@@ -742,6 +756,8 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     else {
         panic!("uncached lazy demand should block on its producer")
     };
+    set_promise(&context, &promise, Value::Number(43.into()))
+        .expect("dormant producer gate should resolve");
     assert!(
         coordinator.park_deferred_wait_for_test(&wait),
         "the forced ordering must park the queued causal producer"
@@ -756,10 +772,10 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     assert_eq!(wait.exact_subscription_count(), 1);
 
     let producer = coordinator
-        .producer_for_wait(&wait)
-        .expect("canonical lazy wait should name its producer");
+        .work_for_wait(&wait)
+        .expect("canonical lazy wait should name its work");
     let work = coordinator
-        .claim_task(producer)
+        .claim_work(producer)
         .expect("the dormant exact producer should remain locally claimable");
     coordinator.poll_claimed_task(work);
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -4003,10 +4019,10 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
     };
     let observer = fixture.context();
 
-    assert_eq!(
+    assert!(matches!(
         observer.poll_wait(&abandoned_wait),
-        EvaluationWaitPoll::Abandoned
-    );
+        EvaluationWaitPoll::Pending(_)
+    ));
     set_promise(&observer, &promise, Value::Number(53.into()))
         .expect("the shared dependency should accept its assignment");
     assert_eq!(
@@ -4014,11 +4030,150 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
             .expect("a later session should resume the lazy-owned checkpoint"),
         Value::Number(53.into())
     );
+    assert!(matches!(
+        observer.poll_wait(&abandoned_wait),
+        EvaluationWaitPoll::Complete(_)
+    ));
     assert_eq!(
         forced.load(Ordering::Acquire),
         1,
         "session handoff must not replay the source callback"
     );
+}
+
+#[test]
+fn closing_first_observer_preserves_another_sessions_lazy_route_demand() {
+    let fixture = SameRuntimeFixture::new();
+    let owner = fixture.context();
+    let observer = fixture.context();
+    let coordinator = observer.coordinator().expect("coordinator should be live");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(owner.values(), "cross-session route gate");
+    let source_polls = Arc::new(AtomicUsize::new(0));
+    let observed = source_polls.clone();
+    let followed = promise.clone();
+    let (lazy, _lazy_value) =
+        rooted_semantic_lazy_value(owner.values(), "shared route", move |_| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Promised(followed.clone()))
+        });
+    let root = lazy.root(owner.values());
+    let first = crate::eval::lazy_root_wait(&owner, &root).expect("first demand should admit");
+    let second = crate::eval::lazy_root_wait(&observer, &root)
+        .expect("second session should join the same route");
+    assert_eq!(first.get(), second.get());
+    let work = coordinator
+        .work_for_wait(&first)
+        .expect("route should have work");
+
+    drop(first);
+    drop(owner);
+    assert_eq!(coordinator.work_for_wait(&second), Some(work));
+    assert!(matches!(
+        observer.poll_wait(&second),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    set_promise(&observer, &promise, Value::Number(67.into()))
+        .expect("shared dependency should resolve");
+    assert!(matches!(
+        observer.pump_wait(&second, 64),
+        EvaluationPumpOutcome::TargetReady
+    ));
+    assert!(matches!(
+        observer.poll_wait(&second),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "route retirement gate");
+    let source_polls = Arc::new(AtomicUsize::new(0));
+    let observed = source_polls.clone();
+    let followed = promise.clone();
+    let (lazy, _lazy_value) =
+        rooted_semantic_lazy_value(context.values(), "retirable route", move |_| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Promised(followed.clone()))
+        });
+    let root = lazy.root(context.values());
+    let first = crate::eval::lazy_root_wait(&context, &root).expect("first route should admit");
+    let first_id = first.get();
+    for _ in 0..8 {
+        if matches!(
+            context.pump_wait(&first, 64),
+            EvaluationPumpOutcome::NoProgress
+        ) {
+            break;
+        }
+    }
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+    assert!(lazy.source_snapshot(context.values()).is_none());
+    assert!(coordinator.work_for_wait(&first).is_some());
+
+    drop(first);
+    assert!(coordinator.deferred_wait(root.id().into()).is_none());
+    assert!(context.values().with_runtime_value_access(|access| {
+        root.access(&access)
+            .expect("lazy root and access should share one runtime")
+            .checkpoint_snapshot()
+            .is_some()
+    }));
+
+    set_promise(&context, &promise, Value::Number(53.into()))
+        .expect("host promise should resolve once");
+    let second = crate::eval::lazy_root_wait(&context, &root).expect("route should re-admit");
+    assert_ne!(second.get(), first_id);
+    assert_eq!(
+        crate::eval::eval_value(&context, &Value::Lazy(lazy.clone())).unwrap(),
+        Value::Number(53.into())
+    );
+    assert_eq!(source_polls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn claimed_lazy_route_survives_last_demand_and_accepts_new_subscriber() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (lazy, _lazy_value) = rooted_semantic_lazy_value(context.values(), "claimed route", |_| {
+        Ok(Value::Number(61.into()))
+    });
+    let root = lazy.root(context.values());
+    let first = crate::eval::lazy_root_wait(&context, &root).expect("route should admit");
+    let work_id = coordinator
+        .work_for_wait(&first)
+        .expect("route must have work");
+    let claim = coordinator.claim_work(work_id).expect("route should claim");
+    drop(first);
+    assert!(coordinator.work_is_busy(work_id));
+
+    let second = crate::eval::lazy_root_wait(&context, &root)
+        .expect("new subscriber should attach to the claimed route");
+    assert_eq!(coordinator.work_for_wait(&second), Some(work_id));
+    coordinator.poll_claimed_task(claim);
+    assert!(matches!(
+        context.poll_wait(&second),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(coordinator.work_for_wait(&second).is_none());
+
+    let third = crate::eval::lazy_root_wait(&context, &root)
+        .expect("a post-publication subscriber may re-admit the cached lazy");
+    assert_ne!(third.get(), second.get());
+    assert!(matches!(
+        context.pump_wait(&third, 64),
+        EvaluationPumpOutcome::TargetReady
+    ));
+    assert!(matches!(
+        context.poll_wait(&third),
+        EvaluationWaitPoll::Complete(_)
+    ));
 }
 
 #[test]
@@ -4822,6 +4977,72 @@ fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
 }
 
 #[test]
+fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
+    for route_first in [true, false] {
+        let context = isolated_standalone_context();
+        let route_slot = Arc::new(OnceLock::new());
+        let produced = Arc::new(Mutex::new(None));
+        let task = context
+            .schedule_task({
+                let route_slot = route_slot.clone();
+                let produced = produced.clone();
+                move |task_context| {
+                    let promise = PromisedValue::fixpoint(
+                        &task_context,
+                        Arc::from("mixed recursive promise"),
+                    )?;
+                    *produced.lock().expect("promise fixture lock was poisoned") = Some(promise);
+                    Ok(Box::new(AwaitCell {
+                        context: task_context,
+                        dependency: route_slot,
+                    }))
+                }
+            })
+            .expect("promise owner should schedule");
+        let promise = produced
+            .lock()
+            .expect("promise fixture lock was poisoned")
+            .take()
+            .expect("task construction should publish its promise");
+        let (_lazy, lazy_root) = context.values().with_runtime_value_access(|access| {
+            let lazy = LazyValue::from_access_in(
+                &access,
+                Arc::from([]),
+                Arc::from([Value::Promised(promise)]),
+            );
+            let root = lazy.root_in(&access);
+            (lazy, root)
+        });
+        let route = context
+            .lazy_root_task(&lazy_root)
+            .expect("lazy route should register");
+        route_slot
+            .set(route.clone())
+            .expect("route dependency should be installed once");
+
+        let target = if route_first { &route } else { task.wait() };
+        assert_eq!(
+            context.pump_wait(target, 256),
+            EvaluationPumpOutcome::TargetReady,
+            "cycle should settle whichever producer was demanded first"
+        );
+        assert!(matches!(
+            context.poll_wait(&route),
+            EvaluationWaitPoll::Failed(error)
+                if error.to_string().contains("recursively observed itself")
+        ));
+        assert_eq!(
+            context.pump_wait(task.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        assert!(matches!(
+            context.poll_reflection_task(&task),
+            EvaluationWaitPoll::Failed(_)
+        ));
+    }
+}
+
+#[test]
 fn pump_and_quiescence_do_not_repoll_an_unchanged_block() {
     // Quiescence is runtime-wide. Use a private value domain so unrelated
     // parallel fixtures cannot legitimately make the broad observation busy.
@@ -5609,7 +5830,7 @@ fn pending_cross_session_task_promise_does_not_spin_a_deferred_retry() {
         .wait()
         .clone();
     let observer = fixture.context();
-    assert_ne!(dependency.owner_id(), observer.session_id());
+    assert_ne!(owner.session_id(), observer.session_id());
 
     let lazy = inert_lazy_for(observer.values(), "cross-session promise follower");
     let wait = observer
@@ -7033,6 +7254,31 @@ fn runtime_pump_snapshot_is_observational() {
 }
 
 #[test]
+fn queued_lazy_route_is_background_pump_work() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (lazy, _lazy_value) =
+        rooted_semantic_lazy_value(context.values(), "background lazy route", |_| {
+            Ok(Value::Number(71.into()))
+        });
+    let root = lazy.root(context.values());
+    let wait = crate::eval::lazy_root_wait(&context, &root).expect("route should admit");
+    assert!(matches!(
+        context.poll_wait(&wait),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert!(coordinator.promote_deferred_wait(&wait));
+    assert!(coordinator.runtime_pump_snapshot().background_ready);
+
+    fixture.runtime.pump_until_stable();
+    assert!(matches!(
+        context.poll_wait(&wait),
+        EvaluationWaitPoll::Complete(_)
+    ));
+}
+
+#[test]
 fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
@@ -7383,7 +7629,11 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
         (0, 0, 1),
         "the unresolved lazy demand should park its stable spark record",
     );
-    assert!(context.task_registry_counts().deferred_active > 0);
+    assert!(
+        coordinator
+            .deferred_wait(lazy.id(context.values()).into())
+            .is_some()
+    );
 
     drop(session);
 
@@ -7393,12 +7643,17 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
         "closing the demand session should immediately abandon blocked sparks",
     );
     let deadline = Instant::now() + Duration::from_secs(2);
-    while coordinator.deferred_counts(context.session.id).0 != 0 && Instant::now() < deadline {
+    while coordinator
+        .deferred_wait(lazy.id(context.values()).into())
+        .is_some()
+        && Instant::now() < deadline
+    {
         std::thread::yield_now();
     }
-    assert_eq!(
-        coordinator.deferred_counts(context.session.id).0,
-        0,
+    assert!(
+        coordinator
+            .deferred_wait(lazy.id(context.values()).into())
+            .is_none(),
         "spark abandonment or the returning worker must release the reusable deferred claim"
     );
     assert!(lazy.cached(context.values()).is_none());

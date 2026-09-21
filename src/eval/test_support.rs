@@ -28,6 +28,13 @@ pub(crate) fn test_context() -> OwnedEvalContext {
     EvalContext::isolated(crate::core::test_value_factory())
 }
 
+pub(crate) fn annotation_test_context() -> OwnedEvalContext {
+    // Annotation launchers are runtime/coordinator defaults. Their fixtures
+    // need a private scheduler even though cheap semantic values come from
+    // the shared test factory.
+    EvalContext::private_closed(crate::core::test_value_factory())
+}
+
 pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt> {
     let context = test_context();
     let mut value = eval_value(&context, &lower_test_computation_value(expr.clone()))?;

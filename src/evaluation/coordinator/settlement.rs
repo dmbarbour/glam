@@ -2,19 +2,21 @@
 
 use std::sync::Arc;
 
+use crate::core::LazyId;
 use crate::runtime::{RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationFailure, RuntimeObservationEpoch};
 use super::client_demand::{ClientDemandResult, detach_client_demand};
-use super::deferred::detach_deferred;
+use super::deferred::{detach_deferred, detach_lazy_route};
 use super::reflection::{detach_reflection, reflection_work, reflection_work_mut};
 use super::{
     ClientDemandRetirement, CompletionWake, EvaluationExitBlock, EvaluationSessionId,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
-    EvaluationWorkCoordinator, EvaluationWorkId, ExitIntent, ProducerSettlementObligation,
-    TaskOwnedPromiseObligation, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake,
-    WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState, task_block,
-    task_for_record, task_observation_epoch, terminal_task_status, work_dependency,
+    EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ExitIntent,
+    ProducerSettlementObligation, TaskOwnedPromiseObligation, TaskStatusPublisher,
+    TaskStatusUpdate, TaskStatusWake, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
+    WorkState, task_block, task_for_record, task_observation_epoch, terminal_task_status,
+    work_dependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub(crate) struct RuntimeExitSnapshot {
 pub(crate) enum RuntimeWorkKindSnapshot {
     ReflectionTask,
     DeferredEvaluation,
+    LazyRoute,
     ClientDemand,
     Spark,
 }
@@ -73,6 +76,10 @@ pub(crate) enum RuntimeDependencySnapshot {
         producer: EvaluationTaskId,
         session: EvaluationSessionId,
     },
+    LazyWait {
+        wait: u64,
+        lazy: LazyId,
+    },
     Promise {
         promise: u64,
         producer: Option<(u64, EvaluationTaskId, EvaluationSessionId)>,
@@ -84,8 +91,9 @@ pub(crate) enum RuntimeDependencySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeDeadlockWorkSnapshot {
     pub(crate) work: EvaluationWorkId,
-    pub(crate) session: EvaluationSessionId,
+    pub(crate) session: Option<EvaluationSessionId>,
     pub(crate) task: Option<EvaluationTaskId>,
+    pub(crate) lazy: Option<LazyId>,
     pub(crate) kind: RuntimeWorkKindSnapshot,
     pub(crate) state: RuntimeWorkStateSnapshot,
     pub(crate) dependency: Option<RuntimeDependencySnapshot>,
@@ -146,8 +154,10 @@ impl EvaluationWorkCoordinator {
 pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> RuntimePumpSnapshot {
     RuntimePumpSnapshot {
         background_ready: state.work.values().any(|record| {
-            matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
-                && matches!(record.state, WorkState::Queued)
+            matches!(
+                record.kind,
+                WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::LazyRoute(_)
+            ) && matches!(record.state, WorkState::Queued)
         }),
         progress_owned: state
             .work
@@ -203,11 +213,17 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
         };
         unfinished.push(RuntimeDeadlockWorkSnapshot {
             work: record.id,
-            session: record.demand_session,
+            session: (!matches!(record.kind, WorkKind::LazyRoute(_)))
+                .then_some(record.demand_session),
             task: task_for_record(record),
+            lazy: match &record.kind {
+                WorkKind::LazyRoute(route) => Some(route.lazy.id()),
+                _ => None,
+            },
             kind: runtime_work_kind(record),
             state: state_snapshot,
-            dependency: work_dependency(record).map(runtime_dependency_snapshot),
+            dependency: work_dependency(record)
+                .map(|dependency| runtime_dependency_snapshot(state, dependency)),
             observed_epoch: task_observation_epoch(record),
             blocked_error: task_block(record)
                 .and_then(|block| block.error.as_ref())
@@ -233,15 +249,16 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
         };
         unfinished.push(RuntimeDeadlockWorkSnapshot {
             work: record.id,
-            session: record.demand_session,
+            session: Some(record.demand_session),
             task: None,
+            lazy: None,
             kind: RuntimeWorkKindSnapshot::ClientDemand,
             state: state_snapshot,
             dependency: record
                 .work
                 .subscription
                 .as_ref()
-                .map(|subscription| runtime_dependency_snapshot(&subscription.dependency)),
+                .map(|subscription| runtime_dependency_snapshot(state, &subscription.dependency)),
             observed_epoch: None,
             blocked_error: None,
         });
@@ -292,22 +309,48 @@ fn runtime_work_kind(record: &WorkRecord) -> RuntimeWorkKindSnapshot {
     match record.kind {
         WorkKind::Reflection(_) => RuntimeWorkKindSnapshot::ReflectionTask,
         WorkKind::Deferred(_) => RuntimeWorkKindSnapshot::DeferredEvaluation,
+        WorkKind::LazyRoute(_) => RuntimeWorkKindSnapshot::LazyRoute,
         WorkKind::Spark(_) => RuntimeWorkKindSnapshot::Spark,
     }
 }
 
-fn runtime_dependency_snapshot(dependency: &WorkDependency) -> RuntimeDependencySnapshot {
+fn runtime_dependency_snapshot(
+    state: &WorkCoordinatorState,
+    dependency: &WorkDependency,
+) -> RuntimeDependencySnapshot {
+    let origin = |wait: &EvaluationWaitToken| {
+        let work = super::work_for_wait_locked(state, wait)
+            .expect("active dependency wait must have a work record");
+        let record = state
+            .work
+            .get(&work)
+            .expect("indexed dependency work must remain registered");
+        match &record.kind {
+            WorkKind::LazyRoute(route) => RuntimeDependencySnapshot::LazyWait {
+                wait: wait.get(),
+                lazy: route.lazy.id(),
+            },
+            _ => RuntimeDependencySnapshot::Wait {
+                wait: wait.get(),
+                producer: super::task_for_record(record)
+                    .expect("non-lazy dependency is task-owned"),
+                session: record.demand_session,
+            },
+        }
+    };
     match dependency {
-        WorkDependency::Wait(wait) => RuntimeDependencySnapshot::Wait {
-            wait: wait.get(),
-            producer: wait.producer(),
-            session: wait.owner_id(),
-        },
+        WorkDependency::Wait(wait) => origin(wait),
         WorkDependency::Promise(promise) => RuntimeDependencySnapshot::Promise {
             promise: promise.id().get(),
-            producer: dependency
-                .producer_wait()
-                .map(|wait| (wait.get(), wait.producer(), wait.owner_id())),
+            producer: dependency.producer_wait().map(|wait| match origin(&wait) {
+                RuntimeDependencySnapshot::Wait {
+                    producer, session, ..
+                } => (wait.get(), producer, session),
+                RuntimeDependencySnapshot::LazyWait { .. } => {
+                    panic!("task-owned promise cannot have a lazy route producer")
+                }
+                _ => unreachable!(),
+            }),
         },
         #[cfg(test)]
         WorkDependency::Test(dependency) => RuntimeDependencySnapshot::Test(dependency.id.get()),
@@ -437,6 +480,7 @@ impl EvaluationWorkCoordinator {
                             ),
                             deferred.block.take(),
                         ),
+                        WorkKind::LazyRoute(route) => (None, route.block.take()),
                         WorkKind::Spark(_) => {
                             unreachable!("stable deadlock cannot retain best-effort spark work")
                         }
@@ -518,11 +562,12 @@ impl EvaluationWorkCoordinator {
             }
         }
 
-        let (machines, blocks, exits, terminals) = {
+        let (machines, blocks, exits, terminals, retired_routes) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            let mut retired_routes = Vec::new();
             let machines = selected
                 .iter_mut()
                 .filter_map(|selected| {
@@ -540,6 +585,9 @@ impl EvaluationWorkCoordinator {
                             );
                         }
                         WorkKind::Deferred(_) => detach_deferred(&mut state, selected.work),
+                        WorkKind::LazyRoute(_) => {
+                            retired_routes.push(detach_lazy_route(&mut state, selected.work))
+                        }
                         WorkKind::Spark(_) => {
                             unreachable!("selected task settlement must contain task work")
                         }
@@ -562,7 +610,7 @@ impl EvaluationWorkCoordinator {
                 .iter()
                 .map(|selected| selected.terminal.clone())
                 .collect();
-            (machines, blocks, exits, terminals)
+            (machines, blocks, exits, terminals, retired_routes)
         };
 
         Some(RuntimeSettlementRelease {
@@ -577,6 +625,7 @@ impl EvaluationWorkCoordinator {
                 })
                 .collect(),
             machines,
+            retired_routes,
             blocks,
             exits,
             terminals,
@@ -610,6 +659,7 @@ pub(crate) struct RuntimeSettlementRelease {
     pub(super) coordinator: Arc<EvaluationWorkCoordinator>,
     pub(super) producers: Vec<ProducerSettlementObligation>,
     pub(super) machines: Vec<Box<dyn EvaluationTaskMachine>>,
+    pub(super) retired_routes: Vec<WorkRecord>,
     pub(super) blocks: Vec<super::EvaluationTaskBlock>,
     pub(super) exits: Vec<EvaluationExitBlock>,
     pub(super) terminals: Vec<EvaluationWaitTerminal>,
@@ -626,6 +676,7 @@ impl RuntimeSettlementRelease {
             coordinator,
             producers,
             machines,
+            retired_routes,
             blocks,
             exits,
             terminals,
@@ -651,6 +702,7 @@ impl RuntimeSettlementRelease {
         coordinator.admission.notify_settlement();
         drop(producers);
         drop(machines);
+        drop(retired_routes);
         drop(blocks);
         drop(exits);
         drop(terminals);

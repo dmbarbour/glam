@@ -29,7 +29,7 @@ use crate::evaluation::{
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
-use crate::runtime::RuntimeValueRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 #[cfg(test)]
 use super::protocol::HostSnapshot;
@@ -547,13 +547,31 @@ impl<S: TaskSpecialization> EffectTask<S> {
             let EffectTaskPoll::Blocked(blocked) = &poll else {
                 return poll;
             };
+            if let Some(error) = blocked
+                .dependency
+                .as_ref()
+                .and_then(|dependency| self.eval_context.recursive_promise_dependency(dependency))
+            {
+                let error = TaskHalt::new(error);
+                self.finish(TaskTerminal::Failed(error.clone()));
+                return EffectTaskPoll::Failed(error);
+            }
             let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
                 return poll;
             };
             match self.eval_context.pump_wait(wait, steps.max(1)) {
                 EvaluationPumpOutcome::TargetReady => {}
                 EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::Yielded,
-                EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => return poll,
+                EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => {
+                    if let Some(error) = blocked.dependency.as_ref().and_then(|dependency| {
+                        self.eval_context.recursive_promise_dependency(dependency)
+                    }) {
+                        let error = TaskHalt::new(error);
+                        self.finish(TaskTerminal::Failed(error.clone()));
+                        return EffectTaskPoll::Failed(error);
+                    }
+                    return poll;
+                }
             }
         }
         EffectTaskPoll::Yielded
@@ -3465,11 +3483,26 @@ fn poll_value_effect_task<S: TaskSpecialization>(
     let observed_epoch = task.eval_context.current_observation_epoch();
     match task.poll_with_context(context, step_budget) {
         EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
-        EffectTaskPoll::Blocked(blocked) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-            dependency: blocked.dependency,
-            observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
-            error: blocked.error,
-        }),
+        EffectTaskPoll::Blocked(blocked) => {
+            if let Some(error) = blocked
+                .dependency
+                .as_ref()
+                .and_then(|dependency| task.eval_context.recursive_promise_dependency(dependency))
+            {
+                let error = TaskHalt::new(error);
+                task.finish(TaskTerminal::Failed(error.clone()));
+                EvaluationMachinePoll::Failed(RuntimeFailureRoot::new(
+                    task.eval_context.values(),
+                    error.into_failure(),
+                ))
+            } else {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: blocked.dependency,
+                    observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
+                    error: blocked.error,
+                })
+            }
+        }
         EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: exit.intent,
             observed_epoch: exit.observed_generation.map(|_| observed_epoch),

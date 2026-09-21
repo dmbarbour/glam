@@ -102,7 +102,11 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let blocked = blocked_checkpoint(context.values(), &runtime, call.pair);
     let observation = checkpoint_semantic_observation(&runtime, context.values(), call.pair);
     assert_eq!(observation.focus, Some(DeferredValueId::Lazy(outer_id)));
-    assert_eq!(context.deferred_task_count(), 1);
+    assert_eq!(
+        context.deferred_task_count(),
+        0,
+        "a runtime-owned lazy route must not register a session-owned deferred task"
+    );
     assert!(matches!(
         context.pump_wait(&blocked.wait.0, 256),
         EvaluationPumpOutcome::TargetReady
@@ -455,7 +459,6 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
         let second = crate::eval::lazy_root_wait(&context, &lazy_root)
             .expect("canonical lazy producer remains admissible");
         assert_eq!(second.get(), blocked.wait.0.get(), "{name}");
-        assert_eq!(second.producer(), blocked.wait.0.producer(), "{name}");
 
         let interface = runtime.test_with(context.values(), RuntimeNet::exposed);
         let parked = normalization_request_in(&context, &runtime, interface)

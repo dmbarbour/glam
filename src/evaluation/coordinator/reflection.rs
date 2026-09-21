@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
+use super::deferred::terminalize_lazy_cycle;
 use super::{
     ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
@@ -536,6 +537,11 @@ impl EvaluationWorkCoordinator {
             if matches!(state_after, WorkState::Queued) {
                 queue_reflection(&mut state, id);
             }
+            let (cycle, cycle_error) = if matches!(state_after, WorkState::Blocked) {
+                terminalize_lazy_cycle(&mut state, id)
+            } else {
+                (Vec::new(), None)
+            };
             state.work_generation = state.work_generation.wrapping_add(1);
             (
                 ReflectionWorkRelease {
@@ -546,6 +552,8 @@ impl EvaluationWorkCoordinator {
                     cancel,
                     abandoned,
                     machine: None,
+                    cycle,
+                    cycle_error,
                 },
                 exact_subscription,
             )
@@ -735,6 +743,8 @@ pub(in crate::evaluation) struct ReflectionWorkRelease {
     pub(in crate::evaluation) cancel: bool,
     pub(in crate::evaluation) abandoned: bool,
     pub(in crate::evaluation) machine: Option<Box<dyn EvaluationTaskMachine>>,
+    pub(in crate::evaluation) cycle: Vec<super::DeferredLazyCycleMember>,
+    pub(in crate::evaluation) cycle_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -772,6 +782,7 @@ pub(super) fn reflection_work(record: &WorkRecord) -> &ReflectionWork {
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
+        WorkKind::LazyRoute(_) => panic!("lazy route cannot be used as a reflection task"),
     }
 }
 
@@ -780,6 +791,7 @@ pub(super) fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWor
         WorkKind::Reflection(work) => work,
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
+        WorkKind::LazyRoute(_) => panic!("lazy route cannot be used as a reflection task"),
     }
 }
 

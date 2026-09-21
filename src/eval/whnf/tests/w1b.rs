@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::core::{CoreValueFactory, EvaluationFailure, Value};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
-    CompletionSubscriptions, EvalContext, EvaluationPollContext, EvaluationTaskId,
-    EvaluationValueAccess, EvaluationWaitToken, EvaluationWorkCoordinator,
+    CompletionSubscriptions, EvalContext, EvaluationPollContext, EvaluationValueAccess,
+    EvaluationWaitToken, EvaluationWorkCoordinator,
 };
 use crate::number::Number;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
@@ -35,21 +35,9 @@ fn synthetic_wait(context: &EvalContext) -> CoreWaitToken {
         .ids()
         .evaluation_wait()
         .expect("synthetic wait identity should allocate");
-    let producer = EvaluationTaskId::from_nonzero(
-        values
-            .ids()
-            .evaluation_task()
-            .expect("synthetic producer identity should allocate"),
-    );
     let coordinator = Arc::new(Mutex::new(Weak::<EvaluationWorkCoordinator>::new()));
     let completion = CompletionSubscriptions::for_wait(values.runtime_id(), wait, coordinator);
-    CoreWaitToken(EvaluationWaitToken::new(
-        wait,
-        values,
-        context.session_id(),
-        producer,
-        completion,
-    ))
+    CoreWaitToken(EvaluationWaitToken::new(wait, values, completion))
 }
 
 #[test]

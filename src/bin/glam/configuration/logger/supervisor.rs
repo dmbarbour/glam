@@ -258,10 +258,10 @@ pub(crate) fn settled_report_diagnostics(
         let RuntimeDispositionKind::ExitError(message) = disposition.kind() else {
             unreachable!("report selection retains only error exits")
         };
-        let mut args = vec![
-            ("work", report_id(values, disposition.work_id())?),
-            ("session", report_id(values, disposition.session_id())?),
-        ];
+        let mut args = vec![("work", report_id(values, disposition.work_id())?)];
+        if let Some(session) = disposition.session_id() {
+            args.push(("session", report_id(values, session)?));
+        }
         if let Some(task) = disposition.task_id() {
             args.push(("task", report_id(values, task)?));
         }
@@ -277,7 +277,6 @@ pub(crate) fn settled_report_diagnostics(
             .map(|diagnostic| diagnostic.message().to_owned());
         let mut args = vec![
             ("work", report_id(values, work.work_id())?),
-            ("session", report_id(values, work.session_id())?),
             (
                 "kind",
                 values.atom_from_text(runtime_work_kind_name(work.kind())),
@@ -287,6 +286,12 @@ pub(crate) fn settled_report_diagnostics(
                 values.atom_from_text(runtime_work_state_name(work.state())),
             ),
         ];
+        if let Some(session) = work.session_id() {
+            args.push(("session", report_id(values, session)?));
+        }
+        if let Some(lazy) = work.lazy_id() {
+            args.push(("lazy", report_id(values, lazy)?));
+        }
         if let Some(task) = work.task_id() {
             args.push(("task", report_id(values, task)?));
         }
@@ -339,6 +344,7 @@ fn runtime_work_kind_name(kind: RuntimeWorkKind) -> &'static str {
     match kind {
         RuntimeWorkKind::ReflectionTask => "reflection_task",
         RuntimeWorkKind::DeferredEvaluation => "deferred_evaluation",
+        RuntimeWorkKind::LazyRoute => "lazy_route",
         RuntimeWorkKind::ClientDemand => "client_demand",
         RuntimeWorkKind::Spark => "spark",
     }
@@ -367,6 +373,13 @@ fn runtime_dependency_value(
                 ("wait", report_id(values, *wait_id)?),
                 ("task", report_id(values, *task_id)?),
                 ("session", report_id(values, *session_id)?),
+            ])?,
+        )]),
+        RuntimeDependency::LazyWait { wait_id, lazy_id } => values.record([(
+            "lazy_wait",
+            values.record([
+                ("wait", report_id(values, *wait_id)?),
+                ("lazy", report_id(values, *lazy_id)?),
             ])?,
         )]),
         RuntimeDependency::Promise {

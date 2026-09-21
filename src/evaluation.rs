@@ -133,14 +133,18 @@ fn allocate_task_id(values: &CoreValueFactory) -> Result<EvaluationTaskId, Arc<s
 
 fn allocate_wait_token(
     session: &Arc<EvaluationDemandState>,
-    producer: EvaluationTaskId,
+    _producer: EvaluationTaskId,
+) -> Result<EvaluationWaitToken, Arc<str>> {
+    allocate_route_wait_token(session)
+}
+
+fn allocate_route_wait_token(
+    session: &Arc<EvaluationDemandState>,
 ) -> Result<EvaluationWaitToken, Arc<str>> {
     let id = session.values.ids().evaluation_wait()?;
     Ok(EvaluationWaitToken::new(
         id,
         &session.values,
-        session.id,
-        producer,
         CompletionSubscriptions::for_wait(
             session.values.runtime_id(),
             id,

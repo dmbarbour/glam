@@ -5664,6 +5664,35 @@ an intermediate state unsafe:
   then run ordinary and aggressive-collection focused suites and routine
   repository gates before W6G.1f.4b-d claims the new lifecycle.
 
+  **W6G.1f.2b.2-.4 complete (2026-09-21).** Lazy producers now admit one
+  machine-free `LazyRoute` in the runtime background demand domain. The route
+  retains only the lazy root, exact wait/block state, and a running-demand
+  latch; each poll takes a transient machine shell over the lazy-owned WHNF
+  checkpoint. Task-owned promise producers retain their distinct task machine
+  and settlement obligations. A leased wait handle counts one logical route
+  demand across clones. Its last drop retires an unclaimed route or latches
+  retirement until a claimed poll publishes its checkpoint/block/terminal;
+  a later observer may admit a fresh route over that retained checkpoint.
+  Runtime-owned routes have no fabricated task or session identity in
+  readiness reports.
+
+  Session-wide drains may execute an exact *runtime-owned lazy route* needed
+  by their blocked tasks, but do not claim another session's reflection task;
+  that remains resumable cross-session quiescence. Exact client-demand pumping
+  may follow the broader producer chain. The coordinator detects pure lazy
+  cycles as before. It also follows reflection-task edges when a lazy route
+  observes a promise owned by that same blocked task: it poisons only the lazy
+  members, waking the reflection task through its normal subscription. A
+  mixed task/lazy wait without a task-owned promise edge remains quiescent,
+  and a separate promise-producing deferred task remains retryable. Forced
+  tests cover both orders of the task/route block publication, subscriber and
+  claim retirement, first-observer closure, and route re-admission. Focused
+  reflection, evaluator, inventory, and complete library suites pass. The
+  aggressive-GC gate found a test-fixture lifetime hole: constructing a raw
+  managed lazy and rooting it in a later access allowed collection between
+  the two. Route fixtures now construct and root in one access; focused route
+  and mixed-cycle tests also pass under aggressive collection.
+
 ###### W6G.1f.3 — Complete producer-family ownership migration
 
 Move every remaining `LazyTaskWork` family behind its correct durable

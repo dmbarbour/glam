@@ -12,7 +12,8 @@ use crate::api::{
 };
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
-    ReflectionTaskLauncher, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
+    ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
+    TaskStatusWake,
 };
 use crate::reflection::lifecycle::{run_composed_effect_task, task_launcher};
 use crate::reflection::{
@@ -3755,7 +3756,7 @@ fn continuation_function_demand_resumes_without_replay_in_both_delivery_paths() 
         let (assembler, effect) =
             compile_effect(".r \"ready\" >>= (anno { refl:(.r ()) } (\\value -> .r value))");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let context = EvalContext::isolated(assembler.core_values());
+        let context = EvalContext::private_closed(assembler.core_values());
         let builds = Arc::new(AtomicUsize::new(0));
         context
             .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -3791,7 +3792,7 @@ fn unit_result_demands_resume_without_replaying_the_assertion() {
     for contextual in [false, true] {
         let (assembler, effect) = compile_effect(".r (anno { refl:(.r ()) } ())");
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let context = EvalContext::isolated(assembler.core_values());
+        let context = EvalContext::private_closed(assembler.core_values());
         let builds = Arc::new(AtomicUsize::new(0));
         context
             .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -3830,7 +3831,7 @@ fn scoped_close_unit_demand_resumes_without_replaying_close() {
         ".scoped (.r \"kept\") ((.write_stderr \"close\") =>> .r (anno { refl:(.r ()) } ()))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -3865,7 +3866,7 @@ fn task_state_get_resumes_lazy_paths_and_intermediates_without_replay() {
             ".set [] { outer:(anno { refl:(.r ()) } { inner:\"value\" }) } =>> .get (anno { refl:(.r ()) } ['outer, 'inner])",
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let context = EvalContext::isolated(assembler.core_values());
+        let context = EvalContext::private_closed(assembler.core_values());
         let builds = Arc::new(AtomicUsize::new(0));
         context
             .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -3903,7 +3904,7 @@ fn task_state_set_publishes_only_after_lazy_path_and_replacement_complete() {
             ".set [] { old:\"kept\" } =>> .set (anno { refl:(.r ()) } []) (anno { refl:(.r ()) } { new:\"ready\" }) =>> .get ['new]",
         );
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let context = EvalContext::isolated(assembler.core_values());
+        let context = EvalContext::private_closed(assembler.core_values());
         let builds = Arc::new(AtomicUsize::new(0));
         context
             .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -3957,7 +3958,7 @@ fn heap_paths_complete_before_host_snapshots_and_commits() {
         ".heap.set (anno { refl:(.r ()) } ['value]) \"initial\" =>> .heap.rewrite (anno { refl:(.r ()) } ['value]) (\\_old -> \"ready\") =>> .heap.get (anno { refl:(.r ()) } ['value])",
     );
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
@@ -3990,7 +3991,7 @@ fn transactional_heap_paths_suspend_before_the_cut_snapshot_is_observed() {
         ".cut (.heap.set (anno { refl:(.r ()) } ['value]) \"ready\" =>> .heap.get (anno { refl:(.r ()) } ['value]))",
     );
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
@@ -4043,7 +4044,7 @@ fn volume_paths_complete_before_host_snapshots_and_commits() {
     let effect = assembler
         .apply(&run, [volume_effects(&assembler.core_values(), volume)])
         .expect("volume path fixture should apply");
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(SnapshotOrderingLauncher {
@@ -4817,7 +4818,7 @@ fn internal_exit_error_message_resumes_without_replay() {
     let (assembler, effect) =
         compile_effect(".exit.error (anno { refl:(.r ()) } {msg:{text:\"stop\"}})");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
+    let (context, owner) = EvalContext::private_closed(assembler.core_values()).into_parts();
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -4885,7 +4886,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
         ".cut ((.heap.set ['discarded] 1) =>> (.write_stderr \"discarded\") =>> (.log 'error {msg:{text:\"discarded\"}}) =>> .task.new (.r \"child\") >>= (\\_child -> .alt (.fail) ((.exit.success) =>> .write_stderr \"after exit\")))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let owned = EvalContext::isolated(assembler.core_values());
+    let owned = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
         inner: task_launcher(TestEffects, host.clone()),
@@ -5163,10 +5164,8 @@ fn schedule_composed_test_task(
     effect: &PublicValue,
     host: Arc<TestHost>,
 ) -> (OwnedEvalContext, EvaluationTaskHandle) {
-    let context = EvalContext::isolated(assembler.core_values());
-    context
-        .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
-        .expect("fresh test session should accept a reflection launcher");
+    let context = EvalContext::isolated(assembler.core_values())
+        .with_test_task_launcher(task_launcher(TestEffects, host.clone()));
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
@@ -5178,15 +5177,33 @@ fn schedule_composed_test_task(
     (context, task)
 }
 
+fn schedule_composed_test_task_with_private_annotations(
+    assembler: &Assembler,
+    effect: &PublicValue,
+    host: Arc<TestHost>,
+) -> (OwnedEvalContext, EvaluationTaskHandle) {
+    let context = EvalContext::private_closed(assembler.core_values());
+    context
+        .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
+        .expect("private annotation fixture should accept its default launcher");
+    let effect = effect.clone_core_for_test();
+    let task = context
+        .schedule_task(move |task_context| {
+            EffectTask::new_in_context(effect, TestEffects, host, task_context)
+                .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
+                .map_err(|error| Arc::from(error.to_string()))
+        })
+        .expect("private annotation task should schedule");
+    (context, task)
+}
+
 fn schedule_exit_child_test_task(
     assembler: &Assembler,
     effect: &PublicValue,
     host: Arc<TestHost>,
 ) -> (OwnedEvalContext, EvaluationTaskHandle) {
-    let context = EvalContext::isolated(assembler.core_values());
-    context
-        .install_reflection_launcher(Arc::new(ExitCapableLauncher { host: host.clone() }))
-        .expect("fresh test session should accept an exit-capable launcher");
+    let context = EvalContext::isolated(assembler.core_values())
+        .with_test_task_launcher(Arc::new(ExitCapableLauncher { host: host.clone() }));
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
@@ -5797,7 +5814,8 @@ fn effectful_metadata_update_observes_environment_and_commits_log_once() {
         env!("CARGO_PKG_VERSION")
     ));
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
+    let (context, task) =
+        schedule_composed_test_task_with_private_annotations(&assembler, &effect, host.clone());
     let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
         panic!("demanded effectful metadata should complete");
     };
@@ -5826,13 +5844,15 @@ fn effectful_metadata_update_retries_after_observed_state_changes() {
             [("ready", assembler.values().text("arrived for metadata"))],
         ),
     ));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
+    let (context, task) =
+        schedule_composed_test_task_with_private_annotations(&assembler, &effect, host.clone());
     assert_eq!(
         context.pump_wait(task.wait(), 16_384),
         crate::evaluation::EvaluationPumpOutcome::NoProgress,
         "the metadata task should first block on its observed heap state"
     );
     assert!(host.wait_for_change(1));
+    context.publish_private_runtime_observation_for_test();
     let EvaluationWaitPoll::Complete(metadata) = pump_composed_test_task(&context, &task) else {
         panic!("the resumed metadata task should complete");
     };
@@ -5981,7 +6001,7 @@ fn resumable_reflection_decode_consumes_one_application_checkpoint_after_resumpt
     let (assembler, effect) =
         compile_effect(".eval (anno { refl:(.r ()) } \"ready\") >>= (\\result -> .r result.ok)");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -6088,7 +6108,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
         ".log 'info (anno {refl:(.r ())} (anno context:\"request argument\" (anno 'error {msg:{text:\"message construction failed\"}})))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -6154,7 +6174,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
     assert_eq!(context.reflection_task_count(), 0);
     assert!(host.diagnostics().is_empty());
 
-    let uninterrupted = EvalContext::isolated(assembler.core_values());
+    let uninterrupted = EvalContext::private_closed(assembler.core_values());
     uninterrupted
         .install_reflection_launcher(task_launcher(TestEffects, host.clone()))
         .expect("fresh uninterrupted fixture should accept a reflection launcher");
@@ -6178,7 +6198,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
         ".cut (.alt ((.log 'warn (anno {refl:(.read_log >>= (\\_message -> .r ()))} {msg:{text:\"discarded\"}})) =>> .fail) ((.log 'info {msg:{text:\"kept\"}}) =>> .r \"ready\"))",
     );
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let context = EvalContext::isolated(assembler.core_values());
+    let context = EvalContext::private_closed(assembler.core_values());
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(CountingLauncher {
@@ -6226,6 +6246,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
         crate::diagnostic::Severity::Warning,
         "release nested reflection",
     ));
+    context.publish_private_runtime_observation_for_test();
     let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
         panic!("the resumed fallback branch should complete")
     };
@@ -7103,15 +7124,13 @@ fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction
         .work_coordinator()
         .expect("assembler runtime coordinator should remain live");
     let session = EvaluationSession::shared_with_values(&coordinator, assembler.core_values());
-    let context = EvalContext::new(&session);
     let builds = Arc::new(AtomicUsize::new(0));
     let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
         inner: task_launcher(TestEffects, host.clone()),
         builds: builds.clone(),
     });
-    context
-        .install_reflection_launcher(launcher)
-        .expect("fresh test session should accept its launcher");
+    let context =
+        EvalContext::with_task_profile(&session, Arc::new(ReflectionTaskProfile::sealed(launcher)));
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {

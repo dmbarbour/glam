@@ -25,7 +25,7 @@ fn foreground_records_are_not_a_background_work_kind() {
         .iter()
         .map(|variant| variant.ident.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(variants, ["Spark", "Reflection", "Deferred"]);
+    assert_eq!(variants, ["Spark", "Reflection", "Deferred", "LazyRoute"]);
     assert!(COORDINATOR.contains("client_demands: HashMap<EvaluationWorkId, ClientDemandRecord>"));
     assert!(COORDINATOR.contains(
         "client_demands_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>"

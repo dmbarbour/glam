@@ -8,6 +8,7 @@ use crate::core::{DeferredValueId, ManagedLazyRoot, ManagedPromiseRoot};
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 #[cfg(test)]
 use super::EvaluationSessionId;
+use super::task::LazyRouteDemandLease;
 use super::{
     ClaimedDemandSession, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitToken,
     EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations, WorkCloseReason,
@@ -17,6 +18,245 @@ use super::{
 };
 
 impl EvaluationWorkCoordinator {
+    pub(in crate::evaluation) fn release_lazy_route(
+        &self,
+        claimed: ClaimedLazyRoute,
+        poll: DeferredWorkPoll,
+    ) -> DeferredWorkRelease {
+        let had_exact_demand = claimed.wait.has_exact_subscriptions();
+        let mutation = self.admission.mutation_guard();
+        let (mut release, exact_subscription) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let demand_while_running = {
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("claimed lazy route must remain registered");
+                assert!(matches!(record.state, WorkState::Running));
+                let WorkKind::LazyRoute(route) = &mut record.kind else {
+                    unreachable!("lazy route claim must match its record")
+                };
+                assert_eq!(route.wait, claimed.wait);
+                std::mem::take(&mut route.demand_while_running)
+            };
+            let (state_after, block, made_progress, remains_blocked, terminal) = match poll {
+                DeferredWorkPoll::Yielded
+                    if (claimed.requeue_on_yield && had_exact_demand) || demand_while_running =>
+                {
+                    (WorkState::Queued, None, true, false, false)
+                }
+                DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
+                DeferredWorkPoll::Blocked(block) => {
+                    let unchanged = claimed.prior_block.as_ref() == Some(&block);
+                    (WorkState::Blocked, Some(block), !unchanged, true, false)
+                }
+                DeferredWorkPoll::Terminal => (WorkState::Terminalizing, None, true, false, true),
+            };
+            let mut exact_subscription = if let Some(block) = block {
+                publish_task_block_locked(&mut state, self.runtime, claimed.id, block)
+            } else {
+                let record = state
+                    .work
+                    .get_mut(&claimed.id)
+                    .expect("claimed lazy route must remain registered");
+                let WorkKind::LazyRoute(route) = &mut record.kind else {
+                    unreachable!()
+                };
+                route.block = None;
+                record.state = state_after;
+                state.observation_waiters.remove(&claimed.id);
+                None
+            };
+            if matches!(state_after, WorkState::Queued) {
+                queue_deferred(&mut state, claimed.id);
+            }
+            let (cycle, cycle_error) = if matches!(state_after, WorkState::Blocked) {
+                terminalize_lazy_cycle(&mut state, claimed.id)
+            } else {
+                (Vec::new(), None)
+            };
+            let cycle_terminal = !cycle.is_empty();
+            if cycle_terminal {
+                exact_subscription = None;
+            }
+            state.work_generation = state.work_generation.wrapping_add(1);
+            (
+                DeferredWorkRelease {
+                    made_progress: made_progress || cycle_terminal,
+                    remains_blocked: remains_blocked && !cycle_terminal,
+                    terminal: terminal || cycle_terminal,
+                    abandoned: false,
+                    cycle,
+                    cycle_error,
+                    machine: None,
+                },
+                exact_subscription,
+            )
+        };
+        let promoted_wait = exact_subscription
+            .as_ref()
+            .and_then(|(dependency, _)| dependency.producer_wait());
+        if release.remains_blocked
+            && exact_subscription.is_some_and(|(dependency, registration)| {
+                self.subscribe_dependency_guarded(&mutation, dependency, registration)
+            })
+        {
+            release.made_progress = true;
+            release.remains_blocked = false;
+        }
+        if let Some(wait) = promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, &wait);
+        }
+        if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
+            release.made_progress = true;
+            release.remains_blocked = false;
+        }
+        drop(mutation);
+        if !release.terminal {
+            self.retire_unsubscribed_lazy_route(claimed.id, false);
+        }
+        self.work_available.notify_all();
+        release
+    }
+
+    pub(in crate::evaluation) fn retire_lazy_route(&self, id: EvaluationWorkId) {
+        let mutation = self.admission.mutation_guard();
+        let retired = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let retired = detach_lazy_route(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            retired
+        };
+        drop(mutation);
+        drop(retired);
+        self.work_available.notify_all();
+    }
+
+    pub(super) fn release_lazy_route_demand(&self, id: EvaluationWorkId) {
+        self.retire_unsubscribed_lazy_route(id, true);
+    }
+
+    fn retire_unsubscribed_lazy_route(&self, id: EvaluationWorkId, release_demand: bool) {
+        let mutation = self.admission.mutation_guard();
+        let retired = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&id) else {
+                return;
+            };
+            let WorkKind::LazyRoute(route) = &mut record.kind else {
+                return;
+            };
+            if release_demand {
+                route.demand_count = route
+                    .demand_count
+                    .checked_sub(1)
+                    .expect("lazy route demand released twice");
+            }
+            if route.demand_count != 0
+                || matches!(record.state, WorkState::Running | WorkState::Terminalizing)
+            {
+                return;
+            }
+            let retired = detach_lazy_route(&mut state, id);
+            state.work_generation = state.work_generation.wrapping_add(1);
+            Some(retired)
+        };
+        drop(mutation);
+        drop(retired);
+        self.work_available.notify_all();
+    }
+
+    /// Admits one runtime-owned route for a lazy. The background demand is an
+    /// execution capability, not the route's owner or a synthetic task.
+    pub(in crate::evaluation) fn reserve_lazy_route(
+        self: &Arc<Self>,
+        lazy: ManagedLazyRoot,
+        wait: EvaluationWaitToken,
+    ) -> Result<EvaluationWaitToken, Arc<str>> {
+        debug_assert_eq!(wait.runtime_id(), self.runtime);
+        let background = self
+            .background_demand()
+            .ok_or_else(|| Arc::from("evaluation runtime has no background demand domain"))?;
+        let value = DeferredValueId::from(lazy.id());
+        let mutation = self.admission.mutation_guard();
+        let (id, canonical_wait, new, leased) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            if let Some(id) = state.deferred.by_value.get(&value).copied() {
+                let record = state
+                    .work
+                    .get_mut(&id)
+                    .expect("indexed producer must remain registered");
+                match &mut record.kind {
+                    WorkKind::LazyRoute(route) => {
+                        route.demand_count = route
+                            .demand_count
+                            .checked_add(1)
+                            .expect("lazy route demand count exhausted");
+                        (id, route.wait.clone(), false, true)
+                    }
+                    #[cfg(test)]
+                    WorkKind::Deferred(work)
+                        if matches!(work.producer, DeferredProducer::Lazy(_)) =>
+                    {
+                        // Test-only custom lazy machines keep their old task
+                        // ownership while production lazies use routes.
+                        (id, work.wait.clone(), false, false)
+                    }
+                    _ => panic!("lazy identity must index a lazy producer"),
+                }
+            } else {
+                let id = EvaluationWorkId(self.ids.evaluation_work());
+                let record = WorkRecord {
+                    id,
+                    // Only used to select a matching value-domain execution
+                    // capability. Lazy routes are deliberately not inserted
+                    // into work_by_session and cannot be closed by an observer.
+                    demand_session: background.id,
+                    subscription_epoch: 0,
+                    control: WorkControl::default(),
+                    obligations: SettlementObligations::deferred_claim(
+                        wait.clone(),
+                        DeferredProducer::Lazy(lazy.clone()),
+                    ),
+                    state: WorkState::Dormant,
+                    kind: WorkKind::LazyRoute(LazyRouteWork {
+                        wait: wait.clone(),
+                        lazy,
+                        block: None,
+                        demand_while_running: false,
+                        demand_count: 1,
+                    }),
+                };
+                assert!(state.work.insert(id, record).is_none());
+                assert!(state.deferred.by_wait.insert(wait.clone(), id).is_none());
+                assert!(state.deferred.by_value.insert(value, id).is_none());
+                state.work_generation = state.work_generation.wrapping_add(1);
+                (id, wait.clone(), true, true)
+            }
+        };
+        drop(mutation);
+        if new {
+            self.work_available.notify_all();
+        }
+        Ok(if leased {
+            canonical_wait.with_lazy_route_lease(LazyRouteDemandLease::new(self, id))
+        } else {
+            canonical_wait
+        })
+    }
+
     pub(in crate::evaluation) fn reserve_deferred(
         &self,
         session: &EvaluationDemandState,
@@ -39,14 +279,12 @@ impl EvaluationWorkCoordinator {
                 return Err(Arc::from("evaluation demand session is closed"));
             }
             if let Some(id) = state.deferred.by_value.get(&deferred).copied() {
-                let wait = deferred_work(
+                let wait = producer_wait(
                     state
                         .work
                         .get(&id)
                         .expect("indexed deferred work must remain registered"),
-                )
-                .wait
-                .clone();
+                );
                 DeferredWorkReservation::Existing(wait)
             } else {
                 let id = EvaluationWorkId(self.ids.evaluation_work());
@@ -116,16 +354,25 @@ impl EvaluationWorkCoordinator {
             .lock()
             .expect("evaluation work coordinator was poisoned");
         let work = state.deferred.by_value.get(&producer)?;
-        Some(
-            deferred_work(
-                state
-                    .work
-                    .get(work)
-                    .expect("indexed deferred work must remain registered"),
-            )
-            .wait
-            .clone(),
-        )
+        Some(producer_wait(
+            state
+                .work
+                .get(work)
+                .expect("indexed producer work must remain registered"),
+        ))
+    }
+
+    pub(in crate::evaluation) fn deferred_owner_for_wait(
+        &self,
+        wait: &EvaluationWaitToken,
+    ) -> Option<super::EvaluationSessionId> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let id = state.deferred.by_wait.get(wait)?;
+        let record = state.work.get(id)?;
+        matches!(record.kind, WorkKind::Deferred(_)).then_some(record.demand_session)
     }
 
     #[cfg(test)]
@@ -236,10 +483,10 @@ impl EvaluationWorkCoordinator {
                 queue_deferred(&mut state, claimed.id);
             }
 
-            let cycle = if matches!(state_after, WorkState::Blocked) {
-                terminalize_pure_lazy_cycle(&mut state, claimed.id)
+            let (cycle, cycle_error) = if matches!(state_after, WorkState::Blocked) {
+                terminalize_lazy_cycle(&mut state, claimed.id)
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let cycle_terminal = !cycle.is_empty();
             if cycle_terminal {
@@ -265,6 +512,7 @@ impl EvaluationWorkCoordinator {
                     terminal: terminal || cycle_terminal,
                     abandoned,
                     cycle,
+                    cycle_error,
                     machine,
                 },
                 exact_subscription,
@@ -446,6 +694,16 @@ pub(super) struct DeferredWork {
     pub(super) demand_while_running: bool,
 }
 
+/// Scheduler state only. The lazy's managed checkpoint is the sole semantic
+/// computation state; this record owns no persistent machine.
+pub(super) struct LazyRouteWork {
+    pub(super) wait: EvaluationWaitToken,
+    pub(super) lazy: ManagedLazyRoot,
+    pub(super) block: Option<EvaluationTaskBlock>,
+    pub(super) demand_while_running: bool,
+    pub(super) demand_count: usize,
+}
+
 #[derive(Default)]
 pub(super) struct DeferredIndexes {
     pub(super) by_task: BTreeMap<EvaluationTaskId, EvaluationWorkId>,
@@ -462,6 +720,33 @@ pub(in crate::evaluation) struct ClaimedDeferredWork {
     pub(super) prior_block: Option<EvaluationTaskBlock>,
     pub(super) requeue_on_yield: bool,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
+}
+
+pub(in crate::evaluation) struct ClaimedLazyRoute {
+    pub(super) id: EvaluationWorkId,
+    pub(super) wait: EvaluationWaitToken,
+    pub(super) lazy: ManagedLazyRoot,
+    pub(super) demand: ClaimedDemandSession,
+    pub(super) prior_block: Option<EvaluationTaskBlock>,
+    pub(super) requeue_on_yield: bool,
+}
+
+impl ClaimedLazyRoute {
+    pub(in crate::evaluation) fn id(&self) -> EvaluationWorkId {
+        self.id
+    }
+
+    pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
+        &self.demand
+    }
+
+    pub(in crate::evaluation) fn poll(
+        &mut self,
+        context: &super::super::EvaluationPollContext,
+        step_budget: &mut super::super::EvaluationStepBudget,
+    ) -> super::EvaluationMachinePoll {
+        crate::eval::poll_lazy_route(context, self.demand.demand(), &self.lazy, step_budget)
+    }
 }
 
 impl ClaimedDeferredWork {
@@ -495,7 +780,9 @@ pub(in crate::evaluation) struct DeferredLazyCycleMember {
     pub(in crate::evaluation) work: EvaluationWorkId,
     pub(in crate::evaluation) wait: EvaluationWaitToken,
     pub(in crate::evaluation) lazy: ManagedLazyRoot,
-    pub(in crate::evaluation) machine: Box<dyn EvaluationTaskMachine>,
+    pub(in crate::evaluation) machine: Option<Box<dyn EvaluationTaskMachine>>,
+    pub(in crate::evaluation) route: bool,
+    pub(in crate::evaluation) retired_block: Option<EvaluationTaskBlock>,
 }
 
 pub(in crate::evaluation) struct DeferredWorkRelease {
@@ -504,6 +791,7 @@ pub(in crate::evaluation) struct DeferredWorkRelease {
     pub(in crate::evaluation) terminal: bool,
     pub(in crate::evaluation) abandoned: bool,
     pub(in crate::evaluation) cycle: Vec<DeferredLazyCycleMember>,
+    pub(in crate::evaluation) cycle_error: Option<String>,
     pub(in crate::evaluation) machine: Option<Box<dyn EvaluationTaskMachine>>,
 }
 
@@ -519,9 +807,10 @@ pub(in crate::evaluation) struct AbandonedDeferredWork {
     pub(in crate::evaluation) machine: Box<dyn EvaluationTaskMachine>,
 }
 
-pub(super) fn deferred_work(record: &WorkRecord) -> &DeferredWork {
-    match &record.kind {
+pub(super) fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
+    match &mut record.kind {
         WorkKind::Deferred(work) => work,
+        WorkKind::LazyRoute(_) => panic!("lazy route is not a task-owned deferred producer"),
         WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
         WorkKind::Reflection(_) => {
             panic!("reflection work cannot be used as a deferred producer")
@@ -529,12 +818,12 @@ pub(super) fn deferred_work(record: &WorkRecord) -> &DeferredWork {
     }
 }
 
-pub(super) fn deferred_work_mut(record: &mut WorkRecord) -> &mut DeferredWork {
-    match &mut record.kind {
-        WorkKind::Deferred(work) => work,
-        WorkKind::Spark(_) => panic!("spark work cannot be used as a deferred producer"),
-        WorkKind::Reflection(_) => {
-            panic!("reflection work cannot be used as a deferred producer")
+pub(super) fn producer_wait(record: &WorkRecord) -> EvaluationWaitToken {
+    match &record.kind {
+        WorkKind::Deferred(work) => work.wait.clone(),
+        WorkKind::LazyRoute(work) => work.wait.clone(),
+        WorkKind::Spark(_) | WorkKind::Reflection(_) => {
+            panic!("indexed deferred producer must remain a deferred producer")
         }
     }
 }
@@ -546,9 +835,30 @@ pub(super) fn queue_deferred(state: &mut WorkCoordinatorState, id: EvaluationWor
             .get(&id)
             .expect("queued deferred work must remain registered")
             .kind,
-        WorkKind::Deferred(_)
+        WorkKind::Deferred(_) | WorkKind::LazyRoute(_)
     ));
     queue_task(state, id);
+}
+
+pub(super) fn detach_lazy_route(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+) -> WorkRecord {
+    state.observation_waiters.remove(&id);
+    remove_ready_deferred(state, id);
+    let record = state
+        .work
+        .remove(&id)
+        .expect("retired lazy route must remain registered");
+    let WorkKind::LazyRoute(route) = &record.kind else {
+        panic!("lazy route retirement must contain lazy route work")
+    };
+    assert_eq!(state.deferred.by_wait.remove(&route.wait), Some(id));
+    assert_eq!(
+        state.deferred.by_value.remove(&route.lazy.id().into()),
+        Some(id)
+    );
+    record
 }
 
 pub(super) fn remove_ready_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
@@ -600,6 +910,43 @@ pub(super) fn claim_deferred(
     })
 }
 
+pub(super) fn claim_lazy_route(
+    state: &mut WorkCoordinatorState,
+    runtime: crate::runtime::EvaluationRuntimeId,
+    id: EvaluationWorkId,
+    requeue_on_yield: bool,
+) -> Option<ClaimedLazyRoute> {
+    let execution_session = state.work.get(&id)?.demand_session;
+    let demand = ClaimedDemandSession::registered(state, execution_session, runtime)?;
+    let (wait, lazy, prior_block, requeue_on_yield) = {
+        let record = state.work.get_mut(&id)?;
+        let WorkKind::LazyRoute(route) = &mut record.kind else {
+            return None;
+        };
+        if !matches!(record.state, WorkState::Dormant | WorkState::Queued) {
+            return None;
+        }
+        let was_queued = matches!(record.state, WorkState::Queued);
+        record.state = WorkState::Running;
+        (
+            route.wait.clone(),
+            route.lazy.clone(),
+            route.block.take(),
+            requeue_on_yield || was_queued || std::mem::take(&mut route.demand_while_running),
+        )
+    };
+    state.observation_waiters.remove(&id);
+    remove_ready_deferred(state, id);
+    Some(ClaimedLazyRoute {
+        id,
+        wait,
+        lazy,
+        demand,
+        prior_block,
+        requeue_on_yield,
+    })
+}
+
 pub(super) fn promote_deferred_wait_locked(
     state: &mut WorkCoordinatorState,
     wait: &EvaluationWaitToken,
@@ -618,13 +965,16 @@ pub(super) fn promote_deferred_wait_locked(
             true
         }
         Some(WorkState::Running) => {
-            deferred_work_mut(
-                state
-                    .work
-                    .get_mut(&id)
-                    .expect("running deferred work must remain registered"),
-            )
-            .demand_while_running = true;
+            match &mut state
+                .work
+                .get_mut(&id)
+                .expect("running deferred work must remain registered")
+                .kind
+            {
+                WorkKind::Deferred(work) => work.demand_while_running = true,
+                WorkKind::LazyRoute(work) => work.demand_while_running = true,
+                WorkKind::Spark(_) | WorkKind::Reflection(_) => unreachable!(),
+            }
             true
         }
         _ => false,
@@ -636,13 +986,11 @@ fn deferred_dependency_cycle(
     start: EvaluationWorkId,
 ) -> Option<DeferredDependencyCycle> {
     let mut path: Vec<EvaluationWorkId> = Vec::new();
-    let mut promise_edges = Vec::new();
     let mut positions = HashMap::new();
     let mut current = start;
     loop {
         if let Some(first) = positions.insert(current, path.len()) {
             let mut cycle = path.split_off(first);
-            let contains_promise = promise_edges.split_off(first).into_iter().any(|edge| edge);
             let canonical = cycle
                 .iter()
                 .enumerate()
@@ -650,71 +998,146 @@ fn deferred_dependency_cycle(
                 .map(|(position, _)| position)
                 .expect("a repeated successor must produce a non-empty cycle");
             cycle.rotate_left(canonical);
-            return Some(DeferredDependencyCycle {
-                members: cycle,
-                contains_promise,
-            });
+            return Some(DeferredDependencyCycle { members: cycle });
         }
         path.push(current);
         let record = state.work.get(&current)?;
-        let dependency = deferred_work(record).block.as_ref()?.dependency.as_ref()?;
-        promise_edges.push(matches!(dependency, WorkDependency::Promise(_)));
+        let dependency = match &record.kind {
+            WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref()?,
+            WorkKind::LazyRoute(work) => work.block.as_ref()?.dependency.as_ref()?,
+            WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref()?,
+            _ => return None,
+        };
         let wait = dependency.producer_wait()?;
-        current = *state.deferred.by_wait.get(&wait)?;
+        current = super::work_for_wait_locked(state, &wait)?;
     }
 }
 
 struct DeferredDependencyCycle {
     members: Vec<EvaluationWorkId>,
-    contains_promise: bool,
 }
 
-pub(super) fn terminalize_pure_lazy_cycle(
+pub(super) fn terminalize_lazy_cycle(
     state: &mut WorkCoordinatorState,
     start: EvaluationWorkId,
-) -> Vec<DeferredLazyCycleMember> {
+) -> (Vec<DeferredLazyCycleMember>, Option<String>) {
     let Some(cycle) = deferred_dependency_cycle(state, start) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    if cycle.contains_promise {
-        return Vec::new();
-    }
-    let pure_lazy = cycle.members.iter().all(|id| {
+    let all_blocked = cycle.members.iter().all(|id| {
         state.work.get(id).is_some_and(|record| {
             matches!(record.state, WorkState::Blocked)
-                && matches!(deferred_work(record).producer, DeferredProducer::Lazy(_))
+                && matches!(
+                    &record.kind,
+                    WorkKind::LazyRoute(_)
+                        | WorkKind::Deferred(DeferredWork {
+                            producer: DeferredProducer::Lazy(_),
+                            ..
+                        })
+                        | WorkKind::Reflection(_)
+                )
         })
     });
-    if !pure_lazy {
-        return Vec::new();
+    if !all_blocked {
+        return (Vec::new(), None);
     }
 
-    let mut members = Vec::with_capacity(cycle.members.len());
-    for id in cycle.members {
+    // Reflection tasks remain blocked; poisoning the lazy members wakes them
+    // through their exact subscriptions. Only the lazy cells are terminalized
+    // here, so no reflection machine or producer obligation is stolen.
+    let cycle_error = cycle.members.iter().find_map(|id| {
+        let record = state.work.get(id)?;
+        let dependency = match &record.kind {
+            WorkKind::LazyRoute(work) => work.block.as_ref()?.dependency.as_ref()?,
+            WorkKind::Deferred(work) => work.block.as_ref()?.dependency.as_ref()?,
+            WorkKind::Reflection(work) => work.block.as_ref()?.dependency.as_ref()?,
+            WorkKind::Spark(_) => return None,
+        };
+        let WorkDependency::Promise(promise) = dependency else {
+            return None;
+        };
+        let producer = promise.producer()?;
+        Some(format!(
+            "reflection promise {} recursively observed itself in task {}",
+            promise.id().get(),
+            producer.owner().get()
+        ))
+    });
+    if cycle_error.is_none()
+        && cycle.members.iter().any(|id| {
+            state
+                .work
+                .get(id)
+                .is_some_and(|record| matches!(record.kind, WorkKind::Reflection(_)))
+        })
+    {
+        // A reflection task can still be cancelled or otherwise disturbed.
+        // Only a promise owned by a member of this exact cycle makes its
+        // recursive observation an evaluation error.
+        return (Vec::new(), None);
+    }
+
+    let lazy_ids = cycle
+        .members
+        .into_iter()
+        .filter(|id| {
+            state.work.get(id).is_some_and(|record| {
+                matches!(
+                    &record.kind,
+                    WorkKind::LazyRoute(_)
+                        | WorkKind::Deferred(DeferredWork {
+                            producer: DeferredProducer::Lazy(_),
+                            ..
+                        })
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if lazy_ids.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    let mut members = Vec::with_capacity(lazy_ids.len());
+    for id in lazy_ids {
         let record = state
             .work
             .get_mut(&id)
             .expect("cycle member must remain registered");
-        let deferred = deferred_work_mut(record);
-        let DeferredProducer::Lazy(lazy) = &deferred.producer else {
-            unreachable!("pure lazy cycle cannot contain a promise")
+        let member = match &mut record.kind {
+            WorkKind::LazyRoute(route) => DeferredLazyCycleMember {
+                work: id,
+                wait: route.wait.clone(),
+                lazy: route.lazy.clone(),
+                machine: None,
+                route: true,
+                retired_block: route.block.take(),
+            },
+            WorkKind::Deferred(deferred) => {
+                let DeferredProducer::Lazy(lazy) = &deferred.producer else {
+                    unreachable!("pure lazy cycle cannot contain a promise")
+                };
+                DeferredLazyCycleMember {
+                    work: id,
+                    wait: deferred.wait.clone(),
+                    lazy: lazy.clone(),
+                    machine: Some(
+                        deferred
+                            .machine
+                            .take()
+                            .expect("blocked legacy lazy cycle member must retain its machine"),
+                    ),
+                    route: false,
+                    retired_block: deferred.block.take(),
+                }
+            }
+            _ => unreachable!("pure lazy cycle contains other work"),
         };
-        let member = DeferredLazyCycleMember {
-            work: id,
-            wait: deferred.wait.clone(),
-            lazy: lazy.clone(),
-            machine: deferred
-                .machine
-                .take()
-                .expect("blocked lazy cycle member must retain its machine"),
-        };
-        deferred.block = None;
         record.state = WorkState::Terminalizing;
         state.observation_waiters.remove(&id);
         remove_ready_deferred(state, id);
         members.push(member);
     }
-    members
+    (members, cycle_error)
 }
 
 pub(super) fn begin_deferred_abandonment(

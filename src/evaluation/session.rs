@@ -1,5 +1,6 @@
 //! Evaluation demand sessions and machine-visible evaluation contexts.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Mutex;
@@ -10,8 +11,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+use crate::core::LazyValue;
 use crate::core::{
-    Builtin, CoreValueFactory, EvaluationFailure, LazyValue, ManagedLazyRoot, ManagedPromiseRoot,
+    Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
     PromisedValue, Value,
 };
 use crate::core_net::CoreWaitToken;
@@ -31,7 +34,8 @@ use super::pump::test_reflection_dependency;
 use super::pump::{EvaluationPumpOutcome, prioritized_task_for, pump_demand};
 use super::{
     EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
-    RuntimeObservationState, allocate_task_id, allocate_wait_token, evaluation_failure,
+    RuntimeObservationState, allocate_route_wait_token, allocate_task_id, allocate_wait_token,
+    evaluation_failure,
 };
 #[cfg(test)]
 use super::{PendingTestPromiseTask, ReflectionTaskLauncher};
@@ -328,17 +332,21 @@ impl EvaluationSession {
         default_reflection_profile: Arc<ReflectionTaskProfile>,
         require_default_reflection_profile: bool,
     ) -> Arc<Self> {
-        Self::install_runtime_background(
+        // The installed background domain is authoritative. An isolated
+        // evaluator can attach to an existing coordinator during diagnostic
+        // enrichment; a concurrent installer may also win the initialization
+        // race. Neither case may install a second annotation profile.
+        let background = Self::install_runtime_background(
             &coordinator,
             values.clone(),
-            default_reflection_profile.clone(),
+            default_reflection_profile,
             require_default_reflection_profile,
         );
         let demand = Arc::new(EvaluationDemandState {
             id: EvaluationSessionId::from_nonzero(values.ids().evaluation_session()),
             values: values.clone(),
-            default_reflection_profile,
-            require_default_reflection_profile,
+            default_reflection_profile: background.default_reflection_profile.clone(),
+            require_default_reflection_profile: background.require_default_reflection_profile,
             closed: Arc::new(AtomicBool::new(false)),
             coordinator: Arc::downgrade(&coordinator),
             #[cfg(test)]
@@ -446,6 +454,7 @@ impl EvaluationSession {
 pub(crate) struct EvalContext {
     pub(super) session: Arc<EvaluationDemandState>,
     task_profile: Arc<ReflectionTaskProfile>,
+    annotation_profile: Arc<ReflectionTaskProfile>,
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
     local_promise_owner: Option<Arc<LocalPromiseOwner>>,
     scheduled_task: bool,
@@ -502,6 +511,17 @@ impl OwnedEvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_test_task_launcher(
+        mut self,
+        launcher: Arc<dyn ReflectionTaskLauncher>,
+    ) -> Self {
+        // Test effects may specialize `.task.new` without replacing the
+        // runtime-wide default used by `refl` and `meta_refl` annotations.
+        self.context.task_profile = Arc::new(ReflectionTaskProfile::sealed(launcher));
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn into_parts(self) -> (EvalContext, Arc<EvaluationSession>) {
         (self.context, self._owner)
     }
@@ -517,6 +537,7 @@ impl EvalContext {
         let task_profile = session.demand.default_reflection_profile.clone();
         Self {
             session: session.demand.clone(),
+            annotation_profile: task_profile.clone(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -537,7 +558,7 @@ impl EvalContext {
         // Carry the demand domain's default, never its role-specific task
         // profile. Production sessions share one immutable runtime default;
         // isolated evaluator fixtures may provide a private default launcher.
-        let task_profile = self.session.default_reflection_profile.clone();
+        let task_profile = self.annotation_profile.clone();
         let session = coordinator
             .background_demand()
             .ok_or_else(|| Arc::from("evaluation runtime has no background demand domain"))?;
@@ -548,6 +569,7 @@ impl EvalContext {
             "production background work must share the runtime's default profile"
         );
         Ok(Self {
+            annotation_profile: task_profile.clone(),
             task_profile,
             session,
             task: Arc::new(OnceLock::new()),
@@ -568,6 +590,7 @@ impl EvalContext {
         let task_profile = session.default_reflection_profile.clone();
         Self {
             session,
+            annotation_profile: task_profile.clone(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -583,10 +606,11 @@ impl EvalContext {
         }
     }
 
-    pub(super) fn for_client_demand(session: Arc<EvaluationDemandState>) -> Self {
+    pub(crate) fn for_client_demand(session: Arc<EvaluationDemandState>) -> Self {
         let task_profile = session.default_reflection_profile.clone();
         Self {
             session,
+            annotation_profile: task_profile.clone(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -605,12 +629,19 @@ impl EvalContext {
         }
     }
 
+    pub(crate) fn for_lazy_route(session: Arc<EvaluationDemandState>) -> Self {
+        // The runtime background demand owns the annotation profile. A route
+        // is never permitted to inherit a caller-specific task profile.
+        Self::for_client_demand(session)
+    }
+
     pub(crate) fn with_task_profile(
         session: &Arc<EvaluationSession>,
         task_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
         Self {
             session: session.demand.clone(),
+            annotation_profile: session.demand.default_reflection_profile.clone(),
             task_profile,
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
@@ -645,6 +676,7 @@ impl EvalContext {
         task.set(Ok(id))
             .expect("fresh task identity cell must be empty");
         Self {
+            annotation_profile: session.default_reflection_profile.clone(),
             session,
             task_profile,
             task,
@@ -671,6 +703,7 @@ impl EvalContext {
         task.set(Ok(id))
             .expect("fresh deferred task identity cell must be empty");
         Self {
+            annotation_profile: session.default_reflection_profile.clone(),
             session,
             task_profile,
             task,
@@ -714,6 +747,13 @@ impl EvalContext {
 
     pub(super) fn coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {
         self.session.coordinator()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_private_runtime_observation_for_test(&self) {
+        self.coordinator()
+            .expect("test context coordinator should remain live")
+            .publish_runtime_observation();
     }
 
     pub(crate) fn current_observation_epoch(&self) -> RuntimeObservationEpoch {
@@ -942,11 +982,11 @@ impl EvalContext {
                     subscription_epoch,
                 } => {
                     if let Some(wait) = dependency.producer_wait() {
-                        if let Some(task) = prioritized_task_for(&coordinator, &wait)
-                            && let Some(mut work) = coordinator.claim_task(task)
+                        if let Some(work_id) = prioritized_task_for(&coordinator, &wait)
+                            && let Some(mut work) = coordinator.claim_work(work_id)
                         {
                             while coordinator.poll_claimed_task(work) {
-                                let Some(next) = coordinator.claim_task(task) else {
+                                let Some(next) = coordinator.claim_work(work_id) else {
                                     break;
                                 };
                                 work = next;
@@ -1094,9 +1134,6 @@ impl EvalContext {
     /// release between [`Self::pump_wait`] and this call from becoming a lost
     /// wakeup.
     pub(crate) fn wait_for_claimed_task(&self, target: &EvaluationWaitToken) {
-        if target.owner_id() != self.session.id {
-            return;
-        }
         let Some(coordinator) = self.coordinator() else {
             return;
         };
@@ -1173,6 +1210,43 @@ impl EvalContext {
             || matches!(self.task.get(), Some(Ok(current)) if *current == task)
     }
 
+    /// A runtime-owned lazy route has no caller task identity. If it blocks
+    /// on a promise owned by this caller, the cycle becomes visible at the
+    /// caller's dependency boundary rather than inside the route's poll.
+    pub(crate) fn recursive_promise_dependency(
+        &self,
+        dependency: &WorkDependency,
+    ) -> Option<String> {
+        let coordinator = self.coordinator()?;
+        let mut dependency = dependency.clone();
+        let mut seen = HashSet::new();
+        loop {
+            match dependency {
+                WorkDependency::Promise(promise) => {
+                    let producer = promise.producer()?;
+                    if !self.observes_as_task(producer.owner()) {
+                        return None;
+                    }
+                    return Some(format!(
+                        "reflection promise {} recursively observed itself in task {}",
+                        promise.id().get(),
+                        producer.owner().get()
+                    ));
+                }
+                WorkDependency::Wait(wait) => {
+                    let work = coordinator.work_for_wait(&wait)?;
+                    if !seen.insert(work) {
+                        return None;
+                    }
+                    dependency = coordinator.work_dependency_by_id(work)?;
+                }
+                #[cfg(test)]
+                WorkDependency::Test(_) => return None,
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn lazy_task<F>(
         &self,
         lazy: &LazyValue,
@@ -1190,19 +1264,13 @@ impl EvalContext {
         })
     }
 
-    pub(crate) fn lazy_root_task<F>(
+    pub(crate) fn lazy_root_task(
         &self,
         root: &ManagedLazyRoot,
-        build: F,
-    ) -> Result<EvaluationWaitToken, Arc<str>>
-    where
-        F: FnOnce(EvalContext, ManagedLazyRoot) -> Box<dyn EvaluationTaskMachine>,
-    {
-        let root = root.clone();
-        let machine_root = root.clone();
-        self.deferred_root_task(DeferredProducer::Lazy(root), |context| {
-            build(context, machine_root)
-        })
+    ) -> Result<EvaluationWaitToken, Arc<str>> {
+        let coordinator = self.coordinator_for_admission()?;
+        let wait = allocate_route_wait_token(&self.session)?;
+        coordinator.reserve_lazy_route(root.clone(), wait)
     }
 
     pub(crate) fn promise_task<F>(
@@ -1283,6 +1351,7 @@ impl EvalContext {
         let context = Self {
             session: self.session.clone(),
             task_profile: self.task_profile.clone(),
+            annotation_profile: self.annotation_profile.clone(),
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
@@ -1373,6 +1442,7 @@ impl EvalContext {
             let promise_id = promise.id();
             let producer = Arc::new(PromiseProducerObligation::local_owned(
                 owner,
+                self.session.id,
                 &wait,
                 promise_id,
                 local_owner,
@@ -1779,7 +1849,7 @@ impl EvalContext {
         }
         if self
             .coordinator()
-            .is_some_and(|coordinator| coordinator.producer_for_wait(wait).is_some())
+            .is_some_and(|coordinator| coordinator.work_for_wait(wait).is_some())
         {
             return EvaluationWaitPoll::Pending(wait.clone());
         }

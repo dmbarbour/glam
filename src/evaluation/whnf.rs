@@ -168,7 +168,7 @@ mod tests {
             panic!("uncached lazy must admit its canonical producer after inspection")
         };
         assert!(!thread_has_runtime_value_access_for_test());
-        assert_eq!(context.deferred_task_count(), 1);
+        assert_eq!(context.deferred_task_count(), 0);
         assert!(matches!(
             context.poll_wait(&wait),
             crate::evaluation::EvaluationWaitPoll::Pending(_)

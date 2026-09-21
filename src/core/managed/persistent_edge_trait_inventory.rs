@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        864,
+        868,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -925,9 +925,14 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // for direct WHNF source route-loss fixtures. Retiring the route-owned
     // source seed also removes its one production lazy-root edge; the
     // checkpoint state itself is now a direct lazy-owned edge.
+    // W6G.1f.2b adds four test-only root projections for route lifetime and
+    // mixed promise/lazy publication-order fixtures. The route tests now
+    // construct and root each value in one access, so no interim raw managed
+    // edge crosses the aggressive-collection entry point. Production route
+    // roots are coordinator obligations, not nested semantic edges.
     assert_eq!(
         occurrence_fingerprint(actual),
-        859_083_306_262_607_380,
+        2_583_448_052_908_849_780,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -974,7 +979,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 613),
+            ((SourceScope::Test, EdgeSurface::Typed), 617),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

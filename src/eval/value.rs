@@ -216,6 +216,29 @@ struct LazyTaskMachine {
     work: LazyTaskWork,
 }
 
+/// Polls the authoritative lazy checkpoint through a transient route shell.
+/// The shell never survives the claim. The only transition which requires
+/// shell-local authority is the one-shot host-call permit, consumed before
+/// releasing the claim even when its installation returned `Yielded`.
+pub(crate) fn poll_lazy_route(
+    poll_context: &crate::evaluation::EvaluationPollContext,
+    demand: Arc<crate::evaluation::EvaluationDemandState>,
+    lazy: &ManagedLazyRoot,
+    budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> EvaluationMachinePoll {
+    let mut machine = LazyTaskMachine {
+        context: EvalContext::for_lazy_route(demand),
+        lazy: lazy.clone(),
+        work: LazyTaskWork::Produce,
+    };
+    let mut poll = machine.poll(poll_context, budget);
+    if matches!(machine.work, LazyTaskWork::HostCallInvoke) {
+        debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
+        poll = machine.poll(poll_context, budget);
+    }
+    poll
+}
+
 impl LazyTaskMachine {
     fn install_regional_whnf_in(
         &self,
@@ -1572,13 +1595,7 @@ pub(super) fn eval_lazy_in(
         }
         let wait = context
             .context()
-            .lazy_task(lazy, |task_context, lazy| {
-                Box::new(LazyTaskMachine {
-                    context: task_context,
-                    lazy,
-                    work: LazyTaskWork::Produce,
-                })
-            })
+            .lazy_root_task(&context.with_value_access(|access| lazy.root_in(access.values())))
             .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
         if let Some(value) = await_deferred_task(context, wait, "lazy value")? {
             return Ok(value);
@@ -1590,13 +1607,7 @@ pub(crate) fn lazy_root_wait(
     context: &EvalContext,
     lazy: &ManagedLazyRoot,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
-    context.lazy_root_task(lazy, |task_context, lazy| {
-        Box::new(LazyTaskMachine {
-            context: task_context,
-            lazy,
-            work: LazyTaskWork::Produce,
-        })
-    })
+    context.lazy_root_task(lazy)
 }
 
 fn await_deferred_task(
