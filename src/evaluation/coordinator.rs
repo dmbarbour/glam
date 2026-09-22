@@ -1280,8 +1280,10 @@ impl EvaluationWorkCoordinator {
         self.work_available.notify_all();
     }
 
-    /// Transitional session-drain selector. Foreground demand uses its exact
-    /// dependency and launch-child routes instead; W6G.1g narrows this drain.
+    /// Claims one reflection root owned by this demand session, or the first
+    /// claimable item on that root's exact producer chain. Merely sharing a
+    /// session does not grant drain authority, and sparks and foreground
+    /// client records are never session-drain roots.
     pub(super) fn claim_ready_task_for_session(
         &self,
         session: EvaluationSessionId,
@@ -1292,11 +1294,17 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), false, false);
-            if claimed.is_some() {
+            let selection = claim_causal_session_background(&mut state, self.runtime, session);
+            if !matches!(selection, CoordinatorSelection::None) {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
-            claimed
+            match selection {
+                CoordinatorSelection::Task(claimed) => Some(claimed),
+                CoordinatorSelection::Spark(_) => {
+                    unreachable!("a session drain cannot select spark work")
+                }
+                CoordinatorSelection::None => None,
+            }
         };
         drop(mutation);
         if claimed.is_some() {
@@ -1305,10 +1313,12 @@ impl EvaluationWorkCoordinator {
         claimed
     }
 
-    /// A session-wide drain can advance an exact runtime-owned lazy route,
-    /// but does not take another session's reflection task. The latter must
-    /// remain visible as resumable cross-session quiescence.
-    pub(super) fn claim_ready_lazy_route_dependency_for_session(
+    /// Mechanical queue-selection hook for coordinator unit tests which are
+    /// not exercising session-drain authority. Production session drains must
+    /// use `claim_ready_task_for_session` and therefore start from an owned
+    /// reflection root.
+    #[cfg(test)]
+    pub(in crate::evaluation) fn claim_ready_session_machine_for_test(
         &self,
         session: EvaluationSessionId,
     ) -> Option<ClaimedTaskWork> {
@@ -1318,7 +1328,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), true, true);
+            let claimed = claim_ready_task(&mut state, self.runtime, Some(session));
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1343,7 +1353,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, None, false, false);
+            let claimed = claim_ready_task(&mut state, self.runtime, None);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1866,6 +1876,7 @@ impl EvaluationWorkCoordinator {
         false
     }
 
+    #[cfg(test)]
     pub(super) fn session_machine_is_busy(&self, session: EvaluationSessionId) -> bool {
         let state = self
             .state
@@ -1881,6 +1892,34 @@ impl EvaluationWorkCoordinator {
                 matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
                     && matches!(record.state, WorkState::Running | WorkState::Terminalizing)
             })
+    }
+
+    /// Reports only progress which a session drain is authorized to await:
+    /// its reflection roots and the exact producer chains beneath them.
+    pub(super) fn session_background_is_busy(&self, session: EvaluationSessionId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state.background_roots.iter().any(|root| {
+            let Some(root_record) = state.work.get(root) else {
+                return false;
+            };
+            if root_record.demand_session != session
+                || !matches!(root_record.kind, WorkKind::Reflection(_))
+            {
+                return false;
+            }
+            match causal_background_probe_locked(&state, *root) {
+                CausalBackgroundProbe::Busy => true,
+                CausalBackgroundProbe::Ready(candidate) => {
+                    state.work.get(&candidate).is_some_and(|candidate| {
+                        session_has_running_machine(&state, candidate.demand_session)
+                    })
+                }
+                CausalBackgroundProbe::None => false,
+            }
+        })
     }
 
     #[cfg(test)]
@@ -2197,40 +2236,68 @@ fn work_for_wait_locked(
 /// chain. A queued root runs before its old block is followed; a blocked root
 /// can reach a dormant deferred producer without promoting unrelated work.
 /// Worker and runtime-pump selectors use this same traversal policy.
-fn causal_background_candidate_locked(
+fn causal_background_probe_locked(
     state: &WorkCoordinatorState,
     root: EvaluationWorkId,
-) -> Option<EvaluationWorkId> {
-    let root_record = state.work.get(&root)?;
+) -> CausalBackgroundProbe {
+    let Some(root_record) = state.work.get(&root) else {
+        return CausalBackgroundProbe::None;
+    };
     if !matches!(
         root_record.kind,
         WorkKind::Reflection(_) | WorkKind::Spark(_)
     ) {
-        return None;
+        return CausalBackgroundProbe::None;
     }
     let mut current = root;
     let mut seen = HashSet::new();
     while seen.insert(current) {
-        let record = state.work.get(&current)?;
+        let Some(record) = state.work.get(&current) else {
+            return CausalBackgroundProbe::None;
+        };
         match record.state {
-            WorkState::Queued => return Some(current),
+            WorkState::Queued => return CausalBackgroundProbe::Ready(current),
             WorkState::Dormant
                 if matches!(record.kind, WorkKind::Deferred(_) | WorkKind::LazyRoute(_)) =>
             {
-                return Some(current);
+                return CausalBackgroundProbe::Ready(current);
             }
             WorkState::Blocked => {
-                let wait = work_dependency(record)?.producer_wait()?;
-                current = work_for_wait_locked(state, &wait)?;
+                let Some(wait) = work_dependency(record).and_then(WorkDependency::producer_wait)
+                else {
+                    return CausalBackgroundProbe::None;
+                };
+                let Some(producer) = work_for_wait_locked(state, &wait) else {
+                    return CausalBackgroundProbe::None;
+                };
+                current = producer;
             }
-            WorkState::Dormant
-            | WorkState::Reserved
-            | WorkState::Running
-            | WorkState::ExitWaiting
-            | WorkState::Terminalizing => return None,
+            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+                return CausalBackgroundProbe::Busy;
+            }
+            WorkState::Dormant | WorkState::ExitWaiting => {
+                return CausalBackgroundProbe::None;
+            }
         }
     }
-    None
+    CausalBackgroundProbe::None
+}
+
+fn causal_background_candidate_locked(
+    state: &WorkCoordinatorState,
+    root: EvaluationWorkId,
+) -> Option<EvaluationWorkId> {
+    match causal_background_probe_locked(state, root) {
+        CausalBackgroundProbe::Ready(candidate) => Some(candidate),
+        CausalBackgroundProbe::Busy | CausalBackgroundProbe::None => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CausalBackgroundProbe {
+    Ready(EvaluationWorkId),
+    Busy,
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2393,6 +2460,58 @@ fn claim_causal_background(
                 state.prefer_spark = !spark_root;
                 return claimed;
             }
+        }
+    }
+    CoordinatorSelection::None
+}
+
+/// Selects from reflection roots owned by one demand session while allowing
+/// an exact producer chain to cross session boundaries. This deliberately
+/// does not scan the session's ready queue: queue co-location is not causal
+/// authority.
+fn claim_causal_session_background(
+    state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
+    session: EvaluationSessionId,
+) -> CoordinatorSelection {
+    for index in 0..state.background_roots.len() {
+        let root = state.background_roots[index];
+        let Some(root_record) = state.work.get(&root) else {
+            continue;
+        };
+        if root_record.demand_session != session
+            || !matches!(root_record.kind, WorkKind::Reflection(_))
+        {
+            continue;
+        }
+        let Some(candidate) = causal_background_candidate_locked(state, root) else {
+            continue;
+        };
+        let Some(record) = state.work.get(&candidate) else {
+            continue;
+        };
+        if session_has_running_machine(state, record.demand_session) {
+            continue;
+        }
+        let claimed = match record.kind {
+            WorkKind::Reflection(_) => {
+                claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
+            }
+            WorkKind::Deferred(_) => claim_deferred(state, runtime, candidate, false)
+                .map(ClaimedTaskWork::Deferred)
+                .map(CoordinatorSelection::Task),
+            WorkKind::LazyRoute(_) => claim_lazy_route(state, runtime, candidate, false)
+                .map(ClaimedTaskWork::LazyRoute)
+                .map(CoordinatorSelection::Task),
+            WorkKind::Spark(_) => None,
+        };
+        if let Some(claimed) = claimed {
+            let rotated = state
+                .background_roots
+                .remove(index)
+                .expect("selected session reflection root must remain registered");
+            state.background_roots.push_back(rotated);
+            return claimed;
         }
     }
     CoordinatorSelection::None
@@ -2588,12 +2707,11 @@ fn session_has_running_machine(state: &WorkCoordinatorState, session: Evaluation
             .any(|record| matches!(record.state, WorkState::Running))
 }
 
+#[cfg(test)]
 fn claim_ready_task(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
     session: Option<EvaluationSessionId>,
-    allow_exact_dependency: bool,
-    exact_lazy_only: bool,
 ) -> Option<ClaimedTaskWork> {
     loop {
         let eligible = |id: &EvaluationWorkId| {
@@ -2620,20 +2738,6 @@ fn claim_ready_task(
                             .get(id)
                             .is_some_and(|record| record.demand_session == session && eligible(id))
                     })
-                })
-                .or_else(|| {
-                    allow_exact_dependency
-                        .then(|| {
-                            state.ready_tasks.iter().position(|id| {
-                                eligible(id)
-                                    && (!exact_lazy_only
-                                        || state.work.get(id).is_some_and(|record| {
-                                            matches!(record.kind, WorkKind::LazyRoute(_))
-                                        }))
-                                    && session_has_exact_dependency_on(state, session, *id)
-                            })
-                        })
-                        .flatten()
                 })?,
             None => state.ready_tasks.iter().position(eligible)?,
         };
@@ -2656,42 +2760,6 @@ fn claim_ready_task(
             return Some(claimed);
         }
     }
-}
-
-/// A task in this session may be blocked on runtime-owned work whose route
-/// deliberately has no session owner. Let a caller pumping that session
-/// execute the exact dependency, but not arbitrary background work.
-fn session_has_exact_dependency_on(
-    state: &WorkCoordinatorState,
-    session: EvaluationSessionId,
-    candidate: EvaluationWorkId,
-) -> bool {
-    state
-        .work_by_session
-        .get(&session)
-        .into_iter()
-        .flatten()
-        .any(|root| {
-            let mut current = *root;
-            let mut seen = HashSet::new();
-            while seen.insert(current) {
-                let Some(record) = state.work.get(&current) else {
-                    break;
-                };
-                let Some(wait) = work_dependency(record).and_then(WorkDependency::producer_wait)
-                else {
-                    break;
-                };
-                let Some(next) = work_for_wait_locked(state, &wait) else {
-                    break;
-                };
-                if next == candidate {
-                    return true;
-                }
-                current = next;
-            }
-            false
-        })
 }
 
 fn claim_reflection_task(

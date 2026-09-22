@@ -46,6 +46,27 @@ pub struct EvaluationRuntime {
     pub(super) default_reflection_profile: Arc<ReflectionTaskProfile>,
 }
 
+/// Runtime-visible background work remaining after one bounded pump call.
+///
+/// This is an instantaneous scheduler observation, not a readiness or
+/// settlement result: another worker may change it immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundPumpState {
+    /// At least one authorized background machine remains claimable.
+    Runnable,
+    /// An authorized causal chain is currently owned by another poller.
+    Busy,
+    /// No authorized background machine is runnable or currently owned.
+    Stable,
+}
+
+/// Result of one bounded runtime-background pump call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundPumpReport {
+    pub spent_steps: usize,
+    pub state: BackgroundPumpState,
+}
+
 pub(super) struct RuntimeState {
     pub(super) executor: Arc<EvaluationExecutor>,
     pub(super) work: Arc<EvaluationWorkCoordinator>,
@@ -796,6 +817,35 @@ impl EvaluationRuntime {
         acknowledged
     }
 
+    /// Advances runtime-visible reflection work by at most `step_budget`
+    /// evaluation transitions.
+    ///
+    /// This excludes foreground client demand and best-effort sparks. It does
+    /// not wait, abandon work, or classify runtime readiness. A host callback
+    /// already entered by a machine is one indivisible transition and cannot
+    /// be preempted at the budget boundary.
+    pub fn pump_background(&self, step_budget: usize) -> BackgroundPumpReport {
+        let mut spent_steps = 0;
+        while spent_steps < step_budget {
+            let remaining = step_budget - spent_steps;
+            let Some(spent) = self.state.work.poll_runtime_work_bounded(remaining) else {
+                break;
+            };
+            debug_assert_ne!(spent, 0);
+            debug_assert!(spent <= remaining);
+            spent_steps += spent;
+        }
+        let snapshot = self.state.work.runtime_pump_snapshot();
+        let state = if snapshot.background_ready {
+            BackgroundPumpState::Runnable
+        } else if snapshot.background_busy {
+            BackgroundPumpState::Busy
+        } else {
+            BackgroundPumpState::Stable
+        };
+        BackgroundPumpReport { spent_steps, state }
+    }
+
     /// Pumps useful lifecycle work across every evaluation session until the
     /// runtime reaches a stable instant.
     ///
@@ -804,10 +854,15 @@ impl EvaluationRuntime {
     /// abandons only unclaimed best-effort sparks, and leaves queued external
     /// output for its host adapter.
     pub fn pump_until_stable(&self) {
+        const BACKGROUND_DRAIN_BUDGET: usize = 4096;
+
         let admission = &self.state.shared_resources.mutation_admission;
         let activity = admission.activity();
         loop {
-            if self.state.work.poll_runtime_work() {
+            if matches!(
+                self.pump_background(BACKGROUND_DRAIN_BUDGET).state,
+                BackgroundPumpState::Runnable
+            ) {
                 continue;
             }
 
@@ -829,7 +884,7 @@ impl EvaluationRuntime {
             if work.background_ready || work.abandonable_sparks {
                 continue;
             }
-            if work.progress_owned || running_delivery {
+            if work.background_busy || work.spark_busy || running_delivery {
                 activity.wait_for_change(observed_activity);
                 continue;
             }

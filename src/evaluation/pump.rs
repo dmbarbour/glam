@@ -749,23 +749,45 @@ fn poison_lazy_cycle(
 }
 
 impl EvaluationWorkCoordinator {
+    #[cfg(test)]
     pub(crate) fn poll_runtime_work(self: &Arc<Self>) -> bool {
+        self.poll_runtime_work_bounded(TASK_POLL_QUANTUM).is_some()
+    }
+
+    /// Polls at most one runtime-visible background machine with a bounded
+    /// allowance. A zero allowance performs no selection, so merely probing
+    /// the bounded public pump cannot perturb queue order.
+    pub(crate) fn poll_runtime_work_bounded(self: &Arc<Self>, step_budget: usize) -> Option<usize> {
+        if step_budget == 0 {
+            return None;
+        }
         match self.select_runtime_pump() {
             coordinator::CoordinatorSelection::Task(work) => {
-                self.poll_claimed_task(work);
-                true
+                let (_, spent) = self.poll_claimed_task_bounded(work, step_budget);
+                Some(spent)
             }
             coordinator::CoordinatorSelection::Spark(_) => {
                 unreachable!("the runtime pump must not claim best-effort spark work")
             }
-            coordinator::CoordinatorSelection::None => false,
+            coordinator::CoordinatorSelection::None => None,
         }
     }
 
     pub(super) fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) -> bool {
+        self.poll_claimed_task_bounded(work, TASK_POLL_QUANTUM).0
+    }
+
+    fn poll_claimed_task_bounded(
+        self: &Arc<Self>,
+        work: ClaimedTaskWork,
+        step_budget: usize,
+    ) -> (bool, usize) {
+        debug_assert_ne!(step_budget, 0);
         let mut claimed = ClaimedTask::new(self.clone(), work);
-        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+        let mut budget = super::EvaluationStepBudget::new(step_budget.min(TASK_POLL_QUANTUM));
+        let before = budget.remaining();
         let poll = claimed.poll(&mut budget);
+        budget.charge_if_unchanged(before);
         let yielded = matches!(
             poll,
             EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
@@ -774,7 +796,7 @@ impl EvaluationWorkCoordinator {
         if let Some(machine) = released {
             machine.finish();
         }
-        yielded
+        (yielded, budget.spent())
     }
 
     #[cfg(test)]
@@ -834,13 +856,11 @@ impl EvaluationDemandState {
         &self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
     ) -> Option<ClaimedTask> {
-        let work = coordinator
-            .claim_ready_task_for_session(self.id)
-            .or_else(|| coordinator.claim_ready_lazy_route_dependency_for_session(self.id))?;
+        let work = coordinator.claim_ready_task_for_session(self.id)?;
         Some(ClaimedTask::new(coordinator.clone(), work))
     }
 
     fn task_is_running(&self, coordinator: &EvaluationWorkCoordinator) -> bool {
-        coordinator.session_machine_is_busy(self.id)
+        coordinator.session_background_is_busy(self.id)
     }
 }

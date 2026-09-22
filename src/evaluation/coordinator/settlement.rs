@@ -10,12 +10,12 @@ use super::client_demand::{ClientDemandResult, detach_client_demand};
 use super::deferred::{detach_deferred, detach_lazy_route};
 use super::reflection::{detach_reflection, reflection_work, reflection_work_mut};
 use super::{
-    ClientDemandRetirement, CompletionWake, EvaluationExitBlock, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal,
-    EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ExitIntent,
-    ProducerSettlementObligation, TaskOwnedPromiseObligation, TaskStatusPublisher,
+    CausalBackgroundProbe, ClientDemandRetirement, CompletionWake, EvaluationExitBlock,
+    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
+    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId,
+    ExitIntent, ProducerSettlementObligation, TaskOwnedPromiseObligation, TaskStatusPublisher,
     TaskStatusUpdate, TaskStatusWake, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, causal_background_candidate_locked, session_has_running_machine, task_block,
+    WorkState, causal_background_probe_locked, session_has_running_machine, task_block,
     task_for_record, task_observation_epoch, terminal_task_status, work_dependency,
 };
 
@@ -27,7 +27,8 @@ pub(crate) struct RuntimePumpSnapshot {
     /// not a reason for the background pump to spin: only its exact client
     /// driver may advance it.
     pub(crate) background_ready: bool,
-    pub(crate) progress_owned: bool,
+    pub(crate) background_busy: bool,
+    pub(crate) spark_busy: bool,
     pub(crate) abandonable_sparks: bool,
 }
 
@@ -58,7 +59,6 @@ pub(crate) enum RuntimeWorkKindSnapshot {
     ReflectionTask,
     DeferredEvaluation,
     LazyRoute,
-    ClientDemand,
     Spark,
 }
 
@@ -152,27 +152,37 @@ impl EvaluationWorkCoordinator {
 }
 
 pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> RuntimePumpSnapshot {
-    RuntimePumpSnapshot {
-        background_ready: state.background_roots.iter().any(|root| {
-            let Some(record) = state.work.get(root) else {
-                return false;
-            };
-            if !matches!(record.kind, WorkKind::Reflection(_)) {
-                return false;
+    let mut background_ready = false;
+    let mut background_busy = false;
+    for root in &state.background_roots {
+        let Some(record) = state.work.get(root) else {
+            continue;
+        };
+        if !matches!(record.kind, WorkKind::Reflection(_)) {
+            continue;
+        }
+        match causal_background_probe_locked(state, *root) {
+            CausalBackgroundProbe::Ready(candidate) => {
+                let Some(candidate) = state.work.get(&candidate) else {
+                    continue;
+                };
+                if session_has_running_machine(state, candidate.demand_session) {
+                    background_busy = true;
+                } else {
+                    background_ready = true;
+                }
             }
-            causal_background_candidate_locked(state, *root)
-                .and_then(|candidate| state.work.get(&candidate))
-                .is_some_and(|candidate| {
-                    !session_has_running_machine(state, candidate.demand_session)
-                })
+            CausalBackgroundProbe::Busy => background_busy = true,
+            CausalBackgroundProbe::None => {}
+        }
+    }
+    RuntimePumpSnapshot {
+        background_ready,
+        background_busy,
+        spark_busy: state.work.values().any(|record| {
+            matches!(record.kind, WorkKind::Spark(_))
+                && matches!(record.state, WorkState::Running | WorkState::Terminalizing)
         }),
-        progress_owned: state
-            .work
-            .values()
-            .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
-            || state.client_demands.values().any(|record| {
-                matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-            }),
         abandonable_sparks: state.work.values().any(|record| {
             matches!(record.kind, WorkKind::Spark(_))
                 && matches!(record.state, WorkState::Queued | WorkState::Blocked)
@@ -181,6 +191,13 @@ pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> Runt
 }
 
 fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorReadiness {
+    // Foreground evaluation is external client activity, not scheduler work
+    // which the runtime may diagnose or kill as deadlocked. Its owner must
+    // complete, cancel, or drop it before terminal settlement.
+    if !state.client_demands.is_empty() {
+        return RuntimeCoordinatorReadiness::Busy;
+    }
+
     let mut exits = Vec::new();
     let mut unfinished = Vec::new();
 
@@ -235,39 +252,6 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             blocked_error: task_block(record)
                 .and_then(|block| block.error.as_ref())
                 .cloned(),
-        });
-    }
-
-    for record in state.client_demands.values() {
-        if matches!(
-            record.state,
-            WorkState::Queued | WorkState::Running | WorkState::Terminalizing
-        ) {
-            return RuntimeCoordinatorReadiness::Busy;
-        }
-        let state_snapshot = match record.state {
-            WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
-            WorkState::Dormant | WorkState::Reserved | WorkState::ExitWaiting => {
-                unreachable!("client demand entered an unsupported work state")
-            }
-            WorkState::Queued | WorkState::Running | WorkState::Terminalizing => {
-                unreachable!("handled above")
-            }
-        };
-        unfinished.push(RuntimeDeadlockWorkSnapshot {
-            work: record.id,
-            session: Some(record.demand_session),
-            task: None,
-            lazy: None,
-            kind: RuntimeWorkKindSnapshot::ClientDemand,
-            state: state_snapshot,
-            dependency: record
-                .work
-                .subscription
-                .as_ref()
-                .map(|subscription| runtime_dependency_snapshot(state, &subscription.dependency)),
-            observed_epoch: None,
-            blocked_error: None,
         });
     }
 

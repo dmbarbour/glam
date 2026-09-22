@@ -2673,6 +2673,27 @@ impl EvaluationTaskMachine for AlwaysYields {
     }
 }
 
+struct YieldThenComplete {
+    yields: usize,
+    polls: Arc<AtomicUsize>,
+}
+
+impl EvaluationTaskMachine for YieldThenComplete {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        self.polls.fetch_add(1, Ordering::AcqRel);
+        if self.yields != 0 {
+            self.yields -= 1;
+            EvaluationMachinePoll::Yielded
+        } else {
+            EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+        }
+    }
+}
+
 struct RecordPollOrder {
     label: u8,
     polls: Arc<Mutex<Vec<u8>>>,
@@ -6469,7 +6490,7 @@ fn run_until_quiescent_reports_stable_blocked_tasks() {
 }
 
 #[test]
-fn live_cross_session_dependencies_are_reported_as_quiescent() {
+fn session_drain_follows_an_exact_cross_session_dependency() {
     let fixture = SameRuntimeFixture::new();
     let owner = fixture.context();
     let dependency = owner
@@ -6486,30 +6507,23 @@ fn live_cross_session_dependencies_are_reported_as_quiescent() {
         })
         .expect("cross-session follower should schedule");
 
-    let EvaluationSessionRun::Quiescent(report) = observer.run_until_quiescent() else {
-        panic!("a live cross-session dependency should produce resumable quiescence")
+    let EvaluationSessionRun::Complete(observer_report) = observer.run_until_quiescent() else {
+        panic!("the observer drain should advance its exact cross-session producer")
     };
-    let blocked = report
-        .unfinished
-        .iter()
-        .find(|task| task.task == follower.id())
-        .expect("cross-session follower should remain blocked");
-    assert_eq!(blocked.dependency, Some(dependency.id()));
-    assert_eq!(blocked.dependency_session, Some(dependency.session_id()));
-    assert_eq!(blocked.wait, Some(dependency.wait.get()));
+    assert!(observer_report.unfinished.is_empty());
     assert!(matches!(
         owner.poll_reflection_task(&dependency),
-        EvaluationWaitPoll::Pending(_)
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(matches!(
+        observer.poll_reflection_task(&follower),
+        EvaluationWaitPoll::Complete(_)
     ));
 
     let EvaluationSessionRun::Complete(owner_report) = owner.run_until_quiescent() else {
-        panic!("the producer's session should complete independently")
+        panic!("the producer's owner should observe the already completed task")
     };
     assert!(owner_report.unfinished.is_empty());
-    let EvaluationSessionRun::Complete(observer_report) = observer.run_until_quiescent() else {
-        panic!("polling again should observe cross-session task completion")
-    };
-    assert!(observer_report.unfinished.is_empty());
 }
 
 #[test]
@@ -7396,12 +7410,17 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
             .expect("coordinator should remain live")
     ));
     fixture.runtime.pump_until_stable();
+    assert!(matches!(
+        fixture.runtime.readiness(),
+        crate::api::RuntimeReadiness::Busy
+    ));
+    drop(client);
     let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("strict join and unresolved client demand should deadlock")
+        panic!("the strict join should deadlock after external demand retires")
     };
     let killed_details = deadlock.unfinished().to_vec();
     let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
-    assert_eq!(forced.dispositions().len(), 3);
+    assert_eq!(forced.dispositions().len(), 2);
     assert!(forced.dispositions().iter().any(|disposition| {
         disposition.task_id() == Some(child.id().get())
             && matches!(
@@ -7416,14 +7435,6 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
                 crate::api::RuntimeDispositionKind::Killed(crate::api::RuntimeKillReason::Deadlock)
             )
     }));
-    assert!(forced.dispositions().iter().any(|disposition| {
-        disposition.task_id().is_none()
-            && matches!(
-                disposition.kind(),
-                crate::api::RuntimeDispositionKind::Killed(crate::api::RuntimeKillReason::Deadlock)
-            )
-    }));
-
     let report = forced
         .settle()
         .expect("unchanged forced deadlock should settle");
@@ -7453,14 +7464,6 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         parent_failure.to_string(),
         "runtime killed work in a deadlocked settlement"
     );
-    let Some(ClientDemandResult::Killed(client_failure)) = client.poll() else {
-        panic!("forced client demand should receive a killed result")
-    };
-    assert!(Arc::ptr_eq(
-        client_failure.as_failure(),
-        parent_failure.as_failure()
-    ));
-    assert!(client_failure.shares_root_with(&parent_failure));
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)
@@ -7726,7 +7729,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
 }
 
 #[test]
-fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
+fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let child = context
@@ -7755,12 +7758,25 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
             .expect("coordinator should remain live")
     ));
     fixture.runtime.pump_until_stable();
+    assert!(matches!(
+        fixture.runtime.readiness(),
+        crate::api::RuntimeReadiness::Busy
+    ));
+    set_promise(&context, &promise, context.values().unit())
+        .expect("host promise should resolve once");
+    assert!(matches!(
+        context
+            .drive_client_demand_for_test(client)
+            .expect("resolved client should complete"),
+        ClientDemandResult::Complete(_)
+    ));
+
     let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("blocked task, join, and client demand should deadlock")
+        panic!("blocked task and strict join should remain a scheduler deadlock")
     };
 
     assert!(snapshot.dispositions().is_empty());
-    assert_eq!(snapshot.unfinished().len(), 3);
+    assert_eq!(snapshot.unfinished().len(), 2);
     let parent_work = snapshot
         .unfinished()
         .iter()
@@ -7774,18 +7790,6 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
             ..
         }) if *task_id == child.id().get() && *session_id == context.session_id().get()
     ));
-    let client_work = snapshot
-        .unfinished()
-        .iter()
-        .find(|work| work.kind() == crate::api::RuntimeWorkKind::ClientDemand)
-        .expect("blocked client demand should remain a distinct participant");
-    assert!(matches!(
-        client_work.dependency(),
-        Some(crate::api::RuntimeDependency::Promise {
-            promise_id,
-            producer: None,
-        }) if *promise_id == promise.id(context.values()).get()
-    ));
     assert!(snapshot.unfinished().iter().any(|work| {
         work.task_id() == Some(child.id().get())
             && work.observed_epoch() == Some(7)
@@ -7793,28 +7797,13 @@ fn runtime_deadlock_retains_typed_task_and_client_dependencies() {
     }));
 
     let retained = snapshot.clone();
-    set_promise(&context, &promise, context.values().unit())
-        .expect("host promise should resolve once");
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Busy
-    ));
     context.complete_wait(child.wait());
     fixture.runtime.pump_until_stable();
-    assert!(poll_one_runtime_work(
-        &context
-            .coordinator()
-            .expect("coordinator should remain live")
-    ));
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)
     ));
-    assert_eq!(retained.unfinished().len(), 3);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(_))
-    ));
+    assert_eq!(retained.unfinished().len(), 2);
 }
 
 #[test]
@@ -7952,6 +7941,9 @@ fn runtime_pump_parks_while_a_worker_owns_progress() {
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Busy
     ));
+    let bounded = fixture.runtime.pump_background(64);
+    assert_eq!(bounded.spent_steps, 0);
+    assert_eq!(bounded.state, crate::api::BackgroundPumpState::Busy);
 
     let runtime = fixture.runtime.clone();
     let (finished, pump_finished) = mpsc::channel();
@@ -8360,6 +8352,99 @@ fn runtime_pump_snapshot_is_observational() {
     assert!(snapshot.abandonable_sparks);
     assert_eq!(coordinator.work_generation(), generation);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+    assert_eq!(coordinator.abandon_quiescent_sparks(), 1);
+}
+
+#[test]
+fn bounded_background_pump_obeys_zero_one_and_many_step_budgets() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let task = context
+        .schedule_task({
+            let polls = polls.clone();
+            move |_| Ok(Box::new(YieldThenComplete { yields: 2, polls }))
+        })
+        .expect("bounded background fixture should schedule");
+
+    let zero = fixture.runtime.pump_background(0);
+    assert_eq!(zero.spent_steps, 0);
+    assert_eq!(zero.state, crate::api::BackgroundPumpState::Runnable);
+    assert_eq!(polls.load(Ordering::Acquire), 0);
+
+    let one = fixture.runtime.pump_background(1);
+    assert_eq!(one.spent_steps, 1);
+    assert_eq!(one.state, crate::api::BackgroundPumpState::Runnable);
+    assert_eq!(polls.load(Ordering::Acquire), 1);
+
+    let many = fixture.runtime.pump_background(8);
+    assert_eq!(many.spent_steps, 2);
+    assert_eq!(many.state, crate::api::BackgroundPumpState::Stable);
+    assert_eq!(polls.load(Ordering::Acquire), 3);
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Complete(_)
+    ));
+}
+
+#[test]
+fn bounded_background_pump_reports_contested_causal_work_without_waiting() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let task = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("contested background fixture should schedule");
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let coordinator::CoordinatorSelection::Task(claimed) = coordinator.select_runtime_pump() else {
+        panic!("the fixture must claim its background root before observation")
+    };
+
+    let report = fixture.runtime.pump_background(8);
+    assert_eq!(report.spent_steps, 0);
+    assert_eq!(report.state, crate::api::BackgroundPumpState::Busy);
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Pending(_)
+    ));
+
+    coordinator.poll_claimed_task(claimed);
+    assert_eq!(
+        fixture.runtime.pump_background(8).state,
+        crate::api::BackgroundPumpState::Stable
+    );
+}
+
+#[test]
+fn bounded_background_pump_excludes_foreground_clients_and_sparks() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let client = context
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            crate::core::keys::unit_value(),
+        ))
+        .expect("foreground client should admit");
+    coordinator.executor_started(1);
+    context.spark(Value::Lazy(inert_lazy_for(
+        context.values(),
+        "bounded-pump excluded spark",
+    )));
+
+    let report = fixture.runtime.pump_background(8);
+    assert_eq!(report.spent_steps, 0);
+    assert_eq!(report.state, crate::api::BackgroundPumpState::Stable);
+    assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+    assert!(client.poll().is_none());
+
+    let claimed = coordinator
+        .claim_client_demand(client.work())
+        .expect("foreground owner should retain its exact claim");
+    coordinator.poll_claimed_client_demand(claimed);
+    assert!(matches!(
+        client.poll(),
+        Some(ClientDemandResult::Complete(_))
+    ));
     assert_eq!(coordinator.abandon_quiescent_sparks(), 1);
 }
 

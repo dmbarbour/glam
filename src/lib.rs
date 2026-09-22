@@ -16,19 +16,19 @@ mod source;
 mod text_pattern;
 
 pub use api::{
-    Assembler, AssemblerBuilder, BuiltModule, DeadlockSnapshot, Diagnostic, DiagnosticBus,
-    DiagnosticCounts, DiagnosticEvent, DiagnosticIngress, DiagnosticSubscriber,
-    DiagnosticSubscription, EffectTokenDomain, Error, EvaluatedValue, EvaluationRuntime,
-    ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy, NetPort, PromiseResolver,
-    QuiescenceReport, QuiescenceSnapshot, ReasoningFailure, ReasoningVolume,
-    ReflectionEnvironmentBuilder, ReflectionInspector, RuntimeDeadlockWork, RuntimeDeliveryFailure,
-    RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot, RuntimeDeliveryId,
-    RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition, RuntimeDispositionKind,
-    RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint, RuntimeInputReader,
-    RuntimeInputSender, RuntimeKillReason, RuntimeOutputDelivery, RuntimeOutputEndpoint,
-    RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness, RuntimeReadinessStamp,
-    RuntimeSettlementError, RuntimeTaskCapability, RuntimeTaskWait, RuntimeWorkKind,
-    RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
+    Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,
+    DeadlockSnapshot, Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent,
+    DiagnosticIngress, DiagnosticSubscriber, DiagnosticSubscription, EffectTokenDomain, Error,
+    EvaluatedValue, EvaluationRuntime, ModuleBuilder, ModuleInput, NetBind, NetBuilder, NetCopy,
+    NetPort, PromiseResolver, QuiescenceReport, QuiescenceSnapshot, ReasoningFailure,
+    ReasoningVolume, ReflectionEnvironmentBuilder, ReflectionInspector, RuntimeDeadlockWork,
+    RuntimeDeliveryFailure, RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot,
+    RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
+    RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
+    RuntimeInputReader, RuntimeInputSender, RuntimeKillReason, RuntimeOutputDelivery,
+    RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness,
+    RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability, RuntimeTaskWait,
+    RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
 #[cfg(feature = "interaction-net-profiling")]
 pub use api::{InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts};

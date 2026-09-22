@@ -641,7 +641,6 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
             RuntimeWorkKindSnapshot::ReflectionTask => RuntimeWorkKind::ReflectionTask,
             RuntimeWorkKindSnapshot::DeferredEvaluation => RuntimeWorkKind::DeferredEvaluation,
             RuntimeWorkKindSnapshot::LazyRoute => RuntimeWorkKind::LazyRoute,
-            RuntimeWorkKindSnapshot::ClientDemand => RuntimeWorkKind::ClientDemand,
             RuntimeWorkKindSnapshot::Spark => RuntimeWorkKind::Spark,
         },
         state: match snapshot.state {

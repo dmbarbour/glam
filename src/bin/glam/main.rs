@@ -377,6 +377,7 @@ mod tests {
                     "refl.effect = .cut (.alt ",
                     "(.read_log >>= (\\_message -> .r ())) ",
                     "(.exit.success))\n",
+                    "refl.producer = .log 'info {msg:{text:\"arrived before settlement\"}}\n",
                 ),
             )
             .build()
@@ -384,6 +385,9 @@ mod tests {
         let effect = assembler
             .get(module.value(), "refl.effect")
             .expect("logger retry fixture should define its effect");
+        let producer = assembler
+            .get(module.value(), "refl.producer")
+            .expect("logger retry fixture should define its producer");
         let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
         let fallback_values = fallback.clone();
         let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
@@ -395,7 +399,7 @@ mod tests {
         let installation = supervisor.install().expect("logger should install");
         let host = Arc::new(LoggerTaskHost::new(
             input.clone(),
-            DiagnosticBus::for_runtime(&input.runtime),
+            diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
             assembler.clone(),
         ));
@@ -403,20 +407,31 @@ mod tests {
             &input.runtime,
             &effect,
             MainEffects::new(assembler.clone()),
-            host,
+            host.clone(),
         )
         .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
         .expect("logger root should enter coordinator work");
 
-        input.runtime.pump_until_stable();
+        let report = input.runtime.pump_background(4096);
+        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(
             matches!(input.runtime.readiness(), glam::RuntimeReadiness::Ready(_)),
             "the retryable exit should be ready for settlement before disturbance"
         );
-        diagnostics.publish_local(Diagnostic::new(
-            &input.runtime.values(),
-            Severity::Info,
-            "arrived before settlement",
+        let producer_lifecycle = EffectLifecycle::new(&input.runtime);
+        let producer_task = EffectRun::new(
+            &input.runtime,
+            &producer,
+            MainEffects::new(assembler.clone()),
+            host,
+        )
+        .schedule(&producer_lifecycle)
+        .expect("independent diagnostic producer should schedule");
+        let report = input.runtime.pump_background(4096);
+        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
+        assert!(matches!(
+            producer_task.run().unwrap(),
+            TaskOutcome::Complete(_)
         ));
 
         assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
@@ -564,6 +579,7 @@ mod tests {
                     "refl.effect = (.cut (.heap.get ['start] >>= ",
                     "(\\start -> (start == 1) =>> .r ()))) =>> logger\n",
                     "refl.start = .heap.set ['start] 1\n",
+                    "refl.producer = .log 'info {msg:{text:\"queued before first poll\"}}\n",
                 ),
             )
             .build()
@@ -574,6 +590,9 @@ mod tests {
         let start = assembler
             .get(module.value(), "refl.start")
             .expect("prequeued logger fixture should define its release effect");
+        let producer = assembler
+            .get(module.value(), "refl.producer")
+            .expect("prequeued logger fixture should define its producer");
         let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
         let fallback_messages = fallback.clone();
         let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
@@ -585,7 +604,7 @@ mod tests {
         let installation = supervisor.install().expect("logger should install");
         let host = Arc::new(LoggerTaskHost::new(
             input.clone(),
-            DiagnosticBus::for_runtime(&input.runtime),
+            diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
             assembler.clone(),
         ));
@@ -607,10 +626,20 @@ mod tests {
             glam::reflection::EffectLifecycleStatus::Blocked
         ));
 
-        diagnostics.publish_local(Diagnostic::new(
-            &input.runtime.values(),
-            Severity::Info,
-            "queued before first poll",
+        let producer_lifecycle = EffectLifecycle::new(&input.runtime);
+        let producer_task = EffectRun::new(
+            &input.runtime,
+            &producer,
+            MainEffects::new(assembler.clone()),
+            host.clone(),
+        )
+        .schedule(&producer_lifecycle)
+        .expect("prequeued diagnostic producer should schedule");
+        let report = input.runtime.pump_background(4096);
+        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
+        assert!(matches!(
+            producer_task.run().unwrap(),
+            TaskOutcome::Complete(_)
         ));
         let (_generation, _store, input_snapshot) = input.task_capability.transaction_snapshot();
         let mut input_probe = RuntimeEventJournal::new(input_snapshot);

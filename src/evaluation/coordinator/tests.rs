@@ -2022,7 +2022,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
 
     assert!(
         coordinator
-            .claim_ready_task_for_session(session.demand.id)
+            .claim_ready_session_machine_for_test(session.demand.id)
             .is_none()
     );
     assert!(matches!(
@@ -2037,7 +2037,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
     ));
     assert!(coordinator.promote_deferred_wait(&wait));
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("demand after atomic insertion should queue the producer")
     else {
         panic!("queued deferred work should preserve its kind")
@@ -2062,7 +2062,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
     assert!(!release.terminal);
 
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("a terminal dependency should immediately requeue the producer")
     else {
         panic!("the requeued producer should preserve its deferred kind")
@@ -2072,7 +2072,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
     assert!(!release.remains_blocked);
     assert!(
         coordinator
-            .claim_ready_task_for_session(session.demand.id)
+            .claim_ready_session_machine_for_test(session.demand.id)
             .is_none(),
         "a completed dependency subscription must not make later yields globally eager"
     );
@@ -2402,7 +2402,7 @@ fn dependency_published_while_deferred_runs_survives_its_yield() {
     assert!(!release.remains_blocked);
 
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("the running producer's latched demand must survive its yield")
     else {
         panic!("the requeued producer should preserve its deferred kind")
@@ -2444,11 +2444,11 @@ fn ready_selection_serializes_machine_polls_within_one_session() {
     }
 
     let first = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("one ready session machine should be selected");
     assert!(
         coordinator
-            .claim_ready_task_for_session(session.demand.id)
+            .claim_ready_session_machine_for_test(session.demand.id)
             .is_none(),
         "global selection must not poll two machines from one session concurrently"
     );
@@ -2636,7 +2636,7 @@ fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unl
         .expect("the winning candidate should retain the canonical index");
     assert!(coordinator.promote_deferred_wait(canonical));
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("the canonical machine should become claimable")
     else {
         panic!("the canonical work should remain deferred")
@@ -2685,14 +2685,14 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
         .expect("new deferred work should retain its wait index");
     assert!(coordinator.promote_deferred_wait(&wait));
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("promoted deferred work should be claimable")
     else {
         panic!("claimed work should preserve its deferred kind")
     };
     assert!(
         coordinator
-            .claim_ready_task_for_session(session.demand.id)
+            .claim_ready_session_machine_for_test(session.demand.id)
             .is_none(),
         "a detached deferred machine must exclude a competing claim"
     );
@@ -2744,7 +2744,7 @@ fn terminal_publication_releases_same_session_client_admission_before_retirement
         .expect("new deferred work should retain its wait index");
     assert!(coordinator.promote_deferred_wait(&wait));
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("promoted deferred work should be claimable")
     else {
         panic!("claimed work should preserve its deferred kind")
@@ -2817,7 +2817,7 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
         .expect("new deferred work should retain its wait index");
     assert!(coordinator.promote_deferred_wait(&wait));
     let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_ready_task_for_session(session.demand.id)
+        .claim_ready_session_machine_for_test(session.demand.id)
         .expect("promoted deferred work should be claimable")
     else {
         panic!("claimed work should preserve its deferred kind")

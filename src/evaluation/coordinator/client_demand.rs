@@ -278,7 +278,6 @@ pub(crate) struct ClientDemandWork {
 /// registry without an extra tag. Only the exact client driver may detach the
 /// operation and poll it.
 pub(super) struct ClientDemandRecord {
-    pub(super) id: EvaluationWorkId,
     pub(super) demand_session: super::EvaluationSessionId,
     pub(super) subscription_epoch: u64,
     pub(super) control: WorkControl,
@@ -352,7 +351,6 @@ impl EvaluationWorkCoordinator {
             }
             let session = demand.id;
             let record = ClientDemandRecord {
-                id,
                 demand_session: session,
                 subscription_epoch: 0,
                 control: WorkControl::default(),

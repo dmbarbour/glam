@@ -41,7 +41,7 @@ fn cross_registry_lifecycle_paths_account_for_foreground_records() {
     assert!(COORDINATOR.contains(".client_demands_by_session\n                .get(&session)"));
     assert!(CLIENT.contains("state.client_demands.insert(id, record)"));
     assert!(CLIENT.contains("state\n        .client_demands\n        .remove(&id)"));
-    assert!(SETTLEMENT.contains("for record in state.client_demands.values()"));
+    assert!(SETTLEMENT.contains("if !state.client_demands.is_empty()"));
     assert!(SETTLEMENT.contains("if state.client_demands.contains_key(&proposed.work)"));
 }
 
