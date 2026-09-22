@@ -131,6 +131,15 @@ queued and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
 
+Foreground demand claims its exact producer chain first. When an effect task
+has launched a child before publishing a join, the coordinator's activation
+index also lets that demand help the parent's still-live causal descendants,
+including children in another demand session. It never substitutes arbitrary
+same-session work. A claimed causal descendant is a `Busy` wait on the work
+generation; an unrelated unresolved promise remains `NoProgress`. Child
+retirement promotes its live descendants to the nearest surviving helping
+route, without making launch an implicit join or transferring task ownership.
+
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector
 lifecycle boundary: an exit guard releases every inactive cache record after

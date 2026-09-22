@@ -4,11 +4,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::coordinator::{
-    self, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork, ClaimedTaskWork,
-    ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll, EvaluationMachinePoll,
-    EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
-    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId,
-    ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
+    self, CausalChildSelection, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork,
+    ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
+    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
+    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
+    EvaluationWorkId, ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -446,11 +446,20 @@ pub(super) fn pump_demand(
         let prioritized = yielded_exact
             .take()
             .or_else(|| prioritized_task_for(coordinator, target));
-        let claimed = prioritized
-            .and_then(|work| coordinator.claim_work(work))
-            .or_else(|| coordinator.claim_ready_task_for_session(session))
-            .or_else(|| coordinator.claim_ready_exact_dependency_for_session(session));
+        let exact = prioritized.and_then(|work| coordinator.claim_work(work));
+        let (claimed, causal_busy) = if let Some(exact) = exact {
+            (Some(exact), false)
+        } else {
+            match coordinator.claim_causal_child_work(target, context.causal_task_ids()) {
+                CausalChildSelection::Claimed(child) => (Some(child), false),
+                CausalChildSelection::Busy => (None, true),
+                CausalChildSelection::None => (None, false),
+            }
+        };
         let Some(work) = claimed else {
+            if causal_busy {
+                return EvaluationPumpOutcome::Busy;
+            }
             if coordinator.target_has_running_producer(target) {
                 return EvaluationPumpOutcome::Busy;
             }

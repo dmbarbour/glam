@@ -624,6 +624,12 @@ pub(super) enum CoordinatorSelection {
     None,
 }
 
+pub(super) enum CausalChildSelection {
+    Claimed(ClaimedTaskWork),
+    Busy,
+    None,
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self
@@ -1266,8 +1272,8 @@ impl EvaluationWorkCoordinator {
         self.work_available.notify_all();
     }
 
-    /// Transitional session selector for reflection/effect child work whose
-    /// causal relationship is not yet represented by a dependency.
+    /// Transitional session-drain selector. Foreground demand uses its exact
+    /// dependency and launch-child routes instead; W6G.1g narrows this drain.
     pub(super) fn claim_ready_task_for_session(
         &self,
         session: EvaluationSessionId,
@@ -1279,32 +1285,6 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_task(&mut state, self.runtime, Some(session), false, false);
-            if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
-            }
-            claimed
-        };
-        drop(mutation);
-        if claimed.is_some() {
-            self.work_available.notify_all();
-        }
-        claimed
-    }
-
-    /// Cooperative demand may advance an exact dependency of a blocked task
-    /// in this session. Session-wide quiescence deliberately uses the
-    /// session-owned selector above instead.
-    pub(super) fn claim_ready_exact_dependency_for_session(
-        &self,
-        session: EvaluationSessionId,
-    ) -> Option<ClaimedTaskWork> {
-        let mutation = self.admission.mutation_guard();
-        let claimed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let claimed = claim_ready_task(&mut state, self.runtime, Some(session), true, false);
             if claimed.is_some() {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1425,6 +1405,74 @@ impl EvaluationWorkCoordinator {
             self.work_available.notify_all();
         }
         claimed
+    }
+
+    /// Claims a launched child (or its exact producer) reachable from the
+    /// target/caller task identities. This never scans the same-session ready
+    /// queue: launch provenance is a helping route, not a completion wait.
+    pub(super) fn claim_causal_child_work(
+        &self,
+        target: &EvaluationWaitToken,
+        caller_tasks: [Option<EvaluationTaskId>; 2],
+    ) -> CausalChildSelection {
+        let mutation = self.admission.mutation_guard();
+        let selection = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let mut excluded = HashSet::new();
+            loop {
+                match causal_child_probe_locked(&state, target, caller_tasks, &excluded) {
+                    CausalChildProbe::Ready(id) => {
+                        let claimed = match state.work.get(&id).map(|record| &record.kind) {
+                            Some(WorkKind::Reflection(_)) => {
+                                claim_reflection_task(&mut state, self.runtime, id)
+                            }
+                            Some(WorkKind::Deferred(_)) => {
+                                claim_deferred(&mut state, self.runtime, id, false)
+                                    .map(ClaimedTaskWork::Deferred)
+                            }
+                            Some(WorkKind::LazyRoute(_)) => {
+                                claim_lazy_route(&mut state, self.runtime, id, false)
+                                    .map(ClaimedTaskWork::LazyRoute)
+                            }
+                            Some(WorkKind::Spark(_)) | None => None,
+                        };
+                        if let Some(claimed) = claimed {
+                            state.work_generation = state.work_generation.wrapping_add(1);
+                            break CausalChildSelection::Claimed(claimed);
+                        } else {
+                            // A demand session can close independently of this
+                            // lock. Keep searching other causal children.
+                            excluded.insert(id);
+                        }
+                    }
+                    CausalChildProbe::Busy => break CausalChildSelection::Busy,
+                    CausalChildProbe::None => break CausalChildSelection::None,
+                }
+            }
+        };
+        drop(mutation);
+        if matches!(selection, CausalChildSelection::Claimed(_)) {
+            self.work_available.notify_all();
+        }
+        selection
+    }
+
+    pub(super) fn has_busy_causal_child(
+        &self,
+        target: &EvaluationWaitToken,
+        caller_tasks: [Option<EvaluationTaskId>; 2],
+    ) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        matches!(
+            causal_child_probe_locked(&state, target, caller_tasks, &HashSet::new()),
+            CausalChildProbe::Busy
+        )
     }
 
     pub(super) fn work_for_wait(&self, wait: &EvaluationWaitToken) -> Option<EvaluationWorkId> {
@@ -2140,6 +2188,109 @@ fn causal_background_candidate_locked(
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CausalChildProbe {
+    Ready(EvaluationWorkId),
+    Busy,
+    None,
+}
+
+/// Walks task-launch edges from the caller and target's exact producer chain.
+/// Each launched child may itself block through an exact producer or launch
+/// further children. A claimed route remains visible as Busy; it must not be
+/// mistaken for stable absence just because its machine was detached.
+fn causal_child_probe_locked(
+    state: &WorkCoordinatorState,
+    target: &EvaluationWaitToken,
+    caller_tasks: [Option<EvaluationTaskId>; 2],
+    excluded: &HashSet<EvaluationWorkId>,
+) -> CausalChildProbe {
+    let mut tasks = VecDeque::new();
+    let mut seen_tasks = HashSet::new();
+    for task in caller_tasks.into_iter().flatten() {
+        if seen_tasks.insert(task) {
+            tasks.push_back(task);
+        }
+    }
+
+    let mut seen_exact = HashSet::new();
+    let mut wait = target.clone();
+    while let Some(work) = work_for_wait_locked(state, &wait) {
+        if !seen_exact.insert(work) {
+            break;
+        }
+        let Some(record) = state.work.get(&work) else {
+            break;
+        };
+        if let Some(task) = task_for_record(record)
+            && seen_tasks.insert(task)
+        {
+            tasks.push_back(task);
+        }
+        let Some(next) = work_dependency(record).and_then(WorkDependency::producer_wait) else {
+            break;
+        };
+        wait = next.clone();
+    }
+
+    let mut seen_child_work = HashSet::new();
+    let mut busy = false;
+    while let Some(parent) = tasks.pop_front() {
+        let Some(children) = state.reflection.children_by_parent.get(&parent) else {
+            continue;
+        };
+        for root in children {
+            let mut current = *root;
+            while seen_child_work.insert(current) {
+                let Some(record) = state.work.get(&current) else {
+                    break;
+                };
+                if let Some(task) = task_for_record(record)
+                    && seen_tasks.insert(task)
+                {
+                    tasks.push_back(task);
+                }
+                match record.state {
+                    WorkState::Queued
+                        if !excluded.contains(&current)
+                            && !demand_session_is_closed(state, record.demand_session) =>
+                    {
+                        return CausalChildProbe::Ready(current);
+                    }
+                    WorkState::Dormant
+                        if matches!(
+                            record.kind,
+                            WorkKind::Deferred(_) | WorkKind::LazyRoute(_)
+                        ) && !excluded.contains(&current)
+                            && !demand_session_is_closed(state, record.demand_session) =>
+                    {
+                        return CausalChildProbe::Ready(current);
+                    }
+                    WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+                        busy = true;
+                        break;
+                    }
+                    WorkState::Blocked => {
+                        let Some(next) = work_dependency(record)
+                            .and_then(WorkDependency::producer_wait)
+                            .and_then(|wait| work_for_wait_locked(state, &wait))
+                        else {
+                            break;
+                        };
+                        current = next;
+                    }
+                    WorkState::Dormant | WorkState::Queued | WorkState::ExitWaiting => break,
+                }
+            }
+        }
+    }
+    if busy {
+        CausalChildProbe::Busy
+    } else {
+        CausalChildProbe::None
+    }
 }
 
 fn claim_causal_background(

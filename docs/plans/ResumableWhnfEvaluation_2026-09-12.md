@@ -4900,8 +4900,8 @@ The checkpoint labels group target contracts, not source order. As of the
 2026-09-21 [interim implementation review](../reviews/ResumableWhnfW6GInterim_2026-09-21.md),
 W6G.1b, W6G.1e.1, W6G.1f.1, W6G.1f.2a-b, W6G.1f.3a-i, and W6G.1f.4 are
 complete; W6G.3 is also complete. **W6G.1c is a cross-cutting acceptance
-target, not one additional implementation step:** its lazy-owned state and
-session-neutral route exist, but its causal claim policy remains open. The
+target, not one additional implementation step:** its lazy-owned state,
+session-neutral route, and causal claim policy are now covered by steps 1-4. The
 [remaining-work review](../reviews/ResumableWhnfW6GRemainingPlan_2026-09-21.md)
 records the source-backed drift and checkpoint-size judgments. The migration
 dependency order, including completed prerequisites, is:
@@ -4913,24 +4913,21 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **W6G.1e.2 complete; next e.3b.2:** the background route inventory,
-   causal selectors, and forced policy matrix are latched. Worker/runtime
-   background selection begins at registered roots and follows exact
-   descendants. Next remove the unrelated same-session fallback. The e.3b.0
-   launch/edge census and forced current-behavior
-   fixtures, and e.3b.1 causal launch-parent publication, are complete;
-   scheduler use of the parent edge and fallback retirement still belong to
-   e.3b.2.
-5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
-   driver as an exact-only owner, then narrow session/runtime drains and
+4. **W6G.1e.2 and e.3b complete:** background selection begins at registered
+   roots and follows exact descendants. Foreground demand claims exact work
+   first, then published launch-parent descendants; unrelated same-session
+   work is no longer a fallback. The forced child-launch and wait-publication
+   orderings are covered by e.3b.2 fixtures.
+5. **Next W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private
+   foreground driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
-   this phase. The current blocking driver still uses runtime and same-session
-   fallbacks, so its final policy depends on step 4.
+   this phase. The current blocking driver still uses runtime-wide help, so
+   its final policy follows the decision gate in d.2.
 6. **W6G.1h (including W6G.1e.3c):** remove the temporary session-wide
    serialization scan and compensating busy waits only after causal ownership
    is authoritative, then close the forced-order matrix and current docs.
 
-W6G.1c closes when steps 1-4 establish its complete session-neutral and
+W6G.1c is complete because steps 1-4 established its session-neutral and
 causal-claim contract. This ordering is a dependency guide, not permission to
 mark a broad checkpoint complete merely because its earlier representation
 work has landed. Revisit this execution-order summary after each W6G.1
@@ -5052,18 +5049,21 @@ checkpoint, or terminal-result state is currently authoritative.
 ##### W6G.1d — Foreground client evaluation lifecycle
 
 As built after W6G.1b/e.1, the private `ClientDemandHandle` and blocking
-driver already claim the exact foreground record. The blocked path still
-helps via runtime-wide work, and `pump_demand` still has an unrelated
-same-session fallback. Those are transitional liveness mechanisms, not the
-target exact-only client policy. Complete this section in two checkpoints:
+driver already claim the exact foreground record. W6G.1e.3b.2 removed the
+unrelated same-session fallback from `pump_demand`; the blocked client driver
+still helps via runtime-wide work. That remaining help is a transitional
+liveness mechanism, not the target exact-only client policy. Complete this
+section in two checkpoints:
 
 - **W6G.1d.1 — ownership/drop audit.** Inventory handle retirement,
-  cancellation, parked subscriptions, exact wake, and the two fallback paths
-  against current tests. Keep the public `Evaluation`/`try_advance` handle
+  cancellation, parked subscriptions, exact wake, the retired same-session
+  fallback, and the remaining runtime-wide help against current tests. Keep
+  the public `Evaluation`/`try_advance` handle
   deferred; an internal representation must not imply a public drop contract.
 - **W6G.1d.2 — exact-only blocking driver.** After W6G.1e.2/e.3b supply causal
-  descendants and explicit child work, remove unrelated runtime and
-  same-session help from ordinary client demand. Force zero-/one-/many-worker
+  descendants and explicit child work, remove unrelated runtime help from
+  ordinary client demand and confirm no same-session fallback remains. Force
+  zero-/one-/many-worker
   schedules for exact dependency progress, owner close, cancellation,
   subscription-before/after-publication, and stable blocked reporting.
 
@@ -5211,8 +5211,8 @@ deferred causal traversal:
     owns the subsequent drain cutover; e.3a is its evidence gate, not a
     second session-selector implementation.
   - **W6G.1e.3b — implicit-child audit and fallback retirement.** Exact demand
-    pumping still has a same-session reflection fallback. The attempted direct
-    removal exposed reflection/effect flows which launch causally related
+    pumping originally had a same-session reflection fallback. Direct removal
+    exposed reflection/effect flows which launch causally related
     child work before publishing an exact dependency edge. Inventory those
     routes, make causal child ownership explicit, then remove the fallback;
     do not misclassify those children as arbitrary unrelated work merely to
@@ -5255,14 +5255,14 @@ deferred causal traversal:
     and `configured_logger_can_join_a_restricted_reflection_task` cover the
     eventual join. Two new zero-worker, single-quantum fixtures force the
     intervening scheduler states without relying on thread races:
-    `same_session_fallback_runs_queued_task_without_exact_child_wait`
-    models the pre-join window and records that an unrelated pending parent
-    dependency currently lets the same-session fallback advance another
-    queued task, while
+    `causal_child_runs_before_unrelated_same_session_task_without_exact_wait`
+    originally modeled the pre-join window and exposed the old fallback by
+    running an unrelated task before a later queued child; e.3b.2 revised it
+    to assert causal selection instead, while
     `published_child_wait_claims_exact_cross_session_child_before_unrelated_work`
     records that a published wait advances the exact child ahead of unrelated
-    same-session work. The former is deliberately a current-behavior assertion
-    to revise at e.3b.2, not a permanent semantic contract.
+    same-session work. The original fallback result was a red assertion, not a
+    permanent semantic contract.
 
     **W6G.1e.3b.1 complete (2026-09-22).** A `.task.new` reservation captures
     its caller's stable task identity, including for directly driven
@@ -5275,21 +5275,23 @@ deferred causal traversal:
     fixtures cover direct and scheduled parents, return, failure, active and
     pre-launch cancellation, and session abandonment.
 
-    **Still open:** e.3b.2 must use the recorded edge for causal selection,
-    remove the same-session fallback, and force both sides of child-launch
-    and subscription publication under the new mechanism. The recorded
-    parent alone does not yet change scheduler behavior.
-
-    **e.3b.2 implementation checkpoints.** First make a single coordinator
-    probe recognize claimable, claimed, or absent work along both exact waits
-    and published `launch_parent` descendants. Its claimed result must feed
-    the same wait/retry predicate as the foreground pump; a new `Busy` without
-    a corresponding wake is not a safe intermediate state. Then cut over
-    `pump_demand` and retire its same-session claim selector. Force queued and
-    claimed children before/after parent wait publication, including a child
-    in another demand session, a truly unrelated same-session task, and an
-    external unresolved promise which still returns `NoProgress`. Keep the
-    optional productive-wait policy at the W6G.1d.2 gate above.
+    **W6G.1e.3b.2 complete (2026-09-22).** The coordinator indexes activated
+    children by launch parent and probes claimable, claimed, or absent work
+    along their exact producer chains and descendants. `pump_demand` claims
+    exact work first, then causal child work; it no longer uses the same-session
+    fallback. The claimed/busy result participates in the foreground wait and
+    generation-wake path, so `Busy` cannot become a lost wake. A claimed or
+    reserved causal child reports `Busy`; an unrelated same-session task does
+    not become causal work. Forced fixtures cover child activation before and
+    after parent wait publication, a cross-session child claimed by another
+    thread, a blocked child with a
+    grandchild, a retired intermediate child with a live grandchild, and an
+    external promise that remains `NoProgress` after side work completes.
+    Retiring an intermediate child promotes its live descendants into the
+    nearest still-indexed ancestor route; retiring a root removes only its
+    own helping route. Neither promotion implies an implicit join or extends
+    child ownership to its parent. Optional productive-wait policy remains
+    deferred to the W6G.1d.2 decision gate.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
     `session_has_running_machine` and its compensating busy waits. This is a

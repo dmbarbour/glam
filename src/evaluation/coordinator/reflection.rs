@@ -311,6 +311,15 @@ impl EvaluationWorkCoordinator {
             }
             reflection_work_mut(record).launch_parent = parent;
             record.state = WorkState::Queued;
+            if let Some(parent) = parent {
+                state
+                    .reflection
+                    .children_by_parent
+                    .entry(parent)
+                    .or_default()
+                    .push(id);
+                state.reflection.helping_parent_by_child.insert(id, parent);
+            }
             register_background_root(&mut state, id);
             queue_reflection(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
@@ -729,6 +738,13 @@ pub(super) struct ReflectionWork {
 pub(super) struct ReflectionIndexes {
     pub(super) by_task: BTreeMap<EvaluationTaskId, EvaluationWorkId>,
     pub(super) by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
+    /// Activated children only. Retiring an intermediate task promotes its
+    /// still-live descendants to its own helping parent. This is a causal
+    /// route, never an implicit join or owner.
+    pub(super) children_by_parent: HashMap<EvaluationTaskId, Vec<EvaluationWorkId>>,
+    /// Effective helping parent; may differ from immutable launch provenance
+    /// after an intermediate task retires.
+    pub(super) helping_parent_by_child: HashMap<EvaluationWorkId, EvaluationTaskId>,
 }
 
 pub(in crate::evaluation) struct ClaimedReflectionWork {
@@ -1035,6 +1051,39 @@ pub(super) fn detach_reflection(
         Some(id),
         "reflection wait index must agree with its work record"
     );
+    let descendants = state
+        .reflection
+        .children_by_parent
+        .remove(&reflection.task)
+        .unwrap_or_default();
+    if let Some(parent) = state.reflection.helping_parent_by_child.remove(&id) {
+        let children = state
+            .reflection
+            .children_by_parent
+            .get_mut(&parent)
+            .expect("activated reflection child must retain its parent index");
+        let position = children
+            .iter()
+            .position(|child| *child == id)
+            .expect("activated reflection child must remain in its parent index");
+        children.remove(position);
+        children.splice(position..position, descendants.iter().copied());
+        for descendant in descendants {
+            state
+                .reflection
+                .helping_parent_by_child
+                .insert(descendant, parent);
+        }
+        if children.is_empty() {
+            state.reflection.children_by_parent.remove(&parent);
+        }
+    } else {
+        // A root with no helping parent leaves autonomous descendants, not
+        // orphaned index entries under a retired task identity.
+        for descendant in descendants {
+            state.reflection.helping_parent_by_child.remove(&descendant);
+        }
+    }
     if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
         session_work.remove(&id);
         if session_work.is_empty() {

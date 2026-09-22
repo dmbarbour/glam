@@ -58,6 +58,13 @@ control-flow overview.
   scheduler state and may only become a session-level deadlock; poisoning a
   lazy from such a temporary dependency would be unsound. Deferred labels and
   IDs belong in internal cycle diagnostics, never in the public value facade.
+- A foreground pump may help exact producers and activated `launch_parent`
+  descendants, including across demand sessions, but never arbitrary
+  same-session work. A claimed or reserved causal child is `Busy` until a
+  generation wake; an unrelated unresolved target may still be `NoProgress`.
+  Retiring an intermediate task must preserve access to its live descendants.
+  Launch provenance is a helping route, not an implicit join or ownership
+  transfer.
 - Lazy production always transfers the current WHNF demand through a
   top-level lazy or promised result. Reflection gates, `seq`, and `spark`
   therefore perform their prerequisite work and continue the same demand;

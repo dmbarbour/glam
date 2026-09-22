@@ -1152,6 +1152,7 @@ impl EvalContext {
         };
         let generation = coordinator.work_generation();
         if !coordinator.target_has_running_producer(target)
+            && !coordinator.has_busy_causal_child(target, self.causal_task_ids())
             && !coordinator.demand_session_has_running_machine(self.session.id)
             && !(coordinator.dependency_observes_runtime(target)
                 && coordinator.runtime_has_running_machine())
@@ -1221,6 +1222,13 @@ impl EvalContext {
     pub(crate) fn observes_as_task(&self, task: EvaluationTaskId) -> bool {
         self.originating_task == Some(task)
             || matches!(self.task.get(), Some(Ok(current)) if *current == task)
+    }
+
+    pub(super) fn causal_task_ids(&self) -> [Option<EvaluationTaskId>; 2] {
+        [
+            self.originating_task,
+            self.task.get().and_then(|task| task.as_ref().ok()).copied(),
+        ]
     }
 
     /// A runtime-owned lazy route has no caller task identity. If it blocks

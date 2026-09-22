@@ -3116,7 +3116,7 @@ fn pump_follows_a_lazy_dependency_to_its_producer() {
 }
 
 #[test]
-fn same_session_fallback_runs_queued_task_without_exact_child_wait() {
+fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let promise = PromisedValue::new(context.values(), "parent before child wait");
@@ -3129,10 +3129,21 @@ fn same_session_fallback_runs_queued_task_without_exact_child_wait() {
             }))
         })
         .expect("parent should schedule before its child");
+    let (unrelated_ran, unrelated_observer) = mpsc::channel();
+    let unrelated = context
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(unrelated_ran)))))
+        .expect("unrelated task should schedule first");
     let (child_ran, child_observer) = mpsc::channel();
     let child = context
-        .schedule_task(move |_| Ok(Box::new(Signal(Some(child_ran)))))
-        .expect("child should launch without an exact parent wait");
+        .prepare_machine(None, move |_| Ok(Box::new(Signal(Some(child_ran)))))
+        .expect("child should reserve without an exact parent wait")
+        .into_handle();
+    assert!(
+        context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .activate_reflection_with_parent(child.work, Some(parent.id()))
+    );
 
     assert_eq!(
         context.pump_wait(parent.wait(), 1),
@@ -3146,15 +3157,17 @@ fn same_session_fallback_runs_queued_task_without_exact_child_wait() {
         Some(WorkDependency::Promise(_))
     ));
     assert!(child_observer.try_recv().is_err());
+    assert!(unrelated_observer.try_recv().is_err());
 
     assert_eq!(
         context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::BudgetExhausted,
-        "the current fallback should poll a same-session child before its parent has a child wait"
+        "the causal child should run before its parent publishes a child wait"
     );
     child_observer
         .try_recv()
-        .expect("the fallback should have run the child");
+        .expect("the causal pump should have run the child");
+    assert!(unrelated_observer.try_recv().is_err());
     assert!(matches!(
         context.poll_reflection_task(&child),
         EvaluationWaitPoll::Complete(_)
@@ -3169,6 +3182,305 @@ fn same_session_fallback_runs_queued_task_without_exact_child_wait() {
     assert_eq!(
         context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::TargetReady
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&unrelated),
+        EvaluationWaitPoll::Pending(_)
+    ));
+}
+
+#[test]
+fn claimed_cross_session_child_keeps_parent_wait_busy_until_release() {
+    let fixture = SameRuntimeFixture::new();
+    let parent_context = fixture.context();
+    let child_context = fixture.context();
+    let promise = PromisedValue::new(parent_context.values(), "parent awaiting child side work");
+    let promise_root = promise.root(parent_context.values());
+    let parent = parent_context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            }))
+        })
+        .expect("parent should schedule");
+    let (child_ran, child_observer) = mpsc::channel();
+    let child = child_context
+        .prepare_machine(None, move |_| Ok(Box::new(Signal(Some(child_ran)))))
+        .expect("cross-session child should reserve")
+        .into_handle();
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the parent must publish its external promise wait before child activation"
+    );
+    let coordinator = parent_context
+        .coordinator()
+        .expect("fixture coordinator should remain live");
+    assert!(coordinator.activate_reflection_with_parent(child.work, Some(parent.id())));
+    let claimed = coordinator
+        .claim_work(child.work)
+        .expect("a second thread may own the activated child");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::Busy,
+        "a claimed causal child must not look like stable NoProgress"
+    );
+
+    let (waiting_sender, waiting_receiver) = mpsc::channel();
+    let (resumed_sender, resumed_receiver) = mpsc::channel();
+    let waiting_context =
+        EvalContext::clone(&parent_context).with_claimed_task_wait_probe(waiting_sender);
+    let target = parent.wait().clone();
+    let waiter = std::thread::spawn(move || {
+        waiting_context.wait_for_claimed_task(&target);
+        resumed_sender
+            .send(())
+            .expect("wait result must remain observable");
+    });
+    waiting_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("causal busy wait must register before child release");
+    assert!(resumed_receiver.try_recv().is_err());
+    coordinator.poll_claimed_task(claimed);
+    child_observer
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the claimed child must run exactly once");
+    resumed_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("child release must wake the causal waiter");
+    waiter.join().expect("causal waiter must finish");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::NoProgress,
+        "the remaining external promise is genuinely unresolved"
+    );
+    set_promise(&parent_context, &promise, parent_context.values().unit())
+        .expect("external promise should resolve");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+}
+
+#[test]
+fn published_child_wait_reaches_child_activated_after_subscription() {
+    let fixture = SameRuntimeFixture::new();
+    let parent_context = fixture.context();
+    let child_context = fixture.context();
+    let child_wait = Arc::new(OnceLock::new());
+    let parent = parent_context
+        .schedule_task({
+            let child_wait = child_wait.clone();
+            move |task_context| {
+                Ok(Box::new(AwaitCell {
+                    context: task_context,
+                    dependency: child_wait,
+                }))
+            }
+        })
+        .expect("parent should schedule before child activation");
+    let (child_ran, child_observer) = mpsc::channel();
+    let child = child_context
+        .prepare_machine(None, move |_| Ok(Box::new(Signal(Some(child_ran)))))
+        .expect("child should reserve before its parent waits")
+        .into_handle();
+    child_wait
+        .set(child.wait().clone())
+        .expect("the child wait should publish once");
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the parent should publish its exact wait while the child is reserved"
+    );
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::Busy,
+        "a reserved exact child must remain pending until activation"
+    );
+    assert!(child_observer.try_recv().is_err());
+
+    let (waiting_sender, waiting_receiver) = mpsc::channel();
+    let (resumed_sender, resumed_receiver) = mpsc::channel();
+    let waiting_context =
+        EvalContext::clone(&parent_context).with_claimed_task_wait_probe(waiting_sender);
+    let target = parent.wait().clone();
+    let waiter = std::thread::spawn(move || {
+        waiting_context.wait_for_claimed_task(&target);
+        resumed_sender
+            .send(())
+            .expect("wait result must remain observable");
+    });
+    waiting_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the reserved-child wait must register before activation");
+    assert!(resumed_receiver.try_recv().is_err());
+    assert!(
+        parent_context
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .activate_reflection_with_parent(child.work, Some(parent.id()))
+    );
+    resumed_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("child activation must wake the reserved-child waiter");
+    waiter.join().expect("reserved-child waiter must finish");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "activation must make the already-published exact child reachable"
+    );
+    child_observer
+        .recv_timeout(Duration::from_secs(2))
+        .expect("child must run once after activation");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+}
+
+#[test]
+fn causal_pump_reaches_grandchild_of_blocked_child() {
+    let fixture = SameRuntimeFixture::new();
+    let parent_context = fixture.context();
+    let child_context = fixture.context();
+    let grandchild_context = fixture.context();
+    let parent_promise = PromisedValue::new(parent_context.values(), "parent causal tree wait");
+    let parent_root = parent_promise.root(parent_context.values());
+    let parent = parent_context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: parent_root,
+            }))
+        })
+        .expect("parent should schedule");
+    let child_promise = PromisedValue::new(child_context.values(), "child causal tree wait");
+    let child_root = child_promise.root(child_context.values());
+    let child = child_context
+        .prepare_machine(None, move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: child_root,
+            }))
+        })
+        .expect("child should reserve")
+        .into_handle();
+    let (grandchild_ran, grandchild_observer) = mpsc::channel();
+    let grandchild = grandchild_context
+        .prepare_machine(None, move |_| Ok(Box::new(Signal(Some(grandchild_ran)))))
+        .expect("grandchild should reserve")
+        .into_handle();
+    let coordinator = parent_context
+        .coordinator()
+        .expect("fixture coordinator should remain live");
+    assert!(coordinator.activate_reflection_with_parent(child.work, Some(parent.id())));
+    assert!(coordinator.activate_reflection_with_parent(grandchild.work, Some(child.id())));
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the parent should publish its own external wait"
+    );
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the launched child should publish its external wait"
+    );
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the causal traversal should reach the grandchild"
+    );
+    grandchild_observer
+        .recv_timeout(Duration::from_secs(2))
+        .expect("grandchild should run once");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::NoProgress,
+        "completed side work does not implicitly resolve either promise"
+    );
+    set_promise(
+        &child_context,
+        &child_promise,
+        child_context.values().unit(),
+    )
+    .expect("child promise should resolve");
+    assert_eq!(
+        child_context.pump_wait(child.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+    set_promise(
+        &parent_context,
+        &parent_promise,
+        parent_context.values().unit(),
+    )
+    .expect("parent promise should resolve");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::TargetReady
+    );
+}
+
+#[test]
+fn causal_pump_keeps_grandchild_reachable_after_child_retires() {
+    let fixture = SameRuntimeFixture::new();
+    let parent_context = fixture.context();
+    let child_context = fixture.context();
+    let grandchild_context = fixture.context();
+    let promise = PromisedValue::new(parent_context.values(), "parent after child retirement");
+    let promise_root = promise.root(parent_context.values());
+    let parent = parent_context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: promise_root,
+            }))
+        })
+        .expect("parent should schedule");
+    let child = child_context
+        .prepare_machine(None, |_| Ok(Box::new(Signal(None))))
+        .expect("child should reserve")
+        .into_handle();
+    let (grandchild_ran, grandchild_observer) = mpsc::channel();
+    let grandchild = grandchild_context
+        .prepare_machine(None, move |_| Ok(Box::new(Signal(Some(grandchild_ran)))))
+        .expect("grandchild should reserve")
+        .into_handle();
+    let coordinator = parent_context
+        .coordinator()
+        .expect("fixture coordinator should remain live");
+    assert!(coordinator.activate_reflection_with_parent(child.work, Some(parent.id())));
+    assert!(coordinator.activate_reflection_with_parent(grandchild.work, Some(child.id())));
+
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "child should complete and retire before its grandchild runs"
+    );
+    assert!(matches!(
+        child_context.poll_reflection_task(&child),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(grandchild_observer.try_recv().is_err());
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "grandchild must remain causally reachable after child retirement"
+    );
+    grandchild_observer
+        .recv_timeout(Duration::from_secs(2))
+        .expect("grandchild should run once");
+    assert_eq!(
+        parent_context.pump_wait(parent.wait(), 1),
+        EvaluationPumpOutcome::NoProgress,
+        "grandchild completion does not resolve the parent's external promise"
     );
 }
 
