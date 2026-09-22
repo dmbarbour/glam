@@ -4913,12 +4913,13 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **Next: W6G.1e.2a, then e.2b-c/e.3b.2:** inventory and dry-run background
-   traversal, then select background roots and their exact descendants and
-   remove global deferred and unrelated same-session selection. The e.3b.0
-   launch/edge census and forced current-behavior fixtures, and e.3b.1
-   causal launch-parent publication, are complete; scheduler use of the
-   parent edge and fallback retirement still belong to e.3b.2.
+4. **Next: all of W6G.1e.2, in order e.2a → e.2b → e.2c; then e.3b.2:**
+   inventory and dry-run background traversal, cut over worker and runtime
+   background selectors together, then force the policy matrix before
+   removing the unrelated same-session fallback. The e.3b.0 launch/edge
+   census and forced current-behavior fixtures, and e.3b.1 causal
+   launch-parent publication, are complete; scheduler use of the parent edge
+   and fallback retirement still belong to e.3b.2.
 5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
    driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
@@ -5116,8 +5117,9 @@ deferred causal traversal:
   work and a deferred dependency discovered by a spark; the foreground and
   reflection-rooted fixtures remain ready for the later policy transition.
   Partition the remaining work:
-  - **W6G.1e.2a — route inventory and dry-run traversal.** After 2b, enumerate
-    background-root entry points, exact dependency edges, yield/requeue
+  - **W6G.1e.2a — route inventory and dry-run traversal.** After W6G.1f.2b
+    and before the e.2b selector cutover, enumerate background-root entry
+    points, exact dependency edges, yield/requeue
     behavior, and every current global-ready fallback. Build the traversal
     helper and forced fixtures without changing production selection yet.
   - **W6G.1e.2b — selector cutover.** Switch worker and runtime background
