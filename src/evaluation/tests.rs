@@ -6497,6 +6497,10 @@ fn live_cross_session_dependencies_are_reported_as_quiescent() {
     assert_eq!(blocked.dependency, Some(dependency.id()));
     assert_eq!(blocked.dependency_session, Some(dependency.session_id()));
     assert_eq!(blocked.wait, Some(dependency.wait.get()));
+    assert!(matches!(
+        owner.poll_reflection_task(&dependency),
+        EvaluationWaitPoll::Pending(_)
+    ));
 
     let EvaluationSessionRun::Complete(owner_report) = owner.run_until_quiescent() else {
         panic!("the producer's session should complete independently")
@@ -6506,6 +6510,74 @@ fn live_cross_session_dependencies_are_reported_as_quiescent() {
         panic!("polling again should observe cross-session task completion")
     };
     assert!(observer_report.unfinished.is_empty());
+}
+
+#[test]
+fn logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_runtime() {
+    let fixture = SameRuntimeFixture::new();
+    let producer = fixture.context();
+    let logger = fixture.context();
+    let (produced, production) = mpsc::channel();
+    let independent = producer
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(produced)))))
+        .expect("independent reflection producer should schedule");
+
+    // A configured logger's read_log wait is host-input observation, not an
+    // exact wait on the reflection task which may later publish that input.
+    let (input, input_root, _value_root) =
+        rooted_promise_value(logger.values(), "logger-shaped host input");
+    let consumer = logger
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitPromise {
+                context: task_context,
+                promise: input_root,
+            }))
+        })
+        .expect("logger-shaped consumer should schedule");
+    let foreground = logger
+        .demand_whnf(RuntimeValueRoot::new(
+            logger.values(),
+            Value::Number(89.into()),
+        ))
+        .expect("independent foreground demand should schedule");
+    let (spark_value, spark_evaluations) =
+        counted_client_lazy(&logger, "logger-session spark", logger.values().unit());
+    logger.spark_root(spark_value);
+
+    let EvaluationSessionRun::Deadlocked(report) = logger.run_until_quiescent() else {
+        panic!("the host-input wait has no exact cross-session producer edge")
+    };
+    assert_eq!(report.unfinished.len(), 1);
+    assert_eq!(report.unfinished[0].task, consumer.id());
+    assert!(production.try_recv().is_err());
+    assert!(matches!(
+        producer.poll_reflection_task(&independent),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    assert!(foreground.poll().is_none());
+    assert_eq!(spark_evaluations.load(Ordering::Relaxed), 0);
+
+    // Runtime-wide background selection, unlike the logger session drain,
+    // may execute the autonomous reflection producer. It still may not run
+    // foreground demand or a best-effort spark.
+    let coordinator = logger
+        .coordinator()
+        .expect("runtime coordinator should be live");
+    assert!(coordinator.poll_runtime_work());
+    production
+        .recv_timeout(Duration::from_secs(2))
+        .expect("runtime background selection should run the producer");
+    assert!(foreground.poll().is_none());
+    assert_eq!(spark_evaluations.load(Ordering::Relaxed), 0);
+
+    set_promise(&logger, &input, logger.values().unit())
+        .expect("the independent producer's host input should arrive");
+    let EvaluationSessionRun::Complete(report) = logger.run_until_quiescent() else {
+        panic!("the logger-shaped consumer should finish after host-input admission")
+    };
+    assert!(report.unfinished.is_empty());
+    assert!(foreground.poll().is_none());
+    assert_eq!(spark_evaluations.load(Ordering::Relaxed), 0);
 }
 
 #[test]

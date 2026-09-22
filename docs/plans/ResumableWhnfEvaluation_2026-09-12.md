@@ -4918,10 +4918,12 @@ dependency order, including completed prerequisites, is:
    first, then published launch-parent descendants; unrelated same-session
    work is no longer a fallback. The forced child-launch and wait-publication
    orderings are covered by e.3b.2 fixtures.
-5. **W6G.1d complete; next W6G.1e.3a and W6G.1g:** the private blocking
+5. **W6G.1d and W6G.1e.3a complete; next W6G.1g:** the private blocking
    foreground driver claims only exact producers and launched causal children;
    stable absence returns a retryable halt rather than helping unrelated
-   background work. Next narrow session/runtime drains and readiness. The
+   background work. The drain-authority evidence gate now identifies the
+   configured-logger ingress as an external input, not an exact task edge;
+   next narrow session/runtime drains and readiness. The
    private timed generation wait is available for later host composition, but
    no public incremental handle or productive-wait policy was introduced.
 6. **W6G.1h (including W6G.1e.3c):** remove the temporary session-wide
@@ -5247,10 +5249,31 @@ deferred causal traversal:
     schedule where configured `conf.log` depends on reflection work hosted by
     another session. Do not choose between “claim that cross-session root” and
     “represent a different exact dependency” through queue filtering. After
-    the topology migration, inventory the actual drain authority and add
-    forced configured-logger and client/spark coexistence schedules. W6G.1g
-    owns the subsequent drain cutover; e.3a is its evidence gate, not a
-    second session-selector implementation.
+    the topology migration, inventory the actual drain authority and force a
+    logger-shaped external-input schedule alongside client/spark work. W6G.1g
+    owns the subsequent drain cutover and production-ingress ordering test;
+    e.3a is its evidence gate, not a second session-selector implementation.
+
+    **W6G.1e.3a complete (2026-09-22).** Source-backed drain authority:
+
+    | Path | Current authority | Cutover constraint |
+    | --- | --- | --- |
+    | `EffectRun::schedule_diagnostic_consumer` | Creates a coordinator-rooted logger effect in a fresh session and attaches the diagnostic ingress atomically with activation. | The logger session is an authorized root; the diagnostic input queue is not an exact wait on whichever independent task may next publish a message. |
+    | `EvaluationDemandState::run_until_quiescent` | First claims broadly ready work in its session, then an exact cross-session lazy route. It reports a live cross-session reflection-task wait as `Quiescent` without claiming that task. | W6G.1g.1 must narrow the same-session selection without pretending an unrelated cross-session diagnostic producer is a logger child. |
+    | `EvaluationRuntime::pump_until_stable` | Selects runtime-visible reflection roots and their causal descendants across sessions; it excludes foreground roots and executes no spark. | W6G.1g.2 must retain this independent-producer route through its bounded background pump and drain composition. |
+
+    The zero-worker `logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_runtime`
+    fixture forces the logger-shaped host-input wait before runtime background
+    selection: session drain leaves the independent producer, foreground
+    client, and spark untouched; one runtime background poll advances only the
+    producer; admitting the input then lets the consumer finish. The existing
+    `live_cross_session_dependencies_are_reported_as_quiescent` fixture now
+    also asserts an exact cross-session reflection producer remains unclaimed
+    until its owner is drained. Configured-logger CLI fixtures cover the
+    end-to-end result but do not force this ordering. W6G.1g.1 must add the
+    production `DiagnosticIngress`/`conf.log` order-forced fixture before
+    changing the selector; `TestHost`'s separate `.read_log` snapshot protocol
+    is not a substitute for that ingress test.
   - **W6G.1e.3b — implicit-child audit and fallback retirement.** Exact demand
     pumping originally had a same-session reflection fallback. Direct removal
     exposed reflection/effect flows which launch causally related
@@ -7137,7 +7160,11 @@ Partition this after W6G.1e.2/e.3b and the e.3a evidence gate:
 - **W6G.1g.1 — session drain authority.** Select session-owned reflection
   roots and their exact descendants, including a causally required
   cross-session child. Do not claim unrelated work merely because it shares
-  a session; force the configured `conf.log` ordering from e.3a.
+  a session. Before cutover, force both publication orders between a real
+  configured `conf.log` consumer and a diagnostic produced by another
+  session through the production `DiagnosticIngress`; retain e.3a's
+  zero-worker logger-shaped/client/spark selector fixture as the topology
+  baseline.
 - **W6G.1g.2a — bounded runtime background pump.** Add a host-callable
   `EvaluationRuntime` operation (provisionally `pump_background(budget)`), not
   just a private selector. One call spends at most its supplied evaluation-step
