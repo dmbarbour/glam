@@ -45,10 +45,11 @@ control-flow overview.
   producer claimed by another thread (`Busy`) from stable quiescence
   (`NoProgress`). Cooperative and scheduled contexts return the wait, while
   synchronous assembler contexts wait on the session condition variable and
-  retry. Deferred producers begin dormant. Publishing an exact dependency on
-  one promotes that canonical producer into the runtime ready queue, where a
-  serial pump or worker may claim it; construction alone does not advertise
-  background work.
+  retry. Deferred producers begin dormant. Publishing an exact dependency may
+  queue the canonical producer for exact/cooperative claim, but does not make
+  it an independent background root. Workers follow exact descendants of
+  registered reflection or spark roots; the runtime background pump follows
+  reflection roots only. Construction alone advertises no work.
 - A blocked lazy or assigned-promise task records an edge only when its wait is
   produced by another deferred-value task. The resulting functional graph is
   checked on every edge change. Cycles containing only computed lazies are
@@ -304,9 +305,11 @@ control-flow overview.
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
   spuriously invalidate the state observations of the task being scheduled.
 - Workers opportunistically poll reflection tasks and are the only consumers
-  of sparks. A serial pump continues to select task records directly within
-  its chosen session by coordinator demand ID. It must not upgrade the external
-  owner lease: worker and task contexts may need to finish exact dependencies
+  of sparks. Workers and the runtime background pump follow exact producer
+  chains from permitted roots, not globally ready deferred work. An explicit
+  serial demand driver still selects its chosen session by coordinator demand
+  ID. It must not upgrade the external owner lease: worker and task contexts
+  may need to finish exact dependencies
   after the client has released that lease.
 - Preserve inactive per-heap allocation cursors across ordinary worker
   quantums, but explicitly release all such thread-local cache records when a

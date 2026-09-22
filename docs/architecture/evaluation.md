@@ -706,11 +706,13 @@ rules.
 
 One `EvaluationRuntime` owns its attached `EvaluationExecutor`; assembler,
 logger, macro, and future IDE demand sessions share that runtime rather than
-registering independent worker pools. The fixed workers claim coordinator-owned
-ready reflection/deferred work or optional sparks. The serial pump remains
-available for exact foreground dependencies and explicit batch draining. It
-selects by demand ID through the coordinator and does not require the external
-session owner lease; an ownerless spark context can therefore finish a deferred
+registering independent worker pools. The fixed workers begin at activated
+reflection tasks or admitted sparks and follow their exact deferred producer
+chains; they do not claim unrelated ready deferred work. The runtime background
+pump follows reflection roots but excludes sparks. An exact serial demand
+driver remains available for foreground dependencies and explicit batch
+draining. It selects by demand ID through the coordinator and does not require
+the external session owner lease; an ownerless spark context can finish a deferred
 follower within the same demand instead of restarting from its original value.
 
 Demand on `seq A B` demands `A` to weak-head normal form before transferring

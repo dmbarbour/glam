@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        873,
+        874,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -938,9 +938,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1e.2b renames two lazy/deferred scheduler fixtures to state their
     // causal-selection contract. A separate lazy-source fixture now roots its
     // promise across a forced collection, adding one test-only root creation.
+    // W6G.1e.2c adds one test-only lazy producer root in the forced
+    // reflection-descendant selector matrix. No production edge changes.
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_373_437_538_390_803_908,
+        1_874_079_410_810_523_759,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -987,7 +989,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 622),
+            ((SourceScope::Test, EdgeSurface::Typed), 623),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

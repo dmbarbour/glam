@@ -4913,11 +4913,11 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **W6G.1e.2a-b complete; next e.2c, then e.3b.2:** the background route
-   inventory and dry-run traversal are latched, and worker/runtime background
-   selection now begins at registered roots and follows exact descendants.
-   Force the policy matrix before removing the unrelated same-session
-   fallback. The e.3b.0 launch/edge census and forced current-behavior
+4. **W6G.1e.2 complete; next e.3b.2:** the background route inventory,
+   causal selectors, and forced policy matrix are latched. Worker/runtime
+   background selection begins at registered roots and follows exact
+   descendants. Next remove the unrelated same-session fallback. The e.3b.0
+   launch/edge census and forced current-behavior
    fixtures, and e.3b.1 causal launch-parent publication, are complete;
    scheduler use of the parent edge and fallback retirement still belong to
    e.3b.2.
@@ -5107,34 +5107,31 @@ deferred causal traversal:
   background selectors reject a queued foreground record while the exact
   client claim remains live. The temporary same-session admission guard and
   the combined client registry remain transitional.
-- **W6G.1e.2 — causal background traversal.** Reordered after implementation
-  probes established W6G.1c/W6G.1f as hard prerequisites. Both causal-only and
-  causal-first-with-global-fallback selectors changed the first-discoverer
-  race enough to strand a canonical lazy in the four-worker executable while
-  producers still inherit their first session. Keep the old globally ready
-  deferred selection for now. After the lazy owns its checkpoint and routes
-  are session-neutral, install causal traversal and retire the global queue in
-  one mechanism checkpoint. Current-behavior fixtures cover unrooted promoted
-  work and a deferred dependency discovered by a spark; the foreground and
-  reflection-rooted fixtures remain ready for the later policy transition.
-  Partition the remaining work:
+- **W6G.1e.2 — causal background traversal — Complete (2026-09-22).**
+  Implementation probes established W6G.1c/W6G.1f as prerequisites: earlier
+  selector experiments stranded a canonical lazy in the four-worker executable
+  while producers inherited their first session. After lazy checkpoint
+  ownership and session-neutral routes were installed, the selectors retired
+  global deferred-ready eligibility together. The forced matrix below now
+  covers foreground-only, spark-rooted, and reflection-rooted paths.
   - **W6G.1e.2a — route inventory and dry-run traversal — Complete
     (2026-09-22).** After W6G.1f.2b
     and before the e.2b selector cutover, enumerate background-root entry
     points, exact dependency edges, yield/requeue
     behavior, and every current global-ready fallback. Build the traversal
     helper and forced fixtures without changing production selection yet.
-  - **W6G.1e.2b — selector cutover — Complete (2026-09-22).** Switch worker and runtime background
-    selectors together to spark/reflection roots and their exact descendants;
-    retire global deferred-ready eligibility in the same coherent change.
+  - **W6G.1e.2b — selector cutover — Complete (2026-09-22).** Switch worker
+    and runtime background selectors together to spark/reflection roots and
+    their exact descendants; retire global deferred-ready eligibility in the
+    same coherent change.
     A busy descendant remains a wait, and a yielded one stays rediscoverable
     from its root on a later pass. Preserve root fairness without making a
     descendant an independent background root.
-  - **W6G.1e.2c — forced policy matrix.** Latch foreground-only deferred work
-    against worker search, spark- and reflection-rooted chains, contested
-    claims, zero-/one-/many-worker execution, and a runtime pump which excludes
-    sparks. Count claims to distinguish causal traversal from accidental
-    global selection.
+  - **W6G.1e.2c — forced policy matrix — Complete (2026-09-22).** Latch
+    foreground-only deferred work against worker search, spark- and
+    reflection-rooted chains, contested claims, zero-/one-/many-worker
+    execution, and a runtime pump which excludes sparks. Count claims to
+    distinguish causal traversal from accidental global selection.
 
   **e.2a source-backed route inventory.** `ReflectionWork` becomes an
   autonomous root only at activation; `.task.new` records a launch parent but
@@ -5178,6 +5175,17 @@ deferred causal traversal:
   declarations were renamed to describe the new scheduler policy; typed-edge
   counts gain one test-only promise root used to latch its lifetime across a
   forced collection.
+
+  **e.2c verification boundary.** A forced coordinator matrix runs with zero,
+  one, and four configured workers. For each eligible claimant order it holds
+  a reflection-rooted deferred claim while the other selector probes, then
+  requeues the unpolled claim and counts exactly one subsequent claim. An
+  unrelated promoted deferred producer remains invisible to both background
+  selectors throughout and remains exactly claimable by its foreground owner.
+  The spark-rooted fixture separately checks that the runtime pump cannot
+  claim a spark descendant. The executable worker-parity fixture exercises
+  actual zero/one/four-worker execution; the coordinator matrix pins the
+  selector ordering without relying on scheduler luck.
 - **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
   drain and serialization policies cannot be narrowed before the registry
   topology which replaces them exists:

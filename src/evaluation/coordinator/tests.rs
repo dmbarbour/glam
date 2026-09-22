@@ -1,6 +1,7 @@
 //! Cross-kind coordinator lifecycle and concurrency tests.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 
@@ -590,6 +591,36 @@ fn settle_test_deferred(coordinator: &Arc<EvaluationWorkCoordinator>, work: Eval
         Arc::new(EvaluationFailure::message("test deferred settlement")),
     );
     coordinator.retire_deferred(work);
+}
+
+fn reserve_test_deferred(
+    coordinator: &EvaluationWorkCoordinator,
+    session: &TestDemand,
+    name: &'static str,
+) -> (EvaluationTaskId, EvaluationWaitToken, EvaluationWorkId) {
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("deferred task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("deferred wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, name, |_| {
+        panic!("coordinator policy test never polls its synthetic lazy")
+    });
+    let DeferredWorkReservation::New = coordinator
+        .reserve_deferred(
+            &session.demand,
+            task,
+            wait.clone(),
+            DeferredProducer::Lazy(lazy.root(&session.demand.values)),
+            Box::new(TestTaskMachine),
+        )
+        .expect("open test session should reserve deferred work")
+    else {
+        panic!("fresh lazy should reserve one producer")
+    };
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("deferred work should retain its wait index");
+    (task, wait, work)
 }
 
 fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {
@@ -2110,7 +2141,114 @@ fn background_selectors_ignore_an_unrooted_promoted_deferred_producer() {
 }
 
 #[test]
-fn global_fallback_claims_a_deferred_dependency_after_a_spark_blocks() {
+fn reflection_root_claims_only_its_exact_descendant_under_contested_orders() {
+    for worker_count in [0, 1, 4] {
+        for first_worker in [false, true]
+            .into_iter()
+            .filter(|worker| !*worker || worker_count > 0)
+        {
+            let (coordinator, _executor) = super::super::test_execution_resources(0)
+                .expect("test execution resources should build");
+            coordinator.executor_started(worker_count);
+            let producer = TestDemand::new(&coordinator);
+            let unrelated = TestDemand::new(&coordinator);
+            let observer = TestDemand::new(&coordinator);
+            let (producer_task, producer_wait, producer_work) =
+                reserve_test_deferred(&coordinator, &producer, "reflection descendant");
+            let (unrelated_task, unrelated_wait, unrelated_work) =
+                reserve_test_deferred(&coordinator, &unrelated, "foreground-only unrelated");
+            assert!(coordinator.promote_deferred_wait(&unrelated_wait));
+
+            let (_, reflection_work) = reserve_ready_test_reflection(&coordinator, &observer);
+            let reflection = claim_ready_test_reflection(&coordinator, observer.demand.id);
+            let release = coordinator.release_reflection(
+                reflection,
+                ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Wait(producer_wait)),
+                    observed_epoch: None,
+                    error: None,
+                }),
+            );
+            assert!(release.remains_blocked);
+            assert_eq!(dry_run_background_candidates(&coordinator), [producer_work]);
+            assert!(coordinator.runtime_pump_snapshot().background_ready);
+
+            let claims = Arc::new(AtomicUsize::new(0));
+            let (claimed_tx, claimed_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let thread_coordinator = Arc::clone(&coordinator);
+            let thread_claims = Arc::clone(&claims);
+            let first = thread::spawn(move || {
+                let selected = if first_worker {
+                    thread_coordinator.select_worker()
+                } else {
+                    thread_coordinator.select_runtime_pump()
+                };
+                let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) = selected
+                else {
+                    panic!("first selector must claim the exact reflection descendant")
+                };
+                assert_eq!(claimed.task, producer_task);
+                thread_claims.fetch_add(1, Ordering::AcqRel);
+                claimed_tx.send(()).expect("claim latch must remain open");
+                resume_rx.recv().expect("release latch must remain open");
+                thread_coordinator.requeue_unpolled_task(ClaimedTaskWork::Deferred(claimed));
+            });
+            claimed_rx
+                .recv()
+                .expect("first claim must publish before the competing probe");
+            let competing = if first_worker {
+                coordinator.select_runtime_pump()
+            } else {
+                coordinator.select_worker()
+            };
+            assert!(matches!(competing, CoordinatorSelection::None));
+            assert!(!coordinator.runtime_pump_snapshot().background_ready);
+            resume_tx.send(()).expect("claimant must remain live");
+            first.join().expect("claimant thread must finish");
+
+            let second = if first_worker {
+                coordinator.select_runtime_pump()
+            } else if worker_count > 0 {
+                coordinator.select_worker()
+            } else {
+                coordinator.select_runtime_pump()
+            };
+            let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) = second else {
+                panic!("requeued descendant must remain reachable through its root")
+            };
+            assert_eq!(claimed.task, producer_task);
+            claims.fetch_add(1, Ordering::AcqRel);
+            assert_eq!(claims.load(Ordering::Acquire), 2);
+            let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+            assert!(release.terminal);
+            settle_test_deferred(&coordinator, producer_work);
+            assert!(coordinator.terminalize_reflection(reflection_work));
+            settle_test_reflection(&coordinator, reflection_work);
+
+            assert!(matches!(
+                coordinator.select_worker(),
+                CoordinatorSelection::None
+            ));
+            assert!(matches!(
+                coordinator.select_runtime_pump(),
+                CoordinatorSelection::None
+            ));
+            let Some(ClaimedTaskWork::Deferred(claimed)) = coordinator.claim_work(unrelated_work)
+            else {
+                panic!("only the foreground owner may claim the unrelated producer")
+            };
+            assert_eq!(claimed.task, unrelated_task);
+            let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+            assert!(release.terminal);
+            settle_test_deferred(&coordinator, unrelated_work);
+            coordinator.executor_stopped();
+        }
+    }
+}
+
+#[test]
+fn spark_root_claims_exact_deferred_dependency_after_block() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let producer = TestDemand::new(&coordinator);
@@ -2148,11 +2286,16 @@ fn global_fallback_claims_a_deferred_dependency_after_a_spark_blocks() {
         SparkWorkPoll::Blocked(WorkDependency::Wait(wait.clone())),
     );
     assert_eq!(dry_run_background_candidates(&coordinator), [work]);
+    assert!(matches!(
+        coordinator.select_runtime_pump(),
+        CoordinatorSelection::None
+    ));
+    assert!(!coordinator.runtime_pump_snapshot().background_ready);
 
     let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
         coordinator.select_worker()
     else {
-        panic!("the global fallback should claim the promoted deferred producer")
+        panic!("the worker must reach the spark's exact deferred descendant")
     };
     assert_eq!(claimed.task, task);
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
