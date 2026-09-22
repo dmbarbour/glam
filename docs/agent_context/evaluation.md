@@ -67,6 +67,11 @@ control-flow overview.
   Retiring an intermediate task must preserve access to its live descendants.
   Launch provenance is a helping route, not an implicit join or ownership
   transfer.
+- A demand session groups lifecycle, closure, drain, and reporting state; it
+  is not a serial executor. Independent same-session records may run
+  concurrently, with no FIFO or one-machine ordering contract. Do not restore
+  a session-wide running-machine admission scan: exact claims and causal waits
+  are the concurrency authority.
 - Lazy production always transfers the current WHNF demand through a
   top-level lazy or promised result. Reflection gates, `seq`, and `spark`
   therefore perform their prerequisite work and continue the same demand;

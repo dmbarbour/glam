@@ -1140,9 +1140,8 @@ impl EvalContext {
         true
     }
 
-    /// Waits for one scheduler change while the target producer, the
-    /// temporary serialized slot for its demand session, or runtime work able
-    /// to disturb its broad observation is claimed by another thread.
+    /// Waits for one scheduler change while the target producer or a causal
+    /// child is claimed by another thread.
     ///
     /// Rechecking against the runtime work generation prevents a producer
     /// release between [`Self::pump_wait`] and this call from becoming a lost
@@ -1154,9 +1153,6 @@ impl EvalContext {
         let generation = coordinator.work_generation();
         if !coordinator.target_has_running_producer(target)
             && !coordinator.has_busy_causal_child(Some(target), self.causal_task_ids())
-            && !coordinator.demand_session_has_running_machine(self.session.id)
-            && !(coordinator.dependency_observes_runtime(target)
-                && coordinator.runtime_has_running_machine())
         {
             return;
         }
@@ -1898,7 +1894,7 @@ impl EvalContext {
                 EvaluationPumpOutcome::NoProgress
             };
         };
-        pump_demand(&coordinator, self.session.id, self, wait, step_budget)
+        pump_demand(&coordinator, self, wait, step_budget)
     }
 
     /// Runs every executable task until all are terminal or one complete pass

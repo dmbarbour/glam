@@ -2004,6 +2004,68 @@ fn running_machine_finishes_its_quantum_after_owner_drop_without_retaining_the_o
 }
 
 #[test]
+fn two_workers_may_poll_independent_same_session_machines_concurrently() {
+    let (coordinator, _executor) =
+        test_execution_resources(2).expect("test execution resources should build");
+    let owner = EvaluationSession::shared(&coordinator);
+    let context = EvalContext::new(&owner);
+
+    let (first_started, first_started_receiver) = mpsc::channel();
+    let (first_release, first_release_receiver) = mpsc::channel();
+    let first = context
+        .schedule_task(move |_| {
+            Ok(Box::new(CompleteAfterRelease {
+                started: Some(first_started),
+                release: first_release_receiver,
+            }))
+        })
+        .expect("first same-session task should schedule");
+    first_started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("one worker should enter the first same-session machine");
+
+    let (second_started, second_started_receiver) = mpsc::channel();
+    let (second_release, second_release_receiver) = mpsc::channel();
+    let second = context
+        .schedule_task(move |_| {
+            Ok(Box::new(CompleteAfterRelease {
+                started: Some(second_started),
+                release: second_release_receiver,
+            }))
+        })
+        .expect("second same-session task should schedule");
+    second_started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the other worker must enter independent same-session work");
+
+    first_release
+        .send(())
+        .expect("first worker should remain live");
+    second_release
+        .send(())
+        .expect("second worker should remain live");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (matches!(
+        context.poll_reflection_task(&first),
+        EvaluationWaitPoll::Pending(_)
+    ) || matches!(
+        context.poll_reflection_task(&second),
+        EvaluationWaitPoll::Pending(_)
+    )) && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        context.poll_reflection_task(&first),
+        EvaluationWaitPoll::Complete(_)
+    ));
+    assert!(matches!(
+        context.poll_reflection_task(&second),
+        EvaluationWaitPoll::Complete(_)
+    ));
+}
+
+#[test]
 fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
     let (coordinator, _executor) =
         test_execution_resources(1).expect("test execution resources should build");
@@ -4107,11 +4169,20 @@ fn worker_releases_mutator_before_sleep() {
         .expect("worker should finish its scoped evaluator substep");
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    while coordinator.session_machine_is_busy(context.session.id) && Instant::now() < deadline {
+    let is_blocked = || {
+        coordinator
+            .reflection_snapshots(context.session.id)
+            .iter()
+            .any(|snapshot| {
+                snapshot.task == task.id()
+                    && matches!(snapshot.state, ReflectionWorkState::Blocked(_))
+            })
+    };
+    while !is_blocked() && Instant::now() < deadline {
         std::thread::yield_now();
     }
     assert!(
-        !coordinator.session_machine_is_busy(context.session.id),
+        is_blocked(),
         "worker should publish the blocked machine before becoming idle"
     );
     assert!(matches!(
@@ -6156,7 +6227,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
 }
 
 #[test]
-fn serial_ready_tasks_preserve_same_session_fifo_order_across_requeue() {
+fn session_drain_completes_owned_roots_without_promising_fifo_order() {
     let fixture = SameRuntimeFixture::new();
     let first = fixture.context();
     let other = fixture.context();
@@ -6183,10 +6254,12 @@ fn serial_ready_tasks_preserve_same_session_fifo_order_across_requeue() {
     first.spark(first.values().unit());
 
     let EvaluationSessionRun::Complete(report) = first.run_until_quiescent() else {
-        panic!("the first session's ordered tasks should complete")
+        panic!("the first session's owned roots should complete")
     };
     assert!(report.failures.is_empty());
-    assert_eq!(*polls.lock().unwrap(), [1, 2, 3, 1]);
+    let mut first_polls = polls.lock().unwrap().clone();
+    first_polls.sort_unstable();
+    assert_eq!(first_polls, [1, 1, 2, 3]);
     assert!(matches!(
         other.poll_reflection_task(&other_task),
         EvaluationWaitPoll::Pending(_)
@@ -6196,7 +6269,9 @@ fn serial_ready_tasks_preserve_same_session_fifo_order_across_requeue() {
         panic!("the unrelated session's task should remain independently runnable")
     };
     assert!(report.failures.is_empty());
-    assert_eq!(*polls.lock().unwrap(), [1, 2, 3, 1, 9]);
+    let mut all_polls = polls.lock().unwrap().clone();
+    all_polls.sort_unstable();
+    assert_eq!(all_polls, [1, 1, 2, 3, 9]);
 
     fixture.runtime.pump_until_stable();
     coordinator.executor_stopped();

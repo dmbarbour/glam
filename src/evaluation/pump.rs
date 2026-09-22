@@ -420,7 +420,6 @@ pub(super) fn prioritized_task_for(
 
 pub(super) fn pump_demand(
     coordinator: &Arc<EvaluationWorkCoordinator>,
-    session: EvaluationSessionId,
     context: &EvalContext,
     target: &EvaluationWaitToken,
     mut step_budget: usize,
@@ -461,14 +460,6 @@ pub(super) fn pump_demand(
                 return EvaluationPumpOutcome::Busy;
             }
             if coordinator.target_has_running_producer(target) {
-                return EvaluationPumpOutcome::Busy;
-            }
-            if coordinator.demand_session_has_running_machine(session) {
-                return EvaluationPumpOutcome::Busy;
-            }
-            if coordinator.dependency_observes_runtime(target)
-                && coordinator.runtime_has_running_machine()
-            {
                 return EvaluationPumpOutcome::Busy;
             }
             if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {

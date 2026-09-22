@@ -15,8 +15,8 @@ use super::{
     EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId,
     ExitIntent, ProducerSettlementObligation, TaskOwnedPromiseObligation, TaskStatusPublisher,
     TaskStatusUpdate, TaskStatusWake, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, causal_background_probe_locked, session_has_running_machine, task_block,
-    task_for_record, task_observation_epoch, terminal_task_status, work_dependency,
+    WorkState, causal_background_probe_locked, task_block, task_for_record, task_observation_epoch,
+    terminal_task_status, work_dependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,12 +163,7 @@ pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> Runt
         }
         match causal_background_probe_locked(state, *root) {
             CausalBackgroundProbe::Ready(candidate) => {
-                let Some(candidate) = state.work.get(&candidate) else {
-                    continue;
-                };
-                if session_has_running_machine(state, candidate.demand_session) {
-                    background_busy = true;
-                } else {
+                if state.work.contains_key(&candidate) {
                     background_ready = true;
                 }
             }

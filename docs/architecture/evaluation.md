@@ -131,6 +131,14 @@ queued and blocked work immediately while a worker safely finishes one
 already-claimed quantum. The immutable reflection environment belongs to the
 active task host rather than either scheduling component.
 
+Demand-session indexes are lifecycle, closure, drain, and reporting indexes;
+they are not execution lanes. Independent records in one demand session may be
+claimed concurrently when workers or explicit claimants are available. The
+coordinator promises neither same-session FIFO order nor one ordinary machine
+at a time. Exact claim ownership and causal dependency state, rather than a
+session-wide running-machine scan, exclude competing evaluation of the same
+work.
+
 Foreground demand claims its exact producer chain first. When an effect task
 has launched a child before publishing a join, the coordinator's activation
 index also lets that demand help the parent's still-live causal descendants,

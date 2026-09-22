@@ -1134,31 +1134,6 @@ impl EvaluationWorkCoordinator {
         })
     }
 
-    pub(super) fn demand_session_has_running_machine(&self, session: EvaluationSessionId) -> bool {
-        session_has_running_machine(
-            &self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned"),
-            session,
-        )
-    }
-
-    pub(super) fn runtime_has_running_machine(&self) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        state
-            .work
-            .values()
-            .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
-            || state
-                .client_demands
-                .values()
-                .any(|record| matches!(record.state, WorkState::Running | WorkState::Terminalizing))
-    }
-
     /// Selects one executor-worker root.
     ///
     /// Foreground client evaluations are intentionally absent. The client
@@ -1876,24 +1851,6 @@ impl EvaluationWorkCoordinator {
         false
     }
 
-    #[cfg(test)]
-    pub(super) fn session_machine_is_busy(&self, session: EvaluationSessionId) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        state
-            .work_by_session
-            .get(&session)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| state.work.get(id))
-            .any(|record| {
-                matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Deferred(_))
-                    && matches!(record.state, WorkState::Running | WorkState::Terminalizing)
-            })
-    }
-
     /// Reports only progress which a session drain is authorized to await:
     /// its reflection roots and the exact producer chains beneath them.
     pub(super) fn session_background_is_busy(&self, session: EvaluationSessionId) -> bool {
@@ -1910,15 +1867,10 @@ impl EvaluationWorkCoordinator {
             {
                 return false;
             }
-            match causal_background_probe_locked(&state, *root) {
-                CausalBackgroundProbe::Busy => true,
-                CausalBackgroundProbe::Ready(candidate) => {
-                    state.work.get(&candidate).is_some_and(|candidate| {
-                        session_has_running_machine(&state, candidate.demand_session)
-                    })
-                }
-                CausalBackgroundProbe::None => false,
-            }
+            matches!(
+                causal_background_probe_locked(&state, *root),
+                CausalBackgroundProbe::Busy
+            )
         })
     }
 
@@ -2434,9 +2386,6 @@ fn claim_causal_background(
             let Some(record) = state.work.get(&candidate) else {
                 continue;
             };
-            if session_has_running_machine(state, record.demand_session) {
-                continue;
-            }
             let claimed = match record.kind {
                 WorkKind::Reflection(_) => {
                     claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
@@ -2490,9 +2439,6 @@ fn claim_causal_session_background(
         let Some(record) = state.work.get(&candidate) else {
             continue;
         };
-        if session_has_running_machine(state, record.demand_session) {
-            continue;
-        }
         let claimed = match record.kind {
             WorkKind::Reflection(_) => {
                 claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
@@ -2679,34 +2625,6 @@ fn remove_ready_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     state.ready_tasks.retain(|candidate| *candidate != id);
 }
 
-/// Returns whether one ordinary machine still owns a semantic poll for this
-/// demand session.
-///
-/// `Terminalizing` is deliberately excluded. Terminal publication has
-/// already detached the machine and made its result authoritative; the
-/// remaining machine destruction and coordinator retirement are
-/// non-semantic cleanup. Treating that tail as an active poll can deadlock a
-/// same-session client demand created while unwinding the completed machine.
-fn session_has_running_machine(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {
-    let background = state
-        .work_by_session
-        .get(&session)
-        .into_iter()
-        .flatten()
-        .filter_map(|id| state.work.get(id))
-        .any(|record| {
-            matches!(record.state, WorkState::Running) && !matches!(record.kind, WorkKind::Spark(_))
-        });
-    background
-        || state
-            .client_demands_by_session
-            .get(&session)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| state.client_demands.get(id))
-            .any(|record| matches!(record.state, WorkState::Running))
-}
-
 #[cfg(test)]
 fn claim_ready_task(
     state: &mut WorkCoordinatorState,
@@ -2714,12 +2632,6 @@ fn claim_ready_task(
     session: Option<EvaluationSessionId>,
 ) -> Option<ClaimedTaskWork> {
     loop {
-        let eligible = |id: &EvaluationWorkId| {
-            state
-                .work
-                .get(id)
-                .is_some_and(|record| !session_has_running_machine(state, record.demand_session))
-        };
         let position = match session {
             Some(session) => state
                 .ready_tasks
@@ -2728,7 +2640,6 @@ fn claim_ready_task(
                     state.work.get(id).is_some_and(|record| {
                         record.demand_session == session
                             && matches!(record.kind, WorkKind::Reflection(_))
-                            && eligible(id)
                     })
                 })
                 .or_else(|| {
@@ -2736,10 +2647,10 @@ fn claim_ready_task(
                         state
                             .work
                             .get(id)
-                            .is_some_and(|record| record.demand_session == session && eligible(id))
+                            .is_some_and(|record| record.demand_session == session)
                     })
                 })?,
-            None => state.ready_tasks.iter().position(eligible)?,
+            None => 0,
         };
         let id = state.ready_tasks.remove(position)?;
         state.ready_task_set.remove(&id);

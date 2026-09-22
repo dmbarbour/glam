@@ -945,9 +945,14 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // schedules.
     // W6G.1d.2 adds one test-only lazy root for the forced claimed-exact
     // foreground wait; no production managed edges change.
+    // W6G.1h renames the same-session terminal-publication fixture to state
+    // its concurrent-admission contract and adds a latched two-worker
+    // concurrency schedule. Neither changes the production or test edge
+    // classification counts; the source-qualified occurrence fingerprint
+    // changes with the fixture name.
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_508_722_456_678_254_864,
+        8_707_150_657_289_273_097,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );

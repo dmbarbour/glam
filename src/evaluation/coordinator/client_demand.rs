@@ -8,8 +8,6 @@ use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
-#[cfg(test)]
-use super::session_has_running_machine;
 use super::{
     CausalChildProbe, ClaimedDemandSession, EvaluationTaskId, EvaluationWorkCoordinator,
     EvaluationWorkId, WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState,
@@ -773,16 +771,7 @@ fn claim_ready_client_demand(
     state: &mut WorkCoordinatorState,
     runtime: EvaluationRuntimeId,
 ) -> Option<ClaimedClientDemand> {
-    while let Some(position) = state.ready_client_demands.iter().position(|id| {
-        state
-            .client_demands
-            .get(id)
-            .is_some_and(|record| !session_has_running_machine(state, record.demand_session))
-    }) {
-        let id = state
-            .ready_client_demands
-            .remove(position)
-            .expect("selected client-demand position must remain present");
+    while let Some(id) = state.ready_client_demands.pop_front() {
         state.ready_client_demand_set.remove(&id);
         if let Some(claimed) = claim_client_demand(state, runtime, id) {
             return Some(claimed);

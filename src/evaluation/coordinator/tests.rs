@@ -2414,7 +2414,7 @@ fn dependency_published_while_deferred_runs_survives_its_yield() {
 }
 
 #[test]
-fn ready_selection_serializes_machine_polls_within_one_session() {
+fn ready_selection_allows_independent_same_session_machine_claims() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2446,30 +2446,26 @@ fn ready_selection_serializes_machine_polls_within_one_session() {
     let first = coordinator
         .claim_ready_session_machine_for_test(session.demand.id)
         .expect("one ready session machine should be selected");
+    let second = coordinator
+        .claim_ready_session_machine_for_test(session.demand.id)
+        .expect("an independent same-session machine should remain claimable");
+    assert_ne!(first.id(), second.id());
     assert!(
-        coordinator
-            .claim_ready_session_machine_for_test(session.demand.id)
-            .is_none(),
-        "global selection must not poll two machines from one session concurrently"
+        tasks
+            .into_iter()
+            .all(|task| !coordinator.task_is_claimable(task))
     );
 
-    let remaining = tasks
-        .into_iter()
-        .find(|task| coordinator.task_is_claimable(*task))
-        .expect("the unselected task must remain queued");
-    let exact = coordinator
-        .claim_task(remaining)
-        .expect("nested exact demand may still advance a same-session dependency");
-    let ClaimedTaskWork::Deferred(exact) = exact else {
-        panic!("the exact producer should preserve its deferred kind")
+    let ClaimedTaskWork::Deferred(second) = second else {
+        panic!("the second producer should preserve its deferred kind")
     };
-    let exact_work = exact.id();
+    let second_work = second.id();
     assert!(
         coordinator
-            .release_deferred(exact, DeferredWorkPoll::Terminal)
+            .release_deferred(second, DeferredWorkPoll::Terminal)
             .terminal
     );
-    settle_test_deferred(&coordinator, exact_work);
+    settle_test_deferred(&coordinator, second_work);
 
     let ClaimedTaskWork::Deferred(first) = first else {
         panic!("the ready producer should preserve its deferred kind")
@@ -2484,7 +2480,7 @@ fn ready_selection_serializes_machine_polls_within_one_session() {
 }
 
 #[test]
-fn running_runtime_owner_makes_a_broad_dependency_busy_not_stable() {
+fn unrelated_running_runtime_work_does_not_make_a_broad_dependency_busy() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2515,15 +2511,9 @@ fn running_runtime_owner_makes_a_broad_dependency_busy_not_stable() {
     let (_, running_work) = reserve_ready_test_reflection(&coordinator, &running_session);
     let running = claim_ready_test_reflection(&coordinator, running_session.demand.id);
     assert_eq!(
-        super::super::pump::pump_demand(
-            &coordinator,
-            session.demand.id,
-            &session.context(),
-            &target_wait,
-            256,
-        ),
-        super::super::EvaluationPumpOutcome::Busy,
-        "a running runtime owner can disturb a broad dependency and is not quiescence"
+        super::super::pump::pump_demand(&coordinator, &session.context(), &target_wait, 256,),
+        super::super::EvaluationPumpOutcome::NoProgress,
+        "unrelated runtime work is not causal progress for the target"
     );
 
     let release = coordinator.release_reflection(running, ReflectionWorkPoll::Terminal);
@@ -2714,7 +2704,7 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
 }
 
 #[test]
-fn terminal_publication_releases_same_session_client_admission_before_retirement() {
+fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2755,15 +2745,18 @@ fn terminal_publication_releases_same_session_client_admission_before_retirement
     let client = context
         .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
         .expect("same-session client demand should be admitted");
-    assert!(
-        matches!(coordinator.select_worker(), CoordinatorSelection::None),
-        "an active semantic poll must exclude another ordinary same-session machine"
-    );
+    let client_claim = coordinator
+        .claim_client_demand(client.work())
+        .expect("independent same-session client work should be claimable concurrently");
+    assert_eq!(client_claim.id, client.work());
+    coordinator.poll_claimed_client_demand(client_claim);
+    assert!(matches!(
+        client.poll(),
+        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
+    ));
 
-    // Force terminal publication to finish while the detached machine and
-    // retirement obligation remain held by the publishing thread. Semantic
-    // evaluation has ended at this point; only non-semantic destruction and
-    // coordinator cleanup remain.
+    // The unrelated deferred claim remains independently owned until its
+    // publisher terminalizes it.
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
     assert!(release.terminal);
     coordinator.settle_terminal_work(
@@ -2771,17 +2764,6 @@ fn terminal_publication_releases_same_session_client_admission_before_retirement
         EvaluationWaitTerminal::Abandoned,
         Arc::new(EvaluationFailure::message("forced terminal publication")),
     );
-
-    let claimed = coordinator
-        .claim_client_demand(client.work())
-        .expect("terminal publication must release semantic admission before retirement");
-    assert_eq!(claimed.id, client.work());
-    coordinator.poll_claimed_client_demand(claimed);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
-
     drop(release);
     coordinator.retire_deferred(work);
 }

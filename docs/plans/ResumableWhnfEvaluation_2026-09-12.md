@@ -4918,7 +4918,7 @@ dependency order, including completed prerequisites, is:
    first, then published launch-parent descendants; unrelated same-session
    work is no longer a fallback. The forced child-launch and wait-publication
    orderings are covered by e.3b.2 fixtures.
-5. **W6G.1d, W6G.1e.3a, and W6G.1g complete; next W6G.1h:** the private blocking
+5. **W6G.1d, W6G.1e.3a, and W6G.1g complete:** the private blocking
    foreground driver claims only exact producers and launched causal children;
    stable absence returns a retryable halt rather than helping unrelated
    background work. The drain-authority evidence gate now identifies the
@@ -4930,9 +4930,15 @@ dependency order, including completed prerequisites, is:
    abandonment. The
    private timed generation wait is available for later host composition, but
    no public incremental handle or productive-wait policy was introduced.
-6. **W6G.1h (including W6G.1e.3c):** remove the temporary session-wide
-   serialization scan and compensating busy waits only after causal ownership
-   is authoritative, then close the forced-order matrix and current docs.
+6. **W6G.1h (including W6G.1e.3c) complete:** removed the temporary
+   session-wide serialization scan and only its compensating admission,
+   busy/wait, drain, and readiness checks after causal ownership became
+   authoritative. Exact claims, causal waits, terminal publication, and
+   lifecycle indexes remain. The forced two-worker schedule proves that two
+   independent machines in one demand session may now execute concurrently.
+
+W6G.1 is complete. W6G.2 is the next actionable checkpoint; W6G.3 is already
+complete, while W6G.4 measurement and W6G.5 closure remain ordered after it.
 
 W6G.1c is complete because steps 1-4 established its session-neutral and
 causal-claim contract. This ordering is a dependency guide, not permission to
@@ -5366,6 +5372,10 @@ deferred causal traversal:
     prerequisite audit and handoff to W6G.1h, **not a separate removal**;
     W6G.1h owns the implementation and final forced matrix. Do not perform it
     as an isolated scheduler relaxation.
+
+    **Complete (2026-09-22).** W6G.1h removed the scan and its compensating
+    checks as one policy change after the causal selectors, foreground driver,
+    and explicit drain authorities were in place.
 
 Replace the generic executor `select` path with role-specific selectors. A
 worker locates a ready spark or reflection root, or rediscovers the deepest
@@ -7276,6 +7286,38 @@ Keep the scan removal distinct from the final integrated test gate:
   the cross-root, cancellation, owner-close, lost-wakeup, readiness, and
   terminal-publication schedules below; update current architecture only
   after those policies are observed in the implementation.
+
+**Complete (2026-09-22).** The census classified the temporary policy as:
+
+- the `session_has_running_machine` scan itself;
+- eligibility filters in the worker/session test selectors and the private
+  client-demand selector;
+- broad same-session or runtime-running `Busy` fallbacks in foreground pumping
+  and its generation wait; and
+- session-drain and runtime-readiness conversions which changed an otherwise
+  claimable causal candidate into `Busy` solely because another machine in
+  that candidate's demand session was running.
+
+Those paths were removed together. The exact-claim state,
+`target_has_running_producer`, causal-child `Busy` detection, checked
+subscriptions, terminal publication, task-owned promises, and the
+`work_by_session` lifecycle/reporting index were retained. The session-ready
+probe likewise remains a drain-discovery fact; it neither grants a claim nor
+excludes another machine.
+
+The former serialization fixtures now assert the target policy: two ready
+same-session coordinator records can be claimed together, an independent
+client demand can run while a same-session deferred producer is claimed, and
+an unrelated running runtime machine does not turn a broad unresolved target
+into causal progress. A latched two-worker fixture holds the first machine
+inside its poll and requires the second worker to enter a second independent
+same-session machine before either is released. Exact-claim exclusion,
+causal-child helping, owner close, cancellation, last-subscriber retirement,
+cross-root lazy sharing, lost-wakeup, terminal-publication, and readiness
+fixtures remain authoritative for the mechanisms deliberately preserved.
+Current architecture and invariant documents now state explicitly that demand
+sessions are lifecycle/reporting groups rather than execution lanes and that
+same-session FIFO or one-machine ordering is not a contract.
 
 After role-specific root discovery is authoritative, delete
 `session_has_running_machine` from global admission and remove only those

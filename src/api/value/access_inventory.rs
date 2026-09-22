@@ -732,7 +732,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#2|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_deferred_machine_does_not_delay_same_session_client_admission#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::terminal_publication_releases_same_session_client_admission_before_retirement#1|surface=compatibility-new|scope=test",
+    "src/evaluation/coordinator/tests.rs::running_deferred_machine_does_not_serialize_same_session_client_admission#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::worker_and_runtime_pump_selectors_reject_foreground_client_demand#1|surface=compatibility-new|scope=test",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
