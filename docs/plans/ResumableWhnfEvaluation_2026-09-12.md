@@ -7138,15 +7138,35 @@ Partition this after W6G.1e.2/e.3b and the e.3a evidence gate:
   roots and their exact descendants, including a causally required
   cross-session child. Do not claim unrelated work merely because it shares
   a session; force the configured `conf.log` ordering from e.3a.
-- **W6G.1g.2 — runtime background drain.** Select runtime-visible reflection
-  roots across sessions and their exact descendants, including autonomous
-  lazy-launched reflection after route loss. Exclude sparks and foreground
-  roots while preserving progress when a worker owns a contested claim.
+- **W6G.1g.2a — bounded runtime background pump.** Add a host-callable
+  `EvaluationRuntime` operation (provisionally `pump_background(budget)`), not
+  just a private selector. One call spends at most its supplied evaluation-step
+  budget on runtime-visible reflection roots across sessions and their exact
+  and published causal descendants, including autonomous lazy-launched
+  reflection after route loss. Zero budget polls nothing; each claimed machine
+  gets a bounded quantum before another is selected. Exclude sparks and
+  foreground client roots, and never select a task merely because it shares a
+  session with selected work. Report spent budget and distinguish remaining
+  runnable work, a worker-owned/contested causal claim, and stable absence so
+  the host can choose whether to pump again or wait; do not wait or classify
+  readiness inside this operation. As elsewhere, the budget cannot preempt a
+  host callback already in progress.
+- **W6G.1g.2b — runtime background drain composition.** Build the existing
+  `pump_until_stable` convenience behavior over the bounded pump, explicit
+  worker-owned-progress waits, and spark-abandonment passes. Preserve its
+  useful-work/observation sequence, but do not hide an unbounded poll loop
+  inside `pump_background`. Keep the change-wait generation compatible with
+  W6G.1d's lost-wakeup-safe timed wait so a later host can compose foreground
+  `try_advance`, bounded background pumping, and timed waiting without a
+  built-in productive-wait policy.
 - **W6G.1g.3 — observational readiness and final scope matrix.** Separate
   polling from snapshot construction, specify parked external client-demand
   activity without calling it background work, and force quiescence,
-  spark-abandonment, cross-session, and route-loss orderings. Keep the
-  existing runtime pump's useful-work/observation sequence explicit.
+  spark-abandonment, cross-session, and route-loss orderings. Include
+  zero/one/many-budget tests, a machine that yields after one bounded quantum,
+  and both publication orders around a contested-worker wait;
+  verify that the bounded pump neither claims a client/spark nor spins when
+  only worker-owned progress remains.
 
 Narrow session and runtime drains to their documented background scopes.
 Runtime-wide draining may traverse newly created reflection roots across
@@ -7164,7 +7184,9 @@ Do not recreate first-observer affinity as a separate drain-scope tag.
 
 Separate “help execute background reflection work” from “classify stable
 runtime state” in names and tests even if the public `pump_until_stable`
-convenience operation performs both in sequence.
+convenience operation performs both in sequence. The bounded background pump
+is a deliverable of W6G.1g, not merely a future optimization of that
+convenience operation.
 
 Client-evaluation records are external demand, not executor work. Define
 whether an outstanding parked client handle contributes an external-demand
