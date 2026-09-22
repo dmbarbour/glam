@@ -5067,6 +5067,17 @@ target exact-only client policy. Complete this section in two checkpoints:
   schedules for exact dependency progress, owner close, cancellation,
   subscription-before/after-publication, and stable blocked reporting.
 
+  **Productive-wait decision gate (before removing runtime help).** Decide
+  whether a blocking host client which is waiting on an already claimed causal
+  producer may spend a bounded quantum helping unrelated runtime-background
+  reflection work before waiting for a coordinator change. The default target
+  remains exact-only foreground pumping; any productive wait is a separate,
+  explicit blocking-client policy, never a substitute for recognizing the
+  claimed causal producer as busy and never a reason to defer genuine
+  `NoProgress`. Assess latency benefit, callback/diagnostic timing, fairness,
+  and zero-/one-/many-worker behavior with forced orderings. Do not silently
+  preserve the old runtime-wide fallback as an implementation convenience.
+
 Introduce the client-only registry before deciding whether to expose its
 driver publicly. Shape the internal handle so a later public `Evaluation`
 facade can offer bounded `try_advance` plus blocking `run`/`eval` without
@@ -5268,6 +5279,17 @@ deferred causal traversal:
     remove the same-session fallback, and force both sides of child-launch
     and subscription publication under the new mechanism. The recorded
     parent alone does not yet change scheduler behavior.
+
+    **e.3b.2 implementation checkpoints.** First make a single coordinator
+    probe recognize claimable, claimed, or absent work along both exact waits
+    and published `launch_parent` descendants. Its claimed result must feed
+    the same wait/retry predicate as the foreground pump; a new `Busy` without
+    a corresponding wake is not a safe intermediate state. Then cut over
+    `pump_demand` and retire its same-session claim selector. Force queued and
+    claimed children before/after parent wait publication, including a child
+    in another demand session, a truly unrelated same-session task, and an
+    external unresolved promise which still returns `NoProgress`. Keep the
+    optional productive-wait policy at the W6G.1d.2 gate above.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
     `session_has_running_machine` and its compensating busy waits. This is a
