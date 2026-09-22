@@ -597,7 +597,13 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
         if matches!(context.poll_wait(&wait), EvaluationWaitPoll::Complete(_)) {
             break;
         }
-        assert!(coordinator.poll_runtime_work());
+        let work = coordinator
+            .work_for_wait(&wait)
+            .expect("the foreground lazy wait retains its exact producer");
+        let claimed = coordinator
+            .claim_work(work)
+            .expect("the foreground owner may claim its exact producer");
+        coordinator.poll_claimed_task(claimed);
     }
     assert!(matches!(
         context.poll_wait(&wait),
@@ -654,7 +660,13 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
         if matches!(context.poll_wait(&wait), EvaluationWaitPoll::Complete(_)) {
             break;
         }
-        assert!(coordinator.poll_runtime_work());
+        let work = coordinator
+            .work_for_wait(&wait)
+            .expect("the foreground lazy wait retains its exact producer");
+        let claimed = coordinator
+            .claim_work(work)
+            .expect("the foreground owner may claim its exact producer");
+        coordinator.poll_claimed_task(claimed);
     }
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(wait.exact_subscription_count(), 0);
@@ -7748,7 +7760,7 @@ fn runtime_pump_snapshot_is_observational() {
 }
 
 #[test]
-fn queued_lazy_route_is_background_pump_work() {
+fn queued_foreground_lazy_route_is_not_background_pump_work() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
@@ -7763,9 +7775,20 @@ fn queued_lazy_route_is_background_pump_work() {
         EvaluationWaitPoll::Pending(_)
     ));
     assert!(coordinator.promote_deferred_wait(&wait));
-    assert!(coordinator.runtime_pump_snapshot().background_ready);
+    assert!(!coordinator.runtime_pump_snapshot().background_ready);
 
     fixture.runtime.pump_until_stable();
+    assert!(matches!(
+        context.poll_wait(&wait),
+        EvaluationWaitPoll::Pending(_)
+    ));
+    let work = coordinator
+        .work_for_wait(&wait)
+        .expect("the foreground route retains its exact producer");
+    let claimed = coordinator
+        .claim_work(work)
+        .expect("the foreground owner may claim its exact producer");
+    coordinator.poll_claimed_task(claimed);
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Complete(_)

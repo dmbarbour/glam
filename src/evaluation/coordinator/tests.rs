@@ -2057,7 +2057,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
 }
 
 #[test]
-fn transitional_background_fallback_claims_an_unrooted_promoted_deferred_producer() {
+fn background_selectors_ignore_an_unrooted_promoted_deferred_producer() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2091,10 +2091,17 @@ fn transitional_background_fallback_claims_an_unrooted_promoted_deferred_produce
         "a foreground-only producer must have no background causal route"
     );
 
-    let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
-        coordinator.select_worker()
-    else {
-        panic!("the transitional global fallback must keep the producer runnable")
+    assert!(matches!(
+        coordinator.select_worker(),
+        CoordinatorSelection::None
+    ));
+    assert!(matches!(
+        coordinator.select_runtime_pump(),
+        CoordinatorSelection::None
+    ));
+    assert!(!coordinator.runtime_pump_snapshot().background_ready);
+    let Some(ClaimedTaskWork::Deferred(claimed)) = coordinator.claim_work(work) else {
+        panic!("the exact foreground owner must still be able to claim its producer")
     };
     assert_eq!(claimed.task, task);
     let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);

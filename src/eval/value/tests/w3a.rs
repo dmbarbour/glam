@@ -15,8 +15,12 @@ fn lazy_machine(context: &EvalContext, lazy: LazyValue) -> (LazyValue, LazyTaskM
 
 #[test]
 fn lazy_source_result_is_installed_once_before_following_a_promise() {
-    let context = EvalContext::standalone();
+    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
     let promise = PromisedValue::new(context.values(), "source-result promise");
+    let _promise_root = promise.root(context.values());
     let evaluations = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&evaluations);
     let returned = promise.clone();
@@ -30,6 +34,10 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     );
     let (lazy, mut machine) = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("the rooted source promise must survive collection before its first poll");
 
     for _ in 0..2 {
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {

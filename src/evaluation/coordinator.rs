@@ -71,7 +71,7 @@ pub(crate) use settlement::{
 #[cfg(test)]
 use spark::spark_work_mut;
 pub(crate) use spark::{ClaimedSparkWork, SparkWork, SparkWorkPoll};
-use spark::{SparkRetirement, claim_ready_spark, detach_spark, queue_spark};
+use spark::{SparkRetirement, claim_spark, detach_spark};
 pub(crate) use task::{
     EvaluationExitBlock, EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock,
     EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
@@ -580,8 +580,7 @@ struct WorkCoordinatorState {
     client_demands_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
     ready_task_set: HashSet<EvaluationWorkId>,
-    ready_sparks: VecDeque<EvaluationWorkId>,
-    ready_spark_set: HashSet<EvaluationWorkId>,
+    background_roots: VecDeque<EvaluationWorkId>,
     ready_client_demands: VecDeque<EvaluationWorkId>,
     ready_client_demand_set: HashSet<EvaluationWorkId>,
     reflection: ReflectionIndexes,
@@ -1161,27 +1160,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
-            let selection = if state.prefer_spark {
-                claim_ready_spark(&mut state, self.runtime)
-                    .map(CoordinatorSelection::Spark)
-                    .or_else(|| {
-                        claim_ready_task(&mut state, self.runtime, None, false, false)
-                            .map(CoordinatorSelection::Task)
-                    })
-                    .unwrap_or(CoordinatorSelection::None)
-            } else {
-                claim_ready_task(&mut state, self.runtime, None, false, false)
-                    .map(CoordinatorSelection::Task)
-                    .or_else(|| {
-                        claim_ready_spark(&mut state, self.runtime).map(CoordinatorSelection::Spark)
-                    })
-                    .unwrap_or(CoordinatorSelection::None)
-            };
-            match selection {
-                CoordinatorSelection::Task(_) => state.prefer_spark = true,
-                CoordinatorSelection::Spark(_) => state.prefer_spark = false,
-                CoordinatorSelection::None => {}
-            }
+            let selection = claim_causal_background(&mut state, self.runtime, true);
             if !matches!(selection, CoordinatorSelection::None) {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -1207,9 +1186,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let initial_generation = state.work_generation;
-            let selection = claim_ready_task(&mut state, self.runtime, None, false, false)
-                .map(CoordinatorSelection::Task)
-                .unwrap_or(CoordinatorSelection::None);
+            let selection = claim_causal_background(&mut state, self.runtime, false);
             if !matches!(selection, CoordinatorSelection::None) {
                 state.work_generation = state.work_generation.wrapping_add(1);
             }
@@ -2128,8 +2105,7 @@ fn work_for_wait_locked(
 /// Finds the first claimable item on one background root's exact producer
 /// chain. A queued root runs before its old block is followed; a blocked root
 /// can reach a dormant deferred producer without promoting unrelated work.
-/// The source-backed dry run becomes the worker/runtime selector in e.2b.
-#[cfg(test)]
+/// Worker and runtime-pump selectors use this same traversal policy.
 fn causal_background_candidate_locked(
     state: &WorkCoordinatorState,
     root: EvaluationWorkId,
@@ -2164,6 +2140,65 @@ fn causal_background_candidate_locked(
         }
     }
     None
+}
+
+fn claim_causal_background(
+    state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
+    include_sparks: bool,
+) -> CoordinatorSelection {
+    let preferred_kinds = if state.prefer_spark {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    for spark_root in preferred_kinds {
+        if spark_root && !include_sparks {
+            continue;
+        }
+        for index in 0..state.background_roots.len() {
+            let root = state.background_roots[index];
+            let Some(root_record) = state.work.get(&root) else {
+                continue;
+            };
+            if matches!(root_record.kind, WorkKind::Spark(_)) != spark_root {
+                continue;
+            }
+            let Some(candidate) = causal_background_candidate_locked(state, root) else {
+                continue;
+            };
+            let Some(record) = state.work.get(&candidate) else {
+                continue;
+            };
+            if session_has_running_machine(state, record.demand_session) {
+                continue;
+            }
+            let claimed = match record.kind {
+                WorkKind::Reflection(_) => {
+                    claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
+                }
+                WorkKind::Deferred(_) => claim_deferred(state, runtime, candidate, false)
+                    .map(ClaimedTaskWork::Deferred)
+                    .map(CoordinatorSelection::Task),
+                WorkKind::LazyRoute(_) => claim_lazy_route(state, runtime, candidate, false)
+                    .map(ClaimedTaskWork::LazyRoute)
+                    .map(CoordinatorSelection::Task),
+                WorkKind::Spark(_) => {
+                    claim_spark(state, runtime, candidate).map(CoordinatorSelection::Spark)
+                }
+            };
+            if let Some(claimed) = claimed {
+                let rotated = state
+                    .background_roots
+                    .remove(index)
+                    .expect("selected background root must remain registered");
+                state.background_roots.push_back(rotated);
+                state.prefer_spark = !spark_root;
+                return claimed;
+            }
+        }
+    }
+    CoordinatorSelection::None
 }
 
 /// Reports progress already latent in one exact producer chain.
@@ -2309,6 +2344,17 @@ fn queue_current_observation(
 fn queue_task(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     if state.ready_task_set.insert(id) {
         state.ready_tasks.push_back(id);
+    }
+}
+
+fn register_background_root(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    debug_assert!(!state.background_roots.contains(&id));
+    state.background_roots.push_back(id);
+}
+
+fn unregister_background_root(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+    if let Some(position) = state.background_roots.iter().position(|root| *root == id) {
+        state.background_roots.remove(position);
     }
 }
 
@@ -2484,11 +2530,6 @@ fn queue_current_registration(
     registration: WakeRegistration,
     source: Option<WorkDependencyKey>,
 ) -> bool {
-    enum ReadyQueue {
-        Spark,
-        Task,
-    }
-
     if let Some(record) = state.client_demands.get_mut(&registration.work) {
         if !matches!(record.state, WorkState::Blocked)
             || record.subscription_epoch != registration.subscription_epoch
@@ -2520,17 +2561,11 @@ fn queue_current_registration(
             return false;
         }
         record.state = WorkState::Queued;
-        match record.kind {
-            WorkKind::Spark(_) => ReadyQueue::Spark,
-            WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::LazyRoute(_) => {
-                ReadyQueue::Task
-            }
-        }
+        !matches!(record.kind, WorkKind::Spark(_))
     };
     state.observation_waiters.remove(&registration.work);
-    match kind {
-        ReadyQueue::Spark => queue_spark(state, registration.work),
-        ReadyQueue::Task => queue_task(state, registration.work),
+    if kind {
+        queue_task(state, registration.work);
     }
     true
 }

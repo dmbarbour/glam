@@ -4913,10 +4913,10 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **W6G.1e.2a complete; next e.2b → e.2c, then e.3b.2:** the background
-   route inventory and read-only traversal are latched against current
-   behavior. Cut over worker and runtime background selectors together, then
-   force the policy matrix before removing the unrelated same-session
+4. **W6G.1e.2a-b complete; next e.2c, then e.3b.2:** the background route
+   inventory and dry-run traversal are latched, and worker/runtime background
+   selection now begins at registered roots and follows exact descendants.
+   Force the policy matrix before removing the unrelated same-session
    fallback. The e.3b.0 launch/edge census and forced current-behavior
    fixtures, and e.3b.1 causal launch-parent publication, are complete;
    scheduler use of the parent edge and fallback retirement still belong to
@@ -5124,7 +5124,7 @@ deferred causal traversal:
     points, exact dependency edges, yield/requeue
     behavior, and every current global-ready fallback. Build the traversal
     helper and forced fixtures without changing production selection yet.
-  - **W6G.1e.2b — selector cutover.** Switch worker and runtime background
+  - **W6G.1e.2b — selector cutover — Complete (2026-09-22).** Switch worker and runtime background
     selectors together to spark/reflection roots and their exact descendants;
     retire global deferred-ready eligibility in the same coherent change.
     A busy descendant remains a wait, and a yielded one stays rediscoverable
@@ -5152,15 +5152,32 @@ deferred causal traversal:
   cross-session reflection-rooted producer while the old selector is still
   authoritative.
 
-  The production global-ready fallback is `claim_ready_task` in both
-  `select_worker` and `select_runtime_pump`; the latter excludes sparks. The
-  test compatibility and session-drain selectors also call `claim_ready_task`
-  but are outside this cutover. `runtime_pump_snapshot_locked` still reports
-  every queued non-spark task as `background_ready`; e.2b must narrow that
-  readiness view along with selection or the pump can spin on foreground-only
-  deferred work. The `ready_tasks` queue remains useful to cooperative and
-  exact selectors; retiring its *global eligibility* does not mean deleting
-  every queue update.
+  Before e.2b, the production global-ready fallback was `claim_ready_task` in
+  both `select_worker` and `select_runtime_pump`; the latter excluded sparks.
+  The test compatibility and session-drain selectors still call
+  `claim_ready_task` but are outside this cutover. Previously,
+  `runtime_pump_snapshot_locked` also reported every queued non-spark task as
+  `background_ready`; e.2b narrowed that view alongside selection so a
+  foreground-only deferred producer cannot spin the pump. The `ready_tasks`
+  queue remains useful to cooperative and exact selectors; retiring its
+  *global eligibility* does not mean deleting every queue update.
+
+  **e.2b implementation boundary.** The coordinator keeps one ID-only
+  round-robin registry of activated reflection and admitted spark roots.
+  Both selectors walk the same exact producer-chain helper under mutation
+  admission and the coordinator lock. Workers alternate root kinds when both
+  can advance; the runtime pump considers reflection roots only. Selection
+  rotates the chosen root, including when it claims a deferred/lazy-route
+  descendant, so yielded descendants are rediscovered from their still-live
+  root. A running descendant cannot be claimed twice. The global ready-task
+  queue remains for explicit/session-cooperative claims, but no longer makes
+  arbitrary deferred work worker- or runtime-pump eligible. Runtime-pump
+  `background_ready` now uses the same reflection-rooted causal criterion,
+  preventing a queued foreground-only deferred producer from causing a pump
+  spin. The source inventory fingerprint changed only because two test
+  declarations were renamed to describe the new scheduler policy; typed-edge
+  counts gain one test-only promise root used to latch its lifetime across a
+  forced collection.
 - **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
   drain and serialization policies cannot be narrowed before the registry
   topology which replaces them exists:

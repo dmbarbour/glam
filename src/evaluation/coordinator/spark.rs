@@ -12,6 +12,7 @@ use super::{
     ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
     WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
     WorkState, demand_session_is_closed, prune_closed_session_registration,
+    register_background_root, unregister_background_root,
 };
 
 pub(super) struct SparkDemand {
@@ -139,7 +140,7 @@ impl EvaluationWorkCoordinator {
                     .entry(session_id)
                     .or_default()
                     .insert(id);
-                queue_spark(&mut state, id);
+                register_background_root(&mut state, id);
                 state.work_generation = state.work_generation.wrapping_add(1);
                 true
             }
@@ -251,7 +252,6 @@ impl EvaluationWorkCoordinator {
                 spark.demand = Some(claimed.demand);
                 spark.dependency = None;
                 record.state = WorkState::Queued;
-                queue_spark(&mut state, claimed.id);
                 None
             } else if let Some(dependency) = dependency {
                 if dependency.runtime_id() != self.runtime {
@@ -356,52 +356,41 @@ pub(super) fn spark_work_mut(record: &mut WorkRecord) -> &mut SparkWork {
     }
 }
 
-pub(super) fn queue_spark(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
-    if state.ready_spark_set.insert(id) {
-        state.ready_sparks.push_back(id);
-    }
-}
-
-pub(super) fn claim_ready_spark(
+pub(super) fn claim_spark(
     state: &mut WorkCoordinatorState,
     runtime: crate::runtime::EvaluationRuntimeId,
+    id: EvaluationWorkId,
 ) -> Option<ClaimedSparkWork> {
-    while let Some(id) = state.ready_sparks.pop_front() {
-        state.ready_spark_set.remove(&id);
-        let Some(record) = state.work.get(&id) else {
-            continue;
-        };
-        if !matches!(record.state, WorkState::Queued) {
-            continue;
-        }
-        let demand_session = record.demand_session;
-        let session = ClaimedDemandSession::registered(state, demand_session, runtime)?;
-        if !spark_work(record)
-            .demand
-            .as_ref()
-            .is_some_and(|demand| Weak::ptr_eq(&demand.session, &Arc::downgrade(&session.demand())))
-        {
-            return None;
-        }
-        let record = state
-            .work
-            .get_mut(&id)
-            .expect("claimable spark work must remain registered");
-        record.state = WorkState::Running;
-        let spark = spark_work_mut(record);
-        let demand = spark
-            .demand
-            .take()
-            .expect("queued spark work must retain its demand");
-        let prior_dependency = spark.dependency.take();
-        return Some(ClaimedSparkWork {
-            id,
-            session,
-            demand,
-            prior_dependency,
-        });
+    let record = state.work.get(&id)?;
+    if !matches!(record.state, WorkState::Queued) {
+        return None;
     }
-    None
+    let demand_session = record.demand_session;
+    let session = ClaimedDemandSession::registered(state, demand_session, runtime)?;
+    if !spark_work(record)
+        .demand
+        .as_ref()
+        .is_some_and(|demand| Weak::ptr_eq(&demand.session, &Arc::downgrade(&session.demand())))
+    {
+        return None;
+    }
+    let record = state
+        .work
+        .get_mut(&id)
+        .expect("claimable spark work must remain registered");
+    record.state = WorkState::Running;
+    let spark = spark_work_mut(record);
+    let demand = spark
+        .demand
+        .take()
+        .expect("queued spark work must retain its demand");
+    let prior_dependency = spark.dependency.take();
+    Some(ClaimedSparkWork {
+        id,
+        session,
+        demand,
+        prior_dependency,
+    })
 }
 
 pub(super) fn detach_spark(
@@ -418,8 +407,7 @@ pub(super) fn detach_spark(
         .work
         .remove(&id)
         .expect("terminalizing spark work must remain registered");
-    state.ready_spark_set.remove(&id);
-    state.ready_sparks.retain(|candidate| *candidate != id);
+    unregister_background_root(state, id);
     if let Some(session_work) = state.work_by_session.get_mut(&record.demand_session) {
         session_work.remove(&id);
         if session_work.is_empty() {

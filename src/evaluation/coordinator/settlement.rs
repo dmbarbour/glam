@@ -15,8 +15,8 @@ use super::{
     EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ExitIntent,
     ProducerSettlementObligation, TaskOwnedPromiseObligation, TaskStatusPublisher,
     TaskStatusUpdate, TaskStatusWake, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, task_block, task_for_record, task_observation_epoch, terminal_task_status,
-    work_dependency,
+    WorkState, causal_background_candidate_locked, session_has_running_machine, task_block,
+    task_for_record, task_observation_epoch, terminal_task_status, work_dependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,11 +153,18 @@ impl EvaluationWorkCoordinator {
 
 pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> RuntimePumpSnapshot {
     RuntimePumpSnapshot {
-        background_ready: state.work.values().any(|record| {
-            matches!(
-                record.kind,
-                WorkKind::Reflection(_) | WorkKind::Deferred(_) | WorkKind::LazyRoute(_)
-            ) && matches!(record.state, WorkState::Queued)
+        background_ready: state.background_roots.iter().any(|root| {
+            let Some(record) = state.work.get(root) else {
+                return false;
+            };
+            if !matches!(record.kind, WorkKind::Reflection(_)) {
+                return false;
+            }
+            causal_background_candidate_locked(state, *root)
+                .and_then(|candidate| state.work.get(&candidate))
+                .is_some_and(|candidate| {
+                    !session_has_running_machine(state, candidate.demand_session)
+                })
         }),
         progress_owned: state
             .work

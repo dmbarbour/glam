@@ -14,7 +14,8 @@ use super::{
     RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
     WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord,
     WorkState, demand_session_is_closed, prune_closed_session_registration,
-    publish_task_block_locked, queue_task, remove_ready_task,
+    publish_task_block_locked, queue_task, register_background_root, remove_ready_task,
+    unregister_background_root,
 };
 
 impl EvaluationWorkCoordinator {
@@ -310,6 +311,7 @@ impl EvaluationWorkCoordinator {
             }
             reflection_work_mut(record).launch_parent = parent;
             record.state = WorkState::Queued;
+            register_background_root(&mut state, id);
             queue_reflection(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
             true
@@ -996,6 +998,7 @@ pub(super) fn detach_reflection(
 ) -> Option<Box<dyn EvaluationTaskMachine>> {
     state.observation_waiters.remove(&id);
     remove_ready_reflection(state, id);
+    unregister_background_root(state, id);
     let mut record = state
         .work
         .remove(&id)
