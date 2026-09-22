@@ -10,12 +10,12 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 use super::super::EvaluationDemandState;
 #[cfg(test)]
 use super::session_has_running_machine;
-use super::settlement::runtime_pump_snapshot_locked;
 use super::{
-    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration,
-    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency, WorkState,
-    demand_session_is_closed, dependency_has_causal_progress_locked,
-    prune_closed_session_registration, queue_current_registration,
+    CausalChildProbe, ClaimedDemandSession, EvaluationTaskId, EvaluationWorkCoordinator,
+    EvaluationWorkId, WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState,
+    WorkDependency, WorkState, causal_child_probe_locked, demand_session_is_closed,
+    dependency_has_causal_progress_locked, prune_closed_session_registration,
+    queue_current_registration,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -213,14 +213,16 @@ impl ClientDemandHandle {
     pub(in crate::evaluation) fn abandon_if_stably_blocked(
         &mut self,
         subscription_epoch: u64,
+        caller_tasks: [Option<EvaluationTaskId>; 2],
     ) -> Option<WorkDependency> {
         if !self.active {
             return None;
         }
-        let dependency = self
-            .coordinator
-            .upgrade()?
-            .abandon_blocked_client_demand(self.work, subscription_epoch)?;
+        let dependency = self.coordinator.upgrade()?.abandon_blocked_client_demand(
+            self.work,
+            subscription_epoch,
+            caller_tasks,
+        )?;
         self.active = false;
         Some(dependency)
     }
@@ -635,6 +637,7 @@ impl EvaluationWorkCoordinator {
         &self,
         id: EvaluationWorkId,
         subscription_epoch: u64,
+        caller_tasks: [Option<EvaluationTaskId>; 2],
     ) -> Option<WorkDependency> {
         let mutation = self.admission.mutation_guard();
         let (dependency, registration) = {
@@ -701,8 +704,15 @@ impl EvaluationWorkCoordinator {
             if dependency_has_causal_progress_locked(&state, &dependency, current_epoch) {
                 return None;
             }
-            let runtime = runtime_pump_snapshot_locked(&state);
-            if runtime.background_ready || runtime.progress_owned || runtime.abandonable_sparks {
+            if !matches!(
+                causal_child_probe_locked(
+                    &state,
+                    dependency.producer_wait().as_ref(),
+                    caller_tasks,
+                    &Default::default(),
+                ),
+                CausalChildProbe::None
+            ) {
                 return None;
             }
             let retirement =

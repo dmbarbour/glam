@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        878,
+        879,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -943,9 +943,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G.1e.3b.2 adds four test-only promise roots for forced child
     // activation, contested claim, transitive launch, and retired-intermediate
     // schedules.
+    // W6G.1d.2 adds one test-only lazy root for the forced claimed-exact
+    // foreground wait; no production managed edges change.
     assert_eq!(
         occurrence_fingerprint(actual),
-        17_400_344_642_680_310_841,
+        13_508_722_456_678_254_864,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -992,7 +994,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 627),
+            ((SourceScope::Test, EdgeSurface::Typed), 628),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

@@ -719,7 +719,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::root_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::rooted_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::synchronous_client_demand_waits_for_worker_owned_runtime_progress#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::synchronous_client_demand_does_not_wait_for_unrelated_worker_progress#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::task_owned_promise_lazy_cycle_fails_in_both_publication_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::project_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",

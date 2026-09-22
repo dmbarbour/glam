@@ -436,7 +436,7 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
     let blocked_probe = client_demand_publish_lock_probe(&coordinator, &blocked);
     assert!(
         blocked
-            .abandon_if_stably_blocked(subscription_epoch)
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
             .is_some()
     );
     assert_client_demand_published_after_unlock(&blocked_probe);
@@ -722,7 +722,7 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
 
     assert!(
         handle
-            .abandon_if_stably_blocked(subscription_epoch)
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
             .is_none(),
         "a producer claimed after the client's quiescence snapshot is still authoritative progress"
     );
@@ -777,7 +777,7 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
 
     assert!(
         handle
-            .abandon_if_stably_blocked(subscription_epoch)
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
             .is_none(),
         "a dormant producer at the exact dependency tail remains causal progress"
     );
@@ -846,7 +846,7 @@ fn blocked_client_follows_a_blocked_chain_to_dormant_causal_progress() {
 
     assert!(
         handle
-            .abandon_if_stably_blocked(subscription_epoch)
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
             .is_none(),
         "stable abandonment must follow blocked producers to a dormant causal tail"
     );
@@ -1250,7 +1250,31 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
 }
 
 #[test]
-fn synchronous_client_demand_waits_for_worker_owned_runtime_progress() {
+fn synchronous_client_demand_does_not_pump_unrelated_reflection_work() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let promise = PromisedValue::new(context.values(), "unrelated foreground input");
+    let (ran, observer) = mpsc::channel();
+    let unrelated = context
+        .schedule_task(move |_| Ok(Box::new(Signal(Some(ran)))))
+        .expect("unrelated reflection task should schedule");
+
+    let halt = context
+        .evaluate_compatibility_whnf(&Value::Promised(promise.clone()))
+        .expect_err("unassigned promise has no causal producer");
+    assert_eq!(
+        halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
+        Some(promise.id(context.values()))
+    );
+    assert!(observer.try_recv().is_err());
+    assert!(matches!(
+        context.poll_reflection_task(&unrelated),
+        EvaluationWaitPoll::Pending(_)
+    ));
+}
+
+#[test]
+fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
     let fixture = SameRuntimeFixture::new();
     fixture
         .runtime
@@ -1266,7 +1290,7 @@ fn synchronous_client_demand_waits_for_worker_owned_runtime_progress() {
         .values()
         .with_runtime_value_access(|access| promise.root_in(&access));
     let promise_values = producer.values().clone();
-    producer
+    let background = producer
         .schedule_task({
             let expected = expected.clone();
             move |_| {
@@ -1285,28 +1309,44 @@ fn synchronous_client_demand_waits_for_worker_owned_runtime_progress() {
         .expect("worker should claim the promise producer");
 
     let (completed, client_completed) = mpsc::channel();
+    let (wait_probe, first_client_event) = mpsc::channel();
+    let consumer = EvalContext::clone(&consumer).with_claimed_task_wait_probe(wait_probe.clone());
+    let client_promise = promise.clone();
     let client = std::thread::spawn(move || {
         completed
-            .send(consumer.evaluate_compatibility_whnf(&Value::Promised(promise)))
+            .send(consumer.evaluate_compatibility_whnf(&Value::Promised(client_promise)))
             .expect("client result receiver should remain live");
+        wait_probe
+            .send(())
+            .expect("first-event observer should remain live");
     });
-    assert!(
-        client_completed
-            .recv_timeout(Duration::from_millis(50))
-            .is_err(),
-        "client demand must not report a stable block while a worker owns progress"
-    );
+    let first_event = first_client_event.recv_timeout(Duration::from_secs(10));
+    let early = client_completed.try_recv();
     release
         .send(())
         .expect("promise producer should remain live");
+    first_event.expect("the client must finish or enter the forbidden wait path");
+    let halt = early
+        .expect("the client's first event must be completion, not an unrelated-work wait")
+        .expect_err("the promise has no exact producer edge");
     assert_eq!(
-        client_completed
-            .recv_timeout(Duration::from_secs(2))
-            .expect("worker completion should wake client demand")
-            .expect("resolved client demand should succeed"),
-        expected
+        halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
+        Some(promise.id(producer.values()))
     );
     client.join().expect("client thread should finish cleanly");
+    loop {
+        match producer.pump_wait(background.wait(), 64) {
+            EvaluationPumpOutcome::TargetReady => break,
+            EvaluationPumpOutcome::Busy => producer.wait_for_claimed_task(background.wait()),
+            other => panic!("released worker must complete its task, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        producer
+            .evaluate_compatibility_whnf(&Value::Promised(promise))
+            .expect("a fresh client demand should observe the later assignment"),
+        expected
+    );
 }
 
 #[test]
@@ -1353,6 +1393,186 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
         already_complete.wait(),
         ClientDemandResult::Complete(value) if value.clone_core_for_test() == context.values().unit()
     ));
+}
+
+#[test]
+fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let (_lazy, value) =
+        rooted_semantic_lazy_value(context.values(), "claimed exact client producer", |_| {
+            Ok(Value::Number(37.into()))
+        });
+    let mut handle = context
+        .demand_whnf(value)
+        .expect("client demand should be admitted");
+    let mut blocked = None;
+    for _ in 0..8 {
+        if let Some(ClientDemandSnapshot::Blocked {
+            dependency: WorkDependency::Wait(wait),
+            subscription_epoch,
+        }) = coordinator.client_demand_snapshot(handle.work())
+        {
+            blocked = Some((wait, subscription_epoch));
+            break;
+        }
+        let claim = coordinator
+            .claim_client_demand(handle.work())
+            .expect("unblocked foreground demand must remain claimable");
+        coordinator.poll_claimed_client_demand(claim);
+    }
+    let (dependency, subscription_epoch) = blocked.expect("client must publish its exact wait");
+    let producer = coordinator
+        .work_for_wait(&dependency)
+        .expect("the lazy's exact producer must be registered");
+    let claimed = coordinator
+        .claim_work(producer)
+        .expect("a second thread may already own the exact producer");
+    assert!(
+        handle
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
+            .is_none(),
+        "a claimed exact producer must prevent stable-block abandonment"
+    );
+
+    let (waiting_sender, waiting_receiver) = mpsc::channel();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let driver = EvalContext::clone(&context).with_claimed_task_wait_probe(waiting_sender);
+    let foreground = std::thread::spawn(move || {
+        result_sender
+            .send(driver.drive_client_demand_for_test(handle))
+            .expect("foreground result observer must remain live");
+    });
+    waiting_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the foreground must reach its claimed-producer wait");
+    assert!(result_receiver.try_recv().is_err());
+    coordinator.poll_claimed_task(claimed);
+    let result = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("exact producer completion must wake the foreground")
+        .expect("the exact lazy producer should succeed");
+    assert!(matches!(
+        result,
+        ClientDemandResult::Complete(value)
+            if value.clone_core_for_test() == Value::Number(37.into())
+    ));
+    foreground.join().expect("foreground driver should finish");
+}
+
+#[test]
+fn synchronous_client_demand_waits_for_worker_owned_task_promise() {
+    for workers in [1, 4] {
+        let fixture = SameRuntimeFixture::new();
+        fixture
+            .runtime
+            .activate_workers(workers)
+            .expect("test workers should activate");
+        let owner = fixture.context();
+        let observer = fixture.context();
+        let expected = Value::Number(41.into());
+        let (promise_sender, promise_receiver) = mpsc::channel();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        owner
+            .schedule_task({
+                let expected = expected.clone();
+                move |task_context| {
+                    let promise = PromisedValue::fixpoint(
+                        &task_context,
+                        Arc::<str>::from("worker-owned client result"),
+                    )?;
+                    let values = task_context.values().clone();
+                    let root = promise.root(task_context.values());
+                    promise_sender
+                        .send(promise)
+                        .expect("promise observer must remain live");
+                    Ok(Box::new(AssignPromiseAfterRelease {
+                        promise: root,
+                        values,
+                        value: expected,
+                        started: Some(started_sender),
+                        release: release_receiver,
+                    }))
+                }
+            })
+            .expect("task-owned promise producer should schedule");
+        let promise = promise_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("task construction should publish the promise");
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a worker should claim the promise producer");
+
+        let (waiting_sender, waiting_receiver) = mpsc::channel();
+        let client = EvalContext::clone(&observer).with_claimed_task_wait_probe(waiting_sender);
+        let (result_sender, result_receiver) = mpsc::channel();
+        let foreground = std::thread::spawn(move || {
+            result_sender
+                .send(client.evaluate_compatibility_whnf(&Value::Promised(promise)))
+                .expect("foreground result observer must remain live");
+        });
+        waiting_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("client should wait on its claimed exact producer");
+        assert!(result_receiver.try_recv().is_err());
+        release_sender
+            .send(())
+            .expect("worker-owned producer should remain live");
+        assert_eq!(
+            result_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("producer settlement should wake the foreground")
+                .expect("task-owned promise should resolve"),
+            expected
+        );
+        foreground.join().expect("foreground driver should finish");
+    }
+}
+
+#[test]
+fn timed_work_change_wait_handles_both_publication_orders_and_expiry() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let before_publication = coordinator.work_generation();
+    assert!(!coordinator.wait_for_change_with_timeout(before_publication, Some(Duration::ZERO),));
+    context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("first publication should schedule");
+    assert!(
+        coordinator.wait_for_change_with_timeout(before_publication, Some(Duration::from_secs(2)),)
+    );
+
+    let before_wait = coordinator.work_generation();
+    let (parked_sender, parked_receiver) = mpsc::channel();
+    coordinator.set_work_wait_probe(parked_sender);
+    let waiting_coordinator = coordinator.clone();
+    let (changed_sender, changed_receiver) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        changed_sender
+            .send(
+                waiting_coordinator
+                    .wait_for_change_with_timeout(before_wait, Some(Duration::from_secs(2))),
+            )
+            .expect("wait result observer should remain live");
+    });
+    parked_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the wait must reach its locked predicate before publication");
+    context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("second publication should schedule");
+    assert!(
+        changed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("publication must wake the timed waiter")
+    );
+    waiter.join().expect("timed waiter should finish");
+
+    let stable = coordinator.work_generation();
+    assert!(!coordinator.wait_for_change_with_timeout(stable, Some(Duration::from_millis(1)),));
 }
 
 #[test]

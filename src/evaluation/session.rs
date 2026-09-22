@@ -21,13 +21,13 @@ use crate::core_net::CoreWaitToken;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
-    ClientDemandHandle, ClientDemandOperation, ClientDemandResult, ClientDemandSink,
-    ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation, EvaluationSessionId,
-    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll,
-    EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator, InitialTaskDisposition,
-    LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation,
-    ReflectionCancellation, ReflectionTaskResultPolicy, TaskFailureLedger,
-    TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
+    CausalChildSelection, ClientDemandHandle, ClientDemandOperation, ClientDemandResult,
+    ClientDemandSink, ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation,
+    EvaluationSessionId, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
+    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
+    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
+    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
+    TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -986,16 +986,15 @@ impl EvalContext {
             match snapshot {
                 ClientDemandSnapshot::Queued => continue,
                 ClientDemandSnapshot::Running => {
-                    if handle.poll().is_none() && coordinator.work_generation() == generation {
-                        coordinator.wait_for_change(generation);
-                    }
+                    self.wait_for_client_progress(&coordinator, &handle, generation);
                 }
                 ClientDemandSnapshot::Blocked {
                     dependency,
                     subscription_epoch,
                 } => {
-                    if let Some(wait) = dependency.producer_wait() {
-                        if let Some(work_id) = prioritized_task_for(&coordinator, &wait)
+                    let producer_wait = dependency.producer_wait();
+                    if let Some(wait) = producer_wait.as_ref() {
+                        if let Some(work_id) = prioritized_task_for(&coordinator, wait)
                             && let Some(mut work) = coordinator.claim_work(work_id)
                         {
                             while coordinator.poll_claimed_task(work) {
@@ -1006,41 +1005,27 @@ impl EvalContext {
                             }
                             continue;
                         }
-                        if coordinator.target_has_running_producer(&wait) {
-                            if handle.poll().is_none()
-                                && coordinator.work_generation() == generation
-                            {
-                                coordinator.wait_for_change(generation);
-                            }
+                        if coordinator.target_has_running_producer(wait) {
+                            self.wait_for_client_progress(&coordinator, &handle, generation);
                             continue;
                         }
                     }
-
-                    // A dependency chain may be blocked while another task or
-                    // worker owns the state transition which will disturb it.
-                    // Use the runtime pump's stability boundary before
-                    // abandoning this client demand: run unrelated useful
-                    // lifecycle work, release parked best-effort sparks, and
-                    // wait for worker-owned progress. A client-visible blocked
-                    // halt is valid only after none of those routes remains.
-                    if coordinator.poll_runtime_work() {
-                        continue;
-                    }
-                    if coordinator.abandon_quiescent_sparks() != 0 {
-                        continue;
-                    }
-                    let runtime = coordinator.runtime_pump_snapshot();
-                    if runtime.background_ready || runtime.abandonable_sparks {
-                        continue;
-                    }
-                    if runtime.progress_owned {
-                        if handle.poll().is_none() && coordinator.work_generation() == generation {
-                            coordinator.wait_for_change(generation);
+                    match coordinator
+                        .claim_causal_child_work(producer_wait.as_ref(), self.causal_task_ids())
+                    {
+                        CausalChildSelection::Claimed(work) => {
+                            coordinator.poll_claimed_task(work);
+                            continue;
                         }
-                        continue;
+                        CausalChildSelection::Busy => {
+                            self.wait_for_client_progress(&coordinator, &handle, generation);
+                            continue;
+                        }
+                        CausalChildSelection::None => {}
                     }
 
-                    let Some(dependency) = handle.abandon_if_stably_blocked(subscription_epoch)
+                    let Some(dependency) = handle
+                        .abandon_if_stably_blocked(subscription_epoch, self.causal_task_ids())
                     else {
                         continue;
                     };
@@ -1048,6 +1033,22 @@ impl EvalContext {
                 }
             }
         }
+    }
+
+    fn wait_for_client_progress(
+        &self,
+        coordinator: &EvaluationWorkCoordinator,
+        handle: &ClientDemandHandle,
+        generation: u64,
+    ) {
+        if handle.poll().is_some() || coordinator.work_generation() != generation {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.claimed_task_wait_probe {
+            let _ = probe.send(());
+        }
+        coordinator.wait_for_change(generation);
     }
 
     #[cfg(test)]
@@ -1152,7 +1153,7 @@ impl EvalContext {
         };
         let generation = coordinator.work_generation();
         if !coordinator.target_has_running_producer(target)
-            && !coordinator.has_busy_causal_child(target, self.causal_task_ids())
+            && !coordinator.has_busy_causal_child(Some(target), self.causal_task_ids())
             && !coordinator.demand_session_has_running_machine(self.session.id)
             && !(coordinator.dependency_observes_runtime(target)
                 && coordinator.runtime_has_running_machine())

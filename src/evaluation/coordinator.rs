@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroU64;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::Duration;
 
 #[cfg(test)]
 use crate::core::LazyValue;
@@ -611,6 +614,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     state: Mutex<WorkCoordinatorState>,
     work_available: Condvar,
     #[cfg(test)]
+    work_wait_probe: OnceLock<std::sync::mpsc::Sender<()>>,
+    #[cfg(test)]
     test_values: Option<CoreValueFactory>,
     #[cfg(test)]
     terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -665,6 +670,8 @@ impl EvaluationWorkCoordinator {
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
+            #[cfg(test)]
+            work_wait_probe: OnceLock::new(),
             #[cfg(test)]
             test_values: None,
             #[cfg(test)]
@@ -727,6 +734,7 @@ impl EvaluationWorkCoordinator {
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: Condvar::new(),
+            work_wait_probe: OnceLock::new(),
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),
             reflection_release_status_probe: Mutex::new(None),
@@ -1412,7 +1420,7 @@ impl EvaluationWorkCoordinator {
     /// queue: launch provenance is a helping route, not a completion wait.
     pub(super) fn claim_causal_child_work(
         &self,
-        target: &EvaluationWaitToken,
+        target: Option<&EvaluationWaitToken>,
         caller_tasks: [Option<EvaluationTaskId>; 2],
     ) -> CausalChildSelection {
         let mutation = self.admission.mutation_guard();
@@ -1462,7 +1470,7 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn has_busy_causal_child(
         &self,
-        target: &EvaluationWaitToken,
+        target: Option<&EvaluationWaitToken>,
         caller_tasks: [Option<EvaluationTaskId>; 2],
     ) -> bool {
         let state = self
@@ -1903,16 +1911,51 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn wait_for_change(&self, observed_generation: u64) {
+        let _ = self.wait_for_change_with_timeout(observed_generation, None);
+    }
+
+    /// Waits on the coordinator's observed generation, optionally bounded by
+    /// an idle timeout. The predicate is checked under the same mutex as
+    /// publication, so a change preceding this call cannot become a lost
+    /// wake. The timeout never interrupts an active machine poll.
+    pub(super) fn wait_for_change_with_timeout(
+        &self,
+        observed_generation: u64,
+        timeout: Option<Duration>,
+    ) -> bool {
         let mut state = self
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
+        #[cfg(test)]
+        if state.work_generation == observed_generation
+            && let Some(probe) = self.work_wait_probe.get()
+        {
+            let _ = probe.send(());
+        }
+        if let Some(timeout) = timeout {
+            let (current, _) = self
+                .work_available
+                .wait_timeout_while(state, timeout, |state| {
+                    state.work_generation == observed_generation
+                })
+                .expect("evaluation work coordinator was poisoned");
+            return current.work_generation != observed_generation;
+        }
         while state.work_generation == observed_generation {
             state = self
                 .work_available
                 .wait(state)
                 .expect("evaluation work coordinator was poisoned");
         }
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_work_wait_probe(&self, probe: std::sync::mpsc::Sender<()>) {
+        self.work_wait_probe
+            .set(probe)
+            .unwrap_or_else(|_| panic!("work wait probe can only be installed once"));
     }
 
     /// Queues every blocked task whose retained retry checkpoint predates a
@@ -2203,7 +2246,7 @@ enum CausalChildProbe {
 /// mistaken for stable absence just because its machine was detached.
 fn causal_child_probe_locked(
     state: &WorkCoordinatorState,
-    target: &EvaluationWaitToken,
+    target: Option<&EvaluationWaitToken>,
     caller_tasks: [Option<EvaluationTaskId>; 2],
     excluded: &HashSet<EvaluationWorkId>,
 ) -> CausalChildProbe {
@@ -2216,8 +2259,11 @@ fn causal_child_probe_locked(
     }
 
     let mut seen_exact = HashSet::new();
-    let mut wait = target.clone();
-    while let Some(work) = work_for_wait_locked(state, &wait) {
+    let mut wait = target.cloned();
+    while let Some(work) = wait
+        .as_ref()
+        .and_then(|wait| work_for_wait_locked(state, wait))
+    {
         if !seen_exact.insert(work) {
             break;
         }
@@ -2232,7 +2278,7 @@ fn causal_child_probe_locked(
         let Some(next) = work_dependency(record).and_then(WorkDependency::producer_wait) else {
             break;
         };
-        wait = next.clone();
+        wait = Some(next.clone());
     }
 
     let mut seen_child_work = HashSet::new();

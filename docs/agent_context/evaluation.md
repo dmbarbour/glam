@@ -44,8 +44,10 @@ control-flow overview.
   not wait on a lazy-specific condition variable. A pump distinguishes a
   producer claimed by another thread (`Busy`) from stable quiescence
   (`NoProgress`). Cooperative and scheduled contexts return the wait, while
-  synchronous assembler contexts wait on the session condition variable and
-  retry. Deferred producers begin dormant. Publishing an exact dependency may
+  synchronous assembler contexts wait on a coordinator generation only while
+  exact or launched causal work is owned elsewhere; stable causal absence
+  returns a retryable halt without pumping unrelated runtime work. Deferred
+  producers begin dormant. Publishing an exact dependency may
   queue the canonical producer for exact/cooperative claim, but does not make
   it an independent background root. Workers follow exact descendants of
   registered reflection or spark roots; the runtime background pump follows

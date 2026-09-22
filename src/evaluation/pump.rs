@@ -450,7 +450,7 @@ pub(super) fn pump_demand(
         let (claimed, causal_busy) = if let Some(exact) = exact {
             (Some(exact), false)
         } else {
-            match coordinator.claim_causal_child_work(target, context.causal_task_ids()) {
+            match coordinator.claim_causal_child_work(Some(target), context.causal_task_ids()) {
                 CausalChildSelection::Claimed(child) => (Some(child), false),
                 CausalChildSelection::Busy => (None, true),
                 CausalChildSelection::None => (None, false),

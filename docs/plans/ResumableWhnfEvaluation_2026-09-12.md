@@ -4918,11 +4918,12 @@ dependency order, including completed prerequisites, is:
    first, then published launch-parent descendants; unrelated same-session
    work is no longer a fallback. The forced child-launch and wait-publication
    orderings are covered by e.3b.2 fixtures.
-5. **Next W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private
-   foreground driver as an exact-only owner, then narrow session/runtime drains and
-   readiness. Do not introduce a public incremental handle merely to close
-   this phase. The current blocking driver still uses runtime-wide help, so
-   its final policy follows the decision gate in d.2.
+5. **W6G.1d complete; next W6G.1e.3a and W6G.1g:** the private blocking
+   foreground driver claims only exact producers and launched causal children;
+   stable absence returns a retryable halt rather than helping unrelated
+   background work. Next narrow session/runtime drains and readiness. The
+   private timed generation wait is available for later host composition, but
+   no public incremental handle or productive-wait policy was introduced.
 6. **W6G.1h (including W6G.1e.3c):** remove the temporary session-wide
    serialization scan and compensating busy waits only after causal ownership
    is authoritative, then close the forced-order matrix and current docs.
@@ -5063,9 +5064,10 @@ section in two checkpoints:
 - **W6G.1d.2 — exact-only blocking driver.** After W6G.1e.2/e.3b supply causal
   descendants and explicit child work, remove unrelated runtime help from
   ordinary client demand and confirm no same-session fallback remains. Force
-  zero-/one-/many-worker
-  schedules for exact dependency progress, owner close, cancellation,
-  subscription-before/after-publication, and stable blocked reporting.
+  zero-/one-/many-worker schedules for exact dependency progress, plus
+  order-forced owner close, cancellation, subscription-before/after-publication,
+  and stable blocked reporting. This is not a worker-count cross product for
+  every independent lifecycle fixture.
 
   **Productive-wait decision gate resolved (2026-09-22).** The blocking
   evaluator does not help unrelated runtime-background reflection work. This
@@ -5093,27 +5095,43 @@ audit is:
 Existing forced fixtures cover result-cell publication after unlock, the
 detach/publication gap, parked subscription and promise wake, owner close and
 kill, and another client continuing to demand a shared producer. The
-`synchronous_client_demand_waits_for_worker_owned_runtime_progress` fixture
-currently encodes broad runtime help: its worker-owned reflection task assigns
-a host promise without an exact producer edge. Revise it at d.2 to distinguish
-an exact claimed producer from unrelated runtime progress, and add a red
-unrelated-background fixture before changing the driver. The same-session
+former `synchronous_client_demand_waits_for_worker_owned_runtime_progress`
+fixture encoded broad runtime help: its worker-owned reflection task assigned
+a host promise without an exact producer edge. At d.2 it was revised to
+distinguish an exact claimed producer from unrelated runtime progress, with a
+red unrelated-background fixture before changing the driver. The same-session
 fallback was retired by W6G.1e.3b.2; session-wide draining remains separately
 owned by W6G.1g.
 
-Introduce the client-only registry before deciding whether to expose its
-driver publicly. Shape the internal handle so a later public `Evaluation`
-facade can offer bounded `try_advance` plus blocking `run`/`eval` without
-moving the computation back into the caller. `ValueEvaluator::eval` remains a
-blocking convenience layered over the same foreground driver rather than a
-second evaluator path.
+**W6G.1d.2 complete (2026-09-22).** The blocking driver now claims the
+foreground record, its exact producer chain, or published causal children;
+it does not pump runtime-wide work, abandon unrelated sparks, or wait for an
+unrelated worker. Stable-block retirement rechecks these same causal routes
+under mutation admission, rather than vetoing retirement on broad runtime
+activity. A private generation-predicate wait supports an optional idle
+timeout, with the predicate checked under the publication mutex; it is not a
+timeout for a running callback. This checkpoint leaves the eventual public
+bounded `try_advance` and background-pump composition to their designated
+phases, rather than implying that the blocking loop itself is a bounded API.
+The order-forced verification now distinguishes: unrelated queued work and
+worker-owned work that must not hold the client; a claimed exact lazy producer
+with no workers; task-owned promise producers with one and four workers;
+publication before the timed wait, publication after its locked predicate,
+and timeout without change. Existing fixtures continue to cover owner close,
+kill, cancellation, and both lazy-subscription publication orders.
 
-One bounded advance claims and polls only the matching client-evaluation
-record and its transitive exact dependencies. It returns a terminal value or
-failure, budget exhaustion, or an exact parked dependency; the last case
-registers a wake before reporting that no local progress is available. The
-client record is affine with respect to polling even if its handle may move
-between threads.
+The client-only registry is in place. If a public incremental `Evaluation`
+facade is introduced later, split a bounded `try_advance` from this private
+blocking driver without moving the computation back into the caller.
+`ValueEvaluator::eval` currently remains the blocking convenience over the
+same foreground record, not a second evaluator path.
+
+The later bounded advance should claim and poll only the matching
+client-evaluation record and its transitive exact dependencies. It should
+return a terminal value or failure, budget exhaustion, or an exact parked
+dependency; the last case registers a wake before reporting that no local
+progress is available. The client record remains affine with respect to
+polling even if its handle moves between threads.
 
 Select the public-handle drop contract before exposing the incremental API.
 At minimum, preserve distinct internal operations for:
