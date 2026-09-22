@@ -7524,6 +7524,209 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum LaunchedChildOutcome {
+    Complete,
+    Fail,
+    Cancel,
+    Abandon,
+}
+
+struct LaunchedChildFixture(LaunchedChildOutcome);
+
+impl ReflectionTaskLauncher for LaunchedChildFixture {
+    fn build(
+        &self,
+        _context: EvalContext,
+        _effect: Value,
+        _result_policy: ReflectionTaskResultPolicy,
+    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
+        Ok(match self.0 {
+            LaunchedChildOutcome::Complete => Box::new(Complete),
+            LaunchedChildOutcome::Fail => Box::new(Fail),
+            LaunchedChildOutcome::Cancel | LaunchedChildOutcome::Abandon => Box::new(AlwaysBlocked),
+        })
+    }
+}
+
+#[test]
+fn direct_effect_child_launch_publishes_causal_parent_only_on_commit() {
+    let fixture = SameRuntimeFixture::new();
+    let session = fixture
+        .runtime
+        .new_evaluation_session()
+        .expect("direct effect session should build");
+    let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
+        LaunchedChildFixture(LaunchedChildOutcome::Complete),
+    )));
+    let context = EvalContext::with_task_profile(&session, profile);
+    let coordinator = context.coordinator().expect("runtime has a coordinator");
+    let parent = context
+        .task_id()
+        .expect("direct effect has a task identity");
+
+    let discarded = context
+        .reserve_reflection_task(Value::binary_from_text("discarded"))
+        .expect("child reservation should succeed");
+    let discarded_id = discarded.handle().id();
+    assert_eq!(
+        coordinator.reflection_launch_parent(discarded_id),
+        Some(None)
+    );
+    drop(discarded);
+    assert_eq!(coordinator.reflection_launch_parent(discarded_id), None);
+
+    let pending = context
+        .reserve_reflection_task(Value::binary_from_text("committed"))
+        .expect("child reservation should succeed");
+    let child = pending.handle().clone();
+    assert_eq!(coordinator.reflection_launch_parent(child.id()), Some(None));
+    let statuses = Arc::new(RecordedStatuses::default());
+    pending.commit(
+        RecordedStatuses::publisher(&statuses),
+        PendingTaskPolicy::default(),
+    );
+    assert_eq!(
+        coordinator.reflection_launch_parent(child.id()),
+        Some(Some(parent))
+    );
+    assert!(poll_one_runtime_work(&coordinator));
+    assert!(matches!(
+        child.wait().terminal_poll(),
+        Some(EvaluationWaitPoll::Complete(_))
+    ));
+    assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
+}
+
+#[test]
+fn scheduled_effect_children_keep_causal_parent_without_implicit_join() {
+    for outcome in [
+        LaunchedChildOutcome::Complete,
+        LaunchedChildOutcome::Fail,
+        LaunchedChildOutcome::Cancel,
+        LaunchedChildOutcome::Abandon,
+    ] {
+        let fixture = SameRuntimeFixture::new();
+        let session = fixture
+            .runtime
+            .new_evaluation_session()
+            .expect("scheduled effect session should build");
+        let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
+            LaunchedChildFixture(outcome),
+        )));
+        let context = EvalContext::with_task_profile(&session, profile);
+        let coordinator = context.coordinator().expect("runtime has a coordinator");
+        let reserved = Arc::new(Mutex::new(None));
+        let launched = reserved.clone();
+        let parent = context
+            .schedule_task(move |parent_context| {
+                let pending =
+                    parent_context.reserve_reflection_task(Value::binary_from_text("child"))?;
+                *launched
+                    .lock()
+                    .expect("child reservation lock was poisoned") = Some(pending);
+                Ok(Box::new(Complete))
+            })
+            .expect("parent should schedule");
+        let pending = reserved
+            .lock()
+            .expect("child reservation lock was poisoned")
+            .take()
+            .expect("parent construction reserved a child");
+        let child = pending.handle().clone();
+        let statuses = Arc::new(RecordedStatuses::default());
+        pending.commit(
+            RecordedStatuses::publisher(&statuses),
+            PendingTaskPolicy::default(),
+        );
+        assert_eq!(
+            coordinator.reflection_launch_parent(child.id()),
+            Some(Some(parent.id()))
+        );
+
+        // The parent completes without joining the child. The child retains
+        // its causal identity after the parent record retires.
+        assert!(poll_one_runtime_work(&coordinator));
+        assert!(matches!(
+            parent.wait().terminal_poll(),
+            Some(EvaluationWaitPoll::Complete(_))
+        ));
+        assert_eq!(
+            coordinator.reflection_launch_parent(child.id()),
+            Some(Some(parent.id()))
+        );
+
+        match outcome {
+            LaunchedChildOutcome::Complete => {
+                assert!(poll_one_runtime_work(&coordinator));
+                assert!(matches!(
+                    child.wait().terminal_poll(),
+                    Some(EvaluationWaitPoll::Complete(_))
+                ));
+            }
+            LaunchedChildOutcome::Fail => {
+                assert!(poll_one_runtime_work(&coordinator));
+                assert!(matches!(
+                    child.wait().terminal_poll(),
+                    Some(EvaluationWaitPoll::Failed(_))
+                ));
+            }
+            LaunchedChildOutcome::Cancel | LaunchedChildOutcome::Abandon => {
+                assert!(poll_one_runtime_work(&coordinator));
+                assert_eq!(
+                    coordinator.reflection_launch_parent(child.id()),
+                    Some(Some(parent.id()))
+                );
+                match outcome {
+                    LaunchedChildOutcome::Cancel => {
+                        assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
+                        assert!(matches!(
+                            child.wait().terminal_poll(),
+                            Some(EvaluationWaitPoll::Cancelled)
+                        ));
+                    }
+                    LaunchedChildOutcome::Abandon => {
+                        drop(session);
+                        assert!(matches!(
+                            child.wait().terminal_poll(),
+                            Some(EvaluationWaitPoll::Abandoned)
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
+    }
+}
+
+#[test]
+fn cancelled_effect_child_never_publishes_a_launch_parent() {
+    let fixture = SameRuntimeFixture::new();
+    let session = fixture
+        .runtime
+        .new_evaluation_session()
+        .expect("effect session should build");
+    let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
+        LaunchedChildFixture(LaunchedChildOutcome::Complete),
+    )));
+    let context = EvalContext::with_task_profile(&session, profile);
+    let coordinator = context.coordinator().expect("runtime has a coordinator");
+    let pending = context
+        .reserve_reflection_task(Value::binary_from_text("cancelled"))
+        .expect("child reservation should succeed");
+    let child = pending.handle().clone();
+    let mut policy = PendingTaskPolicy::default();
+    policy.cancel();
+    let statuses = Arc::new(RecordedStatuses::default());
+    pending.commit(RecordedStatuses::publisher(&statuses), policy);
+    assert!(matches!(
+        child.wait().terminal_poll(),
+        Some(EvaluationWaitPoll::Cancelled)
+    ));
+    assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
+}
+
 #[test]
 fn runtime_pump_snapshot_is_observational() {
     let fixture = SameRuntimeFixture::new();

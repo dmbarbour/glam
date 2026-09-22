@@ -196,6 +196,7 @@ impl EvaluationWorkCoordinator {
                 state: initial,
                 kind: WorkKind::Reflection(ReflectionWork {
                     task,
+                    launch_parent: None,
                     failure_reporting: TaskFailureReporting {
                         owner_session: session.id,
                         acknowledged: false,
@@ -262,8 +263,18 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(in crate::evaluation) fn activate_reflection(&self, id: EvaluationWorkId) -> bool {
+        self.activate_reflection_with_parent(id, None)
+    }
+
+    /// Publishes an effect-launched child and its causal parent together.
+    /// The parent is provenance for work discovery, not a completion wait.
+    pub(in crate::evaluation) fn activate_reflection_with_parent(
+        &self,
+        id: EvaluationWorkId,
+        parent: Option<EvaluationTaskId>,
+    ) -> bool {
         let mutation = self.admission.mutation_guard();
-        let activated = self.activate_reflection_guarded(id, &mutation);
+        let activated = self.activate_reflection_guarded_with_parent(id, parent, &mutation);
         drop(mutation);
         self.notify_reflection_activation(activated);
         activated
@@ -272,6 +283,15 @@ impl EvaluationWorkCoordinator {
     pub(in crate::evaluation) fn activate_reflection_guarded(
         &self,
         id: EvaluationWorkId,
+        mutation: &dyn RuntimeMutationAuthority,
+    ) -> bool {
+        self.activate_reflection_guarded_with_parent(id, None, mutation)
+    }
+
+    fn activate_reflection_guarded_with_parent(
+        &self,
+        id: EvaluationWorkId,
+        parent: Option<EvaluationTaskId>,
         _mutation: &dyn RuntimeMutationAuthority,
     ) -> bool {
         {
@@ -288,6 +308,7 @@ impl EvaluationWorkCoordinator {
             {
                 return false;
             }
+            reflection_work_mut(record).launch_parent = parent;
             record.state = WorkState::Queued;
             queue_reflection(&mut state, id);
             state.work_generation = state.work_generation.wrapping_add(1);
@@ -672,6 +693,19 @@ impl EvaluationWorkCoordinator {
             })
             .collect()
     }
+
+    #[cfg(test)]
+    pub(in crate::evaluation) fn reflection_launch_parent(
+        &self,
+        task: EvaluationTaskId,
+    ) -> Option<Option<EvaluationTaskId>> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let work = state.reflection.by_task.get(&task)?;
+        Some(reflection_work(state.work.get(work)?).launch_parent)
+    }
 }
 
 pub(super) struct TaskFailureReporting {
@@ -681,6 +715,7 @@ pub(super) struct TaskFailureReporting {
 
 pub(super) struct ReflectionWork {
     pub(super) task: EvaluationTaskId,
+    pub(super) launch_parent: Option<EvaluationTaskId>,
     pub(super) failure_reporting: TaskFailureReporting,
     pub(super) wait: EvaluationWaitToken,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,

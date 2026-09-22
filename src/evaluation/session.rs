@@ -174,8 +174,11 @@ impl ReflectionTaskActivationPermit {
             &activation.effect,
             activation.result_policy,
             activation.task_profile.clone(),
-            None,
-            false,
+            ReflectionLaunchPolicy {
+                launch_parent: None,
+                status_publisher: None,
+                error_acknowledged: false,
+            },
         );
     }
 }
@@ -201,8 +204,15 @@ impl Drop for ReflectionTaskActivationPermit {
 struct PendingReflectionTaskInner {
     context: EvalContext,
     handle: EvaluationTaskHandle,
+    launch_parent: EvaluationTaskId,
     effect: RuntimeValueRoot,
     activated: AtomicBool,
+}
+
+struct ReflectionLaunchPolicy {
+    launch_parent: Option<EvaluationTaskId>,
+    status_publisher: Option<TaskStatusPublisher>,
+    error_acknowledged: bool,
 }
 
 impl PendingReflectionTask {
@@ -221,8 +231,11 @@ impl PendingReflectionTask {
                     &self.inner.effect,
                     ReflectionTaskResultPolicy::ReturnValue,
                     self.inner.context.task_profile.clone(),
-                    Some(publisher),
-                    policy.acknowledges_error(),
+                    ReflectionLaunchPolicy {
+                        launch_parent: Some(self.inner.launch_parent),
+                        status_publisher: Some(publisher),
+                        error_acknowledged: policy.acknowledges_error(),
+                    },
                 );
             }
             InitialTaskDisposition::Cancel => self
@@ -1569,16 +1582,15 @@ impl EvalContext {
         effect: &RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
         task_profile: Arc<ReflectionTaskProfile>,
-        status_publisher: Option<TaskStatusPublisher>,
-        error_acknowledged: bool,
+        activation: ReflectionLaunchPolicy,
     ) {
         let Ok(coordinator) = self.coordinator_for_admission() else {
             return;
         };
-        if error_acknowledged {
+        if activation.error_acknowledged {
             coordinator.acknowledge_task_failure(handle.session_id(), handle.id());
         }
-        if let Some(status_publisher) = status_publisher
+        if let Some(status_publisher) = activation.status_publisher
             && !coordinator.attach_reflection_status_publisher(handle.work, status_publisher)
         {
             return;
@@ -1608,7 +1620,8 @@ impl EvalContext {
                 {
                     // A concurrent cancellation may already own terminal
                     // cleanup; activation then returns false.
-                    let _ = coordinator.activate_reflection(handle.work);
+                    let _ = coordinator
+                        .activate_reflection_with_parent(handle.work, activation.launch_parent);
                 }
             }
             Err(error) => {
@@ -1685,10 +1698,12 @@ impl EvalContext {
                 "current task has no sealed reflection task profile",
             ));
         }
+        let launch_parent = self.task_id()?;
         Ok(PendingReflectionTask {
             inner: Arc::new(PendingReflectionTaskInner {
                 context: self.clone(),
                 handle: self.reserve_task()?,
+                launch_parent,
                 effect: self.values().construct_runtime_value_root(|_| effect),
                 activated: AtomicBool::new(false),
             }),

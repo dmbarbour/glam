@@ -4913,12 +4913,12 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **Next: W6G.1e.3b.1 and W6G.1e.2a, then e.2b-c/e.3b.2:** make causally
-   related `.task.new` children explicit, inventory and dry-run background
+4. **Next: W6G.1e.2a, then e.2b-c/e.3b.2:** inventory and dry-run background
    traversal, then select background roots and their exact descendants and
    remove global deferred and unrelated same-session selection. The e.3b.0
-   launch/edge census and forced current-behavior fixtures are complete;
-   behavioral retirement follows the completed 2b and f.4 route verification.
+   launch/edge census and forced current-behavior fixtures, and e.3b.1
+   causal launch-parent publication, are complete; scheduler use of the
+   parent edge and fallback retirement still belong to e.3b.2.
 5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
    driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
@@ -5198,12 +5198,21 @@ deferred causal traversal:
     same-session work. The former is deliberately a current-behavior assertion
     to revise at e.3b.2, not a permanent semantic contract.
 
-    **Still open:** e.3b.1 must represent causal launch ownership without
-    making `.task.new` an implicit join, for both direct and scheduled effect
-    roots, and test child return/failure/cancel/abandonment. e.3b.2 then removes
-    the same-session fallback and forces both sides of child-launch and
-    subscription publication under the new mechanism. None of those claims
-    follows from the profile repair or the e.3b.0 fixtures alone.
+    **W6G.1e.3b.1 complete (2026-09-22).** A `.task.new` reservation captures
+    its caller's stable task identity, including for directly driven
+    `EffectRun::run` tasks with no coordinator record. Successful activation
+    publishes that `launch_parent` in the child's coordinator record together
+    with its queued state, after transaction commit. Discarded and initially
+    cancelled reservations publish no parent. This is causal provenance, not
+    a wait: parent completion does not join the child, and the parent identity
+    remains on a live child even after its parent record retires. Deterministic
+    fixtures cover direct and scheduled parents, return, failure, active and
+    pre-launch cancellation, and session abandonment.
+
+    **Still open:** e.3b.2 must use the recorded edge for causal selection,
+    remove the same-session fallback, and force both sides of child-launch
+    and subscription publication under the new mechanism. The recorded
+    parent alone does not yet change scheduler behavior.
   - **W6G.1e.3c — serialization retirement.** After W6G.1b-W6G.1f express
     root affinity and producer ownership directly, remove
     `session_has_running_machine` and its compensating busy waits. This is a
