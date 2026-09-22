@@ -4913,13 +4913,14 @@ dependency order, including completed prerequisites, is:
    route retention.
 3. **W6G.1f.4 — complete:** verified retention, collection, and mixed-observer
    sharing on the new route lifecycle.
-4. **Next: all of W6G.1e.2, in order e.2a → e.2b → e.2c; then e.3b.2:**
-   inventory and dry-run background traversal, cut over worker and runtime
-   background selectors together, then force the policy matrix before
-   removing the unrelated same-session fallback. The e.3b.0 launch/edge
-   census and forced current-behavior fixtures, and e.3b.1 causal
-   launch-parent publication, are complete; scheduler use of the parent edge
-   and fallback retirement still belong to e.3b.2.
+4. **W6G.1e.2a complete; next e.2b → e.2c, then e.3b.2:** the background
+   route inventory and read-only traversal are latched against current
+   behavior. Cut over worker and runtime background selectors together, then
+   force the policy matrix before removing the unrelated same-session
+   fallback. The e.3b.0 launch/edge census and forced current-behavior
+   fixtures, and e.3b.1 causal launch-parent publication, are complete;
+   scheduler use of the parent edge and fallback retirement still belong to
+   e.3b.2.
 5. **W6G.1d, W6G.1e.3a, and W6G.1g:** complete the already-private foreground
    driver as an exact-only owner, then narrow session/runtime drains and
    readiness. Do not introduce a public incremental handle merely to close
@@ -5117,7 +5118,8 @@ deferred causal traversal:
   work and a deferred dependency discovered by a spark; the foreground and
   reflection-rooted fixtures remain ready for the later policy transition.
   Partition the remaining work:
-  - **W6G.1e.2a — route inventory and dry-run traversal.** After W6G.1f.2b
+  - **W6G.1e.2a — route inventory and dry-run traversal — Complete
+    (2026-09-22).** After W6G.1f.2b
     and before the e.2b selector cutover, enumerate background-root entry
     points, exact dependency edges, yield/requeue
     behavior, and every current global-ready fallback. Build the traversal
@@ -5133,6 +5135,32 @@ deferred causal traversal:
     claims, zero-/one-/many-worker execution, and a runtime pump which excludes
     sparks. Count claims to distinguish causal traversal from accidental
     global selection.
+
+  **e.2a source-backed route inventory.** `ReflectionWork` becomes an
+  autonomous root only at activation; `.task.new` records a launch parent but
+  remains independently runnable. `SparkWork` is admitted as a best-effort
+  worker root when workers exist. A queued root runs before following its
+  prior block; a blocked root follows `WorkDependency::producer_wait` through
+  `promise_by_wait`, deferred `by_wait`, or reflection `by_wait`. A resolver
+  promise, missing producer, running producer, terminalizing producer, or
+  repeated work ID ends that traversal without another claim. A dormant
+  deferred/lazy-route producer is claimable only through such an exact path.
+  Reflection yield requeues its root; spark yield requeues its root; deferred
+  and lazy-route yield either requeue under live exact demand or become dormant
+  until a later exact claim. The new read-only traversal helper is exercised
+  against an unrooted promoted producer, a spark-rooted producer, and a
+  cross-session reflection-rooted producer while the old selector is still
+  authoritative.
+
+  The production global-ready fallback is `claim_ready_task` in both
+  `select_worker` and `select_runtime_pump`; the latter excludes sparks. The
+  test compatibility and session-drain selectors also call `claim_ready_task`
+  but are outside this cutover. `runtime_pump_snapshot_locked` still reports
+  every queued non-spark task as `background_ready`; e.2b must narrow that
+  readiness view along with selection or the pump can spin on foreground-only
+  deferred work. The `ready_tasks` queue remains useful to cooperative and
+  exact selectors; retiring its *global eligibility* does not mean deleting
+  every queue update.
 - **W6G.1e.3 — drain and admission cleanup.** Partitioned because the
   drain and serialization policies cannot be narrowed before the registry
   topology which replaces them exists:

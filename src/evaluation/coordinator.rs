@@ -2125,6 +2125,47 @@ fn work_for_wait_locked(
         .copied()
 }
 
+/// Finds the first claimable item on one background root's exact producer
+/// chain. A queued root runs before its old block is followed; a blocked root
+/// can reach a dormant deferred producer without promoting unrelated work.
+/// The source-backed dry run becomes the worker/runtime selector in e.2b.
+#[cfg(test)]
+fn causal_background_candidate_locked(
+    state: &WorkCoordinatorState,
+    root: EvaluationWorkId,
+) -> Option<EvaluationWorkId> {
+    let root_record = state.work.get(&root)?;
+    if !matches!(
+        root_record.kind,
+        WorkKind::Reflection(_) | WorkKind::Spark(_)
+    ) {
+        return None;
+    }
+    let mut current = root;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let record = state.work.get(&current)?;
+        match record.state {
+            WorkState::Queued => return Some(current),
+            WorkState::Dormant
+                if matches!(record.kind, WorkKind::Deferred(_) | WorkKind::LazyRoute(_)) =>
+            {
+                return Some(current);
+            }
+            WorkState::Blocked => {
+                let wait = work_dependency(record)?.producer_wait()?;
+                current = work_for_wait_locked(state, &wait)?;
+            }
+            WorkState::Dormant
+            | WorkState::Reserved
+            | WorkState::Running
+            | WorkState::ExitWaiting
+            | WorkState::Terminalizing => return None,
+        }
+    }
+    None
+}
+
 /// Reports progress already latent in one exact producer chain.
 ///
 /// The caller holds runtime mutation admission and the coordinator-state

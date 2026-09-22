@@ -28,6 +28,19 @@ impl TestDemand {
     }
 }
 
+fn dry_run_background_candidates(coordinator: &EvaluationWorkCoordinator) -> Vec<EvaluationWorkId> {
+    let state = coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned");
+    state
+        .work
+        .iter()
+        .filter(|(_, record)| matches!(record.kind, WorkKind::Reflection(_) | WorkKind::Spark(_)))
+        .filter_map(|(root, _)| causal_background_candidate_locked(&state, *root))
+        .collect()
+}
+
 #[test]
 fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
     let values = CoreValueFactory::new(
@@ -2073,6 +2086,10 @@ fn transitional_background_fallback_claims_an_unrooted_promoted_deferred_produce
         .deferred_work_for_wait(&wait)
         .expect("deferred work should retain its wait index");
     assert!(coordinator.promote_deferred_wait(&wait));
+    assert!(
+        dry_run_background_candidates(&coordinator).is_empty(),
+        "a foreground-only producer must have no background causal route"
+    );
 
     let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
         coordinator.select_worker()
@@ -2123,6 +2140,7 @@ fn global_fallback_claims_a_deferred_dependency_after_a_spark_blocks() {
         spark,
         SparkWorkPoll::Blocked(WorkDependency::Wait(wait.clone())),
     );
+    assert_eq!(dry_run_background_candidates(&coordinator), [work]);
 
     let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(claimed)) =
         coordinator.select_worker()
@@ -2788,6 +2806,7 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
         }),
     );
     assert!(release.remains_blocked);
+    assert_eq!(dry_run_background_candidates(&coordinator), [producer_work]);
     let CoordinatorSelection::Task(ClaimedTaskWork::Deferred(producer)) =
         coordinator.select_runtime_pump()
     else {
