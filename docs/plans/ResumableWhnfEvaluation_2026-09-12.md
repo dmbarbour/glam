@@ -5067,16 +5067,39 @@ section in two checkpoints:
   schedules for exact dependency progress, owner close, cancellation,
   subscription-before/after-publication, and stable blocked reporting.
 
-  **Productive-wait decision gate (before removing runtime help).** Decide
-  whether a blocking host client which is waiting on an already claimed causal
-  producer may spend a bounded quantum helping unrelated runtime-background
-  reflection work before waiting for a coordinator change. The default target
-  remains exact-only foreground pumping; any productive wait is a separate,
-  explicit blocking-client policy, never a substitute for recognizing the
-  claimed causal producer as busy and never a reason to defer genuine
-  `NoProgress`. Assess latency benefit, callback/diagnostic timing, fairness,
-  and zero-/one-/many-worker behavior with forced orderings. Do not silently
-  preserve the old runtime-wide fallback as an implementation convenience.
+  **Productive-wait decision gate resolved (2026-09-22).** The blocking
+  evaluator does not help unrelated runtime-background reflection work. This
+  is host orchestration policy, not pure-evaluation policy. Preserve an
+  internal bounded foreground advance and an opaque observed-generation wait
+  boundary so a later client may compose `try_advance(budget)`, a bounded
+  background-reflection pump, and a timed wait without spinning or missing a
+  publication. A timeout applies only while awaiting another owner's work;
+  it does not interrupt an active reflection callback. W6G.1d owns the
+  foreground handle and its lost-wakeup-safe private wait, while W6G.1g owns
+  the runtime-background pump/drain surface. Do not expose a public
+  incremental handle or select its drop policy in this checkpoint.
+
+**W6G.1d.1 complete (2026-09-22).** The current internal ownership and wake
+audit is:
+
+| Boundary | Current owner and transition | Required d.2 treatment |
+| --- | --- | --- |
+| Foreground root | `ClientDemandHandle` owns one weak coordinator route and a result cell; dropping it explicitly abandons its coordinator record. The record owns the operation and its subscription until release or retirement. | Keep the handle private; do not turn abandonment into background eligibility or choose a public drop contract. |
+| Parked exact dependency | `release_client_demand` installs `(work ID, subscription epoch)` under mutation admission before notifying waiters. `abandon_blocked_client_demand` rechecks terminal state, subscription epoch, and causal progress before retirement. | Retain this atomic subscription/recheck protocol; remove its runtime-wide readiness veto. |
+| Terminal handoff | Retirement detaches the coordinator record before publishing the result cell, outside locks. `ClientDemandHandle::wait` closes only this narrow publication gap. | Continue to wait on the cell when a snapshot disappears; never treat detachment alone as completion. |
+| Foreground execution | `drive_client_demand` claims its exact client record, then an exact producer. Its blocked path still calls `poll_runtime_work`, abandons sparks, and treats any runtime progress as a reason to wait. | Replace that broad path with the already-indexed causal child/producer probe, then return a retryable halt when no causal route can progress. |
+| Change wait | `coordinator.wait_for_change` uses a generation and condition variable, with no timeout. Work and completion publication advance the generation and notify. | Preserve generation-before-wait recheck; add a private timed form for later host composition, without putting productive-wait policy in the evaluator. |
+
+Existing forced fixtures cover result-cell publication after unlock, the
+detach/publication gap, parked subscription and promise wake, owner close and
+kill, and another client continuing to demand a shared producer. The
+`synchronous_client_demand_waits_for_worker_owned_runtime_progress` fixture
+currently encodes broad runtime help: its worker-owned reflection task assigns
+a host promise without an exact producer edge. Revise it at d.2 to distinguish
+an exact claimed producer from unrelated runtime progress, and add a red
+unrelated-background fixture before changing the driver. The same-session
+fallback was retired by W6G.1e.3b.2; session-wide draining remains separately
+owned by W6G.1g.
 
 Introduce the client-only registry before deciding whether to expose its
 driver publicly. Shape the internal handle so a later public `Evaluation`
