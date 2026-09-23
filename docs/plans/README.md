@@ -57,6 +57,10 @@ when their historical value no longer justifies keeping them.
   retains the extracted W6G.2 measurement and regional-fusion investigation
   for pure standard-effect chains. It is deliberately sequenced after Value
   Representation Refinement and does not block resumable-WHNF closure.
+- [`PublicResumableEvaluation_2026-09-23.md`](PublicResumableEvaluation_2026-09-23.md)
+  consolidates the deferred library API for retaining, boundedly advancing,
+  waiting on, and resuming one foreground evaluation without replaying its
+  semantic work or exact producer route.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
   retains the deferred lifetime-branded `ScopedGc` experiment after the active
   persistent-edge trait migration establishes move-only stored edges.

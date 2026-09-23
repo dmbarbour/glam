@@ -376,7 +376,7 @@ The foreground-driver census is:
 | Driver | Current lifetime | Route owner selected for W6G4R-001E |
 | --- | --- | --- |
 | Blocking `drive_client_demand` behind `ValueEvaluator::eval` | The private `ClientDemandHandle` is consumed by one blocking loop; its client record and result cell already survive thread waits. | One local route beside the handle. The client record remains authoritative for its own blocked dependency and subscription epoch; the route begins at that published dependency. |
-| Future bounded public advancement | No public `Evaluation` or `try_advance` API exists. `ValueEvaluator::eval` is still blocking. | When that deferred facade is added, it must own the private client handle and route together so both survive a bounded return. W6G4R does not select public drop semantics or expose the facade. |
+| Future bounded public advancement | No public `Evaluation` or `try_advance` API exists. `ValueEvaluator::eval` is still blocking. | The [public resumable-evaluation plan](../plans/PublicResumableEvaluation_2026-09-23.md) owns this deferred facade. It must retain the private client handle and route together so both survive a bounded return; W6G4R does not expose the facade. |
 | `EvalContext::pump_wait` / `pump_demand` | A generic bounded helper used by direct evaluation, effect machines, macro execution, and tests. It retains only one yielded work ID until the call returns. | Add a private stateful form accepting an owner-retained route. Keep the current method as a cold, one-call wrapper for compatibility and tests which do not measure resumed-route cost. |
 | Direct `await_deferred_task` | A nonscheduled direct evaluator loops in the same Rust call; a scheduled machine performs one bounded assist and then publishes its own block. | The direct loop can retain a local route. A scheduled machine does not put a route in the lazy/promise: after it returns, its published parent block lets its outer foreground driver descend normally. |
 | Reflection/effect `run`, bounded `poll`, and `poll_blocked` | `run` is blocking, while bounded polls retain `self.blocked` across scheduler quanta. A budget-exhausted nested pump can currently yield the outer task and forget the inner exact position. | Blocking `run` may retain a local route. Persistent effect machines retain an optional route beside the blocked scheduler state, keyed by the current wait; changing or clearing that wait clears the route. This is orchestration state, not an effect value. |
@@ -538,8 +538,9 @@ There is still no public resumable `Evaluation` facade, so F cannot literally
 drop or resume a public bounded evaluation handle. The private stateful pump
 test covers route discard/resumption, while the owner-closure fixture covers
 abandonment and proves the route holds neither a work lease nor a demand-owner
-lease. A future public facade must repeat those lifecycle assertions for its
-own handle rather than treating this deferred API surface as implemented.
+lease. The [deferred public facade plan](../plans/PublicResumableEvaluation_2026-09-23.md)
+must repeat those lifecycle assertions for its own handle rather than treating
+this API surface as implemented.
 
 ### W6G4R-001G — Close the performance finding
 

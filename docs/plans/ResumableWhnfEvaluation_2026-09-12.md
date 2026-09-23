@@ -5141,9 +5141,11 @@ publication before the timed wait, publication after its locked predicate,
 and timeout without change. Existing fixtures continue to cover owner close,
 kill, cancellation, and both lazy-subscription publication orders.
 
-The client-only registry is in place. If a public incremental `Evaluation`
-facade is introduced later, split a bounded `try_advance` from this private
-blocking driver without moving the computation back into the caller.
+The client-only registry is in place. The deferred
+[public resumable-evaluation plan](PublicResumableEvaluation_2026-09-23.md)
+owns the incremental `Evaluation` facade: it will split bounded
+`try_advance` from this private blocking driver without moving the computation
+back into the caller.
 `ValueEvaluator::eval` currently remains the blocking convenience over the
 same foreground record, not a second evaluator path.
 
