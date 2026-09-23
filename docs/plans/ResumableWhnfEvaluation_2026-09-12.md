@@ -7686,6 +7686,9 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
+**Status:** investigation complete on 2026-09-23; repair decision and
+implementation pending.
+
 Investigate the bounded performance regression accepted by W4E after W6G.1
 has established role-specific pumping and completed W6G.3 has removed
 root-per-field WHNF checkpoints. The current bounded W5 standard-effect path
@@ -7717,6 +7720,25 @@ Against its NC0 revision `08f7c09`, the exact duplicate-symbol fixture was
 53.01s before and 52.12s after. The minimized semantic/driver signature also
 remains unchanged. Treat the timings only as corroboration, but do not assign
 the preexisting `7fed99e` gap to callable checkpoints.
+
+The W6G.4 investigation localizes the remaining cost to repeated exact
+producer-chain rediscovery. The current duplicate-symbol fixture invokes
+`prioritized_task_for` about 18,800 times, visits roughly 2.8 million edges,
+reaches depth 573, and allocates about 148 MB across 220,000 temporary
+`Vec`/`HashSet` blocks. Callgrind attributes about one quarter of all current
+release instructions to randomized hashing of private IDs. W4E already reached
+depth 572, correcting its old statement that this fixture's maximum depth was
+four; W6 enlarged rather than introduced the pathology. Interaction-net work
+remains comparable to the pre-W4 baseline.
+
+The first repair candidate is one state-aware exact-target traversal and claim
+under the existing mutation admission and coordinator-state lock, analogous to
+`causal_background_probe_locked`. It must deliberately resolve the current
+foreground/deepest versus background/queued-ancestor ordering asymmetry and
+latch forced tests before changing production behavior. Container or hasher
+micro-optimizations are not an adequate primary repair. Full evidence and the
+verification matrix are recorded in
+[`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md).
 
 #### W6G.5 — Phase closure and post-W6G review
 
