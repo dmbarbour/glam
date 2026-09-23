@@ -53,6 +53,10 @@ when their historical value no longer justifies keeping them.
   records the compact tagged-value and representation-splitting transition to
   pursue after the initial collector boundary works. It is deliberately not a
   prerequisite for the current GC plans.
+- [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md)
+  retains the extracted W6G.2 measurement and regional-fusion investigation
+  for pure standard-effect chains. It is deliberately sequenced after Value
+  Representation Refinement and does not block resumable-WHNF closure.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
   retains the deferred lifetime-branded `ScopedGc` experiment after the active
   persistent-edge trait migration establishes move-only stored edges.

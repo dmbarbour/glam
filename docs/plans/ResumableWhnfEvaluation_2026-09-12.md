@@ -2289,9 +2289,11 @@ locally runnable wait tokens without hiding a genuinely unavailable
 dependency. Standard-request fusion now begins from the rooted parsed request
 and retains result equivalence. W5C.1 gives fused and generic dispatch the same
 single rooted request-argument handoff, eliminating the older redundant
-unfused handoff rather than retaining a misleading relative-root probe. W6G.2
-owns eliminating per-step argument roots across one uninterrupted regional
-effect quantum.
+unfused handoff rather than retaining a misleading relative-root probe. The
+deferred
+[Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) owns
+any later elimination of per-step argument roots across one uninterrupted
+regional effect quantum, after Value Representation Refinement.
 
 The forced-suspension regression now asserts that the first application-lazy
 identity occurs exactly once across resumption. A cancellation fixture now
@@ -2371,8 +2373,11 @@ Forced-order fixtures independently suspend a lazy payload, a lazy list chunk,
 and both `.resume` IDs. Each source is evaluated exactly once across resumption,
 and the broad reflection-machine suite covers the existing malformed request,
 arity, non-list, unknown-tag, and invalid-ID diagnostics. The request handoff
-now roots each argument once for both generic and fused interpretation; W6G.2
-owns any later regional elimination of those per-step roots.
+now roots each argument once for both generic and fused interpretation; the
+deferred
+[Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) owns any
+later regional elimination of those per-step roots after Value Representation
+Refinement.
 
 ##### W5C.2 — Continuation and terminal-value demands
 
@@ -4748,12 +4753,15 @@ owners.
 
 The checkpoint numbers group related work; they do not impose implementation
 order. W6G.3 completed first because its aggregate demand-checkpoint transition
-was independent of scheduling and effect-driver policy. Next establish the
-W6G.1 pump-ownership model; resolve W6G.2 afterward or alongside it only where
-their explicit boundaries remain intact. W6G.4 measures residual overhead
-after those semantic and representation choices, and W6G.5 closes the phase.
-Neither performance measurements nor effect fusion may quietly decide which
-thread role is authorized to claim a machine.
+was independent of scheduling and effect-driver policy, and W6G.1 then
+established pump ownership. The former W6G.2 regional effect-fusion
+investigation has been extracted to
+[`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md)
+and deferred until after Value Representation Refinement; current W5 fusion is
+the reference path for the rest of this plan. W6G.4 measures residual overhead
+of the implemented resumable-WHNF boundary, and W6G.5 closes the phase.
+Performance measurements may not quietly decide which thread role is
+authorized to claim a machine.
 
 #### W6G.1 — Role-specific pumping and causal work ownership
 
@@ -4937,8 +4945,9 @@ dependency order, including completed prerequisites, is:
    lifecycle indexes remain. The forced two-worker schedule proves that two
    independent machines in one demand session may now execute concurrently.
 
-W6G.1 is complete. W6G.2 is the next actionable checkpoint; W6G.3 is already
-complete, while W6G.4 measurement and W6G.5 closure remain ordered after it.
+W6G.1 and W6G.3 are complete. W6G.2 has been extracted and deliberately
+deferred; W6G.4 measurement is the next actionable checkpoint, followed by
+W6G.5 closure.
 
 W6G.1c is complete because steps 1-4 established its session-neutral and
 causal-claim contract. This ordering is a dependency guide, not permission to
@@ -7340,50 +7349,23 @@ and explicit drains have distinct claim authority. Performance attribution
 remains W6G.4; W6G.1 records only gross regressions which would make the
 ownership mechanism nonviable.
 
-#### W6G.2 — Regional standard-effect fusion investigation
+#### W6G.2 — Regional standard-effect fusion (extracted and deferred)
 
-Investigate extending the regional-WHNF principle to consecutive standard
-effect steps. A bounded sequence of callback-free effect reductions should be
-able to share one matching value-access region, retain intermediate values as
-regional raw values, and publish roots only when the quantum yields, suspends,
-or crosses an orchestration boundary. This is an optimization of the existing
-effect semantics, not permission to hide effectful host work beneath managed
-access.
+**Extracted 2026-09-23.** This optimization now belongs to the independent
+[Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md),
+deliberately sequenced after
+[Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md).
+The representation transition will change the cost and shape of intermediate
+value copies, managed edges, and root publication, so implementing this
+regional effect checkpoint first would optimize and then migrate a temporary
+boundary.
 
-Begin with `.r`, `.seq`, `.get`, `.set`, and their continuation applications.
-An operation is eligible only while it is constructively known to be local and
-callback-free, requires no coordinator or host publication, encounters no
-unavailable lazy, promise, or reflection dependency, and has remaining
-deterministic work budget. Lazy or promised results, reflection and task
-operations, heap or volume operations, choice and control operations, and
-specialized requests initially leave the regional driver through an explicit
-durable boundary. Broaden the eligible set only after the same properties are
-proved for another family.
-
-First measure managed-access entries, root publications, WHNF work units, and
-request dispatches for long standard-effect chains under the current W5
-fusion. If the traffic is material, prototype a regional standard-effect work
-form analogous to `drive_regional`; do not keep a managed-access region open
-merely to satisfy the prototype. The target is root traffic proportional to
-real quantum and orchestration boundaries rather than to uninterrupted effect
-depth.
-
-Verification must compare the regional path with the unfused interpreter and
-prove that:
-
-- an uninterrupted eligible chain does not register a root per effect step;
-- every request and continuation application consumes deterministic budget;
-- budget yield publishes one complete durable checkpoint and resumes without
-  replay;
-- forced suspension after each eligible step preserves completed state and
-  the exact pending lazy or promise identity; and
-- every ineligible operation closes regional access before scheduler,
-  reflection, transaction, or host coordination begins.
-
-Resolve this investigation before W7 so its final budget, fairness, and
-small-stack verification exercises the selected effect-driver shape. If the
-measurements do not justify implementation, retain the bounded W5 path and
-record the evidence and a narrower future optimization owner.
+The current bounded W5 fusion remains the production and semantic reference
+path. This extraction does not block W6G.4-W8, GC integration, or Value
+Representation Refinement. The independent plan retains the measurement
+gate, callback-free eligibility rules, differential unfused interpreter,
+budget/suspension matrix, and requirement that managed access close before all
+scheduler, reflection, transaction, and host coordination.
 
 #### W6G.3 — Aggregate durable WHNF state
 
@@ -7705,9 +7687,11 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
-has established role-specific pumping, W6G.2 has selected its effect-driver
-shape, and completed W6G.3 has removed root-per-field WHNF checkpoints. The
-duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
+has established role-specific pumping and completed W6G.3 has removed
+root-per-field WHNF checkpoints. The current bounded W5 standard-effect path
+is the fixed baseline for this measurement; regional effect fusion has been
+extracted and must not be pulled back in merely to explain or repair this gap.
+The duplicate-symbol direct-assembly fixture takes approximately 12.6 to 12.9
 seconds after W4E, versus approximately 8.1 to 8.5 seconds at `7fed99e`, even
 though net-driver work is comparable (159,322 versus 159,994 work items).
 
@@ -7738,25 +7722,28 @@ the preexisting `7fed99e` gap to callable checkpoints.
 
 ##### W6G.5a — Integrated verification and accounting
 
-Reconcile W6G.1-W6G.4 measurements and update the exact W0B and parent D.2c
-manifests for every representation or driver change. Run the affected focused
+Reconcile the implemented W6G.1, extracted W6G.2 disposition, W6G.3, and W6G.4
+measurements and update the exact W0B and parent D.2c manifests for every
+representation or driver change. Run the affected focused
 suites in ordinary and `aggressive-gc-verification` modes plus the routine
 repository gates. Force suspension after representative pure and standard-
 effect child demands and force both sides of every scheduler ordering changed
 by W6G.1. Confirm that the four sections did not quietly exchange ownership:
-pump-role policy remains in W6G.1, standard-effect fusion in W6G.2, aggregate
-pure-WHNF ownership in W6G.3, and performance attribution in W6G.4.
+pump-role policy remains in W6G.1, the current bounded effect path remains the
+reference while future regional fusion belongs to the independent deferred
+plan, aggregate pure-WHNF ownership remains in W6G.3, and performance
+attribution remains in W6G.4.
 
 ##### W6G.5b — Mandatory post-W6G review
 
 Audit the implemented phase before W7. Account for measured scheduler,
 managed-access, root-publication, checkpoint-conversion, and request-dispatch
-traffic; the selected standard-effect driver shape; aggregate checkpoint
-ownership and tracing; and the final disposition of the temporary same-
-session admission rule. Review W7-W8 against the resulting implementation for
-drift, checkpoint size, and newly obsolete compatibility work. Record any
-accepted residual performance gap with a concrete later owner rather than
-leaving it implicit in W6G.
+traffic; the retained bounded standard-effect driver and explicit deferral of
+regional fusion; aggregate checkpoint ownership and tracing; and the final
+disposition of the temporary same-session admission rule. Review W7-W8 against
+the resulting implementation for drift, checkpoint size, and newly obsolete
+compatibility work. Record any accepted residual performance gap with a
+concrete later owner rather than leaving it implicit in W6G.
 
 ### Phase W7 — Stack and Budget Closure
 

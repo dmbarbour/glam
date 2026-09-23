@@ -115,11 +115,14 @@ survive W6G.
 ### Future phases
 
 - W6G now stands as a separate major phase. It owns measured scheduler/access
-  overhead, regional standard-effect fusion, aggregate durable WHNF state, and
-  the final disposition of same-session serialization.
+  overhead, aggregate durable WHNF state, and the final disposition of
+  same-session serialization. **Later disposition (2026-09-23):** regional
+  standard-effect fusion was extracted to the deferred
+  [Pure Effect Access Fusion plan](../plans/PureEffectAccessFusion_2026-09-23.md)
+  after Value Representation Refinement.
 - W7 remains coherent: it owns the residual recursive-call audit, small-stack
-  verification, and the final whole-program budget/fairness contract after
-  W6G selects the effect and durable-state shapes.
+  verification, and the final whole-program budget/fairness contract against
+  the retained bounded effect path and completed durable-state shape.
 - W8 remains coherent: it owns retryable-halt simplification, direct evaluator
   retirement, final inventory/documentation closure, and Gate G3 handoff.
 

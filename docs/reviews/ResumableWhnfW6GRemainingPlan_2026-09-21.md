@@ -1,7 +1,9 @@
 # Resumable WHNF W6G.1 Remaining-Work Plan Review — 2026-09-21
 
 Status: forward-plan review complete; its corrective W6G.1 implementation
-closed through W6G.1h on 2026-09-22. W6G.2, W6G.4, and W6G.5 remain open.
+closed through W6G.1h on 2026-09-22. W6G.2 was extracted to the deferred
+[Pure Effect Access Fusion plan](../plans/PureEffectAccessFusion_2026-09-23.md)
+on 2026-09-23; W6G.4 and W6G.5 remain open.
 Parent plan: [Resumable WHNF evaluation](../plans/ResumableWhnfEvaluation_2026-09-12.md).
 The [interim implementation review](ResumableWhnfW6GInterim_2026-09-21.md)
 covers what has already landed. This review checks the *remaining* W6G.1 order,

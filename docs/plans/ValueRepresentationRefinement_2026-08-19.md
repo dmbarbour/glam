@@ -4,6 +4,12 @@ Status: preliminary and deliberately deferred until the initial Glam-owned GC
 boundary is working. This plan must not expand the collector implementation or
 integration gates merely to obtain a compact value representation.
 
+The deferred
+[Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) follows
+this transition so it can measure and optimize the refined value, edge, and
+root-publication costs rather than the temporary compatibility representation.
+That dependency adds no effect-fusion work to this plan.
+
 ## Purpose
 
 Replace the current large Rust `core::Value` enum with a compact internal value

@@ -33,8 +33,11 @@ current code and focused tests. It is deliberately distinct from the earlier
 W6G.1 [baseline](ResumableWhnfW6G1Baseline_2026-09-18.md) and
 [design review](ResumableWhnfW6G1Design_2026-09-19.md), which largely inspected
 the *proposed* transition. It is also not W6G.5: W6G.1's route and selector
-cutovers, W6G.2, W6G.4, integrated phase verification, and W7/W8 drift audit
-remain later work.
+cutovers, W6G.4, integrated phase verification, and W7/W8 drift audit remain
+later work. **Later disposition (2026-09-23):** W6G.2 moved to the independent
+deferred
+[Pure Effect Access Fusion plan](../plans/PureEffectAccessFusion_2026-09-23.md)
+after Value Representation Refinement.
 
 The implemented boundary is coherent as a staged system. Foreground client
 records have a separate registry and workers no longer select them directly.

@@ -125,8 +125,11 @@ information diagnostic commits once, and all task records retire.
 ### Future phases
 
 - W6 still owns the remaining builtin evaluator and raw-value conversion, the
-  temporary one-ordinary-machine-per-demand-session admission rule, measured
-  residual overhead, and the regional standard-effect fusion decision.
+  temporary one-ordinary-machine-per-demand-session admission rule, and
+  measured residual overhead. **Later disposition (2026-09-23):** the regional
+  standard-effect fusion decision moved to the deferred
+  [Pure Effect Access Fusion plan](../plans/PureEffectAccessFusion_2026-09-23.md)
+  after Value Representation Refinement.
 - W7 still owns complete recursive-call removal, small-stack verification,
   and a strict shared work budget. Current effect polling is cooperative but
   does not yet establish the final global quantum contract.
