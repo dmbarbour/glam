@@ -148,7 +148,7 @@ This rejects “remove one temporary container while preserving component
 queries” as the first repair. It does not reject state-aware forward selection;
 that policy must be evaluated together with one guarded coordinator traversal.
 
-## Repair decision gate
+## Selected remediation direction
 
 The first candidate repair should be a coordinator-owned exact-target selector
 which, under one mutation admission and one coordinator-state lock:
@@ -181,6 +181,186 @@ handling change and should not precede evidence from the simpler repair.
 A private-ID hasher, reusable scratch storage, or traversal stamps may reduce
 constant cost, but none resolves repeated O(depth) rediscovery. They are not
 recommended as the primary repair.
+
+## W6G4R-001 — Exact demand routes are rediscovered from their root
+
+**Severity:** high performance
+
+**Status:** remediation planned
+
+The coordinator retains every exact dependency edge needed to describe the
+current demand route, but foreground pumping retains no position within that
+route. After a selected producer yields, blocks, completes, or is temporarily
+claimed elsewhere, the next selection normally starts again at the client
+demand's original wait token. The cost therefore approaches the number of
+scheduler transitions multiplied by the current route depth.
+
+The repair has two layers:
+
+1. make complete rediscovery a coherent, low-constant-cost cold path; then
+2. retain an explicitly non-authoritative route checkpoint so the common path
+   advances one scheduler edge at a time.
+
+The checkpoint is a scheduling hint, not duplicated semantic state. Work
+records, subscription epochs, and completion sources remain authoritative.
+Dropping or invalidating every checkpoint must preserve behavior and merely
+fall back to complete rediscovery.
+
+### W6G4R-001A — Latch exact-selection semantics and counters
+
+Before changing selection, add forced coordinator fixtures for:
+
+- a queued ancestor which still carries its previous blocked dependency;
+- a blocked chain ending in one dormant or queued producer;
+- a chain ending in a running producer;
+- an exact dependency cycle;
+- a producer observed from another demand session in the same runtime; and
+- retirement or dependency replacement between probe and claim.
+
+The queued-ancestor fixture is the semantic decision gate. The intended rule
+is the rule already used by background roots: queued work runs before its old
+block is followed. First demonstrate that the old foreground reverse scan
+selects the stale descendant, then change the assertion with the repair. If a
+real contract requires deepest-first selection, stop and revise the following
+checkpoints rather than preserving the asymmetry accidentally.
+
+Add statically compiled profiling counters, or an equivalent test-owned probe,
+for complete searches, edges visited, maximum depth, fast handoffs, checkpoint
+invalidations, and fallback reasons. Ordinary builds must not acquire a
+callback or dynamically configured observer on every transition.
+
+### W6G4R-001B — Make complete discovery one guarded operation
+
+Introduce a coordinator-private exact-target probe with a result such as
+`Ready(EvaluationWorkId)`, `Busy`, or `None`. Under one runtime mutation
+admission and one coordinator-state lock, it must:
+
+1. resolve each wait to its producer record;
+2. inspect that record's current `WorkState`;
+3. return queued work, or a demanded dormant deferred/lazy route, before
+   consulting any retained prior block;
+4. follow a dependency only from an actually blocked record;
+5. detect cycles without constructing a reverse result vector; and
+6. claim the selected record before releasing the state lock.
+
+Use the same state vocabulary and claim helpers as
+`causal_background_probe_locked`. Replace the foreground composition of
+`prioritized_task_for`, `work_is_claimable`, `claim_work`, and the duplicated
+running-producer scan. Audit and remove component query helpers which become
+test-only or unused.
+
+Preserve the existing immediate re-claim of a yielded exact work item. Do not
+add a per-session running-work index, change worker/client ownership, or pull
+pure-effect fusion back into W6G.
+
+### W6G4R-001C — Measure the cold-path repair
+
+Re-run the exact fixture and capture:
+
+- cold searches, visited edges, maximum depth, and allocations;
+- Callgrind instruction attribution and DHAT allocation attribution;
+- debug and release timing as corroboration; and
+- unchanged semantic and interaction-net driver signatures.
+
+This checkpoint determines how much cost remains asymptotic rather than
+constant-factor. It does not close the finding merely because the fixture
+becomes faster.
+
+### W6G4R-001D — Inventory incremental route handoffs
+
+For every foreground exact-demand driver, classify the information already
+available after a poll:
+
+- `Yielded`: the same work ID remains the preferred target;
+- `Blocked`: the published dependency identifies the direct producer;
+- `Terminal`: the route should return to the parent which led to this work;
+- `Busy`: the contested candidate remains a useful retry point; and
+- observation-only or resolver-owned waits: no producer work can be followed.
+
+Include blocking `drive_client_demand`, bounded public advancement,
+`pump_demand`, and any test-only compatibility drivers. Identify where a route
+must live to survive a bounded `try_advance` return. Prefer foreground demand
+or handle state; do not place roots or scheduler routes inside semantic values,
+lazy cells, or runtime nets.
+
+The target shape is a lightweight scheduler zipper, approximately:
+
+```text
+ExactDemandRoute
+  current: WorkId
+  parents: Vec<RouteFrame>
+
+RouteFrame
+  work: WorkId
+  subscription_epoch: u64
+  dependency_key: WorkDependencyKey
+```
+
+The exact representation remains an implementation checkpoint. It contains
+only scheduler identities and validation tokens, not `Value`, `Gc`, or
+`RuntimeValueRoot` edges.
+
+### W6G4R-001E — Implement incremental descent and return
+
+Extend claim/release dispositions so the foreground driver can update the
+route without searching from its root:
+
+- push the current parent when it blocks on a directly resolvable producer;
+- retain the current work across an ordinary yield;
+- pop to the remembered parent after terminal completion;
+- retain a busy candidate while waiting for a coordinator change; and
+- persist the zipper across bounded client returns.
+
+Each frame is valid only while its parent remains blocked at the recorded
+subscription epoch on the recorded dependency key. Validation and claim must
+occur atomically under coordinator state. The existing completion subscription
+continues to wake work; the zipper only tells the foreground driver which
+record on its own route to try next.
+
+Do not maintain an eagerly propagated root-to-leaf cache in every work record.
+That would move the same O(depth) work into invalidation and introduce shared
+write contention before the local route has been measured.
+
+### W6G4R-001F — Exercise invalidation and fallback
+
+Force both sides of each condition which can invalidate or suspend the route:
+
+- another thread claims the anticipated child;
+- the child completes before the foreground claim;
+- the parent is woken by another completion source;
+- the parent publishes a different dependency at a later epoch;
+- work or its demand session retires;
+- lazy-cycle terminalization retires several frames;
+- a task-owned promise has a producer but a resolver-owned promise does not;
+- causal `.task.new` work branches away from the exact producer route; and
+- a bounded public evaluation is dropped, resumed, or abandoned.
+
+An invalid checkpoint falls back to the nearest independently valid frame when
+that can be established in O(1); otherwise it invokes the complete guarded
+search from the original target. It must never convert contention into stable
+absence, keep retired work alive, or broaden foreground authority to unrelated
+same-session work.
+
+### W6G4R-001G — Close the performance finding
+
+Repeat the W6G4R-001C measurements after incremental routes. Report:
+
+- fast handoffs versus complete fallback searches;
+- fallback reason counts and edges per fallback;
+- maximum retained route depth and storage;
+- Callgrind and DHAT deltas from current and pre-W4 baselines; and
+- the exact fixture's semantic/driver signature and diagnostic.
+
+The expected complexity for an uncontended linear demand is amortized in the
+number of actual route transitions, plus O(depth) only for cold entry or a
+genuine invalidation. If complete searches remain frequent, use the recorded
+reasons to decide whether background roots need similar route state or whether
+an authoritative ready-descendant index is justified. Do not introduce either
+without that evidence.
+
+Run the routine repository gates and
+`scripts/check-interaction-net-profiling.sh`, update the W6G.4 plan status, and
+reconcile W6G.5 before closing the finding.
 
 ## Verification required by the repair
 

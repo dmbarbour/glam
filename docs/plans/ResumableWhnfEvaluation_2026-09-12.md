@@ -7686,7 +7686,7 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
-**Status:** investigation complete on 2026-09-23; repair decision and
+**Status:** investigation complete and remediation planned on 2026-09-23;
 implementation pending.
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
@@ -7739,6 +7739,10 @@ latch forced tests before changing production behavior. Container or hasher
 micro-optimizations are not an adequate primary repair. Full evidence and the
 verification matrix are recorded in
 [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md).
+That review defines W6G4R-001A-G: first make complete discovery one guarded
+cold-path operation, then retain a validated foreground route zipper so common
+yield, block, completion, and contention transitions do not restart discovery
+at the client root. Full rediscovery remains the authoritative fallback.
 
 #### W6G.5 — Phase closure and post-W6G review
 
