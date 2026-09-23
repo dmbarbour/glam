@@ -25,13 +25,14 @@ use super::coordinator::{
     ClientDemandSink, ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation,
     EvaluationSessionId, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
-    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
-    TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
+    ExactTargetSelection, ExactTargetStatus, InitialTaskDisposition, LocalPromiseOwner,
+    PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation, ReflectionCancellation,
+    ReflectionTaskResultPolicy, TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher,
+    WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
-use super::pump::{EvaluationPumpOutcome, prioritized_task_for, pump_demand};
+use super::pump::{EvaluationPumpOutcome, pump_demand};
 use super::{
     EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
     RuntimeObservationState, allocate_route_wait_token, allocate_task_id, allocate_wait_token,
@@ -994,20 +995,22 @@ impl EvalContext {
                 } => {
                     let producer_wait = dependency.producer_wait();
                     if let Some(wait) = producer_wait.as_ref() {
-                        if let Some(work_id) = prioritized_task_for(&coordinator, wait)
-                            && let Some(mut work) = coordinator.claim_work(work_id)
-                        {
-                            while coordinator.poll_claimed_task(work) {
-                                let Some(next) = coordinator.claim_work(work_id) else {
-                                    break;
-                                };
-                                work = next;
+                        match coordinator.claim_exact_target(wait) {
+                            ExactTargetSelection::Claimed(mut work) => {
+                                let work_id = work.id();
+                                while coordinator.poll_claimed_task(work) {
+                                    let Some(next) = coordinator.claim_work(work_id) else {
+                                        break;
+                                    };
+                                    work = next;
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        if coordinator.target_has_running_producer(wait) {
-                            self.wait_for_client_progress(&coordinator, &handle, generation);
-                            continue;
+                            ExactTargetSelection::Busy => {
+                                self.wait_for_client_progress(&coordinator, &handle, generation);
+                                continue;
+                            }
+                            ExactTargetSelection::None => {}
                         }
                     }
                     match coordinator
@@ -1151,8 +1154,10 @@ impl EvalContext {
             return;
         };
         let generation = coordinator.work_generation();
-        if !coordinator.target_has_running_producer(target)
-            && !coordinator.has_busy_causal_child(Some(target), self.causal_task_ids())
+        if !matches!(
+            coordinator.exact_target_status(target),
+            ExactTargetStatus::Busy
+        ) && !coordinator.has_busy_causal_child(Some(target), self.causal_task_ids())
         {
             return;
         }
@@ -1208,8 +1213,10 @@ impl EvalContext {
         };
         let generation = coordinator.work_generation();
         if target.terminal_poll().is_some()
-            || prioritized_task_for(&coordinator, target).is_some()
-            || coordinator.target_has_running_producer(target)
+            || !matches!(
+                coordinator.exact_target_status(target),
+                ExactTargetStatus::None
+            )
         {
             return true;
         }

@@ -8,7 +8,8 @@ use super::coordinator::{
     ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
+    EvaluationWorkId, ExactTargetSelection, ExactTargetStatus, ReflectionWorkPoll,
+    ReflectionWorkState, WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -392,34 +393,6 @@ impl EvaluationDemandState {
     }
 }
 
-pub(super) fn prioritized_task_for(
-    coordinator: &EvaluationWorkCoordinator,
-    target: &EvaluationWaitToken,
-) -> Option<EvaluationWorkId> {
-    let mut chain = Vec::new();
-    let mut seen = HashSet::new();
-    let mut wait = target.clone();
-    while let Some(work) = coordinator.work_for_wait(&wait) {
-        if !seen.insert(work) {
-            break;
-        }
-        chain.push(work);
-        let Some(dependency) = coordinator.work_dependency_by_id(work) else {
-            break;
-        };
-        let Some(dependency_wait) = dependency.producer_wait() else {
-            break;
-        };
-        wait = dependency_wait.clone();
-    }
-    #[cfg(test)]
-    coordinator.record_complete_exact_route_search(chain.len());
-    chain
-        .into_iter()
-        .rev()
-        .find(|work| coordinator.work_is_claimable(*work))
-}
-
 pub(super) fn pump_demand(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
@@ -441,31 +414,36 @@ pub(super) fn pump_demand(
             return EvaluationPumpOutcome::BudgetExhausted;
         }
 
-        if coordinator.target_has_running_producer(target) {
-            return EvaluationPumpOutcome::Busy;
-        }
-        let prioritized = yielded_exact
+        let selection_generation = coordinator.work_generation();
+        let exact = yielded_exact
             .take()
-            .or_else(|| prioritized_task_for(coordinator, target));
-        let exact = prioritized.and_then(|work| coordinator.claim_work(work));
-        let (claimed, causal_busy) = if let Some(exact) = exact {
-            (Some(exact), false)
-        } else {
-            match coordinator.claim_causal_child_work(Some(target), context.causal_task_ids()) {
-                CausalChildSelection::Claimed(child) => (Some(child), false),
-                CausalChildSelection::Busy => (None, true),
-                CausalChildSelection::None => (None, false),
+            .and_then(|work| coordinator.claim_work(work))
+            .map(ExactTargetSelection::Claimed)
+            .unwrap_or_else(|| coordinator.claim_exact_target(target));
+        let (claimed, causal_busy) = match exact {
+            ExactTargetSelection::Claimed(exact) => (Some(exact), false),
+            ExactTargetSelection::Busy => return EvaluationPumpOutcome::Busy,
+            ExactTargetSelection::None => {
+                match coordinator.claim_causal_child_work(Some(target), context.causal_task_ids()) {
+                    CausalChildSelection::Claimed(child) => (Some(child), false),
+                    CausalChildSelection::Busy => (None, true),
+                    CausalChildSelection::None => (None, false),
+                }
             }
         };
         let Some(work) = claimed else {
             if causal_busy {
                 return EvaluationPumpOutcome::Busy;
             }
-            if coordinator.target_has_running_producer(target) {
-                return EvaluationPumpOutcome::Busy;
-            }
             if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
                 return EvaluationPumpOutcome::TargetReady;
+            }
+            if coordinator.work_generation() != selection_generation {
+                match coordinator.exact_target_status(target) {
+                    ExactTargetStatus::Ready => continue,
+                    ExactTargetStatus::Busy => return EvaluationPumpOutcome::Busy,
+                    ExactTargetStatus::None => {}
+                }
             }
             return EvaluationPumpOutcome::NoProgress;
         };

@@ -696,10 +696,14 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // PNC4 adds the private API assembly loop, ordered operand queue, checked port
 // allocation, journal/result construction, and its test-only operation loops.
 // Semantic operand demand remains one resumable regional state machine.
-const EXPECTED_OCCURRENCES: usize = 208;
+// W6G4R-001B replaces the foreground pump's source-level producer-chain loop
+// with the coordinator's guarded exact-route selector. The loop remains real
+// scheduler work, but its coordinator boundary was already counted; removing
+// the duplicated pump-side traversal removes one user-sized-loop occurrence.
+const EXPECTED_OCCURRENCES: usize = 207;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 2_813_285_538_239_211_418;
+const EXPECTED_FINGERPRINT: u64 = 12_391_485_775_904_766_246;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -712,11 +716,11 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 55),
-    (Signal::UserSizedLoop, 89),
+    (Signal::UserSizedLoop, 88),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 120),
+    (WorkShape::DemandThenInspect, 119),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),

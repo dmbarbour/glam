@@ -3,8 +3,9 @@
 Baseline: `7fed99e` immediately before W4C.1c; current implementation
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3.
 
-Status: investigation and W6G4R-001A baselines complete; production repair is
-in progress. No production selection policy has changed yet.
+Status: investigation and W6G4R-001A/B complete; cold-path repair measurement
+is next. Foreground exact demand now uses the same queued-before-prior-block
+policy as background demand.
 
 ## Scope
 
@@ -186,7 +187,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A complete
+**Status:** remediation in progress; W6G4R-001A/B complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -243,6 +244,8 @@ selector repair.
 
 ### W6G4R-001B — Make complete discovery one guarded operation
 
+**Completed:** 2026-09-23
+
 Introduce a coordinator-private exact-target probe with a result such as
 `Ready(EvaluationWorkId)`, `Busy`, or `None`. Under one runtime mutation
 admission and one coordinator-state lock, it must:
@@ -264,6 +267,18 @@ test-only or unused.
 Preserve the existing immediate re-claim of a yielded exact work item. Do not
 add a per-session running-work index, change worker/client ownership, or pull
 pure-effect fusion back into W6G.
+
+`claim_exact_target` now traverses current-state dependency edges and claims
+the selected task beneath one mutation admission and coordinator-state lock.
+The shared traversal stops at queued ancestors, follows dependencies only from
+blocked records, reports running/terminalizing producers as busy, and bounds
+cycles with one forward `HashSet`; it constructs no reverse route. Foreground
+demand pumping and synchronous client-demand driving use this operation, while
+their wait/retry paths use one-lock status snapshots. The old
+`prioritized_task_for`, `work_is_claimable`, and multi-lock running-producer
+scan have been removed from production. A forced hook verifies that both
+mutation admission and the state mutex remain held between selection and
+claim.
 
 ### W6G4R-001C — Measure the cold-path repair
 

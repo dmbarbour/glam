@@ -623,6 +623,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
+    #[cfg(test)]
+    exact_selection_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Test-owned accounting for W6G4R-001 exact-route discovery and handoff.
@@ -653,6 +655,19 @@ pub(super) enum CoordinatorSelection {
 
 pub(super) enum CausalChildSelection {
     Claimed(ClaimedTaskWork),
+    Busy,
+    None,
+}
+
+pub(super) enum ExactTargetSelection {
+    Claimed(ClaimedTaskWork),
+    Busy,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExactTargetStatus {
+    Ready,
     Busy,
     None,
 }
@@ -702,6 +717,8 @@ impl EvaluationWorkCoordinator {
             reflection_release_status_probe: Mutex::new(None),
             #[cfg(test)]
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
+            #[cfg(test)]
+            exact_selection_probe: Mutex::new(None),
         })
     }
 
@@ -763,6 +780,7 @@ impl EvaluationWorkCoordinator {
             terminal_publication_probe: Mutex::new(None),
             reflection_release_status_probe: Mutex::new(None),
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
+            exact_selection_probe: Mutex::new(None),
         });
         values.attach_work_coordinator(&coordinator);
         coordinator
@@ -820,6 +838,14 @@ impl EvaluationWorkCoordinator {
             .exact_route_profile
             .lock()
             .expect("exact demand route profile was poisoned")
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_exact_selection_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .exact_selection_probe
+            .lock()
+            .expect("exact selection probe was poisoned") = Some(Box::new(probe));
     }
 
     #[cfg(test)]
@@ -1426,14 +1452,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let work = match state.work.get(&id)?.kind {
-                WorkKind::Reflection(_) => claim_reflection_task(&mut state, self.runtime, id),
-                WorkKind::Deferred(_) => claim_deferred(&mut state, self.runtime, id, false)
-                    .map(ClaimedTaskWork::Deferred),
-                WorkKind::LazyRoute(_) => claim_lazy_route(&mut state, self.runtime, id, false)
-                    .map(ClaimedTaskWork::LazyRoute),
-                WorkKind::Spark(_) => None,
-            }?;
+            let work = claim_task_work_locked(&mut state, self.runtime, id, false)?;
             state.work_generation = state.work_generation.wrapping_add(1);
             Some(work)
         };
@@ -1442,6 +1461,78 @@ impl EvaluationWorkCoordinator {
             self.work_available.notify_all();
         }
         claimed
+    }
+
+    /// Finds and claims the first runnable producer on one exact wait route.
+    ///
+    /// Route discovery and claiming share runtime mutation admission and one
+    /// coordinator-state critical section. A queued ancestor therefore wins
+    /// before its retained prior block, and the selected producer cannot
+    /// retire or change dependency between the probe and claim.
+    pub(super) fn claim_exact_target(&self, target: &EvaluationWaitToken) -> ExactTargetSelection {
+        debug_assert_eq!(target.runtime_id(), self.runtime);
+        #[cfg(test)]
+        let selection_probe = self
+            .exact_selection_probe
+            .lock()
+            .expect("exact selection probe was poisoned")
+            .take();
+        let mutation = self.admission.mutation_guard();
+        let (selection, _depth) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let probe = exact_target_probe_locked(&state, target);
+            let selection = match probe.selection {
+                CausalBackgroundProbe::Ready(id) => {
+                    #[cfg(test)]
+                    if let Some(probe) = selection_probe {
+                        probe();
+                    }
+                    match claim_task_work_locked(&mut state, self.runtime, id, false) {
+                        Some(claimed) => {
+                            state.work_generation = state.work_generation.wrapping_add(1);
+                            ExactTargetSelection::Claimed(claimed)
+                        }
+                        None => ExactTargetSelection::None,
+                    }
+                }
+                CausalBackgroundProbe::Busy => ExactTargetSelection::Busy,
+                CausalBackgroundProbe::None => ExactTargetSelection::None,
+            };
+            (selection, probe.depth)
+        };
+        drop(mutation);
+        #[cfg(test)]
+        self.record_complete_exact_route_search(_depth);
+        if matches!(selection, ExactTargetSelection::Claimed(_)) {
+            self.work_available.notify_all();
+        }
+        selection
+    }
+
+    /// Observes the current exact-route scheduling state without claiming it.
+    /// This is used only where a caller must decide whether to wait or retry;
+    /// execution paths use [`Self::claim_exact_target`] instead.
+    pub(super) fn exact_target_status(&self, target: &EvaluationWaitToken) -> ExactTargetStatus {
+        debug_assert_eq!(target.runtime_id(), self.runtime);
+        let (status, _depth) = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let probe = exact_target_probe_locked(&state, target);
+            let status = match probe.selection {
+                CausalBackgroundProbe::Ready(_) => ExactTargetStatus::Ready,
+                CausalBackgroundProbe::Busy => ExactTargetStatus::Busy,
+                CausalBackgroundProbe::None => ExactTargetStatus::None,
+            };
+            (status, probe.depth)
+        };
+        #[cfg(test)]
+        self.record_complete_exact_route_search(_depth);
+        status
     }
 
     /// Claims a launched child (or its exact producer) reachable from the
@@ -1462,20 +1553,7 @@ impl EvaluationWorkCoordinator {
             loop {
                 match causal_child_probe_locked(&state, target, caller_tasks, &excluded) {
                     CausalChildProbe::Ready(id) => {
-                        let claimed = match state.work.get(&id).map(|record| &record.kind) {
-                            Some(WorkKind::Reflection(_)) => {
-                                claim_reflection_task(&mut state, self.runtime, id)
-                            }
-                            Some(WorkKind::Deferred(_)) => {
-                                claim_deferred(&mut state, self.runtime, id, false)
-                                    .map(ClaimedTaskWork::Deferred)
-                            }
-                            Some(WorkKind::LazyRoute(_)) => {
-                                claim_lazy_route(&mut state, self.runtime, id, false)
-                                    .map(ClaimedTaskWork::LazyRoute)
-                            }
-                            Some(WorkKind::Spark(_)) | None => None,
-                        };
+                        let claimed = claim_task_work_locked(&mut state, self.runtime, id, false);
                         if let Some(claimed) = claimed {
                             state.work_generation = state.work_generation.wrapping_add(1);
                             break CausalChildSelection::Claimed(claimed);
@@ -1814,17 +1892,7 @@ impl EvaluationWorkCoordinator {
         state.work.get(&id).and_then(task_observation_epoch)
     }
 
-    pub(super) fn work_is_claimable(&self, id: EvaluationWorkId) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        state
-            .work
-            .get(&id)
-            .is_some_and(|record| matches!(record.state, WorkState::Dormant | WorkState::Queued))
-    }
-
+    #[cfg(test)]
     pub(super) fn work_is_busy(&self, id: EvaluationWorkId) -> bool {
         let state = self
             .state
@@ -1851,27 +1919,6 @@ impl EvaluationWorkCoordinator {
             .or_else(|| state.deferred.by_task.get(&task));
         id.and_then(|id| state.work.get(id))
             .is_some_and(|record| matches!(record.state, WorkState::Dormant | WorkState::Queued))
-    }
-
-    pub(super) fn target_has_running_producer(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = HashSet::new();
-        let mut wait = target.clone();
-        while let Some(work) = self.work_for_wait(&wait) {
-            if !seen.insert(work) {
-                return false;
-            }
-            if self.work_is_busy(work) {
-                return true;
-            }
-            let Some(dependency) = self.work_dependency_by_id(work) else {
-                return false;
-            };
-            let Some(dependency_wait) = dependency.producer_wait() else {
-                return false;
-            };
-            wait = dependency_wait.clone();
-        }
-        false
     }
 
     pub(super) fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
@@ -2245,38 +2292,92 @@ fn causal_background_probe_locked(
     ) {
         return CausalBackgroundProbe::None;
     }
+    exact_producer_probe_locked(state, root).selection
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExactProducerProbe {
+    selection: CausalBackgroundProbe,
+    depth: usize,
+}
+
+fn exact_target_probe_locked(
+    state: &WorkCoordinatorState,
+    target: &EvaluationWaitToken,
+) -> ExactProducerProbe {
+    let Some(root) = work_for_wait_locked(state, target) else {
+        return ExactProducerProbe {
+            selection: CausalBackgroundProbe::None,
+            depth: 0,
+        };
+    };
+    exact_producer_probe_locked(state, root)
+}
+
+/// Walks one exact producer route using each record's current scheduling
+/// state. Prior blocks are meaningful only while their record is blocked.
+fn exact_producer_probe_locked(
+    state: &WorkCoordinatorState,
+    root: EvaluationWorkId,
+) -> ExactProducerProbe {
     let mut current = root;
     let mut seen = HashSet::new();
     while seen.insert(current) {
         let Some(record) = state.work.get(&current) else {
-            return CausalBackgroundProbe::None;
+            return ExactProducerProbe {
+                selection: CausalBackgroundProbe::None,
+                depth: seen.len(),
+            };
         };
         match record.state {
-            WorkState::Queued => return CausalBackgroundProbe::Ready(current),
+            WorkState::Queued => {
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Ready(current),
+                    depth: seen.len(),
+                };
+            }
             WorkState::Dormant
                 if matches!(record.kind, WorkKind::Deferred(_) | WorkKind::LazyRoute(_)) =>
             {
-                return CausalBackgroundProbe::Ready(current);
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Ready(current),
+                    depth: seen.len(),
+                };
             }
             WorkState::Blocked => {
                 let Some(wait) = work_dependency(record).and_then(WorkDependency::producer_wait)
                 else {
-                    return CausalBackgroundProbe::None;
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth: seen.len(),
+                    };
                 };
                 let Some(producer) = work_for_wait_locked(state, &wait) else {
-                    return CausalBackgroundProbe::None;
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth: seen.len(),
+                    };
                 };
                 current = producer;
             }
             WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
-                return CausalBackgroundProbe::Busy;
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Busy,
+                    depth: seen.len(),
+                };
             }
             WorkState::Dormant | WorkState::ExitWaiting => {
-                return CausalBackgroundProbe::None;
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::None,
+                    depth: seen.len(),
+                };
             }
         }
     }
-    CausalBackgroundProbe::None
+    ExactProducerProbe {
+        selection: CausalBackgroundProbe::None,
+        depth: seen.len(),
+    }
 }
 
 fn causal_background_candidate_locked(
@@ -2431,18 +2532,11 @@ fn claim_causal_background(
                 continue;
             };
             let claimed = match record.kind {
-                WorkKind::Reflection(_) => {
-                    claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
-                }
-                WorkKind::Deferred(_) => claim_deferred(state, runtime, candidate, false)
-                    .map(ClaimedTaskWork::Deferred)
-                    .map(CoordinatorSelection::Task),
-                WorkKind::LazyRoute(_) => claim_lazy_route(state, runtime, candidate, false)
-                    .map(ClaimedTaskWork::LazyRoute)
-                    .map(CoordinatorSelection::Task),
                 WorkKind::Spark(_) => {
                     claim_spark(state, runtime, candidate).map(CoordinatorSelection::Spark)
                 }
+                _ => claim_task_work_locked(state, runtime, candidate, false)
+                    .map(CoordinatorSelection::Task),
             };
             if let Some(claimed) = claimed {
                 let rotated = state
@@ -2480,21 +2574,8 @@ fn claim_causal_session_background(
         let Some(candidate) = causal_background_candidate_locked(state, root) else {
             continue;
         };
-        let Some(record) = state.work.get(&candidate) else {
-            continue;
-        };
-        let claimed = match record.kind {
-            WorkKind::Reflection(_) => {
-                claim_reflection_task(state, runtime, candidate).map(CoordinatorSelection::Task)
-            }
-            WorkKind::Deferred(_) => claim_deferred(state, runtime, candidate, false)
-                .map(ClaimedTaskWork::Deferred)
-                .map(CoordinatorSelection::Task),
-            WorkKind::LazyRoute(_) => claim_lazy_route(state, runtime, candidate, false)
-                .map(ClaimedTaskWork::LazyRoute)
-                .map(CoordinatorSelection::Task),
-            WorkKind::Spark(_) => None,
-        };
+        let claimed = claim_task_work_locked(state, runtime, candidate, false)
+            .map(CoordinatorSelection::Task);
         if let Some(claimed) = claimed {
             let rotated = state
                 .background_roots
@@ -2723,6 +2804,24 @@ fn claim_reflection_task(
     id: EvaluationWorkId,
 ) -> Option<ClaimedTaskWork> {
     claim_reflection(state, runtime, id).map(ClaimedTaskWork::Reflection)
+}
+
+fn claim_task_work_locked(
+    state: &mut WorkCoordinatorState,
+    runtime: EvaluationRuntimeId,
+    id: EvaluationWorkId,
+    requeue_on_yield: bool,
+) -> Option<ClaimedTaskWork> {
+    match state.work.get(&id)?.kind {
+        WorkKind::Reflection(_) => claim_reflection_task(state, runtime, id),
+        WorkKind::Deferred(_) => {
+            claim_deferred(state, runtime, id, requeue_on_yield).map(ClaimedTaskWork::Deferred)
+        }
+        WorkKind::LazyRoute(_) => {
+            claim_lazy_route(state, runtime, id, requeue_on_yield).map(ClaimedTaskWork::LazyRoute)
+        }
+        WorkKind::Spark(_) => None,
+    }
 }
 
 fn demand_session_is_closed(state: &WorkCoordinatorState, session: EvaluationSessionId) -> bool {

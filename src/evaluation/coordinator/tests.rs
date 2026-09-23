@@ -665,7 +665,7 @@ fn block_test_reflection_on(
 }
 
 #[test]
-fn foreground_reverse_search_currently_skips_a_queued_ancestor_with_a_prior_block() {
+fn foreground_exact_selection_runs_a_queued_ancestor_before_its_prior_block() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
@@ -685,17 +685,18 @@ fn foreground_reverse_search_currently_skips_a_queued_ancestor_with_a_prior_bloc
         assert!(work_dependency(&state.work[&parent]).is_some());
     }
 
-    assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
-        Some(child),
-        "W6G4R-001A latches the pre-repair mismatch: reverse search follows a queued parent's stale block"
-    );
+    let ExactTargetSelection::Claimed(claimed) = coordinator.claim_exact_target(&parent_wait)
+    else {
+        panic!("a queued exact ancestor should be claimed before its stale descendant")
+    };
+    assert_eq!(claimed.id(), parent);
+    coordinator.requeue_unpolled_task(claimed);
     assert_eq!(
         coordinator.exact_demand_route_profile(),
         ExactDemandRouteProfile {
             complete_searches: 1,
-            edges_visited: 2,
-            maximum_depth: 2,
+            edges_visited: 1,
+            maximum_depth: 1,
             ..ExactDemandRouteProfile::default()
         }
     );
@@ -709,19 +710,16 @@ fn foreground_search_follows_a_blocked_chain_to_queued_and_running_tails() {
     let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "exact tail");
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
 
+    let ExactTargetSelection::Claimed(claimed) = coordinator.claim_exact_target(&parent_wait)
+    else {
+        panic!("the queued exact tail should be claimable")
+    };
+    assert_eq!(claimed.id(), child);
     assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
-        Some(child)
+        coordinator.exact_target_status(&parent_wait),
+        ExactTargetStatus::Busy,
+        "a running tail remains visible but cannot be claimed twice"
     );
-    let claimed = coordinator
-        .claim_work(child)
-        .expect("the queued exact tail should be claimable");
-    assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
-        None,
-        "a running tail is progress but cannot be claimed twice"
-    );
-    assert!(coordinator.target_has_running_producer(&parent_wait));
     coordinator.requeue_unpolled_task(claimed);
 
     assert_eq!(
@@ -761,10 +759,10 @@ fn foreground_search_detects_an_exact_dependency_cycle() {
         }
     }
 
-    assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &first_wait),
-        None
-    );
+    assert!(matches!(
+        coordinator.claim_exact_target(&first_wait),
+        ExactTargetSelection::None
+    ));
     assert_eq!(
         coordinator.exact_demand_route_profile(),
         ExactDemandRouteProfile {
@@ -798,37 +796,47 @@ fn foreground_search_may_cross_demand_sessions_within_one_runtime() {
         )
     };
     assert_ne!(parent_demand, child_demand);
-    assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
-        Some(child)
-    );
+    let ExactTargetSelection::Claimed(claimed) = coordinator.claim_exact_target(&parent_wait)
+    else {
+        panic!("same-runtime exact demand should cross session boundaries")
+    };
+    assert_eq!(claimed.id(), child);
+    coordinator.requeue_unpolled_task(claimed);
 }
 
 #[test]
-fn foreground_probe_result_may_retire_before_the_separate_claim() {
+fn foreground_exact_selection_holds_mutation_and_state_through_claim() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
     let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "retired tail");
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
 
-    assert_eq!(
-        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
-        Some(child)
-    );
-    let ClaimedTaskWork::Deferred(claimed) = coordinator
-        .claim_work(child)
-        .expect("a competing claimant should acquire the probed tail")
+    let probed = Arc::new(AtomicBool::new(false));
+    let probe_observed = probed.clone();
+    let weak = Arc::downgrade(&coordinator);
+    coordinator.set_exact_selection_probe(move || {
+        let coordinator = weak
+            .upgrade()
+            .expect("exact selector must retain its coordinator");
+        assert!(
+            coordinator.state.try_lock().is_err(),
+            "the coordinator-state lock must span exact probing and claiming"
+        );
+        assert!(
+            coordinator.admission.try_settlement_guard().is_none(),
+            "runtime mutation admission must span exact probing and claiming"
+        );
+        probe_observed.store(true, Ordering::Release);
+    });
+
+    let ExactTargetSelection::Claimed(claimed) = coordinator.claim_exact_target(&parent_wait)
     else {
-        panic!("the selected tail should preserve its deferred kind")
+        panic!("the exact selector should claim the probed tail atomically")
     };
-    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
-    assert!(release.terminal);
-    settle_test_deferred(&coordinator, child);
-    assert!(
-        coordinator.claim_work(child).is_none(),
-        "the pre-repair probe and claim are separate operations with a retirement window"
-    );
+    assert_eq!(claimed.id(), child);
+    assert!(probed.load(Ordering::Acquire));
+    coordinator.requeue_unpolled_task(claimed);
 }
 
 fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {

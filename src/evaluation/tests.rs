@@ -10,7 +10,8 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
     ClaimedTaskWork, ClientDemandHandle, ClientDemandPoll, ClientDemandResult,
-    ClientDemandSnapshot, EvaluationWaitTerminal, ReflectionWorkPoll, ReflectionWorkState,
+    ClientDemandSnapshot, EvaluationWaitTerminal, ExactTargetStatus, ReflectionWorkPoll,
+    ReflectionWorkState,
 };
 use super::session::{EvaluationUnfinishedState, EvaluationUnfinishedTask};
 
@@ -718,7 +719,10 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     let work = coordinator
         .claim_work(producer)
         .expect("the exact producer should be claimable");
-    assert!(coordinator.target_has_running_producer(&wait));
+    assert_eq!(
+        coordinator.exact_target_status(&wait),
+        ExactTargetStatus::Busy
+    );
 
     assert!(
         handle
