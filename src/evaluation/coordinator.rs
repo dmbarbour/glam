@@ -621,6 +621,28 @@ pub(crate) struct EvaluationWorkCoordinator {
     terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    exact_route_profile: Mutex<ExactDemandRouteProfile>,
+}
+
+/// Test-owned accounting for W6G4R-001 exact-route discovery and handoff.
+///
+/// Production builds contain neither this state nor updates to it. Later
+/// remediation checkpoints extend the zero-valued handoff and fallback fields
+/// as the incremental route is introduced.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ExactDemandRouteProfile {
+    pub(super) complete_searches: usize,
+    pub(super) edges_visited: usize,
+    pub(super) maximum_depth: usize,
+    pub(super) fast_handoffs: usize,
+    pub(super) checkpoint_invalidations: usize,
+    pub(super) cold_fallbacks: usize,
+    pub(super) contention_fallbacks: usize,
+    pub(super) changed_dependency_fallbacks: usize,
+    pub(super) retired_work_fallbacks: usize,
+    pub(super) branched_work_fallbacks: usize,
 }
 
 pub(super) enum CoordinatorSelection {
@@ -678,6 +700,8 @@ impl EvaluationWorkCoordinator {
             terminal_publication_probe: Mutex::new(None),
             #[cfg(test)]
             reflection_release_status_probe: Mutex::new(None),
+            #[cfg(test)]
+            exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
         })
     }
 
@@ -738,6 +762,7 @@ impl EvaluationWorkCoordinator {
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),
             reflection_release_status_probe: Mutex::new(None),
+            exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
         });
         values.attach_work_coordinator(&coordinator);
         coordinator
@@ -776,6 +801,25 @@ impl EvaluationWorkCoordinator {
     #[cfg(test)]
     pub(super) fn runtime_locks_are_free(&self) -> bool {
         self.state.try_lock().is_ok() && self.admission.try_settlement_guard().is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_complete_exact_route_search(&self, depth: usize) {
+        let mut profile = self
+            .exact_route_profile
+            .lock()
+            .expect("exact demand route profile was poisoned");
+        profile.complete_searches += 1;
+        profile.edges_visited += depth;
+        profile.maximum_depth = profile.maximum_depth.max(depth);
+    }
+
+    #[cfg(test)]
+    pub(super) fn exact_demand_route_profile(&self) -> ExactDemandRouteProfile {
+        *self
+            .exact_route_profile
+            .lock()
+            .expect("exact demand route profile was poisoned")
     }
 
     #[cfg(test)]

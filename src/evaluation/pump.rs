@@ -412,6 +412,8 @@ pub(super) fn prioritized_task_for(
         };
         wait = dependency_wait.clone();
     }
+    #[cfg(test)]
+    coordinator.record_complete_exact_route_search(chain.len());
     chain
         .into_iter()
         .rev()

@@ -3,8 +3,8 @@
 Baseline: `7fed99e` immediately before W4C.1c; current implementation
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3.
 
-Status: investigation complete; repair decision and implementation remain
-pending. No production fix was applied during this investigation.
+Status: investigation and W6G4R-001A baselines complete; production repair is
+in progress. No production selection policy has changed yet.
 
 ## Scope
 
@@ -186,7 +186,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation planned
+**Status:** remediation in progress; W6G4R-001A complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -208,6 +208,8 @@ fall back to complete rediscovery.
 
 ### W6G4R-001A — Latch exact-selection semantics and counters
 
+**Completed:** 2026-09-23
+
 Before changing selection, add forced coordinator fixtures for:
 
 - a queued ancestor which still carries its previous blocked dependency;
@@ -228,6 +230,16 @@ Add statically compiled profiling counters, or an equivalent test-owned probe,
 for complete searches, edges visited, maximum depth, fast handoffs, checkpoint
 invalidations, and fallback reasons. Ordinary builds must not acquire a
 callback or dynamically configured observer on every transition.
+
+The coordinator now has a test-only, statically compiled route profile with
+those fields. Complete reverse searches publish their search count, visited
+edges, and maximum depth; later checkpoints will populate the handoff and
+fallback fields. Forced fixtures cover the queued ancestor mismatch, queued
+and running tails, exact cycles, same-runtime cross-session demand, and a
+producer which terminalizes between the old probe and separate claim. The
+queued-ancestor assertion deliberately records the old stale-descendant
+selection so W6G4R-001B can reverse that assertion alongside the atomic
+selector repair.
 
 ### W6G4R-001B — Make complete discovery one guarded operation
 

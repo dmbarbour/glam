@@ -623,6 +623,214 @@ fn reserve_test_deferred(
     (task, wait, work)
 }
 
+fn wait_for_test_work(
+    coordinator: &EvaluationWorkCoordinator,
+    work: EvaluationWorkId,
+) -> EvaluationWaitToken {
+    let state = coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned");
+    let record = state
+        .work
+        .get(&work)
+        .expect("test work must remain registered");
+    match &record.kind {
+        WorkKind::Reflection(reflection) => reflection.wait.clone(),
+        WorkKind::Deferred(deferred) => deferred.wait.clone(),
+        WorkKind::LazyRoute(route) => route.wait.clone(),
+        WorkKind::Spark(_) => panic!("spark work has no exact wait token"),
+    }
+}
+
+fn block_test_reflection_on(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    session: &TestDemand,
+    dependency: EvaluationWaitToken,
+    observed_epoch: Option<RuntimeObservationEpoch>,
+) -> (EvaluationWaitToken, EvaluationWorkId) {
+    let (_, work) = reserve_ready_test_reflection(coordinator, session);
+    let wait = wait_for_test_work(coordinator, work);
+    let claimed = claim_ready_test_reflection(coordinator, session.demand.id);
+    let release = coordinator.release_reflection(
+        claimed,
+        ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Wait(dependency)),
+            observed_epoch,
+            error: None,
+        }),
+    );
+    assert!(release.remains_blocked);
+    (wait, work)
+}
+
+#[test]
+fn foreground_reverse_search_currently_skips_a_queued_ancestor_with_a_prior_block() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let observed = coordinator.observations.current();
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "stale descendant");
+    let (parent_wait, parent) =
+        block_test_reflection_on(&coordinator, &session, child_wait, Some(observed));
+
+    assert!(publish_test_observation(&coordinator) > observed);
+    {
+        let state = coordinator
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        assert!(matches!(state.work[&parent].state, WorkState::Queued));
+        assert!(matches!(state.work[&child].state, WorkState::Queued));
+        assert!(work_dependency(&state.work[&parent]).is_some());
+    }
+
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
+        Some(child),
+        "W6G4R-001A latches the pre-repair mismatch: reverse search follows a queued parent's stale block"
+    );
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_search_follows_a_blocked_chain_to_queued_and_running_tails() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "exact tail");
+    let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
+        Some(child)
+    );
+    let claimed = coordinator
+        .claim_work(child)
+        .expect("the queued exact tail should be claimable");
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
+        None,
+        "a running tail is progress but cannot be claimed twice"
+    );
+    assert!(coordinator.target_has_running_producer(&parent_wait));
+    coordinator.requeue_unpolled_task(claimed);
+
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 4,
+            maximum_depth: 2,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_search_detects_an_exact_dependency_cycle() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, first_wait, first) = reserve_test_deferred(&coordinator, &session, "cycle first");
+    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session, "cycle second");
+    {
+        let mut state = coordinator
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        for (work, dependency) in [(first, second_wait), (second, first_wait.clone())] {
+            let record = state
+                .work
+                .get_mut(&work)
+                .expect("cycle work must remain registered");
+            record.state = WorkState::Blocked;
+            deferred_work_mut(record).block = Some(EvaluationTaskBlock {
+                dependency: Some(WorkDependency::Wait(dependency)),
+                observed_epoch: None,
+                error: None,
+            });
+        }
+    }
+
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &first_wait),
+        None
+    );
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_search_may_cross_demand_sessions_within_one_runtime() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let parent_session = TestDemand::new(&coordinator);
+    let child_session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) =
+        reserve_test_deferred(&coordinator, &child_session, "cross-session tail");
+    let (parent_wait, parent) =
+        block_test_reflection_on(&coordinator, &parent_session, child_wait, None);
+
+    let (parent_demand, child_demand) = {
+        let state = coordinator
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        (
+            state.work[&parent].demand_session,
+            state.work[&child].demand_session,
+        )
+    };
+    assert_ne!(parent_demand, child_demand);
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
+        Some(child)
+    );
+}
+
+#[test]
+fn foreground_probe_result_may_retire_before_the_separate_claim() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "retired tail");
+    let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+
+    assert_eq!(
+        super::super::pump::prioritized_task_for(&coordinator, &parent_wait),
+        Some(child)
+    );
+    let ClaimedTaskWork::Deferred(claimed) = coordinator
+        .claim_work(child)
+        .expect("a competing claimant should acquire the probed tail")
+    else {
+        panic!("the selected tail should preserve its deferred kind")
+    };
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Terminal);
+    assert!(release.terminal);
+    settle_test_deferred(&coordinator, child);
+    assert!(
+        coordinator.claim_work(child).is_none(),
+        "the pre-repair probe and claim are separate operations with a retirement window"
+    );
+}
+
 fn finish_queued_test_spark(coordinator: &EvaluationWorkCoordinator) {
     let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("woken test spark should be claimable")
