@@ -4,9 +4,10 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A-C complete; incremental route handoff is
-next. Foreground exact demand now uses the same queued-before-prior-block
-policy as background demand, but repeated cold discovery remains material.
+Status: investigation and W6G4R-001A-D complete; incremental route
+implementation is next. Foreground exact demand now uses the same
+queued-before-prior-block policy as background demand, but repeated cold
+discovery remains material.
 
 ## Scope
 
@@ -188,7 +189,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A-C complete
+**Status:** remediation in progress; W6G4R-001A-D complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -327,6 +328,8 @@ appropriate coherent fallback, not the final performance repair.
 
 ### W6G4R-001D — Inventory incremental route handoffs
 
+**Completed:** 2026-09-23
+
 For every foreground exact-demand driver, classify the information already
 available after a poll:
 
@@ -358,6 +361,75 @@ RouteFrame
 The exact representation remains an implementation checkpoint. It contains
 only scheduler identities and validation tokens, not `Value`, `Gc`, or
 `RuntimeValueRoot` edges.
+
+The inventory found one common mechanism with several different-duration
+owners. `EvalContext::pump_wait` and `pump_demand` are currently stateless
+bounded calls: only the `yielded_exact` work ID survives within one call. A
+budget return, contention return, or caller-level suspension discards it and
+the next call begins at the original wait token. The implementation checkpoint
+should therefore introduce a private route-aware pump state and retain the
+current method as a cold compatibility wrapper, rather than placing the route
+in `EvalContext` or in the coordinator's semantic work records.
+
+The foreground-driver census is:
+
+| Driver | Current lifetime | Route owner selected for W6G4R-001E |
+| --- | --- | --- |
+| Blocking `drive_client_demand` behind `ValueEvaluator::eval` | The private `ClientDemandHandle` is consumed by one blocking loop; its client record and result cell already survive thread waits. | One local route beside the handle. The client record remains authoritative for its own blocked dependency and subscription epoch; the route begins at that published dependency. |
+| Future bounded public advancement | No public `Evaluation` or `try_advance` API exists. `ValueEvaluator::eval` is still blocking. | When that deferred facade is added, it must own the private client handle and route together so both survive a bounded return. W6G4R does not select public drop semantics or expose the facade. |
+| `EvalContext::pump_wait` / `pump_demand` | A generic bounded helper used by direct evaluation, effect machines, macro execution, and tests. It retains only one yielded work ID until the call returns. | Add a private stateful form accepting an owner-retained route. Keep the current method as a cold, one-call wrapper for compatibility and tests which do not measure resumed-route cost. |
+| Direct `await_deferred_task` | A nonscheduled direct evaluator loops in the same Rust call; a scheduled machine performs one bounded assist and then publishes its own block. | The direct loop can retain a local route. A scheduled machine does not put a route in the lazy/promise: after it returns, its published parent block lets its outer foreground driver descend normally. |
+| Reflection/effect `run`, bounded `poll`, and `poll_blocked` | `run` is blocking, while bounded polls retain `self.blocked` across scheduler quanta. A budget-exhausted nested pump can currently yield the outer task and forget the inner exact position. | Blocking `run` may retain a local route. Persistent effect machines retain an optional route beside the blocked scheduler state, keyed by the current wait; changing or clearing that wait clears the route. This is orchestration state, not an effect value. |
+| Macro `IsolatedEffectSearch` runner | One blocking expansion loop repeatedly polls the same search and pumps its reported dependency. It does not return an incremental handle. | One local route for the currently reported dependency, reset when the dependency changes. It remains isolated from macro input/output values. |
+| Test compatibility paths | `drive_client_demand_for_test` uses the production blocking driver. Direct `pump_wait` loops, `complete_wait`/`fail_wait`, and inline net fixtures use the stateless helper; `claim_ready_client_demand_for_test` is a lifecycle hook rather than an exact-route driver. | Exercise the production route through the production driver and a new stateful bounded helper. Leave deliberately cold compatibility calls stateless unless a fixture specifically verifies persistence. |
+
+The existing wait helpers are part of the same seam. `wait_for_claimed_task`
+and `retry_after_no_progress` currently call `exact_target_status` from the
+root and repeat the full guarded traversal. The stateful pump should expose
+the exact busy/current checkpoint needed for a lost-wakeup-safe generation
+wait and route-aware recheck. The root-based helpers remain correct fallbacks;
+they should not remain the common resumed path.
+
+The poll-result census also refined the proposed handoff boundary:
+
+| Poll/release result | Information available | Safe route action |
+| --- | --- | --- |
+| Yield or spark request | The claimed work ID is known, but cancellation, abandonment, or an immediate wake may override the apparent yielded state during release. | Retain the ID only when the post-release disposition says the same record remains runnable or dormant-but-exactly-demanded. |
+| Block | The raw poll names a dependency, but the coordinator assigns the subscription epoch while publishing it. Subscribe-and-recheck may immediately queue the parent again. | Have release return a validated blocked handoff only if the record remains blocked after subscription and observation rechecks. That handoff supplies parent ID, epoch, dependency key, and directly resolvable producer. |
+| Terminal completion or failure | The claimed ID and terminal result are known. Settlement may wake its parent; lazy-cycle settlement may terminalize several remembered frames at once. | Pop toward the remembered parent, then atomically validate/claim it. A multi-record terminalization merely invalidates frames and invokes the existing fallback. |
+| Busy exact producer | The guarded traversal sees the contested `Reserved`, `Running`, or `Terminalizing` record, but `ExactTargetSelection::Busy` currently discards its ID. | Preserve the candidate ID in the selection/status disposition and keep it as `route.current` across the generation wait. |
+| Resolver-owned promise, broad observation wait, or reflection exit | The block has no directly followable producer edge. | Retain the parent as the parked point, but do not push a child frame. Ordinary no-progress, observation, or exit policy remains responsible for the wait. |
+
+Consequently, the raw `EvaluationMachinePoll` is not the route API.
+`release_reflection_task`, `release_deferred_task`, and `release_lazy_route`
+currently collapse their result to booleans, while `release_client_demand`
+returns no disposition. W6G4R-001E should add a small post-release scheduling
+disposition produced after block publication and guarded subscribe/recheck.
+It need not expose the machine or semantic result. This avoids constructing a
+frame with an epoch that never became authoritative or descending after an
+already-completed dependency.
+
+The selected zipper remains local and non-authoritative:
+
+- its original target wait stays with the driver for complete guarded
+  fallback; it need not be duplicated into every frame;
+- `current` is the exact runnable or contested background work ID;
+- each parent frame records the parent's work ID and the subscription epoch
+  and dependency key which justified descent;
+- the blocking client root is validated through `ClientDemandSnapshot`
+  separately from background work records; and
+- a causal `.task.new` child selected after the exact route is exhausted is
+  not an exact zipper edge. It may receive the existing immediate yielded
+  re-claim within one call, but it is discarded at a bounded return and found
+  again through the causal-child probe.
+
+Claiming from a checkpoint must validate and claim under the same mutation
+admission and coordinator-state lock. A blocked parent must still have the
+recorded epoch and dependency key; a current record must still exist in the
+expected runnable or contested state. Failure of either check is a cache miss,
+not a semantic failure, and falls back to W6G4R-001B's complete guarded
+search. No route owns a work record, keeps a demand session alive, or adds a
+managed edge.
 
 ### W6G4R-001E — Implement incremental descent and return
 

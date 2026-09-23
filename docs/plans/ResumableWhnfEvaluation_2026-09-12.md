@@ -7686,8 +7686,8 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
-**Status:** investigation complete and remediation planned on 2026-09-23;
-implementation pending.
+**Status:** investigation and W6G4R-001A-D complete on 2026-09-23;
+incremental route implementation and verification remain.
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
 has established role-specific pumping and completed W6G.3 has removed
