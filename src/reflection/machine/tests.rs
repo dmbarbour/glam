@@ -6340,14 +6340,16 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
         .task_owned_promise(Arc::from("specialization demand dependency"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let effect = eval::apply_values(
-        &observer,
-        function.clone_core_for_test(),
-        vec![Value::Promised(promised.clone())],
+    let promised_value = public_value(&assembler.core_values(), Value::Promised(promised.clone()));
+    let effect = assembler.apply(&function, [promised_value]).unwrap();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let mut task = EffectTask::new_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        observer,
     )
     .unwrap();
-    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
 
     let blocked = loop {
         match task.poll(256) {

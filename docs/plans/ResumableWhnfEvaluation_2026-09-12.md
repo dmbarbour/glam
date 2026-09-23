@@ -1,8 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
-post-W6F review are complete by 2026-09-18. W6G.1-W6G.4 are complete;
-W6G.5 phase closure is next. W7-W8 remain planned, followed by the explicit
+post-W6F review are complete by 2026-09-18. W6G.1-W6G.5a are complete;
+the mandatory post-W6G review in W6G.5b is next. W7-W8 remain planned, followed by the explicit
 W6G4R-003 performance follow-up in W9. This is the focused implementation
 plan selected by
 GCI11R-002D.2c.1d in
@@ -7770,17 +7770,226 @@ post-W6G Phase W9 checkpoints below.
 
 ##### W6G.5a — Integrated verification and accounting
 
-Reconcile the implemented W6G.1, extracted W6G.2 disposition, W6G.3, and W6G.4
-measurements and update the exact W0B and parent D.2c manifests for every
-representation or driver change. Run the affected focused
-suites in ordinary and `aggressive-gc-verification` modes plus the routine
-repository gates. Force suspension after representative pure and standard-
-effect child demands and force both sides of every scheduler ordering changed
-by W6G.1. Confirm that the four sections did not quietly exchange ownership:
-pump-role policy remains in W6G.1, the current bounded effect path remains the
-reference while future regional fusion belongs to the independent deferred
-plan, aggregate pure-WHNF ownership remains in W6G.3, and performance
-attribution remains in W6G.4.
+**Status:** complete on 2026-09-23. This is a closure and evidence pass, not another
+representation transition. W6G.1-W6G.4 were implemented and tested along
+their individual paths; W6G.5a proves that their final boundaries compose and
+produces one current accounting baseline for the mandatory review in W6G.5b.
+
+The four inputs have deliberately different owners:
+
+| Input | Contract to preserve | Authoritative evidence | Work excluded from W6G.5a |
+|---|---|---|---|
+| **W6G.1** | Foreground clients poll only their demand and its exact causal producers. Workers and runtime background pumps start only from autonomous reflection roots or sparks and follow their exact dependencies. Lazy checkpoints remain owned by the lazy rather than by a route or session. | Coordinator/evaluation forced-order fixtures, the W0B census, and the lazy-producer/managed-edge inventories. | A public resumable `Evaluation` facade and new work-stealing policy. |
+| **W6G.2** | The bounded W5 standard-effect driver remains the reference implementation. | Existing reflection request resumption/replay fixtures and the explicit extraction record. | Regional pure-effect fusion, now owned by [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md). |
+| **W6G.3** | One managed checkpoint owns the complete pure-WHNF state, independent of frame count; polls exchange that state in place rather than publishing one root per frame. | The WHNF-checkpoint boundary inventory and forced small/large, collection, unwind, and cross-thread fixtures. | `RootFrame` or concurrent-marking refinements. |
+| **W6G.4** | Exact-route retention and the private-ID hasher are performance mechanisms only; full rediscovery remains the authoritative fallback and semantic output remains unchanged. | The exact interaction-net signature, duplicate-symbol diagnostic, route counters, and the closing Callgrind baseline recorded above. | Poll-local generation accounting, now owned by Phase W9. |
+
+Historical completion records remain records of their checkpoints. Do not
+rewrite an older W0B or W6F baseline merely because W6G moved it later. Append
+a later-state reconciliation, and treat every unexplained count or fingerprint
+change as drift until its source change and owner are identified.
+
+Partition closure as follows.
+
+###### W6G.5a.0 — Closure ledger and exact-manifest reconciliation
+
+1. Snapshot the implemented boundaries before changing tests or baselines.
+   The current exact anchors are:
+   - W0B: 207 occurrences with fingerprint
+     `17_311_633_654_805_980_353`, including 21 coordinator boundaries and 51
+     orchestration handoffs;
+   - parent D.2c: no W6 declarations and exactly six declarations assigned to
+     `W8ValueCompatibility`;
+   - one compile-exhaustive managed WHNF-checkpoint API boundary, currently
+     covering 73 exact call sites; and
+   - the exact lazy-task producer families and external-source boundaries.
+2. Run and reconcile the source-backed W0B, raw-value/D.2c,
+   WHNF-checkpoint, lazy-producer, root-publication, durable-owner,
+   recursive-identity, persistent-edge, active-owner, and evaluator-access
+   inventories. A baseline changes only with a named source disposition; it
+   is never relatching by inspection alone.
+3. Append a W6G.5a completion ledger which says which W6G section owns every
+   changed declaration. Where an older review reports a now-stale aggregate
+   (for example, the post-W6F count before W6G), add a later-disposition note
+   or link rather than altering the historical finding.
+
+At minimum, the focused exact-manifest set includes
+`whnf_suspension_and_recursion_census_is_exact`,
+`reflection_has_no_unowned_recursive_whnf_demand`,
+`d2c_w6_checkpoint_manifest_is_exact`,
+`durable_whnf_checkpoint_boundary_is_exact`,
+`checkpoint_boundary_roles_are_compile_exhaustive`, and
+`lazy_task_work_families_are_exact`. The broader inventory tests above remain
+part of the ordinary full repository gate.
+
+###### W6G.5a.1 — Forced scheduler ownership and lifecycle matrix
+
+Exercise the following cases with barriers, latches, or explicit claim/release
+steps. Repetition under the thread scheduler is not evidence for either
+ordering.
+
+1. **Selection roles.** A foreground client may claim only its root or an
+   exact causal producer, including one owned by another session. A worker or
+   runtime background pump must reject foreground client demand. A reflection
+   root and a spark may each reach their exact descendant, while independent
+   same-session machines remain concurrently claimable.
+2. **Route continuity.** Force child publication before subscription and
+   subscription before publication; dependency completion before the parent
+   polls and parent reblocking before dependency completion; another poller
+   holding the anticipated child; parent wake/reblock at a new epoch; and
+   contention invalidating a retained route. Each case must either retain the
+   exact route or fall back to authoritative rediscovery without losing a
+   wake or claiming unrelated work.
+3. **Observer loss.** Close the first observer session while another client,
+   reflection task, or spark still demands the lazy. Separately drop the last
+   route, collect, then attach a new subscriber. The lazy-owned checkpoint
+   must survive; the retired route must not keep a session alive; and
+   completed prefixes must not replay.
+4. **Pump and drain scope.** A blocking client wait must not pump unrelated
+   reflection work. Session drain may follow the session's exact
+   cross-session dependency but leaves independent roots for runtime drain.
+   Bounded background pumping may advance reflection work, reports contested
+   causal work without waiting, and excludes foreground clients and sparks.
+   Runtime quiescence and zero-worker behavior retain their documented
+   meanings.
+
+Prefer the existing coordinator and evaluation fixtures which force these
+orders. Add a fixture only where the matrix exposes a missing order; do not
+replace a deterministic fixture with a repeated stress run.
+
+###### W6G.5a.2 — Checkpoint, effect-path, and performance integration
+
+1. Re-run W6G.3's exact checkpoint inventory and forced small/large-frame,
+   source-promotion, structured-child, collection, unwind-poisoning, and
+   cross-worker-resumption cases in ordinary and
+   `aggressive-gc-verification` modes. Confirm that every steady nonterminal
+   state still owns one managed checkpoint regardless of continuation depth.
+2. Force suspension immediately after representative **pure** child demands
+   (application, access/path conversion, and one structural builtin child)
+   and representative **standard-effect** child demands (request decoding,
+   specialization-owned argument preparation, and list-effect
+   sequence/cut/fix). Count the completed prefix or host callback. Resumption
+   must neither replay it nor convert the bounded W5 effect path into W6G.3's
+   pure regional owner.
+3. Run `scripts/check-interaction-net-profiling.sh` and compare the exact
+   semantic/driver signature and duplicate-symbol diagnostic with the W6G.4
+   record. Preserve the closing performance evidence—3,339,481,894 Callgrind
+   instructions, 19,499 fast route handoffs, and 9,356 contention
+   invalidations—as an attribution baseline, not as a timing gate. A fresh
+   Callgrind run is required only if W6G.5a changes production scheduling or
+   route code.
+4. Confirm by source and plan links that pure-effect fusion remains in its
+   independent deferred plan and generation-accounting work remains in W9.
+   W6G.5a must not implement either in the name of closing verification.
+
+###### W6G.5a.3 — Integrated gates and handoff to review
+
+Run affected focused suites first in ordinary and
+`aggressive-gc-verification` modes, then the interaction-net profiling script
+and the routine repository gates:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
+```
+
+Record exact commands and results in the completion ledger. Update current
+architecture/agent notes only for discovered drift; broad compatibility-doc
+retirement remains W8C. W6G.5a is complete only when:
+
+- every exact inventory delta has a named owner and reviewed baseline;
+- every disputed scheduler ordering is forced, not inferred from repetition;
+- W6G.1, deferred W6G.2, W6G.3, and W6G.4 retain the separate ownership in
+  the table above;
+- W7, W8, and W9 have explicit ownership of every accepted residual; and
+- the evidence is sufficient to begin W6G.5b without reconstructing the
+  month-long W6G implementation history.
+
+W6G.5a completion ledger, 2026-09-23:
+
+| Checkpoint | Result |
+|---|---|
+| **5a.0 inventories** | All 116 source-backed inventory tests pass. W0B remains 207 occurrences at fingerprint `17_311_633_654_805_980_353`; D.2c remains closed for W6 with six `W8ValueCompatibility` declarations; the managed checkpoint boundary remains 73 exact call sites. One intentional test-only access delta removes the delayed promise-root region from `synchronous_client_demand_does_not_wait_for_unrelated_worker_progress`, reducing the `src/evaluation/tests.rs` mutator-introduction count from 16 to 15. |
+| **5a.1 scheduler matrix** | Existing deterministic fixtures cover all listed selection, route, observer-loss, pump, and drain orders. The ordinary and aggressive-GC focused runs pass. No scheduler policy or production coordinator code changed. |
+| **5a.2 state/effect/performance integration** | Nineteen focused pure-WHNF and bounded standard-effect filters pass across the ordinary and `aggressive-gc-verification` runs; eighteen execute in both modes, while `collection_between_polls_preserves_only_the_installed_checkpoint` is intentionally aggressive-only. The profiling script passes its 21 named regressions without semantic/driver signature drift. Production route code did not change, so no new Callgrind run was warranted. |
+| **5a.3 repository gates** | `cargo fmt --check`, all-target/all-feature Clippy with warnings denied, and the complete workspace test suite pass. The main library suite reports 1,839 passed and two ignored tests; every remaining workspace and integration suite also passes. |
+
+The aggressive run exposed three related test-fixture ownership defects which
+ordinary collection timing had hidden:
+
+1. the specialization replay fixture returned a raw application lazy from one
+   mutator region and rooted it only during later effect-task admission;
+2. the counted client-lazy fixture split lazy allocation from root publication
+   and four callers supplied unrooted promises; and
+3. synchronous-client and spark fixtures likewise opened a later region to
+   root already-unprotected managed values.
+
+The repairs are deliberately test-side. Fixtures now construct public rooted
+applications, use the existing atomic rooted-lazy/rooted-promise helpers, and
+admit sparks through `spark_root`. The access inventory latches removal of the
+one redundant delayed root introduction. These changes preserve all forced
+scheduler orderings while making the fixtures obey the same regional handoff
+rule as production code.
+
+The exact verification entry points were:
+
+- Scheduler filters: `foreground_route`,
+  `lazy_producer_completion_before_client_subscription_requeues_exactly_once`,
+  `client_subscription_before_lazy_producer_receives_one_exact_wake`,
+  `reflection_root_claims_only_its_exact_descendant_under_contested_orders`,
+  `spark_root_claims_exact_deferred_dependency_after_block`,
+  `ready_selection_allows_independent_same_session_machine_claims`,
+  `running_deferred_machine_does_not_serialize_same_session_client_admission`,
+  `worker_and_runtime_pump_selectors_reject_foreground_client_demand`,
+  `closing_first_observer_preserves_another_sessions_lazy_route_demand`,
+  `last_lazy_route_demand_retires_without_losing_its_checkpoint`,
+  `claimed_lazy_route_survives_last_demand_and_accepts_new_subscriber`,
+  `client_and_spark_share_a_lazy_checkpoint_after_client_route_loss`,
+  `client_and_background_reflection_share_lazy_progress_after_first_session_closes`,
+  `reflection_completion_activation_and_first_session_close_have_both_orders`,
+  `task_owned_promise_lazy_cycle_fails_in_both_publication_orders`,
+  `synchronous_client_demand_does_not_pump_unrelated_reflection_work`,
+  `session_drain_follows_an_exact_cross_session_dependency`,
+  `logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_runtime`,
+  `bounded_background_pump`,
+  `queued_foreground_lazy_route_is_not_background_pump_work`, and
+  `zero_worker_executor_drops_sparks_without_forcing_them`.
+- Checkpoint/effect filters:
+  `small_and_large_seed_promotions_use_one_managed_root`,
+  `structured_constructors_publish_canonical_state_under_existing_access`,
+  `borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots`,
+  `forced_collection_traces_every_edge_owned_by_the_managed_state`,
+  `poisoned_state_remains_traceable_but_repolling_observes_poison`,
+  `one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition`,
+  `managed_checkpoint_resumes_on_another_worker_after_collection`,
+  `external_boundary_publishes_the_complete_checkpoint_before_access_closes`,
+  `unwind_poison_is_reported_without_reentering_the_reducer`,
+  `collection_between_polls_preserves_only_the_installed_checkpoint`,
+  `w6g1f3i_application_checkpoint_survives_promise_and_route_loss`,
+  `w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss`,
+  `object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_collection`,
+  `list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_loss`,
+  `list_effect_fix_checkpoint_constructs_and_assigns_one_promise`,
+  `request_decode_resumes_the_exact_lazy_payload_without_replay`,
+  `specialization_host_activity_is_not_reentered_after_owned_demand_suspends`,
+  `fused_standard_chains_resume_at_the_cooperative_budget`, and
+  `resumable_reflection_decode_consumes_one_application_checkpoint_after_resumption`.
+
+```sh
+cargo test -q --lib inventory
+cargo test -q --lib <each focused filter above>
+cargo test -q --features aggressive-gc-verification --lib <the same fixtures>
+scripts/check-interaction-net-profiling.sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
+```
+
+W6G.5a leaves the ownership boundaries unchanged: pump-role policy is W6G.1,
+regional pure-effect fusion remains in its independent deferred plan,
+aggregate pure-WHNF state remains W6G.3, and W6G4R-003 remains Phase W9 work.
+The phase is ready for W6G.5b.
 
 ##### W6G.5b — Mandatory post-W6G review
 

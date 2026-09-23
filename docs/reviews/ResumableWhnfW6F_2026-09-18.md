@@ -63,6 +63,13 @@ The final W6C.1b dispatcher reclassification accounts for the difference
 between W6F.7's intermediate 263 violations and the reviewed total of 262.
 There is no unexplained declaration delta.
 
+**Later reconciliation (2026-09-23):** the table remains the historical
+post-W6F baseline. Completed W6G work moves the current W0B census to 207
+occurrences and leaves six, rather than seven, declarations assigned to
+`W8ValueCompatibility`. The current exact accounting and its verification are
+recorded by
+[`W6G.5a`](../plans/ResumableWhnfEvaluation_2026-09-12.md#w6g5a--integrated-verification-and-accounting).
+
 ## Ownership and Budget Audit
 
 One `EvaluationStepBudget` is created at an outer claimed task, client demand,

@@ -260,11 +260,11 @@ fn counted_client_lazy(
 ) -> (RuntimeValueRoot, Arc<std::sync::atomic::AtomicUsize>) {
     let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = evaluations.clone();
-    let lazy = LazyValue::semantic_thunk(context.values(), label, move |_| {
+    let (_lazy, root) = rooted_semantic_lazy_value(context.values(), label, move |_| {
         observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(value.clone())
     });
-    (client_lazy_root(context, lazy), evaluations)
+    (root, evaluations)
 }
 
 fn client_lazy_root(context: &EvalContext, lazy: LazyValue) -> RuntimeValueRoot {
@@ -566,7 +566,8 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "producer before subscription gate");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "producer before subscription gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer before subscription",
@@ -632,7 +633,8 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "subscription before producer gate");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "subscription before producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "subscription before producer",
@@ -689,7 +691,8 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "claimed producer gate");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "claimed producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer claimed before stable abandonment",
@@ -752,7 +755,8 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "dormant producer gate");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "dormant producer gate");
     let (root, evaluations) = counted_client_lazy(
         &context,
         "dormant causal tail before stable abandonment",
@@ -1257,7 +1261,8 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
 fn synchronous_client_demand_does_not_pump_unrelated_reflection_work() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let promise = PromisedValue::new(context.values(), "unrelated foreground input");
+    let (promise, _promise_root, _promise_value) =
+        rooted_promise_value(context.values(), "unrelated foreground input");
     let (ran, observer) = mpsc::channel();
     let unrelated = context
         .schedule_task(move |_| Ok(Box::new(Signal(Some(ran)))))
@@ -1286,13 +1291,11 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
         .expect("test worker should activate");
     let producer = fixture.context();
     let consumer = fixture.context();
-    let promise = PromisedValue::new(producer.values(), "worker-resolved client input");
+    let (promise, promise_root, _promise_value) =
+        rooted_promise_value(producer.values(), "worker-resolved client input");
     let expected = Value::Number(31.into());
     let (started, worker_started) = mpsc::channel();
     let (release, worker_release) = mpsc::channel();
-    let promise_root = producer
-        .values()
-        .with_runtime_value_access(|access| promise.root_in(&access));
     let promise_values = producer.values().clone();
     let background = producer
         .schedule_task({
@@ -6975,11 +6978,9 @@ fn zero_worker_executor_drops_sparks_without_forcing_them() {
     let (coordinator, _executor) = test_execution_resources(0).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let lazy = crate::core::LazyValue::semantic_thunk(context.values(), "unforced spark", |_| {
-        panic!("zero-worker spark must never be evaluated")
-    });
+    let (lazy, value) = rooted_inert_lazy_value(context.values(), "unforced spark");
 
-    context.spark(Value::Lazy(lazy.clone()));
+    context.spark_root(value);
 
     assert!(lazy.cached(context.values()).is_none());
     assert_eq!(
@@ -8498,10 +8499,8 @@ fn runtime_pump_snapshot_is_observational() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "snapshot-retained spark",
-    )));
+    let (_lazy, value) = rooted_inert_lazy_value(context.values(), "snapshot-retained spark");
+    context.spark_root(value);
     let generation = coordinator.work_generation();
 
     let snapshot = coordinator.runtime_pump_snapshot();
@@ -8583,10 +8582,8 @@ fn bounded_background_pump_excludes_foreground_clients_and_sparks() {
         ))
         .expect("foreground client should admit");
     coordinator.executor_started(1);
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "bounded-pump excluded spark",
-    )));
+    let (_lazy, value) = rooted_inert_lazy_value(context.values(), "bounded-pump excluded spark");
+    context.spark_root(value);
 
     let report = fixture.runtime.pump_background(8);
     assert_eq!(report.spent_steps, 0);
