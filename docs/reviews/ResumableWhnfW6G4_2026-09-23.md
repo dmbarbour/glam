@@ -1,11 +1,12 @@
 # Resumable WHNF W6G.4 Investigation — 2026-09-23
 
-Baseline: `7fed99e` immediately before W4C.1c; current implementation
-`d8d44e0` after W6G.1, extracted W6G.2, and W6G.3.
+Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
+`d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
+measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A/B complete; cold-path repair measurement
-is next. Foreground exact demand now uses the same queued-before-prior-block
-policy as background demand.
+Status: investigation and W6G4R-001A-C complete; incremental route handoff is
+next. Foreground exact demand now uses the same queued-before-prior-block
+policy as background demand, but repeated cold discovery remains material.
 
 ## Scope
 
@@ -187,7 +188,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A/B complete
+**Status:** remediation in progress; W6G4R-001A-C complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -282,6 +283,8 @@ claim.
 
 ### W6G4R-001C — Measure the cold-path repair
 
+**Completed:** 2026-09-23
+
 Re-run the exact fixture and capture:
 
 - cold searches, visited edges, maximum depth, and allocations;
@@ -292,6 +295,35 @@ Re-run the exact fixture and capture:
 This checkpoint determines how much cost remains asymptotic rather than
 constant-factor. It does not close the finding merely because the fixture
 becomes faster.
+
+The exact duplicate-symbol fixture retained its expected diagnostic and the
+interaction-net profiling regression script retained every semantic/driver
+signature. Warm direct test-binary timings were 15.97–16.94 seconds in debug
+(the last two runs were 15.97 and 15.99) and 1.27–1.28 seconds in release,
+compared with the pre-repair 16.43–16.79 and 1.36–1.60 ranges. These timings
+remain corroborating rather than gating evidence.
+
+Callgrind measured 4,504,812,008 release instructions, down 418,860,818 or
+8.51% from the 4,923,672,826 pre-repair total. `claim_exact_target` still
+accounted for 2,636,835,645 inclusive instructions (58.53%), its shared
+forward probe accounted for 2,605,256,370 (57.83%), and private-ID hashing
+accounted for 2,010,888,838 (44.64%). Thus one-lock discovery removed material
+constant work without making complete route discovery cheap.
+
+Call counts and a temporary statically compiled maximum-depth probe recorded
+19,630 complete searches over 2,811,441 visited records: an average depth of
+143.22 and a maximum depth of 573. Of those searches, 18,824 attempted an
+atomic claim and 806 were read-only wait/retry snapshots. The maximum is
+unchanged and the edge count remains of the same order as the pre-repair
+profile, confirming that the residual is still repeated O(depth) discovery.
+
+DHAT measured 239,291,699 allocated bytes in 1,092,327 blocks, down 65,753,219
+bytes (21.56%) and 115,695 blocks (9.58%) from the pre-repair totals. Allocation
+beneath the remaining forward probe was 84,990,872 bytes in 125,051 blocks,
+35.52% of all allocated bytes. This is essentially the bounded cycle
+`HashSet`; the old 64,574,176-byte reverse `Vec` has disappeared, while the
+forward-set cost remains. W6G4R-001D/E therefore remain justified: B is the
+appropriate coherent fallback, not the final performance repair.
 
 ### W6G4R-001D — Inventory incremental route handoffs
 
