@@ -38,11 +38,6 @@ when their historical value no longer justifies keeping them.
 
 ## Recent Completed Plans
 
-- [`InteractionNetFunctionCalls_2026-08-31.md`](InteractionNetFunctionCalls_2026-08-31.md)
-  restored ordinary value-level function calls through explicitly constructed
-  interaction nets, including direct operator splicing and partial-function
-  preservation.
-
 ## Preliminary and Deferred Plans
 
 - [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
