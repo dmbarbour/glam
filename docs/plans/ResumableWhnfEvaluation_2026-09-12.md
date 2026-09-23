@@ -7688,8 +7688,10 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
-**Status:** investigation and W6G4R-001A-F complete on 2026-09-23;
-closing measurement remains.
+**Status:** investigation and W6G4R-001A-G complete on 2026-09-23. The primary
+route-rediscovery finding is resolved; a private-ID hasher experiment and
+poll-time generation-accounting cleanup remain explicitly assigned in the
+review before W6G.5 closes the phase.
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
 has established role-specific pumping and completed W6G.3 has removed
@@ -7745,6 +7747,16 @@ That review defines W6G4R-001A-G: first make complete discovery one guarded
 cold-path operation, then retain a validated foreground route zipper so common
 yield, block, completion, and contention transitions do not restart discovery
 at the client root. Full rediscovery remains the authoritative fallback.
+
+The closing measurement records 19,499 fast route handoffs against 9,356
+fallbacks, reducing Callgrind instructions by 21.10% and allocated bytes by
+35.35% relative to the cold-path repair without changing the exact
+interaction-net signature. Remaining complete searches are entirely assigned
+to the broad contention class rather than background-root absence. The review
+therefore owns two narrower follow-ups: W6G4R-002 trials a deterministic
+hasher only for trusted private-ID loop sets, and W6G4R-003 separates
+poll-local generation movement from genuine release interference before any
+further route-policy change.
 
 #### W6G.5 — Phase closure and post-W6G review
 

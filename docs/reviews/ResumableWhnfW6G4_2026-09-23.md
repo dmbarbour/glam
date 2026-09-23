@@ -4,10 +4,12 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A-F complete; closing performance
-measurement is next. Foreground exact demand retains a local validated route
-across common work transitions; the complete guarded traversal remains the
-authoritative cold and invalidation fallback.
+Status: investigation and W6G4R-001A-G complete. Foreground exact demand
+retains a local validated route across common work transitions; the complete
+guarded traversal remains the authoritative cold and invalidation fallback.
+The closing measurement confirms a material improvement and assigns two
+narrower residuals below rather than treating the remaining pre-W4 gap as
+unexplained.
 
 ## Scope
 
@@ -189,7 +191,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A-F complete
+**Status:** resolved by W6G4R-001A-G; narrower residuals recorded separately
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -544,6 +546,8 @@ this API surface as implemented.
 
 ### W6G4R-001G — Close the performance finding
 
+**Completed:** 2026-09-23
+
 Repeat the W6G4R-001C measurements after incremental routes. Report:
 
 - fast handoffs versus complete fallback searches;
@@ -563,6 +567,133 @@ Run the routine repository gates and
 `scripts/check-interaction-net-profiling.sh`, update the W6G.4 plan status, and
 reconcile W6G.5 before closing the finding.
 
+The incremental route produces a substantial but incomplete improvement. A
+separately instrumented release build recorded the following exact-route
+profile for the source-shaped duplicate-symbol fixture:
+
+| Route observation | Count |
+| --- | ---: |
+| fast handoffs | 19,499 |
+| complete searches | 9,374 |
+| records visited by complete searches | 1,418,995 |
+| average records per complete search | 151.38 |
+| maximum complete-search/retained depth | 573 |
+| checkpoint invalidations / cold fallbacks | 9,356 |
+| contention fallbacks | 9,356 |
+| changed-dependency / retired-work / branched-work fallbacks | 0 / 0 / 0 |
+
+Thus 67.58% of the 28,855 measured release handoffs use retained route state,
+while 32.42% invalidate it. Only 18 complete searches are initial cold entries;
+the other 9,356 correspond exactly to invalidations. This cuts complete
+searches from W6G4R-001C's 19,630 to 9,374 and visited edges from 2,811,441 to
+1,418,995, but does not yet achieve the ideal of O(depth) only for genuinely
+external invalidation.
+
+The deepest retained route contains 573 parent/member identities. Its parent
+vector reached capacity 1,024 with 32-byte frames; its member set reached
+capacity 896 with 8-byte work IDs. That is roughly 42 KiB of reserved backing
+storage including an estimated 1,024-bucket hash table's controls, rather than
+per-work-record duplication. DHAT attributes only 324,032 bytes in 5,056
+blocks to exact-route functions over the complete process. Of that, 226,672
+bytes in 2,622 blocks lie under cold rebuilding; the previous forward probe
+alone allocated 84,990,872 bytes in 125,051 blocks.
+
+Uninstrumented measurements were:
+
+| Measurement | Pre-W4 `7fed99e` | Pre-repair `d8d44e0` | Cold repair `fdb52907` | Incremental route |
+| --- | ---: | ---: | ---: | ---: |
+| Callgrind instructions | 1,696,306,307 | 4,923,672,826 | 4,504,812,008 | 3,554,190,609 |
+| DHAT allocated bytes | 138,793,591 | 305,044,918 | 239,291,699 | 154,698,955 |
+| DHAT allocated blocks | 881,143 | 1,208,022 | 1,092,327 | 973,490 |
+
+Relative to the cold-path repair, incremental routes remove 950,621,399
+instructions (21.10%), 84,592,744 allocated bytes (35.35%), and 118,837
+allocation events (10.88%). Relative to the original pre-repair build, the
+combined repair removes 27.81% of instructions and 49.29% of allocated bytes.
+The remaining instruction total is still 2.10 times pre-W4, while allocated
+bytes and blocks are now only 11.46% and 10.48% above it.
+
+Warm native timings corroborate the profile: three interleaved runs measured
+13.72–13.98 seconds in debug and 1.11–1.13 seconds in release, versus the
+W6G4R-001C post-cold-repair ranges of 15.97–16.94 and 1.27–1.28 seconds.
+Timing remains supporting evidence only.
+
+The exact fixture's interaction-net signature is bit-for-bit equal at
+`fdb52907` and after incremental routes:
+
+- reductions: 12,356 bind joins, 519 fan/data, 3,683 calls, 9,926 operator
+  calls, 15,214 cursor materializations, and 6,215 cursor joins; every other
+  reduction counter is zero; and
+- driver: 3,670 machine polls, 154,573 work items, 47,900 interface polls,
+  35,326 cursor steps, 49,388 active-pair steps, and 21,959 cursor
+  dependencies; every retry/contention/disturbance/restart/checkpoint counter
+  is zero.
+
+The fixture still fails with the intended structured diagnostic,
+`direct-assembly symbol is already published`, enriched by `asm.result`, the
+source definition, and binary-extraction contexts. The routine interaction-net
+profiling script retains its semantic/driver assertions.
+
+The route repair therefore closes W6G4R-001: it eliminates the repeated
+temporary traversal containers, makes two thirds of transitions constant-time
+handoffs, and materially reduces total work without changing semantics. The
+measurement also reveals that the broad `Contention` fallback class is now the
+only reason complete rediscovery remains common. This does not justify route
+state for background roots or an authoritative ready-descendant index. It is
+a narrower release-validation issue, recorded as W6G4R-003 below.
+
+## Follow-up Performance Findings
+
+### W6G4R-002 — Trusted loop discovery pays randomized-hash cost
+
+**Severity:** medium performance
+
+**Status:** proposed low-risk experiment
+
+Callgrind still attributes 752,883,732 instructions, or 21.18% of the current
+fixture, to `RandomState::hash_one` over `NonZeroU64`-backed private IDs. That
+is down 62.56% from the cold-repair measurement because fewer IDs are hashed,
+but remains the largest self-cost. The cold exact-route cycle set's
+`HashSet<EvaluationWorkId>::insert` path alone accounts for 297,309,318
+inclusive instructions (8.37%).
+
+These identities are runtime-allocated and cannot be selected by an
+adversarial Glam program. Trial a small deterministic multiplicative hasher
+for bounded loop-discovery sets, beginning with `ExactDemandRoute::members`
+and the temporary `seen` set in `rebuild_exact_route_locked`. Keep persistent
+scheduler indexes and user-keyed collections out of the first experiment. A
+single private alias should make the trust boundary visible and prevent the
+hasher from spreading casually.
+
+The experiment must retain the forced route/cycle suites, the exact semantic
+and driver signature above, and the intended duplicate-symbol diagnostic.
+Measure native time and Callgrind before deciding whether to keep it or extend
+it to other coordinator-local private-ID traversal sets. A simple wrapping
+multiply/add or xor/multiply mix is sufficient for this role; no external hash
+dependency or collision-resistance policy is justified.
+
+### W6G4R-003 — Poll-time generation movement over-invalidates routes
+
+**Severity:** medium performance
+
+**Status:** assigned to post-W6G performance cleanup
+
+All 9,356 route invalidations are currently classified as `Contention`; every
+other fallback reason is zero. The fixture requests zero evaluator workers,
+although the logger and reflection lifecycle still provide concurrency. Code
+inspection shows the same class also covers a route-generation mismatch
+between claim and release: coordinator changes made while polling the claimed
+machine occur before `ExactRouteReleaseTracker` is constructed and therefore
+look indistinguishable from external interruption to `apply_release`.
+
+Before changing semantics, split this profile reason into current-work
+replacement, generation movement during the claimed poll, and interleaving
+during guarded release. Force each ordering. Then determine which poll-owned
+mutations can be incorporated into a validated release disposition and which
+must still trigger the authoritative cold traversal. Do not simply ignore a
+generation mismatch, and do not add a global descendant index to repair this
+local accounting boundary.
+
 ## Verification required by the repair
 
 Before-and-after verification should include:
@@ -576,3 +707,9 @@ Before-and-after verification should include:
 - the routine formatting, Clippy, and test gates.
 
 Repeated timing alone is not evidence for scheduling correctness.
+
+At W6G4R-001G completion, formatting, full-feature Clippy with warnings
+denied, the complete ordinary test suite, and
+`scripts/check-interaction-net-profiling.sh` all pass. Temporary route and
+CLI-profile instrumentation remained confined to detached worktrees and is
+not part of the production binary.
