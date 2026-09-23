@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Barrier, OnceLock};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread;
 
 use super::*;
@@ -649,13 +649,32 @@ fn block_test_reflection_on(
     dependency: EvaluationWaitToken,
     observed_epoch: Option<RuntimeObservationEpoch>,
 ) -> (EvaluationWaitToken, EvaluationWorkId) {
+    block_test_reflection_on_dependency(
+        coordinator,
+        session,
+        WorkDependency::Wait(dependency),
+        observed_epoch,
+    )
+}
+
+fn block_test_reflection_on_dependency(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    session: &TestDemand,
+    dependency: WorkDependency,
+    observed_epoch: Option<RuntimeObservationEpoch>,
+) -> (EvaluationWaitToken, EvaluationWorkId) {
     let (_, work) = reserve_ready_test_reflection(coordinator, session);
     let wait = wait_for_test_work(coordinator, work);
-    let claimed = claim_ready_test_reflection(coordinator, session.demand.id);
+    let ClaimedTaskWork::Reflection(claimed) = coordinator
+        .claim_work(work)
+        .expect("the synthetic reflection work should be claimable")
+    else {
+        panic!("synthetic reflection work should preserve its kind")
+    };
     let release = coordinator.release_reflection(
         claimed,
         ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
-            dependency: Some(WorkDependency::Wait(dependency)),
+            dependency: Some(dependency),
             observed_epoch,
             error: None,
         }),
@@ -941,6 +960,350 @@ fn foreground_route_returns_to_its_parent_after_child_completion() {
         1,
         "terminal return should validate the zipper without a cold root search"
     );
+}
+
+#[test]
+fn foreground_route_keeps_an_anticipated_child_claimed_by_another_poller() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "raced child");
+    let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        coordinator.exact_target_status_on_route(&parent_wait, &mut route),
+        ExactTargetStatus::Ready
+    );
+    let claimed_elsewhere = coordinator
+        .claim_work(child)
+        .expect("the anticipated child should be claimable by another poller");
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route),
+        ExactTargetSelection::Busy
+    ));
+    coordinator.requeue_unpolled_task(claimed_elsewhere);
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the foreground route should reclaim the released child")
+    };
+    assert_eq!(claimed.id(), child);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            ..ExactDemandRouteProfile::default()
+        },
+        "ordinary claim contention must retain the validated route"
+    );
+}
+
+#[test]
+fn foreground_route_recovers_its_root_when_the_child_completes_first() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "early child");
+    let (parent_wait, parent) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        coordinator.exact_target_status_on_route(&parent_wait, &mut route),
+        ExactTargetStatus::Ready
+    );
+    let ClaimedTaskWork::Deferred(child_claim) = coordinator
+        .claim_work(child)
+        .expect("the child should be claimable by another poller")
+    else {
+        panic!("the child should preserve its deferred kind")
+    };
+    let mut release = coordinator.release_deferred(child_claim, DeferredWorkPoll::Terminal);
+    coordinator.settle_terminal_work(
+        child,
+        EvaluationWaitTerminal::Abandoned,
+        Arc::new(EvaluationFailure::message("test early child completion")),
+    );
+    drop(
+        release
+            .machine
+            .take()
+            .expect("terminal deferred release should retain its machine"),
+    );
+    coordinator.retire_deferred(child);
+
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the route should recover the independently rooted parent")
+    };
+    assert_eq!(claimed.id(), parent);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            fast_handoffs: 1,
+            ..ExactDemandRouteProfile::default()
+        },
+        "a missing child below the target root should pop in O(1)"
+    );
+}
+
+#[test]
+fn foreground_route_falls_back_when_an_observation_wakes_its_parent() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let observed = coordinator.observations.current();
+    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session, "observed child");
+    let (parent_wait, parent) =
+        block_test_reflection_on(&coordinator, &session, child_wait, Some(observed));
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        coordinator.exact_target_status_on_route(&parent_wait, &mut route),
+        ExactTargetStatus::Ready
+    );
+    assert!(publish_test_observation(&coordinator) > observed);
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the cold fallback should select the newly woken parent")
+    };
+    assert_eq!(claimed.id(), parent);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 3,
+            maximum_depth: 2,
+            checkpoint_invalidations: 1,
+            cold_fallbacks: 1,
+            changed_dependency_fallbacks: 1,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_route_falls_back_after_its_parent_reblocks_at_a_new_epoch() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let observed = coordinator.observations.current();
+    let (_, first_wait, _) = reserve_test_deferred(&coordinator, &session, "first child");
+    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session, "second child");
+    let (parent_wait, parent) =
+        block_test_reflection_on(&coordinator, &session, first_wait, Some(observed));
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        coordinator.exact_target_status_on_route(&parent_wait, &mut route),
+        ExactTargetStatus::Ready
+    );
+    assert!(publish_test_observation(&coordinator) > observed);
+    let ClaimedTaskWork::Reflection(parent_claim) = coordinator
+        .claim_work(parent)
+        .expect("the observed parent should be claimable")
+    else {
+        panic!("the parent should preserve its reflection kind")
+    };
+    let release = coordinator.release_reflection(
+        parent_claim,
+        ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Wait(second_wait)),
+            observed_epoch: None,
+            error: None,
+        }),
+    );
+    assert!(release.remains_blocked);
+
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the cold fallback should follow the replacement dependency")
+    };
+    assert_eq!(claimed.id(), second);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 4,
+            maximum_depth: 2,
+            checkpoint_invalidations: 1,
+            cold_fallbacks: 1,
+            changed_dependency_fallbacks: 1,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_route_does_not_retain_a_closed_demand_session() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session, "closing child");
+    let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        coordinator.exact_target_status_on_route(&parent_wait, &mut route),
+        ExactTargetStatus::Ready
+    );
+    let TestDemand { owner, demand } = session;
+    drop(owner);
+    assert!(demand.closed.load(Ordering::Acquire));
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route),
+        ExactTargetSelection::None
+    ));
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            checkpoint_invalidations: 1,
+            cold_fallbacks: 1,
+            retired_work_fallbacks: 1,
+            ..ExactDemandRouteProfile::default()
+        },
+        "the route must not keep either retired work or its owner lease alive"
+    );
+}
+
+#[test]
+fn foreground_route_falls_back_after_an_interleaved_release_mutation() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, unrelated_wait, _) = reserve_test_deferred(&coordinator, &session, "interleaved work");
+    let (_, parent) = reserve_ready_test_reflection(&coordinator, &session);
+    let parent_wait = wait_for_test_work(&coordinator, parent);
+    let mut route = ExactDemandRoute::default();
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::Reflection(parent_claim)) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the exact route should claim its root")
+    };
+
+    let (release_entered, release_observed) = mpsc::channel();
+    let (resume_release, resume_observed) = mpsc::channel();
+    coordinator.set_reflection_release_status_probe(move || {
+        release_entered
+            .send(())
+            .expect("release observer should remain live");
+        resume_observed
+            .recv()
+            .expect("release resumption should remain live");
+    });
+    let release_coordinator = coordinator.clone();
+    let release_thread = thread::spawn(move || {
+        release_coordinator.release_reflection(parent_claim, ReflectionWorkPoll::Yielded)
+    });
+    release_observed
+        .recv()
+        .expect("release must reach its forced interleaving point");
+    assert!(
+        coordinator.promote_deferred_wait(&unrelated_wait),
+        "the interleaved transition should change the coordinator generation"
+    );
+    resume_release
+        .send(())
+        .expect("release thread should remain live");
+    let mut release = release_thread.join().expect("release thread should finish");
+    assert!(
+        !route.apply_release(
+            release
+                .route
+                .take()
+                .expect("release should report its interrupted handoff")
+        ),
+        "an interleaved mutation must invalidate the optimistic handoff"
+    );
+
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the invalidated route should rebuild from its target")
+    };
+    assert_eq!(claimed.id(), parent);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 2,
+            maximum_depth: 1,
+            checkpoint_invalidations: 1,
+            cold_fallbacks: 1,
+            contention_fallbacks: 1,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn foreground_route_follows_only_task_owned_promise_producers() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let context = session.context();
+    let published = Arc::new(Mutex::new(None));
+    let producer = context
+        .schedule_task({
+            let published = published.clone();
+            move |task_context| {
+                let promise = PromisedValue::fixpoint(&task_context, "task-owned route promise")?;
+                *published
+                    .lock()
+                    .expect("published promise fixture was poisoned") = Some(promise);
+                Ok(Box::new(TestTaskMachine))
+            }
+        })
+        .expect("task-owned promise producer should schedule");
+    let task_owned = published
+        .lock()
+        .expect("published promise fixture was poisoned")
+        .take()
+        .expect("task construction should publish its promise");
+    let task_work = producer.work;
+    let (task_parent_wait, _) = block_test_reflection_on_dependency(
+        &coordinator,
+        &session,
+        WorkDependency::Promise(task_owned.root(context.values())),
+        None,
+    );
+    let mut task_route = ExactDemandRoute::default();
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&task_parent_wait, &mut task_route)
+    else {
+        panic!("task-owned promise demand should reach its producer")
+    };
+    assert_eq!(claimed.id(), task_work);
+    coordinator.requeue_unpolled_task(claimed);
+
+    let resolver_owned = PromisedValue::new(context.values(), "resolver-owned route promise");
+    let (resolver_parent_wait, _) = block_test_reflection_on_dependency(
+        &coordinator,
+        &session,
+        WorkDependency::Promise(resolver_owned.root(context.values())),
+        None,
+    );
+    let mut resolver_route = ExactDemandRoute::default();
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&resolver_parent_wait, &mut resolver_route),
+        ExactTargetSelection::None
+    ));
 }
 
 #[test]

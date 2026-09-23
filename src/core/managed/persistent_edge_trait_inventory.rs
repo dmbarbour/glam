@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        879,
+        881,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -950,9 +950,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // concurrency schedule. Neither changes the production or test edge
     // classification counts; the source-qualified occurrence fingerprint
     // changes with the fixture name.
+    // W6G4R-001F adds two test-only promise roots that force the exact-route
+    // distinction between task-owned and resolver-owned promise producers.
+    // Production managed edges remain unchanged.
     assert_eq!(
         occurrence_fingerprint(actual),
-        8_707_150_657_289_273_097,
+        4_205_394_170_383_848_614,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -999,7 +1002,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 628),
+            ((SourceScope::Test, EdgeSurface::Typed), 630),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

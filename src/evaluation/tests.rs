@@ -3451,9 +3451,10 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
             .expect("fixture coordinator should remain live")
             .activate_reflection_with_parent(child.work, Some(parent.id()))
     );
+    let mut route = ExactDemandRoute::default();
 
     assert_eq!(
-        context.pump_wait(parent.wait(), 1),
+        context.pump_wait_on_route(parent.wait(), 1, &mut route),
         EvaluationPumpOutcome::BudgetExhausted
     );
     assert!(matches!(
@@ -3467,7 +3468,7 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
     assert!(unrelated_observer.try_recv().is_err());
 
     assert_eq!(
-        context.pump_wait(parent.wait(), 1),
+        context.pump_wait_on_route(parent.wait(), 1, &mut route),
         EvaluationPumpOutcome::BudgetExhausted,
         "the causal child should run before its parent publishes a child wait"
     );
@@ -3487,13 +3488,20 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
     set_promise(&context, &promise, context.values().unit())
         .expect("the parent should resume after its separate promise resolves");
     assert_eq!(
-        context.pump_wait(parent.wait(), 1),
+        context.pump_wait_on_route(parent.wait(), 1, &mut route),
         EvaluationPumpOutcome::TargetReady
     );
     assert!(matches!(
         context.poll_reflection_task(&unrelated),
         EvaluationWaitPoll::Pending(_)
     ));
+    let profile = context
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_demand_route_profile();
+    assert_eq!(profile.complete_searches, 1);
+    assert_eq!(profile.cold_fallbacks, 0);
+    assert_eq!(profile.branched_work_fallbacks, 0);
 }
 
 #[test]
@@ -5952,8 +5960,9 @@ fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
             .expect("route dependency should be installed once");
 
         let target = if route_first { &route } else { task.wait() };
+        let mut exact_route = ExactDemandRoute::default();
         assert_eq!(
-            context.pump_wait(target, 256),
+            context.pump_wait_on_route(target, 256, &mut exact_route),
             EvaluationPumpOutcome::TargetReady,
             "cycle should settle whichever producer was demanded first"
         );
@@ -5963,7 +5972,7 @@ fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
                 if error.to_string().contains("recursively observed itself")
         ));
         assert_eq!(
-            context.pump_wait(task.wait(), 256),
+            context.pump_wait_on_route(task.wait(), 256, &mut exact_route),
             EvaluationPumpOutcome::TargetReady
         );
         assert!(matches!(
@@ -6069,6 +6078,27 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
             ..ExactDemandRouteProfile::default()
         },
         "two block handoffs and two leaf yields should avoid root rediscovery"
+    );
+
+    drop(route);
+    let mut resumed = ExactDemandRoute::default();
+    assert_eq!(
+        context.pump_wait_on_route(root.wait(), 1, &mut resumed),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+    assert_eq!(
+        context
+            .coordinator()
+            .expect("test coordinator should remain live")
+            .exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 4,
+            maximum_depth: 3,
+            fast_handoffs: 5,
+            ..ExactDemandRouteProfile::default()
+        },
+        "discarding orchestration state should cause one cold rebuild, not alter semantics"
     );
 }
 

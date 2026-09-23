@@ -678,6 +678,7 @@ pub(crate) struct ExactDemandRoute {
     parents: Vec<ExactDemandRouteFrame>,
     members: HashSet<EvaluationWorkId>,
     generation: Option<u64>,
+    invalidation: Option<ExactRouteFallbackReason>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -696,6 +697,7 @@ impl ExactDemandRoute {
             self.parents.clear();
             self.members.clear();
             self.generation = None;
+            self.invalidation = None;
         }
     }
 
@@ -705,10 +707,12 @@ impl ExactDemandRoute {
         self.parents.clear();
         self.members.clear();
         self.generation = None;
+        self.invalidation = None;
     }
 
-    pub(crate) fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self, reason: ExactRouteFallbackReason) {
         self.generation = None;
+        self.invalidation = Some(reason);
     }
 
     pub(super) fn apply_release(&mut self, release: ExactRouteRelease) -> bool {
@@ -716,7 +720,7 @@ impl ExactDemandRoute {
             || self.generation != Some(release.start_generation)
             || !release.uninterrupted
         {
-            self.invalidate();
+            self.invalidate(ExactRouteFallbackReason::Contention);
             return false;
         }
         match release.disposition {
@@ -749,6 +753,14 @@ impl ExactDemandRoute {
         self.generation = Some(release.end_generation);
         true
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactRouteFallbackReason {
+    Contention,
+    ChangedDependency,
+    RetiredWork,
+    BranchedWork,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -982,13 +994,21 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(test)]
-    fn record_exact_route_fallback(&self) {
+    fn record_exact_route_fallback(&self, reason: ExactRouteFallbackReason) {
         let mut profile = self
             .exact_route_profile
             .lock()
             .expect("exact demand route profile was poisoned");
         profile.checkpoint_invalidations += 1;
         profile.cold_fallbacks += 1;
+        match reason {
+            ExactRouteFallbackReason::Contention => profile.contention_fallbacks += 1,
+            ExactRouteFallbackReason::ChangedDependency => {
+                profile.changed_dependency_fallbacks += 1;
+            }
+            ExactRouteFallbackReason::RetiredWork => profile.retired_work_fallbacks += 1,
+            ExactRouteFallbackReason::BranchedWork => profile.branched_work_fallbacks += 1,
+        }
     }
 
     #[cfg(test)]
@@ -1654,32 +1674,12 @@ impl EvaluationWorkCoordinator {
             .expect("exact selection probe was poisoned")
             .take();
         let mutation = self.admission.mutation_guard();
-        let (selection, _depth, _handoffs, _fell_back) = {
+        let (selection, _depth, _handoffs, _fallback) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let route_generation = route.generation;
-            let current_generation = state.work_generation;
-            let (probe, handoffs, fell_back) =
-                if route_generation == Some(current_generation) && route.current.is_some() {
-                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
-                    (probe, handoffs, false)
-                } else if route_generation.is_some()
-                    && validate_exact_route_locked(&state, target, route)
-                {
-                    route.generation = Some(current_generation);
-                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
-                    (probe, handoffs, false)
-                } else {
-                    let fell_back = route_generation.is_some();
-                    route.reset_to_target(target);
-                    (
-                        rebuild_exact_route_locked(&state, target, route),
-                        0,
-                        fell_back,
-                    )
-                };
+            let (probe, handoffs, fallback) = exact_route_probe_locked(&state, target, route);
             let selection = match probe.selection {
                 CausalBackgroundProbe::Ready(id) => {
                     #[cfg(test)]
@@ -1694,7 +1694,7 @@ impl EvaluationWorkCoordinator {
                             ExactTargetSelection::Claimed(claimed)
                         }
                         None => {
-                            route.invalidate();
+                            route.invalidate(ExactRouteFallbackReason::Contention);
                             ExactTargetSelection::None
                         }
                     }
@@ -1709,7 +1709,7 @@ impl EvaluationWorkCoordinator {
                     ExactTargetSelection::None
                 }
             };
-            (selection, probe.depth, handoffs, fell_back)
+            (selection, probe.depth, handoffs, fallback)
         };
         drop(mutation);
         #[cfg(test)]
@@ -1718,8 +1718,8 @@ impl EvaluationWorkCoordinator {
                 self.record_complete_exact_route_search(_depth);
             }
             self.record_exact_route_handoffs(_handoffs);
-            if _fell_back {
-                self.record_exact_route_fallback();
+            if let Some(reason) = _fallback {
+                self.record_exact_route_fallback(reason);
             }
         }
         if matches!(selection, ExactTargetSelection::Claimed(_)) {
@@ -1759,32 +1759,12 @@ impl EvaluationWorkCoordinator {
     ) -> ExactTargetStatus {
         debug_assert_eq!(target.runtime_id(), self.runtime);
         route.prepare(target);
-        let (status, _depth, _handoffs, _fell_back) = {
+        let (status, _depth, _handoffs, _fallback) = {
             let state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let current_generation = state.work_generation;
-            let route_generation = route.generation;
-            let (probe, handoffs, fell_back) =
-                if route_generation == Some(current_generation) && route.current.is_some() {
-                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
-                    (probe, handoffs, false)
-                } else if route_generation.is_some()
-                    && validate_exact_route_locked(&state, target, route)
-                {
-                    route.generation = Some(current_generation);
-                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
-                    (probe, handoffs, false)
-                } else {
-                    let fell_back = route_generation.is_some();
-                    route.reset_to_target(target);
-                    (
-                        rebuild_exact_route_locked(&state, target, route),
-                        0,
-                        fell_back,
-                    )
-                };
+            let (probe, handoffs, fallback) = exact_route_probe_locked(&state, target, route);
             let status = match probe.selection {
                 CausalBackgroundProbe::Ready(id) => {
                     route.current = Some(id);
@@ -1797,7 +1777,7 @@ impl EvaluationWorkCoordinator {
                 CausalBackgroundProbe::None => ExactTargetStatus::None,
             };
             route.generation = Some(state.work_generation);
-            (status, probe.depth, handoffs, fell_back)
+            (status, probe.depth, handoffs, fallback)
         };
         #[cfg(test)]
         {
@@ -1805,8 +1785,8 @@ impl EvaluationWorkCoordinator {
                 self.record_complete_exact_route_search(_depth);
             }
             self.record_exact_route_handoffs(_handoffs);
-            if _fell_back {
-                self.record_exact_route_fallback();
+            if let Some(reason) = _fallback {
+                self.record_exact_route_fallback(reason);
             }
         }
         status
@@ -2621,6 +2601,44 @@ fn exact_target_probe_locked(
     exact_producer_probe_locked(state, root)
 }
 
+fn exact_route_probe_locked(
+    state: &WorkCoordinatorState,
+    target: &EvaluationWaitToken,
+    route: &mut ExactDemandRoute,
+) -> (ExactProducerProbe, usize, Option<ExactRouteFallbackReason>) {
+    let route_generation = route.generation;
+    let current_generation = state.work_generation;
+    if route_generation == Some(current_generation) && route.current.is_some() {
+        let (probe, handoffs) = continue_exact_route_locked(state, route);
+        return (probe, handoffs, None);
+    }
+    if route_generation.is_some() {
+        return match validate_exact_route_locked(state, target, route) {
+            Ok(validation_handoffs) => {
+                route.generation = Some(current_generation);
+                let (probe, handoffs) = continue_exact_route_locked(state, route);
+                (probe, validation_handoffs + handoffs, None)
+            }
+            Err(reason) => {
+                route.reset_to_target(target);
+                (
+                    rebuild_exact_route_locked(state, target, route),
+                    0,
+                    Some(reason),
+                )
+            }
+        };
+    }
+
+    let fallback = route.invalidation.take();
+    route.reset_to_target(target);
+    (
+        rebuild_exact_route_locked(state, target, route),
+        0,
+        fallback,
+    )
+}
+
 fn rebuild_exact_route_locked(
     state: &WorkCoordinatorState,
     target: &EvaluationWaitToken,
@@ -2713,43 +2731,62 @@ fn rebuild_exact_route_locked(
 fn validate_exact_route_locked(
     state: &WorkCoordinatorState,
     target: &EvaluationWaitToken,
-    route: &ExactDemandRoute,
-) -> bool {
+    route: &mut ExactDemandRoute,
+) -> Result<usize, ExactRouteFallbackReason> {
     let Some(current) = route.current else {
-        return false;
+        return Err(ExactRouteFallbackReason::RetiredWork);
     };
+    if !state.work.contains_key(&current) {
+        if route.parents.len() == 1 {
+            let root = route.parents[0].work;
+            if work_for_wait_locked(state, target) == Some(root) && state.work.contains_key(&root) {
+                route.members.remove(&current);
+                route.parents.clear();
+                route.current = Some(root);
+                return Ok(1);
+            }
+        }
+        return Err(ExactRouteFallbackReason::RetiredWork);
+    }
     let root = route.parents.first().map_or(current, |frame| frame.work);
-    if work_for_wait_locked(state, target) != Some(root) {
-        return false;
+    match work_for_wait_locked(state, target) {
+        None => return Err(ExactRouteFallbackReason::RetiredWork),
+        Some(actual) if actual != root => {
+            return Err(ExactRouteFallbackReason::BranchedWork);
+        }
+        Some(_) => {}
     }
     for (index, frame) in route.parents.iter().enumerate() {
         let Some(record) = state.work.get(&frame.work) else {
-            return false;
+            return Err(ExactRouteFallbackReason::RetiredWork);
         };
         if !matches!(record.state, WorkState::Blocked)
             || record.subscription_epoch != frame.subscription_epoch
         {
-            return false;
+            return Err(ExactRouteFallbackReason::ChangedDependency);
         }
         let Some(dependency) = work_dependency(record) else {
-            return false;
+            return Err(ExactRouteFallbackReason::ChangedDependency);
         };
         if dependency.key() != frame.dependency {
-            return false;
+            return Err(ExactRouteFallbackReason::ChangedDependency);
         }
         let expected = route
             .parents
             .get(index + 1)
             .map_or(current, |next| next.work);
-        let producer = dependency
+        let Some(producer) = dependency
             .producer_wait()
             .as_ref()
-            .and_then(|wait| work_for_wait_locked(state, wait));
-        if producer != Some(expected) {
-            return false;
+            .and_then(|wait| work_for_wait_locked(state, wait))
+        else {
+            return Err(ExactRouteFallbackReason::RetiredWork);
+        };
+        if producer != expected {
+            return Err(ExactRouteFallbackReason::BranchedWork);
         }
     }
-    state.work.contains_key(&current)
+    Ok(0)
 }
 
 /// Advances a route already known to describe the coordinator's current

@@ -148,6 +148,16 @@ generation; an unrelated unresolved promise remains `NoProgress`. Child
 retirement promotes its live descendants to the nearest surviving helping
 route, without making launch an implicit join or transferring task ownership.
 
+Foreground drivers retain a private, non-authoritative exact-demand zipper
+across bounded polls. Its current work ID and parent subscription
+epoch/dependency keys avoid rediscovering an unchanged producer chain; they do
+not own work or keep a demand session alive. Claim and validation occur under
+coordinator state. A generation change with valid frames continues locally,
+while changed dependencies, retirement, or an interrupted release discard the
+hint and invoke the complete guarded traversal from the original wait. Causal
+`.task.new` descendants are a separate helping route and never become zipper
+frames.
+
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector
 lifecycle boundary: an exit guard releases every inactive cache record after

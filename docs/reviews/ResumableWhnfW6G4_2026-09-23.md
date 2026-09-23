@@ -4,10 +4,10 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A-E complete; invalidation and fallback
-verification is next. Foreground exact demand now retains a local validated
-route across common work transitions; the complete guarded traversal remains
-the authoritative cold and invalidation fallback.
+Status: investigation and W6G4R-001A-F complete; closing performance
+measurement is next. Foreground exact demand retains a local validated route
+across common work transitions; the complete guarded traversal remains the
+authoritative cold and invalidation fallback.
 
 ## Scope
 
@@ -189,7 +189,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A-E complete
+**Status:** remediation in progress; W6G4R-001A-F complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -487,6 +487,8 @@ evidence for the concurrent ordering.
 
 ### W6G4R-001F — Exercise invalidation and fallback
 
+**Completed:** 2026-09-23
+
 Force both sides of each condition which can invalidate or suspend the route:
 
 - another thread claims the anticipated child;
@@ -504,6 +506,40 @@ that can be established in O(1); otherwise it invokes the complete guarded
 search from the original target. It must never convert contention into stable
 absence, keep retired work alive, or broaden foreground authority to unrelated
 same-session work.
+
+Fallbacks now retain one private reason until the next authoritative rebuild:
+interleaved release contention, a changed dependency/epoch, retired work, or
+replacement of a remembered producer branch. Test-only profiling increments
+the matching reason counter alongside the aggregate invalidation and cold-
+fallback counts. A generation change by itself is not an invalidation: if all
+frames still validate, the route continues and a child claimed by another
+poller remains a `Busy` checkpoint.
+
+The one constant-time retirement recovery is deliberately narrow. If the
+current child disappeared and its only remembered parent is the original
+target root, the coordinator can discard that child frame and continue from
+the independently rooted parent. Deeper retirement cannot prove that all
+remaining ancestors still lead from the target in O(1), so it uses the cold
+guarded traversal. A woken parent or a parent reblocked at a new subscription
+epoch similarly rebuilds and selects current state rather than following the
+stale child.
+
+Forced tests cover an anticipated child claimed and released by another
+poller, child completion before foreground claim, an observation waking the
+parent while its child remains live, reblocking onto another producer, an
+interleaved release mutation, whole demand-session retirement, task-owned
+versus resolver-owned promise dependencies, lazy/promise cycle settlement in
+both publication orders, and causal child work remaining outside the exact
+zipper. Discarding caller-owned bounded route state causes one cold rebuild and
+does not change the result; dropping the demand owner retires work even while
+the route remains alive.
+
+There is still no public resumable `Evaluation` facade, so F cannot literally
+drop or resume a public bounded evaluation handle. The private stateful pump
+test covers route discard/resumption, while the owner-closure fixture covers
+abandonment and proves the route holds neither a work lease nor a demand-owner
+lease. A future public facade must repeat those lifecycle assertions for its
+own handle rather than treating this deferred API surface as implemented.
 
 ### W6G4R-001G — Close the performance finding
 
