@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -94,6 +95,37 @@ impl EvaluationWorkId {
         self.0.get()
     }
 }
+
+/// Deterministic hashing for bounded traversals over runtime-allocated IDs.
+///
+/// These IDs are allocated monotonically by the runtime and cannot be chosen
+/// by Glam programs. This hasher deliberately provides no collision-resistance
+/// policy and must not be used for user-controlled keys or persistent
+/// coordinator indexes.
+#[derive(Debug, Default)]
+struct TrustedWorkIdHasher(u64);
+
+impl TrustedWorkIdHasher {
+    const MULTIPLIER: u64 = 0x9e37_79b1_85eb_ca87;
+}
+
+impl Hasher for TrustedWorkIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(Self::MULTIPLIER);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(Self::MULTIPLIER);
+    }
+}
+
+type TrustedWorkIdSet = HashSet<EvaluationWorkId, BuildHasherDefault<TrustedWorkIdHasher>>;
 
 #[cfg(test)]
 pub(crate) fn test_wake_registration() -> WakeRegistration {
@@ -676,7 +708,7 @@ pub(crate) struct ExactDemandRoute {
     target: Option<(EvaluationRuntimeId, u64)>,
     current: Option<EvaluationWorkId>,
     parents: Vec<ExactDemandRouteFrame>,
-    members: HashSet<EvaluationWorkId>,
+    members: TrustedWorkIdSet,
     generation: Option<u64>,
     invalidation: Option<ExactRouteFallbackReason>,
 }
@@ -2918,7 +2950,7 @@ fn exact_producer_probe_locked(
     root: EvaluationWorkId,
 ) -> ExactProducerProbe {
     let mut current = root;
-    let mut seen = HashSet::new();
+    let mut seen = TrustedWorkIdSet::default();
     while seen.insert(current) {
         let Some(record) = state.work.get(&current) else {
             return ExactProducerProbe {

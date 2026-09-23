@@ -4,12 +4,12 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A-G complete. Foreground exact demand
-retains a local validated route across common work transitions; the complete
-guarded traversal remains the authoritative cold and invalidation fallback.
-The closing measurement confirms a material improvement and assigns two
-narrower residuals below rather than treating the remaining pre-W4 gap as
-unexplained.
+Status: investigation, W6G4R-001A-G, and W6G4R-002 complete. Foreground exact
+demand retains a local validated route across common work transitions; the
+complete guarded traversal remains the authoritative cold and invalidation
+fallback. A narrowly scoped deterministic hasher removes another measured
+portion of the residual. W6G4R-003 remains assigned to later post-W6G
+generation-accounting work rather than keeping this investigation open.
 
 ## Scope
 
@@ -21,9 +21,10 @@ regression by implementation phase, and identifies the first repair boundary.
 It does not reconsider the semantics of resumable WHNF, role-specific pumping,
 or the separately deferred pure-effect fusion work.
 
-All source instrumentation and experimental edits were confined to detached
-worktrees. The main worktree received only this investigation record and the
-corresponding plan update.
+Measurement-only instrumentation was removed after each observation and is
+absent from the production binary. The main worktree contains only the
+accepted exact-route and trusted-hasher repairs, their forced tests, and the
+corresponding review/plan records.
 
 ## Method
 
@@ -648,7 +649,7 @@ a narrower release-validation issue, recorded as W6G4R-003 below.
 
 **Severity:** medium performance
 
-**Status:** proposed low-risk experiment
+**Completed:** 2026-09-23
 
 Callgrind still attributes 752,883,732 instructions, or 21.18% of the current
 fixture, to `RandomState::hash_one` over `NonZeroU64`-backed private IDs. That
@@ -658,19 +659,44 @@ but remains the largest self-cost. The cold exact-route cycle set's
 inclusive instructions (8.37%).
 
 These identities are runtime-allocated and cannot be selected by an
-adversarial Glam program. Trial a small deterministic multiplicative hasher
-for bounded loop-discovery sets, beginning with `ExactDemandRoute::members`
-and the temporary `seen` set in `rebuild_exact_route_locked`. Keep persistent
-scheduler indexes and user-keyed collections out of the first experiment. A
-single private alias should make the trust boundary visible and prevent the
-hasher from spreading casually.
+adversarial Glam program. The retained route membership set and the
+background exact-producer probe's temporary cycle set now share the private
+`TrustedWorkIdSet` alias and a wrapping xor/multiply hasher. The original
+proposal referred to a temporary `seen` set in `rebuild_exact_route_locked`,
+but the implemented rebuild already uses the route's retained `members` set
+directly; the temporary set belongs to `exact_producer_probe_locked`.
+Persistent scheduler indexes and user-keyed collections remain on randomized
+hashing. The source comment makes this trust boundary explicit.
 
-The experiment must retain the forced route/cycle suites, the exact semantic
-and driver signature above, and the intended duplicate-symbol diagnostic.
-Measure native time and Callgrind before deciding whether to keep it or extend
-it to other coordinator-local private-ID traversal sets. A simple wrapping
-multiply/add or xor/multiply mix is sufficient for this role; no external hash
-dependency or collision-resistance policy is justified.
+Callgrind provides a clear keep decision:
+
+| Measurement | Incremental route | Trusted traversal hasher | Delta |
+| --- | ---: | ---: | ---: |
+| total instructions | 3,554,190,609 | 3,339,481,894 | -6.04% |
+| randomized `NonZeroU64` hash instructions | 752,883,732 | 629,642,378 | -16.37% |
+
+The total removes 214,708,715 instructions; 123,241,354 of those are directly
+attributed to randomized private-ID hashing. Three interleaved warm native
+runs measured 14.18–14.34 seconds in debug and 1.11–1.14 seconds in release.
+The release range is unchanged from W6G4R-001G and the debug range is slightly
+higher, so native timing does not independently establish a wall-clock win.
+It remains corroborating evidence only; the deterministic instruction count,
+small implementation boundary, and absence of semantic change justify keeping
+the experiment.
+
+The exact full-fixture profile remains bit-for-bit equal to W6G4R-001G:
+12,356 bind joins, 519 fan/data reductions, 3,683 calls, 9,926 operator calls,
+15,214 cursor materializations, and 6,215 cursor joins, with all other
+reduction counters zero; and 3,670 machine polls, 154,573 work items, 47,900
+interface polls, 35,326 cursor steps, 49,388 active-pair steps, and 21,959
+cursor dependencies, with every retry/contention/disturbance/restart/checkpoint
+counter zero. The structured duplicate-symbol diagnostic and its
+`asm.result`, source-definition, and binary-extraction contexts are unchanged.
+
+The forced coordinator route/cycle suite, evaluation suite, exact executable
+fixture, and profiling-only semantic assertions pass. The experiment is not
+extended to other traversal sets without separate measurements; W6G4R-003 is
+still the higher-value remaining route-accounting question.
 
 ### W6G4R-003 — Poll-time generation movement over-invalidates routes
 
@@ -713,3 +739,8 @@ denied, the complete ordinary test suite, and
 `scripts/check-interaction-net-profiling.sh` all pass. Temporary route and
 CLI-profile instrumentation remained confined to detached worktrees and is
 not part of the production binary.
+
+At W6G4R-002 completion, formatting, full-feature Clippy with warnings denied,
+the complete ordinary test suite, and the profiling script pass again. Its
+temporary full-fixture profile output was removed before these final gates;
+only the private hasher boundary and its contract test remain.

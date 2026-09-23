@@ -7688,10 +7688,10 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 #### W6G.4 — Measured residual compatibility and scheduling overhead
 
-**Status:** investigation and W6G4R-001A-G complete on 2026-09-23. The primary
-route-rediscovery finding is resolved; a private-ID hasher experiment and
-poll-time generation-accounting cleanup remain explicitly assigned in the
-review before W6G.5 closes the phase.
+**Status:** complete on 2026-09-23. The investigation, W6G4R-001A-G route
+repair, and W6G4R-002 private-ID hasher experiment are complete. The remaining
+poll-time generation-accounting question is extracted as W6G4R-003 for later
+post-W6G performance work and does not hold W6G.5 open.
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
 has established role-specific pumping and completed W6G.3 has removed
@@ -7757,6 +7757,14 @@ therefore owns two narrower follow-ups: W6G4R-002 trials a deterministic
 hasher only for trusted private-ID loop sets, and W6G4R-003 separates
 poll-local generation movement from genuine release interference before any
 further route-policy change.
+
+W6G4R-002 retains that private hasher after reducing the fixture from
+3,554,190,609 to 3,339,481,894 Callgrind instructions (6.04%) while preserving
+the exact semantic/driver signature and diagnostic. Its private alias covers
+only retained exact-route membership and the background exact-producer
+probe's temporary cycle set; persistent scheduler indexes and user-keyed
+collections remain randomized. W6G4R-003 remains explicitly deferred to the
+post-W6G performance docket.
 
 #### W6G.5 — Phase closure and post-W6G review
 
