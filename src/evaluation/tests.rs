@@ -10,8 +10,8 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
     ClaimedTaskWork, ClientDemandHandle, ClientDemandPoll, ClientDemandResult,
-    ClientDemandSnapshot, EvaluationWaitTerminal, ExactTargetStatus, ReflectionWorkPoll,
-    ReflectionWorkState,
+    ClientDemandSnapshot, EvaluationWaitTerminal, ExactDemandRouteProfile, ExactTargetStatus,
+    ReflectionWorkPoll, ReflectionWorkState,
 };
 use super::session::{EvaluationUnfinishedState, EvaluationUnfinishedTask};
 
@@ -6022,6 +6022,54 @@ fn pump_reports_budget_exhaustion_for_runnable_work() {
         .values()
         .collect_managed_for_test()
         .expect("budget exhaustion must return without retaining a mutator");
+}
+
+#[test]
+fn bounded_pump_retains_exact_route_across_budget_returns() {
+    let context = isolated_standalone_context();
+    let leaf = context
+        .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+        .expect("yielding leaf should schedule");
+    let leaf_wait = leaf.wait().clone();
+    let middle = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(Await {
+                context: task_context,
+                dependency: leaf_wait,
+            }))
+        })
+        .expect("middle task should schedule");
+    let middle_wait = middle.wait().clone();
+    let root = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(Await {
+                context: task_context,
+                dependency: middle_wait,
+            }))
+        })
+        .expect("root task should schedule");
+    let mut route = ExactDemandRoute::default();
+
+    for _ in 0..4 {
+        assert_eq!(
+            context.pump_wait_on_route(root.wait(), 1, &mut route),
+            EvaluationPumpOutcome::BudgetExhausted
+        );
+    }
+    assert_eq!(
+        context
+            .coordinator()
+            .expect("test coordinator should remain live")
+            .exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 1,
+            maximum_depth: 1,
+            fast_handoffs: 4,
+            ..ExactDemandRouteProfile::default()
+        },
+        "two block handoffs and two leaf yields should avoid root rediscovery"
+    );
 }
 
 #[test]

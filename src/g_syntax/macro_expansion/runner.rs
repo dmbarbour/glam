@@ -4,7 +4,7 @@ use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue, Values}
 use crate::core::CoreValueFactory;
 use crate::core::Value;
 use crate::diagnostic::Severity;
-use crate::evaluation::EvaluationPumpOutcome;
+use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute};
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
 use crate::runtime::RuntimeValueRoot;
 
@@ -105,6 +105,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
         )
     })?;
 
+    let mut exact_demand_route = ExactDemandRoute::default();
     let branches = loop {
         match search.poll(STEP_BUDGET) {
             IsolatedSearchPoll::Yielded => {}
@@ -119,10 +120,11 @@ pub(in crate::g_syntax) fn run_macro_effect(
                         format!("macro effect became blocked {detail}"),
                     ));
                 };
-                match execution
-                    .macro_context()
-                    .pump_wait(&dependency, STEP_BUDGET)
-                {
+                match execution.macro_context().pump_wait_on_route(
+                    &dependency,
+                    STEP_BUDGET,
+                    &mut exact_demand_route,
+                ) {
                     EvaluationPumpOutcome::TargetReady
                     | EvaluationPumpOutcome::Busy
                     | EvaluationPumpOutcome::BudgetExhausted => {}

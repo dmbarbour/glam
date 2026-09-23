@@ -10,12 +10,12 @@ use super::deferred::terminalize_lazy_cycle;
 use super::{
     ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExitIntent, ObservationRegistration, ProducerSettlementObligation,
-    RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
-    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord,
-    WorkState, demand_session_is_closed, prune_closed_session_registration,
-    publish_task_block_locked, queue_task, register_background_root, remove_ready_task,
-    unregister_background_root,
+    EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker, ExitIntent,
+    ObservationRegistration, ProducerSettlementObligation, RuntimeFailureLedger,
+    SettlementObligations, TaskFailureLedger, TaskStatusPublisher, WakeRegistration,
+    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord, WorkState,
+    demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
+    queue_task, register_background_root, remove_ready_task, unregister_background_root,
 };
 
 impl EvaluationWorkCoordinator {
@@ -478,11 +478,12 @@ impl EvaluationWorkCoordinator {
         } = claimed;
         let demand_session = demand.id();
         let mutation = self.admission.mutation_guard();
-        let (mut release, exact_subscription) = {
+        let (mut release, exact_subscription, mut route_tracker) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            let mut route_tracker = ExactRouteReleaseTracker::new(&state, id);
             let (cancel, abandoned) = {
                 let record = state
                     .work
@@ -575,6 +576,7 @@ impl EvaluationWorkCoordinator {
                 (Vec::new(), None)
             };
             state.work_generation = state.work_generation.wrapping_add(1);
+            route_tracker.changed(true);
             (
                 ReflectionWorkRelease {
                     made_progress,
@@ -586,25 +588,31 @@ impl EvaluationWorkCoordinator {
                     machine: None,
                     cycle,
                     cycle_error,
+                    route: None,
                 },
                 exact_subscription,
+                route_tracker,
             )
         };
         let promoted_wait = exact_subscription
             .as_ref()
             .and_then(|(dependency, _)| dependency.producer_wait());
-        if release.remains_blocked
+        let woke = release.remains_blocked
             && exact_subscription.is_some_and(|(dependency, registration)| {
                 self.subscribe_dependency_guarded(&mutation, dependency, registration)
-            })
-        {
+            });
+        route_tracker.changed(woke);
+        if woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
         if let Some(wait) = promoted_wait {
-            self.promote_deferred_wait_guarded(&mutation, &wait);
+            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+            route_tracker.changed(promoted);
         }
-        if release.remains_blocked && self.recheck_observation_wait(id) {
+        let observation_woke = release.remains_blocked && self.recheck_observation_wait(id);
+        route_tracker.changed(observation_woke);
+        if observation_woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
@@ -650,6 +658,13 @@ impl EvaluationWorkCoordinator {
         } else {
             Vec::new()
         };
+        release.route = Some({
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            route_tracker.finish(&state)
+        });
         drop(mutation);
         self.work_available.notify_all();
         for wake in status_wakes {
@@ -798,6 +813,7 @@ pub(in crate::evaluation) struct ReflectionWorkRelease {
     pub(in crate::evaluation) machine: Option<Box<dyn EvaluationTaskMachine>>,
     pub(in crate::evaluation) cycle: Vec<super::DeferredLazyCycleMember>,
     pub(in crate::evaluation) cycle_error: Option<String>,
+    pub(in crate::evaluation) route: Option<ExactRouteRelease>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

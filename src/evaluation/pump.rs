@@ -8,8 +8,8 @@ use super::coordinator::{
     ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExactTargetSelection, ExactTargetStatus, ReflectionWorkPoll,
-    ReflectionWorkState, WorkDependency,
+    EvaluationWorkId, ExactDemandRoute, ExactRouteRelease, ExactTargetSelection,
+    ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -165,7 +165,15 @@ impl ClaimedTask {
         }
     }
 
-    fn release(self, poll: EvaluationMachinePoll) -> (bool, bool, Option<ReleasedTaskMachine>) {
+    fn release(
+        self,
+        poll: EvaluationMachinePoll,
+    ) -> (
+        bool,
+        bool,
+        Option<ReleasedTaskMachine>,
+        Option<ExactRouteRelease>,
+    ) {
         let (poll, spark) = match poll {
             EvaluationMachinePoll::ScheduleSpark(value) => {
                 (EvaluationMachinePoll::Yielded, Some(value))
@@ -204,7 +212,12 @@ fn release_lazy_route(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedLazyRoute,
     poll: EvaluationMachinePoll,
-) -> (bool, bool, Option<ReleasedTaskMachine>) {
+) -> (
+    bool,
+    bool,
+    Option<ReleasedTaskMachine>,
+    Option<ExactRouteRelease>,
+) {
     let work = claimed.id();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
@@ -224,16 +237,17 @@ fn release_lazy_route(
         EvaluationMachinePoll::Cancelled => unreachable!("lazy route cannot be canceled as a task"),
     };
     let mut release = coordinator.release_lazy_route(claimed, work_poll);
+    let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
             coordinator,
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
         );
-        return (release.made_progress, false, None);
+        return (release.made_progress, false, None, route);
     }
     if !release.terminal {
-        return (release.made_progress, release.remains_blocked, None);
+        return (release.made_progress, release.remains_blocked, None, route);
     }
     let terminal = terminal.expect("terminal lazy route poll must carry a terminal result");
     let failure = match &terminal {
@@ -245,7 +259,7 @@ fn release_lazy_route(
     };
     coordinator.settle_terminal_work(work, terminal, failure);
     coordinator.retire_lazy_route(work);
-    (release.made_progress, false, None)
+    (release.made_progress, false, None, route)
 }
 
 impl EvaluationDemandState {
@@ -279,7 +293,7 @@ impl EvaluationDemandState {
 
             let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
             let poll = claimed.poll(&mut budget);
-            let (_, _, released) = claimed.release(poll);
+            let (_, _, released, _) = claimed.release(poll);
             if let Some(machine) = released {
                 machine.finish();
             }
@@ -393,11 +407,28 @@ impl EvaluationDemandState {
     }
 }
 
+#[cfg(test)]
 pub(super) fn pump_demand(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
+    step_budget: usize,
+) -> EvaluationPumpOutcome {
+    pump_demand_on_route(
+        coordinator,
+        context,
+        target,
+        step_budget,
+        &mut ExactDemandRoute::default(),
+    )
+}
+
+pub(super) fn pump_demand_on_route(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    context: &EvalContext,
+    target: &EvaluationWaitToken,
     mut step_budget: usize,
+    route: &mut ExactDemandRoute,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
         return EvaluationPumpOutcome::TargetReady;
@@ -405,7 +436,7 @@ pub(super) fn pump_demand(
     if target.runtime_id() != context.values().runtime_id() {
         return EvaluationPumpOutcome::NoProgress;
     }
-    let mut yielded_exact = None;
+    let mut yielded_causal = None;
     loop {
         if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
@@ -415,19 +446,22 @@ pub(super) fn pump_demand(
         }
 
         let selection_generation = coordinator.work_generation();
-        let exact = yielded_exact
-            .take()
-            .and_then(|work| coordinator.claim_work(work))
-            .map(ExactTargetSelection::Claimed)
-            .unwrap_or_else(|| coordinator.claim_exact_target(target));
-        let (claimed, causal_busy) = match exact {
-            ExactTargetSelection::Claimed(exact) => (Some(exact), false),
+        let exact = coordinator.claim_exact_target_on_route(target, route);
+        let (claimed, exact_claim, causal_busy) = match exact {
+            ExactTargetSelection::Claimed(exact) => (Some(exact), true, false),
             ExactTargetSelection::Busy => return EvaluationPumpOutcome::Busy,
             ExactTargetSelection::None => {
-                match coordinator.claim_causal_child_work(Some(target), context.causal_task_ids()) {
-                    CausalChildSelection::Claimed(child) => (Some(child), false),
-                    CausalChildSelection::Busy => (None, true),
-                    CausalChildSelection::None => (None, false),
+                let causal = yielded_causal
+                    .take()
+                    .and_then(|work| coordinator.claim_work(work))
+                    .map(CausalChildSelection::Claimed)
+                    .unwrap_or_else(|| {
+                        coordinator.claim_causal_child_work(Some(target), context.causal_task_ids())
+                    });
+                match causal {
+                    CausalChildSelection::Claimed(child) => (Some(child), false, false),
+                    CausalChildSelection::Busy => (None, false, true),
+                    CausalChildSelection::None => (None, false, false),
                 }
             }
         };
@@ -439,11 +473,7 @@ pub(super) fn pump_demand(
                 return EvaluationPumpOutcome::TargetReady;
             }
             if coordinator.work_generation() != selection_generation {
-                match coordinator.exact_target_status(target) {
-                    ExactTargetStatus::Ready => continue,
-                    ExactTargetStatus::Busy => return EvaluationPumpOutcome::Busy,
-                    ExactTargetStatus::None => {}
-                }
+                continue;
             }
             return EvaluationPumpOutcome::NoProgress;
         };
@@ -459,17 +489,26 @@ pub(super) fn pump_demand(
             poll,
             EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
         );
-        let (_, _, released) = claimed.release(poll);
+        let (_, _, released, route_release) = claimed.release(poll);
+        if exact_claim {
+            if let Some(release) = route_release {
+                let _handed_off = route.apply_release(release);
+                #[cfg(test)]
+                if _handed_off {
+                    coordinator.record_exact_route_handoffs(1);
+                }
+            } else {
+                route.invalidate();
+            }
+        }
         if let Some(machine) = released {
             machine.finish();
         }
-        if yielded {
-            // An exact, dormant producer can consume a quantum immediately
-            // before publishing the dependency it discovered. Preserve that
-            // continuation only in this bounded demand pump. Globally queuing
-            // it would turn speculative demand from an abandoned alternative
-            // into unbounded eager evaluation by background workers.
-            yielded_exact = Some(work_id);
+        if yielded && !exact_claim {
+            // Causal launch provenance is not an exact zipper edge. Preserve
+            // its immediate continuation within this bounded call only; a
+            // later call must rediscover it through the causal-child probe.
+            yielded_causal = Some(work_id);
         }
     }
 }
@@ -478,7 +517,12 @@ fn release_reflection_task(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedReflectionWork,
     poll: EvaluationMachinePoll,
-) -> (bool, bool, Option<ReleasedTaskMachine>) {
+) -> (
+    bool,
+    bool,
+    Option<ReleasedTaskMachine>,
+    Option<ExactRouteRelease>,
+) {
     let work = claimed.id();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
@@ -502,6 +546,7 @@ fn release_reflection_task(
     };
 
     let mut release = coordinator.release_reflection(claimed, work_poll);
+    let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
             coordinator,
@@ -512,10 +557,15 @@ fn release_reflection_task(
     if !release.terminal {
         if !release.exit_waiting {
             debug_assert!(release.machine.is_none());
-            return (release.made_progress, release.remains_blocked, None);
+            return (release.made_progress, release.remains_blocked, None, route);
         }
         let released = release.machine.take().map(ReleasedTaskMachine::DropOnly);
-        return (release.made_progress, release.remains_blocked, released);
+        return (
+            release.made_progress,
+            release.remains_blocked,
+            released,
+            route,
+        );
     }
 
     let terminal = if release.cancel {
@@ -558,14 +608,19 @@ fn release_reflection_task(
             retirement,
         }
     });
-    (release.made_progress, false, released)
+    (release.made_progress, false, released, route)
 }
 
 fn release_deferred_task(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedDeferredWork,
     poll: EvaluationMachinePoll,
-) -> (bool, bool, Option<ReleasedTaskMachine>) {
+) -> (
+    bool,
+    bool,
+    Option<ReleasedTaskMachine>,
+    Option<ExactRouteRelease>,
+) {
     let work = claimed.id();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
@@ -599,17 +654,18 @@ fn release_deferred_task(
     };
 
     let mut release = coordinator.release_deferred(claimed, work_poll);
+    let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
             coordinator,
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
         );
-        return (release.made_progress, false, None);
+        return (release.made_progress, false, None, route);
     }
     if !release.terminal {
         debug_assert!(release.machine.is_none());
-        return (release.made_progress, release.remains_blocked, None);
+        return (release.made_progress, release.remains_blocked, None, route);
     }
 
     let terminal = if release.abandoned {
@@ -645,6 +701,7 @@ fn release_deferred_task(
             machine,
             retirement: WorkRetirement::Deferred(coordinator.clone(), work),
         }),
+        route,
     )
 }
 
@@ -763,7 +820,7 @@ impl EvaluationWorkCoordinator {
             poll,
             EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
         );
-        let (_, _, released) = claimed.release(poll);
+        let (_, _, released, _) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
         }
@@ -780,7 +837,7 @@ impl EvaluationWorkCoordinator {
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let poll = claimed.poll(&mut budget);
         probe(&poll);
-        let (_, _, released) = claimed.release(poll);
+        let (_, _, released, _) = claimed.release(poll);
         if let Some(machine) = released {
             machine.finish();
         }

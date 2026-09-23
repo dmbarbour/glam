@@ -805,6 +805,145 @@ fn foreground_search_may_cross_demand_sessions_within_one_runtime() {
 }
 
 #[test]
+fn foreground_route_descends_from_a_published_block_without_rediscovery() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "route child");
+    let (_, parent) = reserve_ready_test_reflection(&coordinator, &session);
+    let parent_wait = wait_for_test_work(&coordinator, parent);
+    let mut route = ExactDemandRoute::default();
+
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::Reflection(parent_claim)) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the exact route should initially claim its reflection root")
+    };
+    let mut release = coordinator.release_reflection(
+        parent_claim,
+        ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Wait(child_wait)),
+            observed_epoch: None,
+            error: None,
+        }),
+    );
+    assert!(
+        route.apply_release(
+            release
+                .route
+                .take()
+                .expect("release should publish an exact route handoff")
+        ),
+        "the uninterrupted parent release should advance its local route"
+    );
+
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the retained route should claim the direct child")
+    };
+    assert_eq!(claimed.id(), child);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 1,
+            maximum_depth: 1,
+            ..ExactDemandRouteProfile::default()
+        },
+        "the child handoff should not search again from the parent wait"
+    );
+}
+
+#[test]
+fn foreground_route_retains_a_busy_candidate_across_its_release() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "busy route child");
+    let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+    let running = coordinator
+        .claim_work(child)
+        .expect("the child should be claimable by another poller");
+    let mut route = ExactDemandRoute::default();
+
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route),
+        ExactTargetSelection::Busy
+    ));
+    coordinator.requeue_unpolled_task(running);
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the retained busy candidate should be claimable after release")
+    };
+    assert_eq!(claimed.id(), child);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 1,
+            edges_visited: 2,
+            maximum_depth: 2,
+            ..ExactDemandRouteProfile::default()
+        },
+        "validating the retained zipper should not count as a cold search"
+    );
+}
+
+#[test]
+fn foreground_route_returns_to_its_parent_after_child_completion() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "terminal child");
+    let (parent_wait, parent) = block_test_reflection_on(&coordinator, &session, child_wait, None);
+    let mut route = ExactDemandRoute::default();
+
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::Deferred(child_claim)) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the initial route should descend to its deferred child")
+    };
+    assert_eq!(child_claim.id(), child);
+    let mut release = coordinator.release_deferred(child_claim, DeferredWorkPoll::Terminal);
+    let route_release = release
+        .route
+        .take()
+        .expect("terminal release should retain the exact route handoff");
+    coordinator.settle_terminal_work(
+        child,
+        EvaluationWaitTerminal::Abandoned,
+        Arc::new(EvaluationFailure::message("test terminal route child")),
+    );
+    assert!(
+        route.apply_release(route_release),
+        "the uninterrupted terminal release should pop to its parent"
+    );
+    drop(
+        release
+            .machine
+            .take()
+            .expect("terminal deferred release should retain its machine"),
+    );
+    coordinator.retire_deferred(child);
+
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&parent_wait, &mut route)
+    else {
+        panic!("the retained route should return to the woken parent")
+    };
+    assert_eq!(claimed.id(), parent);
+    coordinator.requeue_unpolled_task(claimed);
+    assert_eq!(
+        coordinator.exact_demand_route_profile().complete_searches,
+        1,
+        "terminal return should validate the zipper without a cold root search"
+    );
+}
+
+#[test]
 fn foreground_exact_selection_holds_mutation_and_state_through_claim() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");

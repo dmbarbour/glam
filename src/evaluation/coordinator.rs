@@ -665,6 +665,147 @@ pub(super) enum ExactTargetSelection {
     None,
 }
 
+/// Non-authoritative position on one foreground exact-demand route.
+///
+/// The original wait remains owned by the driver. These scheduler identities
+/// merely avoid rediscovering a route whose coordinator generation is still
+/// known. Any unaccounted mutation discards the checkpoint and rebuilds it
+/// from that original wait.
+#[derive(Debug, Default)]
+pub(crate) struct ExactDemandRoute {
+    target: Option<(EvaluationRuntimeId, u64)>,
+    current: Option<EvaluationWorkId>,
+    parents: Vec<ExactDemandRouteFrame>,
+    members: HashSet<EvaluationWorkId>,
+    generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExactDemandRouteFrame {
+    work: EvaluationWorkId,
+    subscription_epoch: u64,
+    dependency: WorkDependencyKey,
+}
+
+impl ExactDemandRoute {
+    fn prepare(&mut self, target: &EvaluationWaitToken) {
+        let target = (target.runtime_id(), target.get());
+        if self.target != Some(target) {
+            self.target = Some(target);
+            self.current = None;
+            self.parents.clear();
+            self.members.clear();
+            self.generation = None;
+        }
+    }
+
+    fn reset_to_target(&mut self, target: &EvaluationWaitToken) {
+        self.target = Some((target.runtime_id(), target.get()));
+        self.current = None;
+        self.parents.clear();
+        self.members.clear();
+        self.generation = None;
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = None;
+    }
+
+    pub(super) fn apply_release(&mut self, release: ExactRouteRelease) -> bool {
+        if self.current != Some(release.work)
+            || self.generation != Some(release.start_generation)
+            || !release.uninterrupted
+        {
+            self.invalidate();
+            return false;
+        }
+        match release.disposition {
+            ExactRouteDisposition::Runnable | ExactRouteDisposition::Busy => {}
+            ExactRouteDisposition::Blocked {
+                subscription_epoch,
+                dependency,
+                producer: Some(producer),
+            } => {
+                if !self.members.insert(producer) {
+                    self.generation = Some(release.end_generation);
+                    return true;
+                }
+                self.parents.push(ExactDemandRouteFrame {
+                    work: release.work,
+                    subscription_epoch,
+                    dependency,
+                });
+                self.current = Some(producer);
+            }
+            ExactRouteDisposition::Blocked { producer: None, .. }
+            | ExactRouteDisposition::Parked => {}
+            ExactRouteDisposition::Terminal => {
+                if let Some(current) = self.current {
+                    self.members.remove(&current);
+                }
+                self.current = self.parents.pop().map(|frame| frame.work);
+            }
+        }
+        self.generation = Some(release.end_generation);
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ExactRouteRelease {
+    work: EvaluationWorkId,
+    start_generation: u64,
+    end_generation: u64,
+    uninterrupted: bool,
+    disposition: ExactRouteDisposition,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExactRouteDisposition {
+    Runnable,
+    Busy,
+    Blocked {
+        subscription_epoch: u64,
+        dependency: WorkDependencyKey,
+        producer: Option<EvaluationWorkId>,
+    },
+    Parked,
+    Terminal,
+}
+
+pub(super) struct ExactRouteReleaseTracker {
+    work: EvaluationWorkId,
+    start_generation: u64,
+    expected_generation: u64,
+}
+
+impl ExactRouteReleaseTracker {
+    fn new(state: &WorkCoordinatorState, work: EvaluationWorkId) -> Self {
+        Self {
+            work,
+            start_generation: state.work_generation,
+            expected_generation: state.work_generation,
+        }
+    }
+
+    fn changed(&mut self, changed: bool) {
+        if changed {
+            self.expected_generation = self.expected_generation.wrapping_add(1);
+        }
+    }
+
+    fn finish(self, state: &WorkCoordinatorState) -> ExactRouteRelease {
+        let disposition = exact_route_disposition_locked(state, self.work);
+        ExactRouteRelease {
+            work: self.work,
+            start_generation: self.start_generation,
+            end_generation: state.work_generation,
+            uninterrupted: state.work_generation == self.expected_generation,
+            disposition,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExactTargetStatus {
     Ready,
@@ -830,6 +971,24 @@ impl EvaluationWorkCoordinator {
         profile.complete_searches += 1;
         profile.edges_visited += depth;
         profile.maximum_depth = profile.maximum_depth.max(depth);
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_exact_route_handoffs(&self, handoffs: usize) {
+        self.exact_route_profile
+            .lock()
+            .expect("exact demand route profile was poisoned")
+            .fast_handoffs += handoffs;
+    }
+
+    #[cfg(test)]
+    fn record_exact_route_fallback(&self) {
+        let mut profile = self
+            .exact_route_profile
+            .lock()
+            .expect("exact demand route profile was poisoned");
+        profile.checkpoint_invalidations += 1;
+        profile.cold_fallbacks += 1;
     }
 
     #[cfg(test)]
@@ -1469,8 +1628,25 @@ impl EvaluationWorkCoordinator {
     /// coordinator-state critical section. A queued ancestor therefore wins
     /// before its retained prior block, and the selected producer cannot
     /// retire or change dependency between the probe and claim.
+    #[cfg(test)]
     pub(super) fn claim_exact_target(&self, target: &EvaluationWaitToken) -> ExactTargetSelection {
+        let mut route = ExactDemandRoute::default();
+        self.claim_exact_target_on_route(target, &mut route)
+    }
+
+    /// Claims the next runnable record through a retained exact-demand route.
+    ///
+    /// A matching coordinator generation makes the local zipper a sufficient
+    /// proof for the next descent or return. Any other mutation rebuilds the
+    /// complete route under the same lock before claiming, preserving the cold
+    /// selector as the sole source of authority.
+    pub(super) fn claim_exact_target_on_route(
+        &self,
+        target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
+    ) -> ExactTargetSelection {
         debug_assert_eq!(target.runtime_id(), self.runtime);
+        route.prepare(target);
         #[cfg(test)]
         let selection_probe = self
             .exact_selection_probe
@@ -1478,12 +1654,32 @@ impl EvaluationWorkCoordinator {
             .expect("exact selection probe was poisoned")
             .take();
         let mutation = self.admission.mutation_guard();
-        let (selection, _depth) = {
+        let (selection, _depth, _handoffs, _fell_back) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let probe = exact_target_probe_locked(&state, target);
+            let route_generation = route.generation;
+            let current_generation = state.work_generation;
+            let (probe, handoffs, fell_back) =
+                if route_generation == Some(current_generation) && route.current.is_some() {
+                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
+                    (probe, handoffs, false)
+                } else if route_generation.is_some()
+                    && validate_exact_route_locked(&state, target, route)
+                {
+                    route.generation = Some(current_generation);
+                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
+                    (probe, handoffs, false)
+                } else {
+                    let fell_back = route_generation.is_some();
+                    route.reset_to_target(target);
+                    (
+                        rebuild_exact_route_locked(&state, target, route),
+                        0,
+                        fell_back,
+                    )
+                };
             let selection = match probe.selection {
                 CausalBackgroundProbe::Ready(id) => {
                     #[cfg(test)]
@@ -1493,19 +1689,39 @@ impl EvaluationWorkCoordinator {
                     match claim_task_work_locked(&mut state, self.runtime, id, false) {
                         Some(claimed) => {
                             state.work_generation = state.work_generation.wrapping_add(1);
+                            route.current = Some(id);
+                            route.generation = Some(state.work_generation);
                             ExactTargetSelection::Claimed(claimed)
                         }
-                        None => ExactTargetSelection::None,
+                        None => {
+                            route.invalidate();
+                            ExactTargetSelection::None
+                        }
                     }
                 }
-                CausalBackgroundProbe::Busy => ExactTargetSelection::Busy,
-                CausalBackgroundProbe::None => ExactTargetSelection::None,
+                CausalBackgroundProbe::Busy(id) => {
+                    route.current = Some(id);
+                    route.generation = Some(state.work_generation);
+                    ExactTargetSelection::Busy
+                }
+                CausalBackgroundProbe::None => {
+                    route.generation = Some(state.work_generation);
+                    ExactTargetSelection::None
+                }
             };
-            (selection, probe.depth)
+            (selection, probe.depth, handoffs, fell_back)
         };
         drop(mutation);
         #[cfg(test)]
-        self.record_complete_exact_route_search(_depth);
+        {
+            if _depth != 0 {
+                self.record_complete_exact_route_search(_depth);
+            }
+            self.record_exact_route_handoffs(_handoffs);
+            if _fell_back {
+                self.record_exact_route_fallback();
+            }
+        }
         if matches!(selection, ExactTargetSelection::Claimed(_)) {
             self.work_available.notify_all();
         }
@@ -1515,6 +1731,7 @@ impl EvaluationWorkCoordinator {
     /// Observes the current exact-route scheduling state without claiming it.
     /// This is used only where a caller must decide whether to wait or retry;
     /// execution paths use [`Self::claim_exact_target`] instead.
+    #[cfg(test)]
     pub(super) fn exact_target_status(&self, target: &EvaluationWaitToken) -> ExactTargetStatus {
         debug_assert_eq!(target.runtime_id(), self.runtime);
         let (status, _depth) = {
@@ -1525,13 +1742,73 @@ impl EvaluationWorkCoordinator {
             let probe = exact_target_probe_locked(&state, target);
             let status = match probe.selection {
                 CausalBackgroundProbe::Ready(_) => ExactTargetStatus::Ready,
-                CausalBackgroundProbe::Busy => ExactTargetStatus::Busy,
+                CausalBackgroundProbe::Busy(_) => ExactTargetStatus::Busy,
                 CausalBackgroundProbe::None => ExactTargetStatus::None,
             };
             (status, probe.depth)
         };
         #[cfg(test)]
         self.record_complete_exact_route_search(_depth);
+        status
+    }
+
+    pub(super) fn exact_target_status_on_route(
+        &self,
+        target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
+    ) -> ExactTargetStatus {
+        debug_assert_eq!(target.runtime_id(), self.runtime);
+        route.prepare(target);
+        let (status, _depth, _handoffs, _fell_back) = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let current_generation = state.work_generation;
+            let route_generation = route.generation;
+            let (probe, handoffs, fell_back) =
+                if route_generation == Some(current_generation) && route.current.is_some() {
+                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
+                    (probe, handoffs, false)
+                } else if route_generation.is_some()
+                    && validate_exact_route_locked(&state, target, route)
+                {
+                    route.generation = Some(current_generation);
+                    let (probe, handoffs) = continue_exact_route_locked(&state, route);
+                    (probe, handoffs, false)
+                } else {
+                    let fell_back = route_generation.is_some();
+                    route.reset_to_target(target);
+                    (
+                        rebuild_exact_route_locked(&state, target, route),
+                        0,
+                        fell_back,
+                    )
+                };
+            let status = match probe.selection {
+                CausalBackgroundProbe::Ready(id) => {
+                    route.current = Some(id);
+                    ExactTargetStatus::Ready
+                }
+                CausalBackgroundProbe::Busy(id) => {
+                    route.current = Some(id);
+                    ExactTargetStatus::Busy
+                }
+                CausalBackgroundProbe::None => ExactTargetStatus::None,
+            };
+            route.generation = Some(state.work_generation);
+            (status, probe.depth, handoffs, fell_back)
+        };
+        #[cfg(test)]
+        {
+            if _depth != 0 {
+                self.record_complete_exact_route_search(_depth);
+            }
+            self.record_exact_route_handoffs(_handoffs);
+            if _fell_back {
+                self.record_exact_route_fallback();
+            }
+        }
         status
     }
 
@@ -1960,7 +2237,7 @@ impl EvaluationWorkCoordinator {
             }
             matches!(
                 causal_background_probe_locked(&state, *root),
-                CausalBackgroundProbe::Busy
+                CausalBackgroundProbe::Busy(_)
             )
         })
     }
@@ -2263,6 +2540,35 @@ fn work_dependency(record: &WorkRecord) -> Option<&WorkDependency> {
     }
 }
 
+fn exact_route_disposition_locked(
+    state: &WorkCoordinatorState,
+    work: EvaluationWorkId,
+) -> ExactRouteDisposition {
+    let Some(record) = state.work.get(&work) else {
+        return ExactRouteDisposition::Terminal;
+    };
+    match record.state {
+        WorkState::Queued | WorkState::Dormant => ExactRouteDisposition::Runnable,
+        WorkState::Reserved | WorkState::Running => ExactRouteDisposition::Busy,
+        WorkState::Blocked => {
+            let Some(dependency) = work_dependency(record) else {
+                return ExactRouteDisposition::Parked;
+            };
+            let producer = dependency
+                .producer_wait()
+                .as_ref()
+                .and_then(|wait| work_for_wait_locked(state, wait));
+            ExactRouteDisposition::Blocked {
+                subscription_epoch: record.subscription_epoch,
+                dependency: dependency.key(),
+                producer,
+            }
+        }
+        WorkState::ExitWaiting => ExactRouteDisposition::Parked,
+        WorkState::Terminalizing => ExactRouteDisposition::Terminal,
+    }
+}
+
 fn work_for_wait_locked(
     state: &WorkCoordinatorState,
     wait: &EvaluationWaitToken,
@@ -2301,6 +2607,7 @@ struct ExactProducerProbe {
     depth: usize,
 }
 
+#[cfg(test)]
 fn exact_target_probe_locked(
     state: &WorkCoordinatorState,
     target: &EvaluationWaitToken,
@@ -2312,6 +2619,259 @@ fn exact_target_probe_locked(
         };
     };
     exact_producer_probe_locked(state, root)
+}
+
+fn rebuild_exact_route_locked(
+    state: &WorkCoordinatorState,
+    target: &EvaluationWaitToken,
+    route: &mut ExactDemandRoute,
+) -> ExactProducerProbe {
+    let Some(root) = work_for_wait_locked(state, target) else {
+        return ExactProducerProbe {
+            selection: CausalBackgroundProbe::None,
+            depth: 0,
+        };
+    };
+    route.current = Some(root);
+    route.members.insert(root);
+    let mut current = root;
+    let mut depth = 0;
+    loop {
+        depth += 1;
+        route.current = Some(current);
+        let Some(record) = state.work.get(&current) else {
+            route.current = None;
+            route.parents.clear();
+            return ExactProducerProbe {
+                selection: CausalBackgroundProbe::None,
+                depth,
+            };
+        };
+        match record.state {
+            WorkState::Queued => {
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Ready(current),
+                    depth,
+                };
+            }
+            WorkState::Dormant
+                if matches!(record.kind, WorkKind::Deferred(_) | WorkKind::LazyRoute(_)) =>
+            {
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Ready(current),
+                    depth,
+                };
+            }
+            WorkState::Blocked => {
+                let Some(dependency) = work_dependency(record) else {
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth,
+                    };
+                };
+                let Some(wait) = dependency.producer_wait() else {
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth,
+                    };
+                };
+                let Some(producer) = work_for_wait_locked(state, &wait) else {
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth,
+                    };
+                };
+                if !route.members.insert(producer) {
+                    return ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth,
+                    };
+                }
+                route.parents.push(ExactDemandRouteFrame {
+                    work: current,
+                    subscription_epoch: record.subscription_epoch,
+                    dependency: dependency.key(),
+                });
+                current = producer;
+            }
+            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::Busy(current),
+                    depth,
+                };
+            }
+            WorkState::Dormant | WorkState::ExitWaiting => {
+                return ExactProducerProbe {
+                    selection: CausalBackgroundProbe::None,
+                    depth,
+                };
+            }
+        }
+    }
+}
+
+fn validate_exact_route_locked(
+    state: &WorkCoordinatorState,
+    target: &EvaluationWaitToken,
+    route: &ExactDemandRoute,
+) -> bool {
+    let Some(current) = route.current else {
+        return false;
+    };
+    let root = route.parents.first().map_or(current, |frame| frame.work);
+    if work_for_wait_locked(state, target) != Some(root) {
+        return false;
+    }
+    for (index, frame) in route.parents.iter().enumerate() {
+        let Some(record) = state.work.get(&frame.work) else {
+            return false;
+        };
+        if !matches!(record.state, WorkState::Blocked)
+            || record.subscription_epoch != frame.subscription_epoch
+        {
+            return false;
+        }
+        let Some(dependency) = work_dependency(record) else {
+            return false;
+        };
+        if dependency.key() != frame.dependency {
+            return false;
+        }
+        let expected = route
+            .parents
+            .get(index + 1)
+            .map_or(current, |next| next.work);
+        let producer = dependency
+            .producer_wait()
+            .as_ref()
+            .and_then(|wait| work_for_wait_locked(state, wait));
+        if producer != Some(expected) {
+            return false;
+        }
+    }
+    state.work.contains_key(&current)
+}
+
+/// Advances a route already known to describe the coordinator's current
+/// generation. Each loop iteration is one real scheduler edge transition,
+/// rather than a repeated walk from the root.
+fn continue_exact_route_locked(
+    state: &WorkCoordinatorState,
+    route: &mut ExactDemandRoute,
+) -> (ExactProducerProbe, usize) {
+    let mut handoffs = 0;
+    loop {
+        let Some(current) = route.current else {
+            return (
+                ExactProducerProbe {
+                    selection: CausalBackgroundProbe::None,
+                    depth: 0,
+                },
+                handoffs,
+            );
+        };
+        let Some(record) = state.work.get(&current) else {
+            route.members.remove(&current);
+            let Some(parent) = route.parents.pop() else {
+                route.current = None;
+                return (
+                    ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth: 0,
+                    },
+                    handoffs,
+                );
+            };
+            route.current = Some(parent.work);
+            handoffs += 1;
+            continue;
+        };
+        match record.state {
+            WorkState::Queued => {
+                return (
+                    ExactProducerProbe {
+                        selection: CausalBackgroundProbe::Ready(current),
+                        depth: 0,
+                    },
+                    handoffs,
+                );
+            }
+            WorkState::Dormant
+                if matches!(record.kind, WorkKind::Deferred(_) | WorkKind::LazyRoute(_)) =>
+            {
+                return (
+                    ExactProducerProbe {
+                        selection: CausalBackgroundProbe::Ready(current),
+                        depth: 0,
+                    },
+                    handoffs,
+                );
+            }
+            WorkState::Blocked => {
+                let Some(dependency) = work_dependency(record) else {
+                    return (
+                        ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth: 0,
+                        },
+                        handoffs,
+                    );
+                };
+                let Some(wait) = dependency.producer_wait() else {
+                    return (
+                        ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth: 0,
+                        },
+                        handoffs,
+                    );
+                };
+                let Some(producer) = work_for_wait_locked(state, &wait) else {
+                    return (
+                        ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth: 0,
+                        },
+                        handoffs,
+                    );
+                };
+                if !route.members.insert(producer) {
+                    return (
+                        ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth: 0,
+                        },
+                        handoffs,
+                    );
+                }
+                route.parents.push(ExactDemandRouteFrame {
+                    work: current,
+                    subscription_epoch: record.subscription_epoch,
+                    dependency: dependency.key(),
+                });
+                route.current = Some(producer);
+                handoffs += 1;
+            }
+            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+                return (
+                    ExactProducerProbe {
+                        selection: CausalBackgroundProbe::Busy(current),
+                        depth: 0,
+                    },
+                    handoffs,
+                );
+            }
+            WorkState::Dormant | WorkState::ExitWaiting => {
+                return (
+                    ExactProducerProbe {
+                        selection: CausalBackgroundProbe::None,
+                        depth: 0,
+                    },
+                    handoffs,
+                );
+            }
+        }
+    }
 }
 
 /// Walks one exact producer route using each record's current scheduling
@@ -2362,7 +2922,7 @@ fn exact_producer_probe_locked(
             }
             WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
                 return ExactProducerProbe {
-                    selection: CausalBackgroundProbe::Busy,
+                    selection: CausalBackgroundProbe::Busy(current),
                     depth: seen.len(),
                 };
             }
@@ -2386,14 +2946,14 @@ fn causal_background_candidate_locked(
 ) -> Option<EvaluationWorkId> {
     match causal_background_probe_locked(state, root) {
         CausalBackgroundProbe::Ready(candidate) => Some(candidate),
-        CausalBackgroundProbe::Busy | CausalBackgroundProbe::None => None,
+        CausalBackgroundProbe::Busy(_) | CausalBackgroundProbe::None => None,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CausalBackgroundProbe {
     Ready(EvaluationWorkId),
-    Busy,
+    Busy(EvaluationWorkId),
     None,
 }
 

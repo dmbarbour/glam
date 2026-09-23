@@ -1615,6 +1615,7 @@ fn await_deferred_task(
     wait: crate::evaluation::EvaluationWaitToken,
     kind: &str,
 ) -> Result<Option<Value>, EvaluationHalt> {
+    let mut exact_demand_route = crate::evaluation::ExactDemandRoute::default();
     let poll = context.context().poll_wait(&wait);
     if !matches!(&poll, EvaluationWaitPoll::Pending(_)) {
         return deferred_wait_result(context, &wait, kind, poll);
@@ -1624,7 +1625,10 @@ fn await_deferred_task(
         return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
     }
     if context.context().runs_scheduled_task() {
-        return match context.context().pump_wait(&wait, 256) {
+        return match context
+            .context()
+            .pump_wait_on_route(&wait, 256, &mut exact_demand_route)
+        {
             EvaluationPumpOutcome::TargetReady => {
                 deferred_wait_result(context, &wait, kind, context.context().poll_wait(&wait))
             }
@@ -1636,17 +1640,24 @@ fn await_deferred_task(
         };
     }
     loop {
-        match context.context().pump_wait(&wait, 256) {
+        match context
+            .context()
+            .pump_wait_on_route(&wait, 256, &mut exact_demand_route)
+        {
             EvaluationPumpOutcome::TargetReady => break,
             EvaluationPumpOutcome::Busy if context.context().waits_for_claimed_tasks() => {
-                context.context().wait_for_claimed_task(&wait);
+                context
+                    .context()
+                    .wait_for_claimed_task_on_route(&wait, &mut exact_demand_route);
             }
             EvaluationPumpOutcome::Busy => {
                 return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
             }
             EvaluationPumpOutcome::NoProgress => {
                 if context.context().waits_for_claimed_tasks()
-                    && context.context().retry_after_no_progress(&wait)
+                    && context
+                        .context()
+                        .retry_after_no_progress_on_route(&wait, &mut exact_demand_route)
                 {
                     continue;
                 }

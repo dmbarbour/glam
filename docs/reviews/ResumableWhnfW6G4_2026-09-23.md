@@ -4,10 +4,10 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation and W6G4R-001A-D complete; incremental route
-implementation is next. Foreground exact demand now uses the same
-queued-before-prior-block policy as background demand, but repeated cold
-discovery remains material.
+Status: investigation and W6G4R-001A-E complete; invalidation and fallback
+verification is next. Foreground exact demand now retains a local validated
+route across common work transitions; the complete guarded traversal remains
+the authoritative cold and invalidation fallback.
 
 ## Scope
 
@@ -189,7 +189,7 @@ recommended as the primary repair.
 
 **Severity:** high performance
 
-**Status:** remediation in progress; W6G4R-001A-D complete
+**Status:** remediation in progress; W6G4R-001A-E complete
 
 The coordinator retains every exact dependency edge needed to describe the
 current demand route, but foreground pumping retains no position within that
@@ -433,6 +433,8 @@ managed edge.
 
 ### W6G4R-001E — Implement incremental descent and return
 
+**Completed:** 2026-09-23
+
 Extend claim/release dispositions so the foreground driver can update the
 route without searching from its root:
 
@@ -451,6 +453,37 @@ record on its own route to try next.
 Do not maintain an eagerly propagated root-to-leaf cache in every work record.
 That would move the same O(depth) work into invalidation and introduce shared
 write contention before the local route has been measured.
+
+Foreground exact demand now carries a private `ExactDemandRoute` containing
+the current work, validated parent frames, a retained-route cycle set, and the
+last observed coordinator generation. The coordinator claims from this route
+under the existing mutation admission and state lock. A matching generation
+continues directly; a changed generation first validates the retained frames;
+and failed validation invokes W6G4R-001B's complete guarded traversal. The
+cycle set is local scheduler state, not an authoritative descendant index, and
+prevents lazy/reflection wait cycles from making retained traversal spin.
+
+Task release produces a post-publication route disposition. A small generation
+tracker accounts for the release's own queue, subscription, promotion, and
+observation transitions; any interleaved mutation makes the handoff a cache
+miss. An uninterrupted block pushes its directly resolved producer, yield
+retains the current work, terminal completion pops its parent, and a busy
+selection preserves the contested work ID. Completion subscriptions remain
+the wake authority—the zipper neither owns nor wakes work.
+
+Blocking client demand and macro execution retain a local route, effect tasks
+retain one beside their blocked orchestration state, and direct deferred waits
+retain one for the lifetime of their loop. The route-aware bounded helper
+accepts caller-owned state so a future public bounded evaluation facade can
+retain it without placing scheduler data in values, lazies, or runtime nets.
+The deliberately cold test compatibility wrapper still constructs a route for
+one call.
+
+Forced tests cover direct block descent, repeated yields across bounded
+returns, a contested child becoming available, terminal return to a woken
+parent, and pre-existing lazy/reflection cycles. The transition tests assert
+that only the initial cold search occurs; repeated execution is not used as
+evidence for the concurrent ordering.
 
 ### W6G4R-001F — Exercise invalidation and fallback
 

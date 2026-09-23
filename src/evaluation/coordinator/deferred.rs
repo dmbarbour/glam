@@ -11,10 +11,10 @@ use super::EvaluationSessionId;
 use super::task::LazyRouteDemandLease;
 use super::{
     ClaimedDemandSession, EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitToken,
-    EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations, WorkCloseReason,
-    WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState,
-    demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
-    queue_task, remove_ready_task,
+    EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
+    SettlementObligations, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkDependency,
+    WorkKind, WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
+    publish_task_block_locked, queue_task, remove_ready_task,
 };
 
 impl EvaluationWorkCoordinator {
@@ -25,11 +25,12 @@ impl EvaluationWorkCoordinator {
     ) -> DeferredWorkRelease {
         let had_exact_demand = claimed.wait.has_exact_subscriptions();
         let mutation = self.admission.mutation_guard();
-        let (mut release, exact_subscription) = {
+        let (mut release, exact_subscription, mut route_tracker) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            let mut route_tracker = ExactRouteReleaseTracker::new(&state, claimed.id);
             let demand_while_running = {
                 let record = state
                     .work
@@ -83,6 +84,7 @@ impl EvaluationWorkCoordinator {
                 exact_subscription = None;
             }
             state.work_generation = state.work_generation.wrapping_add(1);
+            route_tracker.changed(true);
             (
                 DeferredWorkRelease {
                     made_progress: made_progress || cycle_terminal,
@@ -92,28 +94,41 @@ impl EvaluationWorkCoordinator {
                     cycle,
                     cycle_error,
                     machine: None,
+                    route: None,
                 },
                 exact_subscription,
+                route_tracker,
             )
         };
         let promoted_wait = exact_subscription
             .as_ref()
             .and_then(|(dependency, _)| dependency.producer_wait());
-        if release.remains_blocked
+        let woke = release.remains_blocked
             && exact_subscription.is_some_and(|(dependency, registration)| {
                 self.subscribe_dependency_guarded(&mutation, dependency, registration)
-            })
-        {
+            });
+        route_tracker.changed(woke);
+        if woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
         if let Some(wait) = promoted_wait {
-            self.promote_deferred_wait_guarded(&mutation, &wait);
+            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+            route_tracker.changed(promoted);
         }
-        if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
+        let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
+        route_tracker.changed(observation_woke);
+        if observation_woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
+        release.route = Some({
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            route_tracker.finish(&state)
+        });
         drop(mutation);
         if !release.terminal {
             self.retire_unsubscribed_lazy_route(claimed.id, false);
@@ -417,11 +432,12 @@ impl EvaluationWorkCoordinator {
                 .expect("released deferred claim must retain its detached machine"),
         );
         let mutation = self.admission.mutation_guard();
-        let (mut release, exact_subscription) = {
+        let (mut release, exact_subscription, mut route_tracker) = {
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            let mut route_tracker = ExactRouteReleaseTracker::new(&state, claimed.id);
             let demand_while_running = {
                 let record = state
                     .work
@@ -505,6 +521,7 @@ impl EvaluationWorkCoordinator {
                 None
             };
             state.work_generation = state.work_generation.wrapping_add(1);
+            route_tracker.changed(true);
             (
                 DeferredWorkRelease {
                     made_progress: made_progress || cycle_terminal,
@@ -514,28 +531,41 @@ impl EvaluationWorkCoordinator {
                     cycle,
                     cycle_error,
                     machine,
+                    route: None,
                 },
                 exact_subscription,
+                route_tracker,
             )
         };
         let promoted_wait = exact_subscription
             .as_ref()
             .and_then(|(dependency, _)| dependency.producer_wait());
-        if release.remains_blocked
+        let woke = release.remains_blocked
             && exact_subscription.is_some_and(|(dependency, registration)| {
                 self.subscribe_dependency_guarded(&mutation, dependency, registration)
-            })
-        {
+            });
+        route_tracker.changed(woke);
+        if woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
         if let Some(wait) = promoted_wait {
-            self.promote_deferred_wait_guarded(&mutation, &wait);
+            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+            route_tracker.changed(promoted);
         }
-        if release.remains_blocked && self.recheck_observation_wait(claimed.id) {
+        let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
+        route_tracker.changed(observation_woke);
+        if observation_woke {
             release.made_progress = true;
             release.remains_blocked = false;
         }
+        release.route = Some({
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            route_tracker.finish(&state)
+        });
         drop(mutation);
         self.work_available.notify_all();
         release
@@ -793,6 +823,7 @@ pub(in crate::evaluation) struct DeferredWorkRelease {
     pub(in crate::evaluation) cycle: Vec<DeferredLazyCycleMember>,
     pub(in crate::evaluation) cycle_error: Option<String>,
     pub(in crate::evaluation) machine: Option<Box<dyn EvaluationTaskMachine>>,
+    pub(in crate::evaluation) route: Option<ExactRouteRelease>,
 }
 
 pub(in crate::evaluation) enum DeferredWorkReservation {

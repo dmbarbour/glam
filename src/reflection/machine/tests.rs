@@ -1145,6 +1145,7 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         blocked,
         exit,
         terminal,
+        exact_demand_route,
         phase_probe,
         force_unfused,
     } = task;
@@ -1165,6 +1166,7 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         blocked,
         exit,
         terminal,
+        exact_demand_route,
         phase_probe,
         force_unfused,
     );

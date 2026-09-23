@@ -25,14 +25,14 @@ use super::coordinator::{
     ClientDemandSink, ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation,
     EvaluationSessionId, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    ExactTargetSelection, ExactTargetStatus, InitialTaskDisposition, LocalPromiseOwner,
+    ExactDemandRoute, ExactTargetStatus, InitialTaskDisposition, LocalPromiseOwner,
     PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation, ReflectionCancellation,
     ReflectionTaskResultPolicy, TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher,
     WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
-use super::pump::{EvaluationPumpOutcome, pump_demand};
+use super::pump::{EvaluationPumpOutcome, pump_demand_on_route};
 use super::{
     EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
     RuntimeObservationState, allocate_route_wait_token, allocate_task_id, allocate_wait_token,
@@ -967,6 +967,7 @@ impl EvalContext {
         let coordinator = self
             .coordinator_for_admission()
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        let mut exact_demand_route = ExactDemandRoute::default();
 
         loop {
             if let Some(result) = handle.poll() {
@@ -995,36 +996,29 @@ impl EvalContext {
                 } => {
                     let producer_wait = dependency.producer_wait();
                     if let Some(wait) = producer_wait.as_ref() {
-                        match coordinator.claim_exact_target(wait) {
-                            ExactTargetSelection::Claimed(mut work) => {
-                                let work_id = work.id();
-                                while coordinator.poll_claimed_task(work) {
-                                    let Some(next) = coordinator.claim_work(work_id) else {
-                                        break;
-                                    };
-                                    work = next;
-                                }
+                        match self.pump_wait_on_route(wait, 4_096, &mut exact_demand_route) {
+                            EvaluationPumpOutcome::TargetReady
+                            | EvaluationPumpOutcome::BudgetExhausted => {
                                 continue;
                             }
-                            ExactTargetSelection::Busy => {
+                            EvaluationPumpOutcome::Busy => {
                                 self.wait_for_client_progress(&coordinator, &handle, generation);
                                 continue;
                             }
-                            ExactTargetSelection::None => {}
+                            EvaluationPumpOutcome::NoProgress => {}
                         }
-                    }
-                    match coordinator
-                        .claim_causal_child_work(producer_wait.as_ref(), self.causal_task_ids())
-                    {
-                        CausalChildSelection::Claimed(work) => {
-                            coordinator.poll_claimed_task(work);
-                            continue;
+                    } else {
+                        match coordinator.claim_causal_child_work(None, self.causal_task_ids()) {
+                            CausalChildSelection::Claimed(work) => {
+                                coordinator.poll_claimed_task(work);
+                                continue;
+                            }
+                            CausalChildSelection::Busy => {
+                                self.wait_for_client_progress(&coordinator, &handle, generation);
+                                continue;
+                            }
+                            CausalChildSelection::None => {}
                         }
-                        CausalChildSelection::Busy => {
-                            self.wait_for_client_progress(&coordinator, &handle, generation);
-                            continue;
-                        }
-                        CausalChildSelection::None => {}
                     }
 
                     let Some(dependency) = handle
@@ -1149,13 +1143,22 @@ impl EvalContext {
     /// Rechecking against the runtime work generation prevents a producer
     /// release between [`Self::pump_wait`] and this call from becoming a lost
     /// wakeup.
+    #[cfg(test)]
     pub(crate) fn wait_for_claimed_task(&self, target: &EvaluationWaitToken) {
+        self.wait_for_claimed_task_on_route(target, &mut ExactDemandRoute::default());
+    }
+
+    pub(crate) fn wait_for_claimed_task_on_route(
+        &self,
+        target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
+    ) {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
         let generation = coordinator.work_generation();
         if !matches!(
-            coordinator.exact_target_status(target),
+            coordinator.exact_target_status_on_route(target, route),
             ExactTargetStatus::Busy
         ) && !coordinator.has_busy_causal_child(Some(target), self.causal_task_ids())
         {
@@ -1175,11 +1178,12 @@ impl EvalContext {
     /// This is narrower than treating every live task as future progress: a
     /// pure wait cycle has no observed epoch and remains `NoProgress` for
     /// quiescence analysis.
-    pub(crate) fn wait_for_observed_dependency_progress(
+    pub(crate) fn wait_for_observed_dependency_progress_on_route(
         &self,
         target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
     ) -> bool {
-        if self.retry_after_no_progress(target) {
+        if self.retry_after_no_progress_on_route(target, route) {
             return true;
         }
         let Some(coordinator) = self.coordinator() else {
@@ -1200,7 +1204,11 @@ impl EvalContext {
     /// the recheck, but deliberately does not wait for a future broad runtime
     /// disturbance. Pure patient evaluation must still expose a genuinely
     /// quiescent reflection gate as a retryable halt.
-    pub(crate) fn retry_after_no_progress(&self, target: &EvaluationWaitToken) -> bool {
+    pub(crate) fn retry_after_no_progress_on_route(
+        &self,
+        target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
+    ) -> bool {
         #[cfg(test)]
         if let Some(pause) = &self.observed_progress_wait_barrier
             && pause.armed.swap(false, Ordering::AcqRel)
@@ -1214,7 +1222,7 @@ impl EvalContext {
         let generation = coordinator.work_generation();
         if target.terminal_poll().is_some()
             || !matches!(
-                coordinator.exact_target_status(target),
+                coordinator.exact_target_status_on_route(target, route),
                 ExactTargetStatus::None
             )
         {
@@ -1889,10 +1897,20 @@ impl EvalContext {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn pump_wait(
         &self,
         wait: &EvaluationWaitToken,
         step_budget: usize,
+    ) -> EvaluationPumpOutcome {
+        self.pump_wait_on_route(wait, step_budget, &mut ExactDemandRoute::default())
+    }
+
+    pub(crate) fn pump_wait_on_route(
+        &self,
+        wait: &EvaluationWaitToken,
+        step_budget: usize,
+        route: &mut ExactDemandRoute,
     ) -> EvaluationPumpOutcome {
         let Some(coordinator) = self.coordinator() else {
             return if wait.terminal_poll().is_some() {
@@ -1901,7 +1919,7 @@ impl EvalContext {
                 EvaluationPumpOutcome::NoProgress
             };
         };
-        pump_demand(&coordinator, self, wait, step_budget)
+        pump_demand_on_route(&coordinator, self, wait, step_budget, route)
     }
 
     /// Runs every executable task until all are terminal or one complete pass

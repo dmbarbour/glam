@@ -353,9 +353,13 @@ fn method_signal(path: &Path, name: &str) -> Option<Signal> {
     match name {
         "poll_wait"
         | "pump_wait"
+        | "pump_wait_on_route"
         | "wait_for_claimed_task"
+        | "wait_for_claimed_task_on_route"
         | "wait_for_observed_dependency_progress"
+        | "wait_for_observed_dependency_progress_on_route"
         | "retry_after_no_progress"
+        | "retry_after_no_progress_on_route"
         | "lazy_task"
         | "promise_task"
         | "promise_root_task" => Some(Signal::CoordinatorBoundary),
@@ -700,10 +704,14 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // with the coordinator's guarded exact-route selector. The loop remains real
 // scheduler work, but its coordinator boundary was already counted; removing
 // the duplicated pump-side traversal removes one user-sized-loop occurrence.
+// W6G4R-001E carries exact-route state through the existing orchestration
+// boundaries. The route-aware method names preserve those boundary counts;
+// the blocking client driver now delegates bounded polling to the common pump
+// instead of maintaining one additional unbounded source-level polling loop.
 const EXPECTED_OCCURRENCES: usize = 207;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 12_391_485_775_904_766_246;
+const EXPECTED_FINGERPRINT: u64 = 17_311_633_654_805_980_353;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -711,22 +719,22 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::RetryableWait, 9),
     (Signal::UnassignedPromise, 2),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 20),
+    (Signal::CoordinatorBoundary, 21),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
     (Signal::StructuralRecursion, 55),
-    (Signal::UserSizedLoop, 88),
+    (Signal::UserSizedLoop, 87),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 119),
+    (WorkShape::DemandThenInspect, 118),
     (WorkShape::OrderedOperands, 10),
     (WorkShape::CollectionWalk, 16),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 50),
+    (WorkShape::OrchestrationHandoff, 51),
 ];
 
 #[test]

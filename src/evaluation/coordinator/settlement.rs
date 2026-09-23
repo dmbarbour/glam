@@ -167,7 +167,7 @@ pub(super) fn runtime_pump_snapshot_locked(state: &WorkCoordinatorState) -> Runt
                     background_ready = true;
                 }
             }
-            CausalBackgroundProbe::Busy => background_busy = true,
+            CausalBackgroundProbe::Busy(_) => background_busy = true,
             CausalBackgroundProbe::None => {}
         }
     }

@@ -24,8 +24,8 @@ use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExitIntent, WhnfOwnerPoll,
-    WorkDependency, poll_whnf_computation,
+    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExactDemandRoute, ExitIntent,
+    WhnfOwnerPoll, WorkDependency, poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -115,6 +115,7 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     blocked: Option<BlockedExecution<S>>,
     exit: Option<TaskExitState<S>>,
     terminal: Option<TaskTerminal>,
+    exact_demand_route: ExactDemandRoute,
     #[cfg(test)]
     phase_probe: Option<Arc<EffectPhaseProbe>>,
     #[cfg(test)]
@@ -316,6 +317,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             blocked: None,
             exit: None,
             terminal: None,
+            exact_demand_route: ExactDemandRoute::default(),
             #[cfg(test)]
             phase_probe: None,
             #[cfg(test)]
@@ -497,11 +499,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 ));
                             }
                         };
-                        match self.eval_context.pump_wait(&wait, 4_096) {
+                        match self.eval_context.pump_wait_on_route(
+                            &wait,
+                            4_096,
+                            &mut self.exact_demand_route,
+                        ) {
                             EvaluationPumpOutcome::TargetReady
                             | EvaluationPumpOutcome::BudgetExhausted => continue,
                             EvaluationPumpOutcome::Busy => {
-                                self.eval_context.wait_for_claimed_task(&wait);
+                                self.eval_context.wait_for_claimed_task_on_route(
+                                    &wait,
+                                    &mut self.exact_demand_route,
+                                );
                                 continue;
                             }
                             EvaluationPumpOutcome::NoProgress
@@ -509,7 +518,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             {
                                 if self
                                     .eval_context
-                                    .wait_for_observed_dependency_progress(&wait)
+                                    .wait_for_observed_dependency_progress_on_route(
+                                        &wait,
+                                        &mut self.exact_demand_route,
+                                    )
                                 {
                                     continue;
                                 }
@@ -559,7 +571,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
                 return poll;
             };
-            match self.eval_context.pump_wait(wait, steps.max(1)) {
+            match self.eval_context.pump_wait_on_route(
+                wait,
+                steps.max(1),
+                &mut self.exact_demand_route,
+            ) {
                 EvaluationPumpOutcome::TargetReady => {}
                 EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::Yielded,
                 EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => {
@@ -3200,7 +3216,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match self.eval_context.poll_wait(wait) {
             EvaluationWaitPoll::Pending(_) => {
                 if matches!(
-                    self.eval_context.pump_wait(wait, 256),
+                    self.eval_context
+                        .pump_wait_on_route(wait, 256, &mut self.exact_demand_route,),
                     EvaluationPumpOutcome::TargetReady
                 ) {
                     self.blocked = None;
