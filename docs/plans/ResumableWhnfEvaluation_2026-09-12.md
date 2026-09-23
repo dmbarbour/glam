@@ -1,10 +1,10 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
-post-W6F review are complete by 2026-09-18. W6G is a separate scheduling,
-performance, and representation phase. W6G.3 is complete; W6G.1 is the next
-implementation family. W7-W8 remain planned. This is the
-focused implementation plan selected by
+post-W6F review are complete by 2026-09-18. W6G.1-W6G.4 are complete;
+W6G.5 phase closure is next. W7-W8 remain planned, followed by the explicit
+W6G4R-003 performance follow-up in W9. This is the focused implementation
+plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -7690,8 +7690,8 @@ trace-immediate `RootFrame` remains assigned to the concurrent-GC plan.
 
 **Status:** complete on 2026-09-23. The investigation, W6G4R-001A-G route
 repair, and W6G4R-002 private-ID hasher experiment are complete. The remaining
-poll-time generation-accounting question is extracted as W6G4R-003 for later
-post-W6G performance work and does not hold W6G.5 open.
+poll-time generation-accounting question is extracted as W6G4R-003 into
+explicit Phase W9 below and does not hold W6G.5 open.
 
 Investigate the bounded performance regression accepted by W4E after W6G.1
 has established role-specific pumping and completed W6G.3 has removed
@@ -7764,7 +7764,7 @@ the exact semantic/driver signature and diagnostic. Its private alias covers
 only retained exact-route membership and the background exact-producer
 probe's temporary cycle set; persistent scheduler indexes and user-keyed
 collections remain randomized. W6G4R-003 remains explicitly deferred to the
-post-W6G performance docket.
+post-W6G Phase W9 checkpoints below.
 
 #### W6G.5 — Phase closure and post-W6G review
 
@@ -7791,7 +7791,9 @@ regional fusion; aggregate checkpoint ownership and tracing; and the final
 disposition of the temporary same-session admission rule. Review W7-W8 against
 the resulting implementation for drift, checkpoint size, and newly obsolete
 compatibility work. Record any accepted residual performance gap with a
-concrete later owner rather than leaving it implicit in W6G.
+concrete later owner rather than leaving it implicit in W6G. W6G4R-003 is
+already owned by Phase W9; verify that W6G.5 neither duplicates nor silently
+widens that work.
 
 ### Phase W7 — Stack and Budget Closure
 
@@ -7893,6 +7895,161 @@ unsafe or synchronization code. Ordinary WHNF state should require neither.
 Then perform a dated review against every invariant and acceptance criterion
 in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 
+Review Phase W9 against the then-current coordinator before beginning it. Its
+release-accounting repair is deliberately sequenced after semantic stack,
+budget, and compatibility closure so this performance residual does not
+distort those transitions.
+
+### Phase W9 — Exact-Route Poll and Release Accounting
+
+**Status:** planned. This phase owns W6G4R-003 in full. It is a measured
+post-W6G performance repair, not unfinished W6G semantics.
+
+The W6G4R-002 baseline is 3,339,481,894 Callgrind instructions for the exact
+source-shaped duplicate-symbol fixture. It records 19,499 fast route handoffs,
+9,356 `Contention` invalidations, and the exact semantic/driver signature in
+the W6G.4 review. Preserve that fixture, signature, diagnostic, and route
+profile as the comparison point.
+
+The current route stores the coordinator generation produced by exact claim.
+The claimed machine then polls without holding coordinator locks or mutation
+admission, as required. `ExactRouteReleaseTracker` is constructed only after
+that poll, when the work kind begins its guarded release. Consequently one
+`Contention` result currently conflates three distinct conditions:
+
+1. the caller's local route no longer names the released work;
+2. the global work generation moved while the claimed machine was polling,
+   whether from causally owned work or a concurrent participant; and
+3. an unaccounted coordinator mutation interleaved with the guarded release.
+
+No checkpoint may make the caller-local route authoritative, hold a
+coordinator lock or mutation guard across machine polling, or accept a global
+generation mismatch without proving that the remembered exact path remains
+valid. The guarded cold traversal remains the final fallback.
+
+#### W9A — Classification-only baseline
+
+Split the current broad profile reason without changing route decisions:
+
+- current-work mismatch or missing exact release;
+- generation movement between exact claim and guarded release start;
+- mutation not accounted for by `ExactRouteReleaseTracker` while release is
+  guarded; and
+- a retained route rejected by its ordinary frame/dependency validation.
+
+Carry only the claim/release observations needed to classify these cases.
+Keep counters test-only or under the existing static profiling boundary; do
+not add permanent per-work scheduler metadata. Re-run the exact fixture and
+record non-overlapping counts whose sum reconciles with the 9,356 baseline
+invalidations. If the baseline no longer reproduces after W7-W8, stop and
+re-profile before designing a repair.
+
+#### W9B — Forced ordering and relevance matrix
+
+Latch each ordering with barriers rather than repeated runs:
+
+1. unchanged claimed work with no coordinator mutation during poll;
+2. a poll which causally publishes or advances coordinator work itself;
+3. an unrelated participant mutating the coordinator while the poll is
+   active;
+4. a remembered parent waking or reblocking onto a new producer during the
+   poll;
+5. current work retiring, being replaced, or otherwise no longer matching the
+   caller's route before reconciliation;
+6. an interleaving admitted after guarded release starts but before its final
+   route observation; and
+7. yield, block, terminal return, lazy/promise cycle settlement, and missing
+   route-release dispositions for each work family that can be claimed
+   exactly.
+
+The tests must prove both classification and current fallback behavior before
+implementation changes. Preserve the existing queued-parent, busy-leaf,
+cross-session, owner-closure, child-completion, and interleaved-release tests.
+
+#### W9C — Reconciliation design gate
+
+Use W9A-B evidence to select the smallest safe proof boundary. Evaluate at
+least these choices:
+
+- reconcile the caller-local route under the release's existing mutation
+  admission and coordinator-state lock, after the work disposition is known;
+- retain the local disposition but require an exact frame/dependency
+  validation on the next claim; or
+- keep cold rebuilding for a class whose relevant interference cannot be
+  distinguished cheaply.
+
+Prefer guarded local reconciliation when the remembered parent frames,
+subscription epochs, dependency keys, current work identity, and final
+disposition jointly prove that the exact path is unchanged. Unrelated global
+generation movement alone is not a reason to rebuild once that local proof is
+available. A parent wake/reblock, route-tip mismatch, retired work, branched
+dependency, or unexplained guarded-release mutation must still validate or
+fall back authoritatively.
+
+Do not solve this with a global descendant index, a lock spanning poll, a
+durable claim on the net or task, or special scheduler authority for the
+caller-owned route. If safe reconciliation would require one of those, retain
+the conservative fallback and record the measured residual instead.
+
+#### W9D — Implement the selected proof boundary
+
+##### W9D.1 — Claim/release representation
+
+Separate claim generation, guarded-release start/end generations, current
+work identity, accounted release mutations, and final disposition in the
+internal exact-release representation. Delete ambiguous `Contention`
+classification where a more precise cause is available. Keep the
+representation private and bounded; it must not become public task status or
+semantic state.
+
+##### W9D.2 — Guarded reconciliation
+
+Implement the W9C choice consistently for reflection, deferred, and lazy-route
+release. Any path accepted without a cold rebuild must either reconcile while
+the coordinator state is protected or deliberately remain pending validation
+before its next claim. It must never stamp an unvalidated caller route with the
+latest global generation.
+
+Preserve notification and destruction boundaries: callbacks, wake delivery,
+machine destruction, and other user-observable work remain outside runtime
+locks and mutation admission. Do not duplicate release policy independently
+across the three work families when one shared helper can express the proof.
+
+##### W9D.3 — Transitional accounting cleanup
+
+Remove temporary probes and classification scaffolding which no longer serves
+tests or ongoing profiling. Retain named fallback counters only when they
+describe stable implementation distinctions useful for future diagnosis.
+Update coordinator comments so the generations are described as validation
+inputs rather than route authority.
+
+#### W9E — Measurement, verification, and disposition
+
+Re-run the source-shaped duplicate-symbol fixture with the same static route
+profile, Callgrind method, native debug/release timing, and exact
+interaction-net profile used by W6G4R-001G and W6G4R-002. Report:
+
+- handoffs and fallbacks by the new non-overlapping reasons;
+- complete searches, visited records, maximum route depth, and retained route
+  storage;
+- Callgrind instructions against the 3,339,481,894 W6G4R-002 baseline;
+- native timings as corroboration only; and
+- the exact semantic/driver signature and structured duplicate-symbol
+  diagnostic.
+
+Run the forced W9B matrix, affected coordinator/evaluation suites,
+`scripts/check-interaction-net-profiling.sh`, formatting, full-feature Clippy
+with warnings denied, and the complete ordinary test suite. Run aggressive-GC
+verification if W9 changes any managed ownership boundary; it should not need
+to do so.
+
+Keep the repair only if it preserves every forced ordering and materially
+reduces cold rediscovery or deterministic instruction work. Otherwise revert
+the optimization, keep the precise classification if it remains cheap and
+useful, and record the justified residual. Close W9 with a dated review which
+accounts for any drift introduced by W7-W8 and updates the W6G.4 review with
+the final disposition.
+
 ## Verification Matrix
 
 | Concern | Required evidence |
@@ -7912,6 +8069,7 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 | nets | Raw nets remain WHNF; cursor/net-construction worklists preserve identity and restoration. |
 | stack control | User-controlled semantic depth completes on a deliberately small stack. |
 | bounded whole-program work | Source-shaped direct assembly completes within deterministic scheduler/net budgets; semantic selections and terminal caches are not replayed. |
+| exact-route accounting | Forced poll/release orderings classify relevant interference precisely; any retained handoff has a guarded local proof or falls back to authoritative traversal. |
 | closure | Source-backed manifests show no unclassified recursive/suspendable WHNF entry. |
 
 ## Risks and Review Triggers
@@ -7937,6 +8095,9 @@ in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
 - If source-shaped work exceeds a deterministic scheduler or net-work budget,
   classify replay versus scheduler amplification before increasing the budget
   or relying on a later phase to hide the regression.
+- If W9 can avoid cold rediscovery only by treating a global generation match
+  as proof, holding coordinator synchronization across poll, or making the
+  caller-local route authoritative, retain the conservative fallback instead.
 - If stack closure would require converting unrelated balanced persistent
   data structures, record their actual depth bound rather than enlarging this
   plan without evidence.
@@ -7962,4 +8123,7 @@ This plan is complete only when:
 9. source-shaped direct assembly has deterministic bounded-work evidence and
    no replayed function-call source or terminal cache; and
 10. a post-implementation review accounts for every deliberate or accidental
-   departure from this plan.
+    departure from this plan; and
+11. W9 either implements and verifies precise exact-route poll/release
+    reconciliation or records a measured reason for retaining the conservative
+    fallback.

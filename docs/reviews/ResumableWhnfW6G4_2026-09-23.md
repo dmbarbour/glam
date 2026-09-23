@@ -4,12 +4,13 @@ Investigation baseline: `7fed99e` immediately before W4C.1c and pre-repair
 `d8d44e0` after W6G.1, extracted W6G.2, and W6G.3. Cold-path repair
 measurement: `fdb52907` after W6G4R-001B.
 
-Status: investigation, W6G4R-001A-G, and W6G4R-002 complete. Foreground exact
-demand retains a local validated route across common work transitions; the
-complete guarded traversal remains the authoritative cold and invalidation
-fallback. A narrowly scoped deterministic hasher removes another measured
-portion of the residual. W6G4R-003 remains assigned to later post-W6G
-generation-accounting work rather than keeping this investigation open.
+Status: closed on 2026-09-23. W6G4R-001A-G and W6G4R-002 are complete.
+Foreground exact demand retains a local validated route across common work
+transitions; the complete guarded traversal remains the authoritative cold
+and invalidation fallback. A narrowly scoped deterministic hasher removes
+another measured portion of the residual. W6G4R-003's investigation,
+implementation gate, and verification are transferred explicitly to Phase W9
+of the resumable-WHNF plan rather than remaining an open review obligation.
 
 ## Scope
 
@@ -702,7 +703,7 @@ still the higher-value remaining route-accounting question.
 
 **Severity:** medium performance
 
-**Status:** assigned to post-W6G performance cleanup
+**Resolution:** transferred to planned Phase W9 on 2026-09-23
 
 All 9,356 route invalidations are currently classified as `Contention`; every
 other fallback reason is zero. The fixture requests zero evaluator workers,
@@ -719,6 +720,14 @@ mutations can be incorporated into a validated release disposition and which
 must still trigger the authoritative cold traversal. Do not simply ignore a
 generation mismatch, and do not add a global descendant index to repair this
 local accounting boundary.
+
+Phase W9 in
+[`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
+now owns the complete follow-up: classification-only instrumentation, the
+forced ordering matrix, an explicit reconciliation design gate, implementation
+of the selected proof boundary, before/after measurement, and removal of
+temporary accounting. The review is therefore closed by concrete plan
+ownership, not by treating the observed over-invalidation as fixed.
 
 ## Verification required by the repair
 
