@@ -6,7 +6,7 @@
 //! scans orchestration adapters only where they translate evaluator halts or
 //! host resumptions; it is not a second inventory of the entire scheduler.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -93,6 +93,19 @@ enum WorkShape {
     OrchestrationHandoff,
 }
 
+/// W7's stack-ownership disposition for one W0B occurrence.
+///
+/// This is deliberately independent from `WorkShape`: the latter explains
+/// what must resume after a boundary, while this enum explains why the source
+/// occurrence does not hide user-controlled semantic depth on the Rust stack.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum W7Disposition {
+    ExplicitIteration,
+    Orchestration,
+    W8ValueCompatibility,
+    UnapprovedRecursion,
+}
+
 /// Compile-exhaustive latch for W0C's selected shared work-stack vocabulary.
 /// Production payloads arrive in W1; changing this set first requires updating
 /// the census-backed representation decision in the plan.
@@ -164,6 +177,10 @@ impl Occurrence {
             self.classification.context,
         )
     }
+
+    fn w7_record(&self) -> String {
+        format!("{}|{:?}", self.record(), w7_disposition(self))
+    }
 }
 
 struct CensusVisitor<'path> {
@@ -173,6 +190,189 @@ struct CensusVisitor<'path> {
     function: Option<String>,
     ordinals: BTreeMap<String, usize>,
     occurrences: Vec<Occurrence>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct FunctionKey {
+    path: String,
+    module: Vec<String>,
+    impl_name: Option<String>,
+    name: String,
+}
+
+impl FunctionKey {
+    fn declaration(&self) -> String {
+        let mut parts = vec![self.path.clone()];
+        parts.extend(self.module.iter().cloned());
+        if let Some(name) = &self.impl_name {
+            parts.push(name.clone());
+        }
+        parts.push(self.name.clone());
+        parts.join("::")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedCall {
+    caller: FunctionKey,
+    ordinal: usize,
+    callee: FunctionKey,
+}
+
+impl ResolvedCall {
+    fn record(&self) -> String {
+        format!(
+            "{}#{}->{}",
+            self.caller.declaration(),
+            self.ordinal,
+            self.callee.declaration()
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+enum LocalCallTarget {
+    Free(String),
+    Associated { owner: String, name: String },
+}
+
+#[derive(Clone, Debug)]
+struct LocalCall {
+    caller: FunctionKey,
+    ordinal: usize,
+    target: LocalCallTarget,
+}
+
+struct CallGraphVisitor<'path> {
+    path: &'path Path,
+    module: Vec<String>,
+    impl_name: Option<String>,
+    function: Option<FunctionKey>,
+    ordinals: BTreeMap<FunctionKey, usize>,
+    definitions: BTreeSet<FunctionKey>,
+    calls: Vec<LocalCall>,
+}
+
+impl<'path> CallGraphVisitor<'path> {
+    fn new(path: &'path Path) -> Self {
+        Self {
+            path,
+            module: Vec::new(),
+            impl_name: None,
+            function: None,
+            ordinals: BTreeMap::new(),
+            definitions: BTreeSet::new(),
+            calls: Vec::new(),
+        }
+    }
+
+    fn key(&self, name: String) -> FunctionKey {
+        FunctionKey {
+            path: self.path.display().to_string(),
+            module: self.module.clone(),
+            impl_name: self.impl_name.clone(),
+            name,
+        }
+    }
+
+    fn visit_function(&mut self, name: String, attributes: &[Attribute], body: &syn::Block) {
+        if is_test_only(attributes) {
+            return;
+        }
+        let function = self.key(name);
+        self.definitions.insert(function.clone());
+        let prior = self.function.replace(function);
+        self.visit_block(body);
+        self.function = prior;
+    }
+
+    fn record(&mut self, target: LocalCallTarget) {
+        let Some(caller) = self.function.clone() else {
+            return;
+        };
+        let ordinal = self.ordinals.entry(caller.clone()).or_default();
+        *ordinal += 1;
+        self.calls.push(LocalCall {
+            caller,
+            ordinal: *ordinal,
+            target,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for CallGraphVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        let Some((_, items)) = &node.content else {
+            return;
+        };
+        self.module.push(node.ident.to_string());
+        for item in items {
+            self.visit_item(item);
+        }
+        self.module.pop();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        let prior = self.impl_name.replace(type_name(&node.self_ty));
+        visit::visit_item_impl(self, node);
+        self.impl_name = prior;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            match segments.as_slice() {
+                [name] => self.record(LocalCallTarget::Free(name.clone())),
+                [owner, name] if owner == "Self" || owner == "self" => {
+                    if let Some(owner) = self.impl_name.clone() {
+                        self.record(LocalCallTarget::Associated {
+                            owner,
+                            name: name.clone(),
+                        });
+                    }
+                }
+                [owner, name] => self.record(LocalCallTarget::Associated {
+                    owner: owner.clone(),
+                    name: name.clone(),
+                }),
+                _ => {}
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if matches!(
+            node.receiver.as_ref(),
+            syn::Expr::Path(path) if path.path.is_ident("self")
+        ) && let Some(owner) = self.impl_name.clone()
+        {
+            self.record(LocalCallTarget::Associated {
+                owner,
+                name: node.method.to_string(),
+            });
+        }
+        visit::visit_expr_method_call(self, node);
+    }
 }
 
 impl<'path> CensusVisitor<'path> {
@@ -265,7 +465,11 @@ impl<'ast> Visit<'ast> for CensusVisitor<'_> {
             {
                 self.record(signal);
             }
-            if name.as_deref() == self.function.as_deref() {
+            if is_direct_recursive_call(
+                &path.path,
+                self.function.as_deref(),
+                self.impl_name.as_deref(),
+            ) {
                 self.record(Signal::StructuralRecursion);
             }
         }
@@ -275,6 +479,14 @@ impl<'ast> Visit<'ast> for CensusVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if let Some(signal) = method_signal(self.path, &node.method.to_string()) {
             self.record(signal);
+        }
+        if node.method == self.function.as_deref().unwrap_or_default()
+            && matches!(
+                node.receiver.as_ref(),
+                syn::Expr::Path(path) if path.path.is_ident("self")
+            )
+        {
+            self.record(Signal::StructuralRecursion);
         }
         visit::visit_expr_method_call(self, node);
     }
@@ -330,6 +542,30 @@ fn path_string(path: &syn::Path) -> String {
         .map(|part| part.ident.to_string())
         .collect::<Vec<_>>()
         .join("::")
+}
+
+fn is_direct_recursive_call(
+    path: &syn::Path,
+    function: Option<&str>,
+    impl_name: Option<&str>,
+) -> bool {
+    let Some(function) = function else {
+        return false;
+    };
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        // Bare `drop(value)` inside a `Drop::drop` implementation resolves to
+        // the prelude function, not recursively to the trait method.
+        [name] => name == function && function != "drop",
+        [owner, name] if name == function => {
+            owner == "Self" || owner == "self" || impl_name.is_some_and(|ty| owner == ty)
+        }
+        _ => false,
+    }
 }
 
 fn function_signal(full: &str, name: &str) -> Option<Signal> {
@@ -498,6 +734,53 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
     }
 }
 
+const W8_VALUE_COMPATIBILITY_NAMES: &[&str] = &[
+    "await_deferred_task",
+    "deferred_wait_result",
+    "eval_lazy_in",
+    "eval_promised_in",
+    "eval_value",
+    "eval_value_in",
+];
+
+fn declaration_name(declaration: &str) -> &str {
+    declaration
+        .rsplit("::")
+        .next()
+        .expect("an inventory declaration must end with its function name")
+}
+
+fn is_w8_value_compatibility_declaration(declaration: &str) -> bool {
+    declaration.starts_with("src/eval/value.rs::")
+        && W8_VALUE_COMPATIBILITY_NAMES
+            .binary_search(&declaration_name(declaration))
+            .is_ok()
+}
+
+fn w7_disposition(occurrence: &Occurrence) -> W7Disposition {
+    if is_w8_value_compatibility_declaration(&occurrence.declaration) {
+        W7Disposition::W8ValueCompatibility
+    } else {
+        match occurrence.signal {
+            Signal::StructuralRecursion => W7Disposition::UnapprovedRecursion,
+            Signal::UserSizedLoop => W7Disposition::ExplicitIteration,
+            Signal::EvalValue
+            | Signal::EvalLazy
+            | Signal::EvalPromise
+            | Signal::ApplyValue
+            | Signal::ApplyValues
+            | Signal::ReflectionEvaluate
+            | Signal::RetryableWait
+            | Signal::UnassignedPromise
+            | Signal::DependencyTranslation
+            | Signal::CoordinatorBoundary
+            | Signal::ReflectionBoundary
+            | Signal::HostBoundary
+            | Signal::NetBoundary => W7Disposition::Orchestration,
+        }
+    }
+}
+
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
@@ -546,7 +829,7 @@ fn is_in_scope(relative: &Path) -> bool {
     )
 }
 
-fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
+fn scoped_sources(manifest: &Path) -> Vec<PathBuf> {
     let mut sources = Vec::new();
     collect_rust_sources(&manifest.join("src/eval"), &mut sources);
     sources.extend([
@@ -559,9 +842,12 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     ]);
     sources.sort();
     sources.dedup();
+    sources
+}
 
+fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     let mut occurrences = Vec::new();
-    for path in sources {
+    for path in scoped_sources(manifest) {
         let relative = path
             .strip_prefix(manifest)
             .expect("census source must belong to the package");
@@ -580,6 +866,104 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     occurrences
 }
 
+fn collect_resolved_calls(manifest: &Path) -> (BTreeSet<FunctionKey>, Vec<ResolvedCall>) {
+    let mut definitions = BTreeSet::new();
+    let mut local_calls = Vec::new();
+    for path in scoped_sources(manifest) {
+        let relative = path
+            .strip_prefix(manifest)
+            .expect("call-graph source must belong to the package");
+        if !is_in_scope(relative) {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("call-graph source should be readable");
+        let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
+            panic!("{} must parse for call graph: {error}", relative.display())
+        });
+        let mut visitor = CallGraphVisitor::new(relative);
+        visitor.visit_file(&syntax);
+        definitions.extend(visitor.definitions);
+        local_calls.extend(visitor.calls);
+    }
+
+    let calls = local_calls
+        .into_iter()
+        .filter_map(|call| {
+            let callee = match call.target {
+                LocalCallTarget::Free(name) => FunctionKey {
+                    path: call.caller.path.clone(),
+                    module: call.caller.module.clone(),
+                    impl_name: None,
+                    name,
+                },
+                LocalCallTarget::Associated { owner, name } => FunctionKey {
+                    path: call.caller.path.clone(),
+                    module: call.caller.module.clone(),
+                    impl_name: Some(owner),
+                    name,
+                },
+            };
+            definitions.contains(&callee).then_some(ResolvedCall {
+                caller: call.caller,
+                ordinal: call.ordinal,
+                callee,
+            })
+        })
+        .collect::<Vec<_>>();
+    (definitions, calls)
+}
+
+fn resolved_call_fingerprint(calls: &[ResolvedCall]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut records = calls.iter().map(ResolvedCall::record).collect::<Vec<_>>();
+    records.sort();
+    records.iter().fold(FNV_OFFSET, |mut fingerprint, record| {
+        for byte in record.bytes().chain([0xff]) {
+            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+        fingerprint
+    })
+}
+
+fn cyclic_functions(
+    definitions: &BTreeSet<FunctionKey>,
+    calls: &[ResolvedCall],
+) -> BTreeSet<FunctionKey> {
+    let mut adjacency = BTreeMap::<FunctionKey, BTreeSet<FunctionKey>>::new();
+    for call in calls {
+        adjacency
+            .entry(call.caller.clone())
+            .or_default()
+            .insert(call.callee.clone());
+    }
+
+    definitions
+        .iter()
+        .filter(|start| {
+            let mut pending = adjacency
+                .get(*start)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut visited = BTreeSet::new();
+            while let Some(next) = pending.pop() {
+                if &next == *start {
+                    return true;
+                }
+                if visited.insert(next.clone())
+                    && let Some(following) = adjacency.get(&next)
+                {
+                    pending.extend(following.iter().cloned());
+                }
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
 fn occurrence_fingerprint(occurrences: &[Occurrence]) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -587,6 +971,19 @@ fn occurrence_fingerprint(occurrences: &[Occurrence]) -> u64 {
         .iter()
         .fold(FNV_OFFSET, |mut fingerprint, occurrence| {
             for byte in occurrence.record().bytes().chain([0xff]) {
+                fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+            }
+            fingerprint
+        })
+}
+
+fn w7_disposition_fingerprint(occurrences: &[Occurrence]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    occurrences
+        .iter()
+        .fold(FNV_OFFSET, |mut fingerprint, occurrence| {
+            for byte in occurrence.w7_record().bytes().chain([0xff]) {
                 fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
             }
             fingerprint
@@ -609,6 +1006,15 @@ fn shape_counts(occurrences: &[Occurrence]) -> BTreeMap<WorkShape, usize> {
             *counts
                 .entry(occurrence.classification.remaining)
                 .or_default() += 1;
+            counts
+        })
+}
+
+fn w7_disposition_counts(occurrences: &[Occurrence]) -> BTreeMap<W7Disposition, usize> {
+    occurrences
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, occurrence| {
+            *counts.entry(w7_disposition(occurrence)).or_default() += 1;
             counts
         })
 }
@@ -708,10 +1114,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // boundaries. The route-aware method names preserve those boundary counts;
 // the blocking client driver now delegates bounded polling to the common pump
 // instead of maintaining one additional unbounded source-level polling loop.
-const EXPECTED_OCCURRENCES: usize = 207;
+const EXPECTED_OCCURRENCES: usize = 156;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 17_311_633_654_805_980_353;
+const EXPECTED_FINGERPRINT: u64 = 6_487_120_116_923_049_700;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -723,18 +1129,41 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 55),
+    (Signal::StructuralRecursion, 4),
     (Signal::UserSizedLoop, 87),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 118),
-    (WorkShape::OrderedOperands, 10),
-    (WorkShape::CollectionWalk, 16),
+    (WorkShape::DemandThenInspect, 79),
+    (WorkShape::OrderedOperands, 8),
+    (WorkShape::CollectionWalk, 8),
     (WorkShape::KeyConversion, 2),
-    (WorkShape::AccessPath, 7),
+    (WorkShape::AccessPath, 5),
     (WorkShape::DiagnosticContext, 1),
     (WorkShape::OrchestrationHandoff, 51),
+];
+
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 9_118_067_021_981_578_255;
+const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
+    (W7Disposition::ExplicitIteration, 84),
+    (W7Disposition::Orchestration, 49),
+    (W7Disposition::W8ValueCompatibility, 19),
+    (W7Disposition::UnapprovedRecursion, 4),
+];
+
+const EXPECTED_W7A0_UNAPPROVED_RECURSION: &[&str] = &[
+    "src/eval/dict_machine.rs::key_value#1",
+    "src/eval/dict_machine.rs::key_value#2",
+    "src/eval/dict_machine.rs::update_dict_path_in#1",
+    "src/reflection/machine.rs::insert_effect_api_path#1",
+];
+
+const EXPECTED_W7A0_RESOLVED_CALLS: usize = 1_152;
+const EXPECTED_W7A0_RESOLVED_CALL_FINGERPRINT: u64 = 6_358_179_092_932_255_754;
+const EXPECTED_W7A0_CYCLIC_FUNCTIONS: &[&str] = &[
+    "src/eval/dict_machine.rs::key_value",
+    "src/eval/dict_machine.rs::update_dict_path_in",
+    "src/reflection/machine.rs::insert_effect_api_path",
 ];
 
 #[test]
@@ -756,6 +1185,52 @@ fn whnf_suspension_and_recursion_census_is_exact() {
         (EXPECTED_OCCURRENCES, EXPECTED_FINGERPRINT),
         "W0B census drifted; reviewed shapes: {:#?}",
         shape_counts(&occurrences),
+    );
+}
+
+#[test]
+fn w7_stack_disposition_gate_is_exact() {
+    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(
+        w7_disposition_counts(&occurrences),
+        EXPECTED_W7_DISPOSITION_COUNTS.iter().copied().collect(),
+        "every W0B occurrence needs one reviewed W7 stack disposition"
+    );
+    assert_eq!(
+        w7_disposition_fingerprint(&occurrences),
+        EXPECTED_W7_DISPOSITION_FINGERPRINT,
+        "a W7 stack disposition or its source occurrence drifted"
+    );
+
+    let unapproved = occurrences
+        .iter()
+        .filter(|occurrence| w7_disposition(occurrence) == W7Disposition::UnapprovedRecursion)
+        .map(|occurrence| format!("{}#{}", occurrence.declaration, occurrence.ordinal))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unapproved, EXPECTED_W7A0_UNAPPROVED_RECURSION,
+        "W7A.0 must hand every unapproved recursive call to W7A.1 explicitly"
+    );
+}
+
+#[test]
+fn w7_resolved_call_graph_cycles_are_exact() {
+    let (definitions, calls) = collect_resolved_calls(Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(
+        (calls.len(), resolved_call_fingerprint(&calls)),
+        (
+            EXPECTED_W7A0_RESOLVED_CALLS,
+            EXPECTED_W7A0_RESOLVED_CALL_FINGERPRINT
+        ),
+        "the statically resolved W7 call-edge ledger drifted"
+    );
+    assert_eq!(
+        cyclic_functions(&definitions, &calls)
+            .into_iter()
+            .map(|function| function.declaration())
+            .collect::<Vec<_>>(),
+        EXPECTED_W7A0_CYCLIC_FUNCTIONS,
+        "W7A.0 must hand every statically resolved recursive family to W7A.1"
     );
 }
 

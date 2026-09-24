@@ -8022,6 +8022,8 @@ dependencies supply concurrency authority.
 
 ##### W7A.0 — Disposition and call-graph gate
 
+**Status:** complete on 2026-09-24.
+
 Begin from the exact 207-occurrence W0B baseline and its fingerprint. Extend
 the audit so every occurrence has one reviewed W7 disposition:
 
@@ -8038,6 +8040,26 @@ itself prove the absence of mutual recursion. Add an exact call-edge ledger or
 a targeted manual/AST census for every semantic evaluator family reachable
 from production demand. Do not classify a call as bounded merely because its
 current fixture is shallow.
+
+Completion record: W0B's former direct-recursion predicate compared only the
+called function's final name. It therefore mistook calls such as `Foo::new()`
+inside another `new()` and prelude `drop(value)` inside `Drop::drop` for
+recursion. The corrected predicate recognizes only unqualified free-function,
+same-implementation associated-function, and `self` method re-entry. This
+reduces the exact W0B baseline from 207 to 156 occurrences at fingerprint
+`6_487_120_116_923_049_700`; four calls, not 55, are genuinely recursive.
+
+Every occurrence now has one independently fingerprinted W7 disposition: 84
+explicit iterative traversals, 49 orchestration/wait boundaries, 19
+occurrences inside the six W8 compatibility declarations, and four
+unapproved recursive calls. A second AST ledger resolves 1,152 exact
+same-module free-function and same-implementation call sites at fingerprint
+`6_358_179_092_932_255_754`, computes transitive cycles iteratively, and
+agrees on the three recursive functions. Calls through a typed receiver are
+not guessed from method names; their semantic demand boundaries remain
+covered by W0B's exact evaluator-signal census and compile-exhaustive regional
+owners. W7A.1 owns the exact remaining set: `key_value` twice,
+`update_dict_path_in`, and `insert_effect_api_path`.
 
 ##### W7A.1 — Production semantic stack closure
 
