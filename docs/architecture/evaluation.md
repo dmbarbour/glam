@@ -617,8 +617,12 @@ holds no duplicate focus or continuation state, and a later same-runtime
 session polls the exact checkpoint through the lazy. Terminal cache
 publication removes the checkpoint after installing the result. Specialized
 lazy producer progress also lives beneath typed managed lazy checkpoints. The
-coordinator still supplies a temporary producer route machine for admission
-and polling; W6G.1f.2b will remove that machine after lifecycle review.
+coordinator supplies a runtime-owned route record for admission, polling,
+dependency publication, and last-demand retirement. A claimed route
+reconstructs one transient poll adapter, but neither record nor adapter owns a
+duplicate focus or continuation: semantic progress is read from the managed
+lazy checkpoint. The route is session-neutral and retires when its demand
+count reaches zero unless a claim is still completing.
 
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and

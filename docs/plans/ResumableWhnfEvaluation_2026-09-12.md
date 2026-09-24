@@ -1,9 +1,9 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
-post-W6F review are complete by 2026-09-18. W6G.1-W6G.5a are complete;
-the mandatory post-W6G review in W6G.5b is next. W7-W8 remain planned, followed by the explicit
-W6G4R-003 performance follow-up in W9. This is the focused implementation
+post-W6F review are complete by 2026-09-18. W6G.1-W6G.5 and the mandatory
+post-W6G review are complete by 2026-09-24. W7-W8 remain planned, followed by
+the explicit W6G4R-003 performance follow-up in W9. This is the focused implementation
 plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -7993,6 +7993,9 @@ The phase is ready for W6G.5b.
 
 ##### W6G.5b — Mandatory post-W6G review
 
+**Status:** complete on 2026-09-24. See the dated
+[W6G review](../reviews/ResumableWhnfW6G_2026-09-24.md).
+
 Audit the implemented phase before W7. Account for measured scheduler,
 managed-access, root-publication, checkpoint-conversion, and request-dispatch
 traffic; the retained bounded standard-effect driver and explicit deferral of
@@ -8004,12 +8007,43 @@ concrete later owner rather than leaving it implicit in W6G. W6G4R-003 is
 already owned by Phase W9; verify that W6G.5 neither duplicates nor silently
 widens that work.
 
+The review found no new production correctness defect. It corrected one stale
+architecture paragraph, distinguished dynamically measured scheduler traffic
+from static access/root/checkpoint inventories, assigned broader post-value-
+representation traffic measurement to the independent pure-effect-fusion
+plan, and partitioned W7-W8 around the exact W0B and six-item W8 compatibility
+manifests. The temporary same-session admission rule is fully retired: demand
+sessions are lifecycle/reporting groups, while exact work claims and causal
+dependencies supply concurrency authority.
+
 ### Phase W7 — Stack and Budget Closure
 
 #### W7A — Recursive-call elimination audit
 
-Reduce the W0B manifest to zero unapproved recursive WHNF calls. Any remaining
-Rust recursion must be one of:
+##### W7A.0 — Disposition and call-graph gate
+
+Begin from the exact 207-occurrence W0B baseline and its fingerprint. Extend
+the audit so every occurrence has one reviewed W7 disposition:
+
+- budgeted resumable semantic work;
+- scheduler/orchestration loop with a bounded poll or explicit wait;
+- statically bounded representation plumbing;
+- balanced persistent-container traversal with a documented logarithmic
+  depth bound;
+- a separately owned worklist/trampoline such as cursor-WHNF; or
+- one of the exact six `W8ValueCompatibility` declarations.
+
+The existing syntax census detects direct self-calls and loops but does not by
+itself prove the absence of mutual recursion. Add an exact call-edge ledger or
+a targeted manual/AST census for every semantic evaluator family reachable
+from production demand. Do not classify a call as bounded merely because its
+current fixture is shallow.
+
+##### W7A.1 — Production semantic stack closure
+
+Reduce the W0B manifest to zero unapproved production semantic recursion
+outside the exact W8 compatibility set. Any remaining Rust recursion must be
+one of:
 
 - statically bounded representation plumbing;
 - balanced persistent-container traversal with a documented logarithmic
@@ -8018,24 +8052,82 @@ Rust recursion must be one of:
 
 No user-controlled semantic recursion may remain implicit on the Rust stack.
 
+##### W7A.2 — Exact W8 handoff
+
+Latch the remaining compatibility declarations and their fingerprint as the
+only temporary stack-closure exception. Record why none is reachable from the
+ordinary resumable production driver. W8A-B must remove that set rather than
+relabelling it, and W8D must rerun W0B and the small-stack fixtures before the
+whole plan closes.
+
 #### W7B — Small-stack verification
 
-Run deterministic deep lazy-alias, promise-alias, application, access-path,
-key-conversion, collection, fixpoint, and structured-failure fixtures in a
-thread with a deliberately small Rust stack. Include both uninterrupted and
-forced-suspension forms. Success must not depend on worker count or repeated
-runs.
+##### W7B.0 — Harness and depth baseline
+
+Introduce one deterministic small-stack thread harness with an explicit stack
+size and a source-shaped depth large enough to fail an equivalent recursive
+fixture. Keep scale-only variants out of the routine path if necessary, but
+retain one bounded routine witness. Repetition is not evidence.
+
+##### W7B.1 — Alias, application, and fixpoint chains
+
+Run deep lazy-alias, promise-alias, application, and fixpoint fixtures in both
+uninterrupted and forced-suspension forms. Force the suspension point and the
+resume owner; do not infer it from worker timing.
+
+##### W7B.2 — Structural paths, collections, and failures
+
+Run deep access-path, key-conversion, collection, and structured-failure
+fixtures. Distinguish explicit evaluator worklists from balanced persistent-
+container recursion whose logarithmic bound was approved in W7A.
+
+##### W7B.3 — Scheduler-owner matrix
+
+Exercise representative client-demand, lazy-route, reflection-hosted, and
+spark/deferred owners where the same semantic state may resume on another
+poller. Use zero-, one-, and multiple-worker configurations only where they
+force a distinct owner boundary; all semantic outcomes and exact checkpoints
+must be schedule independent.
 
 #### W7C — Budget and fairness verification
 
-Prove that a deep computation yields after its exact budget, resumes from the
-same checkpoint, and eventually completes. Ensure client demand, deferred
-work, reflection, and sparks requeue yields without installing dependency
-subscriptions or starving other ready work.
+##### W7C.0 — Budget vocabulary decision
 
-Observe root registrations, allocations, and poll counts. Treat them as
-regression diagnostics initially, except enforce that uninterrupted tail
-delegation performs no per-step root registration.
+Distinguish the inner `EvaluationStepBudget::spent()` count from the
+foreground pump's current reservation of a complete task quantum before a
+poll. Decide whether the pump allowance is a reservation or an exact consumed-
+transition budget, and document any refund/translation rule. All later tests
+must use that one vocabulary; do not claim exact spend from a merely reserved
+quantum.
+
+##### W7C.1 — Exact checkpoint budget
+
+Prove that a deep computation yields at the selected exact boundary, retains
+the same checkpoint, reports the selected spent/reserved counts, and
+eventually completes. A zero budget performs no semantic transition or work
+claim.
+
+##### W7C.2 — Owner-specific yield and requeue
+
+Ensure client demand, lazy/deferred work, reflection, and sparks requeue an
+ordinary budget yield without installing a dependency subscription. Force the
+yield/reclaim order and distinguish it from a real lazy, promise, reflection,
+or observation dependency.
+
+##### W7C.3 — Fair ready-work scheduling
+
+Force at least two independently ready records around repeated budget yields
+and prove that each role's selected queue makes progress without granting
+workers foreground authority or granting foreground pumps unrelated work.
+Use latches or explicit poll gates, not repeated parallel runs.
+
+##### W7C.4 — Cost accounting
+
+Observe root registrations, allocations, managed-access entries, checkpoint
+publications, and poll counts. Treat them as regression diagnostics initially,
+except enforce that uninterrupted tail delegation performs no per-step root
+registration and that a retained aggregate checkpoint does not republish
+roots per frame or per repoll.
 
 W4E supplies the static interaction-net counters and a test-only work-item
 fuse for stopping a net at a known pre-completion boundary. Reuse those as
@@ -8051,11 +8143,21 @@ ordinary suite under instrumentation.
 
 #### W8A — Retire retryable recursive-halt transport
 
+##### W8A.0 — Exact compatibility census and halt decision inputs
+
+Begin from the D.2c `W8ValueCompatibility` manifest: six `ValueDemand`
+declarations at fingerprint `1_485_448_540_290_006_633`. Inventory their real
+production and test callers before deletion. Use that caller census—not the
+current union representation—to decide whether `EvaluationHalt` becomes a
+permanent-failure carrier, aliases `EvaluationFailure`, or remains a narrow
+compatibility name.
+
+##### W8A.1 — Remove recursive wait transport
+
 Remove `await_deferred_task`, the recursive blocked/unassigned-promise paths,
 and adapters which translate a bare `EvaluationHalt` after losing evaluator
-state. Decide from remaining callers whether `EvaluationHalt` becomes only a
-permanent-failure carrier, aliases `EvaluationFailure`, or remains as a narrow
-compatibility name. Do not preserve the union solely for obsolete call sites.
+state. Apply the `EvaluationHalt` disposition selected from W8A.0's remaining
+callers. Do not preserve the union solely for obsolete call sites.
 
 W4E removed the synchronous nested-evaluation path from a claimed
 `ApplyArity` operator pair. Compatibility retirement must not reconstruct that
@@ -8067,10 +8169,24 @@ same boundary deterministically.
 
 #### W8B — Retire direct evaluator compatibility
 
-Remove the direct evaluator constructor and test wrappers made unnecessary by
-the shared synchronous driver. Reconcile `EvaluationMachinePoll`, client
-demand, spark, and reflection result boundaries with the final yielded/pending
-protocol.
+##### W8B.1 — Migrate direct-wrapper callers
+
+Move remaining tests and internal helpers to the shared synchronous driver or
+an explicitly bounded submachine fixture. Do not keep a recursive evaluator
+solely because a test wants a concise assertion.
+
+##### W8B.2 — Delete the gate and wrappers
+
+Remove the direct evaluator constructor, `eval_value`/`eval_value_in` family,
+and wrappers made unnecessary by the shared synchronous driver. Reconcile
+`EvaluationMachinePoll`, client demand, spark, and reflection result
+boundaries with the final yielded/pending protocol.
+
+##### W8B.3 — Close exact inventories
+
+Require the D.2c W8 compatibility manifest to be empty, remove its obsolete
+checkpoint enum/fingerprint, and rerun W0B. No new declaration may inherit the
+compatibility disposition as a replacement.
 
 #### W8C — Inventory and documentation closure
 
@@ -8103,6 +8219,8 @@ unsafe or synchronization code. Ordinary WHNF state should require neither.
 
 Then perform a dated review against every invariant and acceptance criterion
 in this plan, including future-phase drift in D.2d-D.2g, P3-P5, and Gate G3.
+Repeat the W7 small-stack and budget fixtures after compatibility deletion so
+W7A.2's temporary exception is actually closed.
 
 Review Phase W9 against the then-current coordinator before beginning it. Its
 release-accounting repair is deliberately sequenced after semantic stack,
