@@ -99,14 +99,20 @@ enum ManagedKeyConversionState {
 }
 
 pub(in crate::eval) struct RegionalKeyConversion {
-    state: RegionalKeyConversionState,
+    focus: Option<RegionalKeyConversionState>,
+    parents: Vec<RegionalKeyConversionParent>,
     source_owner: Option<LazyId>,
 }
 
 enum RegionalKeyConversionState {
     Demand(RegionalWhnfWork),
     Dict(RegionalDictConversion),
-    List(Box<RegionalKeyList>),
+    List(RegionalKeyListState),
+}
+
+enum RegionalKeyConversionParent {
+    Dict(RegionalDictConversion),
+    List(RegionalKeyListState),
 }
 
 enum RegionalClassifiedKeyValue {
@@ -120,7 +126,6 @@ struct RegionalDictConversion {
     members: Vec<(Key, Value)>,
     next: usize,
     converted: Vec<(Key, Key)>,
-    child: Option<Box<RegionalKeyConversion>>,
 }
 
 /// Callback-free conversion of one logical list into dictionary keys.
@@ -129,13 +134,15 @@ struct RegionalDictConversion {
 /// prefix remain raw managed edges beneath one caller-owned checkpoint. This
 /// is also the shared child representation for compiler paths.
 pub(in crate::eval) struct RegionalKeyList {
+    conversion: RegionalKeyConversion,
+}
+
+struct RegionalKeyListState {
     source: Option<RegionalWhnfWork>,
     lists: Vec<Value>,
     chunk: Option<RegionalWhnfWork>,
     chunk_suffix: Option<Value>,
-    child: Option<Box<RegionalKeyConversion>>,
     converted: Vec<Key>,
-    source_owner: Option<LazyId>,
 }
 
 pub(in crate::eval) enum RegionalConversionPoll<T> {
@@ -537,7 +544,20 @@ impl RegionalKeyConversion {
         source_owner: Option<LazyId>,
     ) -> Self {
         Self {
-            state: RegionalKeyConversionState::Demand(regional_whnf(access, value, source_owner)),
+            focus: Some(RegionalKeyConversionState::Demand(regional_whnf(
+                access,
+                value,
+                source_owner,
+            ))),
+            parents: Vec::new(),
+            source_owner,
+        }
+    }
+
+    fn from_list(state: RegionalKeyListState, source_owner: Option<LazyId>) -> Self {
+        Self {
+            focus: Some(RegionalKeyConversionState::List(state)),
+            parents: Vec::new(),
             source_owner,
         }
     }
@@ -563,97 +583,195 @@ impl RegionalKeyConversion {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalConversionPoll<Option<Key>> {
-        match &mut self.state {
-            RegionalKeyConversionState::Demand(computation) => {
-                let value = match poll_regional_whnf(computation, access, step_budget) {
+        let focus = self
+            .focus
+            .take()
+            .expect("key conversion cannot be polled after terminal completion");
+        match focus {
+            RegionalKeyConversionState::Demand(mut computation) => {
+                let value = match poll_regional_whnf(&mut computation, access, step_budget) {
                     RegionalConversionPoll::Ready(value) => value,
                     RegionalConversionPoll::Boundary(request) => {
+                        self.focus = Some(RegionalKeyConversionState::Demand(computation));
                         return RegionalConversionPoll::Boundary(request);
                     }
-                    RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
+                    RegionalConversionPoll::Yielded => {
+                        self.focus = Some(RegionalKeyConversionState::Demand(computation));
+                        return RegionalConversionPoll::Yielded;
+                    }
                     RegionalConversionPoll::Failed(failure) => {
                         return RegionalConversionPoll::Failed(failure);
                     }
                 };
                 match classify_regional_key_value(access, value) {
-                    RegionalClassifiedKeyValue::Ready(key) => {
-                        RegionalConversionPoll::Ready(Some(key))
-                    }
+                    RegionalClassifiedKeyValue::Ready(key) => self.finish(Some(key)),
                     RegionalClassifiedKeyValue::List(value) => {
-                        self.state = RegionalKeyConversionState::List(Box::new(
-                            RegionalKeyList::from_ready(access, value, self.source_owner),
+                        self.focus = Some(RegionalKeyConversionState::List(
+                            RegionalKeyListState::from_ready(value),
                         ));
                         RegionalConversionPoll::Yielded
                     }
                     RegionalClassifiedKeyValue::Dict(members) => {
-                        self.state = RegionalKeyConversionState::Dict(RegionalDictConversion {
-                            members,
-                            next: 0,
-                            converted: Vec::new(),
-                            child: None,
-                        });
+                        self.focus =
+                            Some(RegionalKeyConversionState::Dict(RegionalDictConversion {
+                                members,
+                                next: 0,
+                                converted: Vec::new(),
+                            }));
                         RegionalConversionPoll::Yielded
                     }
-                    RegionalClassifiedKeyValue::Invalid => RegionalConversionPoll::Ready(None),
+                    RegionalClassifiedKeyValue::Invalid => self.finish(None),
                 }
             }
-            RegionalKeyConversionState::Dict(dict) => {
-                if let Some(child) = &mut dict.child {
-                    return match child.poll_optional_in(access, step_budget) {
-                        RegionalConversionPoll::Ready(Some(value)) => {
-                            let (key, _) = &dict.members[dict.next - 1];
-                            if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                                dict.converted.push((key.clone(), value));
-                            }
-                            dict.child = None;
-                            RegionalConversionPoll::Yielded
-                        }
-                        RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
-                        RegionalConversionPoll::Boundary(request) => {
-                            RegionalConversionPoll::Boundary(request)
-                        }
-                        RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
-                        RegionalConversionPoll::Failed(failure) => {
-                            RegionalConversionPoll::Failed(failure)
-                        }
-                    };
-                }
+            RegionalKeyConversionState::Dict(mut dict) => {
                 let Some((_, value)) = dict.members.get(dict.next) else {
-                    return RegionalConversionPoll::Ready(Some(Key::Dict(Arc::from(
-                        std::mem::take(&mut dict.converted),
-                    ))));
+                    return self.finish(Some(Key::Dict(Arc::from(dict.converted))));
                 };
+                let value = access.values().duplicate_value(value);
                 dict.next += 1;
-                dict.child = Some(Box::new(Self::new(
+                self.parents.push(RegionalKeyConversionParent::Dict(dict));
+                self.focus = Some(RegionalKeyConversionState::Demand(regional_whnf(
                     access,
-                    access.values().duplicate_value(value),
+                    value,
                     self.source_owner,
                 )));
                 RegionalConversionPoll::Yielded
             }
-            RegionalKeyConversionState::List(list) => {
-                match list.poll_optional_in(access, step_budget) {
-                    RegionalConversionPoll::Ready(Some(items)) => {
-                        RegionalConversionPoll::Ready(Some(Key::List(Arc::from(items))))
+            RegionalKeyConversionState::List(mut list) => {
+                if let Some(mut computation) = list.source.take() {
+                    let value = match poll_regional_whnf(&mut computation, access, step_budget) {
+                        RegionalConversionPoll::Ready(value) => value,
+                        RegionalConversionPoll::Boundary(request) => {
+                            list.source = Some(computation);
+                            self.focus = Some(RegionalKeyConversionState::List(list));
+                            return RegionalConversionPoll::Boundary(request);
+                        }
+                        RegionalConversionPoll::Yielded => {
+                            list.source = Some(computation);
+                            self.focus = Some(RegionalKeyConversionState::List(list));
+                            return RegionalConversionPoll::Yielded;
+                        }
+                        RegionalConversionPoll::Failed(failure) => {
+                            return RegionalConversionPoll::Failed(failure);
+                        }
+                    };
+                    let list_value =
+                        match value_as_regional_list(access, value, "path-list operand", false) {
+                            Ok(list) => list,
+                            Err(error) => {
+                                return RegionalConversionPoll::Failed(
+                                    error.into_permanent_failure(),
+                                );
+                            }
+                        };
+                    list.lists.push(list_value);
+                    self.focus = Some(RegionalKeyConversionState::List(list));
+                    return RegionalConversionPoll::Yielded;
+                }
+
+                if let Some(mut computation) = list.chunk.take() {
+                    let value = match poll_regional_whnf(&mut computation, access, step_budget) {
+                        RegionalConversionPoll::Ready(value) => value,
+                        RegionalConversionPoll::Boundary(request) => {
+                            list.chunk = Some(computation);
+                            self.focus = Some(RegionalKeyConversionState::List(list));
+                            return RegionalConversionPoll::Boundary(request);
+                        }
+                        RegionalConversionPoll::Yielded => {
+                            list.chunk = Some(computation);
+                            self.focus = Some(RegionalKeyConversionState::List(list));
+                            return RegionalConversionPoll::Yielded;
+                        }
+                        RegionalConversionPoll::Failed(failure) => {
+                            return RegionalConversionPoll::Failed(failure);
+                        }
+                    };
+                    let list_value =
+                        match value_as_regional_list(access, value, "lazy list chunk", true) {
+                            Ok(list) => list,
+                            Err(error) => {
+                                return RegionalConversionPoll::Failed(
+                                    error.into_permanent_failure(),
+                                );
+                            }
+                        };
+                    if let Some(suffix) = list.chunk_suffix.take() {
+                        list.lists.push(suffix);
                     }
-                    RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
-                    RegionalConversionPoll::Boundary(request) => {
-                        RegionalConversionPoll::Boundary(request)
+                    list.lists.push(list_value);
+                    self.focus = Some(RegionalKeyConversionState::List(list));
+                    return RegionalConversionPoll::Yielded;
+                }
+
+                let Some(value) = list.lists.pop() else {
+                    return self.finish(Some(Key::List(Arc::from(list.converted))));
+                };
+                let Value::List(values) = value else {
+                    unreachable!("regional key-list work must retain list values")
+                };
+                match values.pop_front_step_by(
+                    &mut |value| access.values().duplicate_value(value),
+                    &mut |thunk| thunk.duplicate_as_value_in(access.values()),
+                ) {
+                    ListFrontStep::Empty => {
+                        self.focus = Some(RegionalKeyConversionState::List(list));
                     }
-                    RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
-                    RegionalConversionPoll::Failed(failure) => {
-                        RegionalConversionPoll::Failed(failure)
+                    ListFrontStep::Item { item, tail } => {
+                        list.lists.push(Value::List(tail));
+                        match item {
+                            ListItem::Byte(byte) => {
+                                list.converted.push(Key::Number(Number::from_u8(byte)));
+                                self.focus = Some(RegionalKeyConversionState::List(list));
+                            }
+                            ListItem::Value(value) => {
+                                self.parents.push(RegionalKeyConversionParent::List(list));
+                                self.focus = Some(RegionalKeyConversionState::Demand(
+                                    regional_whnf(access, value, self.source_owner),
+                                ));
+                            }
+                        }
+                    }
+                    ListFrontStep::Deferred { deferred, suffix } => {
+                        list.chunk = Some(regional_whnf(access, deferred, self.source_owner));
+                        list.chunk_suffix = Some(Value::List(suffix));
+                        self.focus = Some(RegionalKeyConversionState::List(list));
                     }
                 }
+                RegionalConversionPoll::Yielded
             }
         }
     }
 
+    fn finish(&mut self, result: Option<Key>) -> RegionalConversionPoll<Option<Key>> {
+        let Some(key) = result else {
+            self.parents.clear();
+            return RegionalConversionPoll::Ready(None);
+        };
+        let Some(parent) = self.parents.pop() else {
+            return RegionalConversionPoll::Ready(Some(key));
+        };
+        match parent {
+            RegionalKeyConversionParent::Dict(mut dict) => {
+                let (name, _) = &dict.members[dict.next - 1];
+                if !matches!(&key, Key::Dict(entries) if entries.is_empty()) {
+                    dict.converted.push((name.clone(), key));
+                }
+                self.focus = Some(RegionalKeyConversionState::Dict(dict));
+            }
+            RegionalKeyConversionParent::List(mut list) => {
+                list.converted.push(key);
+                self.focus = Some(RegionalKeyConversionState::List(list));
+            }
+        }
+        RegionalConversionPoll::Yielded
+    }
+
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
-        match &self.state {
-            RegionalKeyConversionState::Demand(work) => work.trace_managed_edges(visitor),
-            RegionalKeyConversionState::Dict(dict) => dict.trace_managed_edges(visitor),
-            RegionalKeyConversionState::List(list) => list.trace_managed_edges(visitor),
+        if let Some(focus) = &self.focus {
+            focus.trace_managed_edges(visitor);
+        }
+        for parent in &self.parents {
+            parent.trace_managed_edges(visitor);
         }
     }
 }
@@ -662,9 +780,6 @@ impl RegionalDictConversion {
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         for (_, value) in &self.members {
             trace_compatibility_value_managed_edges(value, visitor);
-        }
-        if let Some(child) = &self.child {
-            child.trace_managed_edges(visitor);
         }
     }
 }
@@ -676,13 +791,10 @@ impl RegionalKeyList {
         source_owner: Option<LazyId>,
     ) -> Self {
         Self {
-            source: Some(regional_whnf(access, value, source_owner)),
-            lists: Vec::new(),
-            chunk: None,
-            chunk_suffix: None,
-            child: None,
-            converted: Vec::new(),
-            source_owner,
+            conversion: RegionalKeyConversion::from_list(
+                RegionalKeyListState::new(access, value, source_owner),
+                source_owner,
+            ),
         }
     }
 
@@ -692,13 +804,10 @@ impl RegionalKeyList {
         source_owner: Option<LazyId>,
     ) -> Self {
         Self {
-            source: None,
-            lists: vec![value],
-            chunk: None,
-            chunk_suffix: None,
-            child: None,
-            converted: Vec::new(),
-            source_owner,
+            conversion: RegionalKeyConversion::from_list(
+                RegionalKeyListState::from_ready(value),
+                source_owner,
+            ),
         }
     }
 
@@ -723,106 +832,47 @@ impl RegionalKeyList {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalConversionPoll<Option<Vec<Key>>> {
-        if let Some(child) = &mut self.child {
-            return match child.poll_optional_in(access, step_budget) {
-                RegionalConversionPoll::Ready(Some(key)) => {
-                    self.converted.push(key);
-                    self.child = None;
-                    RegionalConversionPoll::Yielded
-                }
-                RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
-                RegionalConversionPoll::Boundary(request) => {
-                    RegionalConversionPoll::Boundary(request)
-                }
-                RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
-                RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
-            };
-        }
-
-        if let Some(computation) = &mut self.source {
-            let value = match poll_regional_whnf(computation, access, step_budget) {
-                RegionalConversionPoll::Ready(value) => value,
-                RegionalConversionPoll::Boundary(request) => {
-                    return RegionalConversionPoll::Boundary(request);
-                }
-                RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
-                RegionalConversionPoll::Failed(failure) => {
-                    return RegionalConversionPoll::Failed(failure);
-                }
-            };
-            let list = match value_as_regional_list(access, value, "path-list operand", false) {
-                Ok(list) => list,
-                Err(error) => {
-                    return RegionalConversionPoll::Failed(error.into_permanent_failure());
-                }
-            };
-            self.source = None;
-            self.lists.push(list);
-            return RegionalConversionPoll::Yielded;
-        }
-
-        if let Some(computation) = &mut self.chunk {
-            let value = match poll_regional_whnf(computation, access, step_budget) {
-                RegionalConversionPoll::Ready(value) => value,
-                RegionalConversionPoll::Boundary(request) => {
-                    return RegionalConversionPoll::Boundary(request);
-                }
-                RegionalConversionPoll::Yielded => return RegionalConversionPoll::Yielded,
-                RegionalConversionPoll::Failed(failure) => {
-                    return RegionalConversionPoll::Failed(failure);
-                }
-            };
-            let list = match value_as_regional_list(access, value, "lazy list chunk", true) {
-                Ok(list) => list,
-                Err(error) => {
-                    return RegionalConversionPoll::Failed(error.into_permanent_failure());
-                }
-            };
-            self.chunk = None;
-            if let Some(suffix) = self.chunk_suffix.take() {
-                self.lists.push(suffix);
+        match self.conversion.poll_optional_in(access, step_budget) {
+            RegionalConversionPoll::Ready(Some(Key::List(keys))) => {
+                RegionalConversionPoll::Ready(Some(keys.to_vec()))
             }
-            self.lists.push(list);
-            return RegionalConversionPoll::Yielded;
-        }
-
-        let Some(list) = self.lists.pop() else {
-            return RegionalConversionPoll::Ready(Some(std::mem::take(&mut self.converted)));
-        };
-        let Value::List(list) = list else {
-            unreachable!("regional key-list work must retain list values")
-        };
-        let step = list.pop_front_step_by(
-            &mut |value| access.values().duplicate_value(value),
-            &mut |thunk| thunk.duplicate_as_value_in(access.values()),
-        );
-        match step {
-            ListFrontStep::Empty => RegionalConversionPoll::Yielded,
-            ListFrontStep::Item { item, tail } => {
-                self.lists.push(Value::List(tail));
-                match item {
-                    ListItem::Byte(byte) => {
-                        self.converted.push(Key::Number(Number::from_u8(byte)));
-                    }
-                    ListItem::Value(value) => {
-                        self.child = Some(Box::new(RegionalKeyConversion::new(
-                            access,
-                            value,
-                            self.source_owner,
-                        )));
-                    }
-                }
-                RegionalConversionPoll::Yielded
+            RegionalConversionPoll::Ready(Some(_)) => {
+                unreachable!("key-list conversion must produce one list key")
             }
-            ListFrontStep::Deferred { deferred, suffix } => {
-                self.chunk = Some(regional_whnf(access, deferred, self.source_owner));
-                self.chunk_suffix = Some(Value::List(suffix));
-                RegionalConversionPoll::Yielded
-            }
+            RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
+            RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
+            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
         }
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        self.conversion.trace_managed_edges(visitor);
+    }
+}
+
+impl RegionalKeyListState {
+    fn new(access: &EvaluationValueAccess<'_>, value: Value, source_owner: Option<LazyId>) -> Self {
+        Self {
+            source: Some(regional_whnf(access, value, source_owner)),
+            lists: Vec::new(),
+            chunk: None,
+            chunk_suffix: None,
+            converted: Vec::new(),
+        }
+    }
+
+    fn from_ready(value: Value) -> Self {
+        Self {
+            source: None,
+            lists: vec![value],
+            chunk: None,
+            chunk_suffix: None,
+            converted: Vec::new(),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         if let Some(source) = &self.source {
             source.trace_managed_edges(visitor);
         }
@@ -835,8 +885,24 @@ impl RegionalKeyList {
         if let Some(suffix) = &self.chunk_suffix {
             trace_compatibility_value_managed_edges(suffix, visitor);
         }
-        if let Some(child) = &self.child {
-            child.trace_managed_edges(visitor);
+    }
+}
+
+impl RegionalKeyConversionState {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Demand(work) => work.trace_managed_edges(visitor),
+            Self::Dict(dict) => dict.trace_managed_edges(visitor),
+            Self::List(list) => list.trace_managed_edges(visitor),
+        }
+    }
+}
+
+impl RegionalKeyConversionParent {
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        match self {
+            Self::Dict(dict) => dict.trace_managed_edges(visitor),
+            Self::List(list) => list.trace_managed_edges(visitor),
         }
     }
 }

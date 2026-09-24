@@ -9,15 +9,18 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::core::{
-    CoreValueFactory, EvaluationHalt, FixpointComputation, FunctionValue, LazyValue, PromisedValue,
-    Value,
+    CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FixpointComputation, FunctionValue,
+    Key, LazyValue, List, PromisedValue, Value,
 };
+use crate::core_net::CoreDataKey;
+use crate::eval::access_machine::{ConversionPoll, KeyConversionMachine, KeyListMachine};
 use crate::eval::test_support::{TestExpr, closed_function_value_in};
 use crate::eval::whnf::{
     RegionalWhnfDrive, RegionalWhnfStep, RegionalWhnfWork, WhnfStepBudget, drive_regional,
 };
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluatorStepContext, OwnedEvalContext,
+    EvalContext, EvaluationPollContext, EvaluationStepBudget, EvaluatorStepContext,
+    OwnedEvalContext,
 };
 use crate::number::Number;
 use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
@@ -189,6 +192,49 @@ fn assert_producer_chain(
     });
     assert_ne!(first_owner, second_owner);
     assert_ready_number(result, PRODUCER_DEPTH);
+}
+
+fn promised_dictionary_chain(context: &EvalContext, depth: usize, key: &Key, leaf: Value) -> Value {
+    (0..depth).fold(leaf, |value, _| {
+        let promise = PromisedValue::new(context.values(), "W7B dictionary link");
+        crate::core::set_test_promise(context.values(), &promise, value)
+            .expect("a fresh dictionary link should accept its assignment");
+        Value::Dict(Dict::new_sync().insert(key.clone(), Value::Promised(promise)))
+    })
+}
+
+fn poll_key_conversion(context: &EvalContext, machine: &mut KeyConversionMachine) -> Key {
+    let poll = EvaluationPollContext::for_context(context);
+    loop {
+        let result = poll.evaluate(context, |evaluator| {
+            machine.poll(&poll, evaluator, context, &mut EvaluationStepBudget::new(1))
+        });
+        match result {
+            ConversionPoll::Ready(key) => return key,
+            ConversionPoll::Yielded => {}
+            ConversionPoll::Pending(_) => panic!("the strict key fixture must not suspend"),
+            ConversionPoll::Failed(failure) => {
+                panic!("the strict key fixture failed: {failure:?}")
+            }
+        }
+    }
+}
+
+fn poll_key_list(context: &EvalContext, machine: &mut KeyListMachine) -> Vec<Key> {
+    let poll = EvaluationPollContext::for_context(context);
+    loop {
+        let result = poll.evaluate(context, |evaluator| {
+            machine.poll(&poll, evaluator, context, &mut EvaluationStepBudget::new(1))
+        });
+        match result {
+            ConversionPoll::Ready(keys) => return keys,
+            ConversionPoll::Yielded => {}
+            ConversionPoll::Pending(_) => panic!("the strict list fixture must not suspend"),
+            ConversionPoll::Failed(failure) => {
+                panic!("the strict list fixture failed: {failure:?}")
+            }
+        }
+    }
 }
 
 #[inline(never)]
@@ -372,4 +418,118 @@ fn deep_fixpoint_chain_completes_and_resumes_on_a_forced_owner() {
         "w7b-fixpoint-suspend-owner",
         "w7b-fixpoint-resume-owner",
     );
+}
+
+#[test]
+fn deep_static_access_path_completes_on_the_small_stack() {
+    let (_context, result) = on_small_stack("w7b-static-access", || {
+        let context = context();
+        let key = Key::atom_from_text("next");
+        let path: Arc<[CoreDataKey]> = (0..SEMANTIC_DEPTH)
+            .map(|_| CoreDataKey::Key(key.clone()))
+            .collect::<Vec<_>>()
+            .into();
+        let base = promised_dictionary_chain(
+            &context,
+            SEMANTIC_DEPTH,
+            &key,
+            Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+        );
+        let root = context.values().construct_runtime_value_root(|access| {
+            Value::Lazy(LazyValue::from_access_in(access, path, Arc::from([base])))
+        });
+        let result = context
+            .evaluate_root_whnf(root)
+            .expect("the deep static path should reach its leaf");
+        assert_ready_number(result.clone(), SEMANTIC_DEPTH);
+        (context, result)
+    });
+    assert_ready_number(result, SEMANTIC_DEPTH);
+}
+
+#[test]
+fn deeply_nested_dictionary_key_conversion_completes_on_the_small_stack() {
+    let (_context, key) = on_small_stack("w7b-key-conversion", || {
+        let context = context();
+        let member = Key::atom_from_text("member");
+        let input = RuntimeValueRoot::new(
+            context.values(),
+            promised_dictionary_chain(
+                &context,
+                SEMANTIC_DEPTH,
+                &member,
+                Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+            ),
+        );
+        let mut machine = KeyConversionMachine::new(input, None);
+        let key = poll_key_conversion(&context, &mut machine);
+        (context, key)
+    });
+
+    let mut current = &key;
+    for _ in 0..SEMANTIC_DEPTH {
+        let Key::Dict(entries) = current else {
+            panic!("every nested key level must remain a dictionary")
+        };
+        assert_eq!(entries.len(), 1);
+        current = &entries[0].1;
+    }
+    assert_eq!(current, &Key::Number(Number::from_usize(SEMANTIC_DEPTH)));
+}
+
+#[test]
+fn large_strict_collection_conversion_completes_on_the_small_stack() {
+    let (_context, keys) = on_small_stack("w7b-collection-conversion", || {
+        let context = context();
+        let input = context.values().construct_runtime_value_root(|_| {
+            Value::List(List::from_values(
+                (0..SEMANTIC_DEPTH)
+                    .map(|index| Value::Number(Number::from_usize(index)))
+                    .collect(),
+            ))
+        });
+        let mut machine = KeyListMachine::unowned(input);
+        let keys = poll_key_list(&context, &mut machine);
+        (context, keys)
+    });
+    assert_eq!(keys.len(), SEMANTIC_DEPTH);
+    assert_eq!(keys.first(), Some(&Key::Number(Number::from_usize(0))));
+    assert_eq!(
+        keys.last(),
+        Some(&Key::Number(Number::from_usize(SEMANTIC_DEPTH - 1)))
+    );
+}
+
+#[test]
+fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
+    let _context = on_small_stack("w7b-structured-failure", || {
+        let context = context();
+        let detail = Key::atom_from_text("detail");
+        let emission = Value::Dict(
+            Dict::new_sync()
+                .insert(
+                    Key::atom_from_text("msg"),
+                    Value::binary_from_text("W7B structured failure"),
+                )
+                .insert(detail, Value::Number(7.into())),
+        );
+        let frame = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("eval"),
+            Value::binary_from_text("small_stack"),
+        ));
+        let failure =
+            Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
+        let promise = PromisedValue::new(context.values(), "W7B structured failure");
+        crate::core::fail_test_promise(context.values(), &promise, failure.clone())
+            .expect("the fresh terminal promise should accept one failure");
+        let root = promised_alias_root(&context, Value::Promised(promise), SEMANTIC_DEPTH);
+        let observed = context
+            .evaluate_root_whnf(root)
+            .expect_err("the deep aliases must preserve their terminal failure")
+            .into_permanent_failure();
+        assert!(Arc::ptr_eq(&failure, &observed));
+        assert_eq!(observed.emission_value(), Some(&emission));
+        assert_eq!(observed.contexts(), [frame]);
+        context
+    });
 }

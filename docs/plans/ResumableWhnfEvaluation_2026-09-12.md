@@ -8160,9 +8160,31 @@ on a worker race to choose the boundary or resumption owner.
 
 ##### W7B.2 — Structural paths, collections, and failures
 
+**Status:** complete on 2026-09-24.
+
 Run deep access-path, key-conversion, collection, and structured-failure
 fixtures. Distinguish explicit evaluator worklists from balanced persistent-
 container recursion whose logarithmic bound was approved in W7A.
+
+Completion record: 4,096-element routine witnesses now cover static access
+paths, nested dictionary-key conversion, strict list conversion, and
+structured failure propagation through promise aliases. The static path and
+nested-key fixtures place each dictionary layer behind an already-assigned
+managed promise. This preserves the semantic depth while making compatibility
+edge tracing stop at its intended managed-identity boundary rather than
+conflating evaluator stack safety with a raw transitional `Value::Dict`
+representation walk. The strict collection uses the balanced list
+representation and verifies all 4,096 ordered results, while the failure case
+preserves one exact emission and context frame.
+
+The first nested-key witness found a real omission in W7A's source analysis:
+`RegionalKeyConversion` and `RegionalKeyList` called boxed children through
+typed receivers, a mutual recursion shape the deliberately conservative local
+call graph did not guess. The old fixture deterministically overflowed the
+512 KiB stack. Key conversion now owns one focus and an explicit vector of
+dictionary/list parent frames; each poll still performs the same single
+transition, and managed tracing visits the focus and frames iteratively. The
+same 4,096-level witness now completes on the selected stack.
 
 ##### W7B.3 — Scheduler-owner matrix
 
