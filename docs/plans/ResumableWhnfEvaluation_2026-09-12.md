@@ -8123,10 +8123,20 @@ new function is not closure.
 
 ##### W7B.0 — Harness and depth baseline
 
+**Status:** complete on 2026-09-24.
+
 Introduce one deterministic small-stack thread harness with an explicit stack
 size and a source-shaped depth large enough to fail an equivalent recursive
 fixture. Keep scale-only variants out of the routine path if necessary, but
 retain one bounded routine witness. Repetition is not evidence.
+
+Completion record: W7B uses one 512 KiB named-thread harness and a semantic
+depth of 4,096. A subprocess-isolated recursive control keeps an observable
+1 KiB frame live across each recursive call and proves that the chosen depth
+overflows that stack without risking the main test process. At the same depth,
+the callback-free regional WHNF driver completes 4,096 delegations through its
+explicit work state. Both are routine bounded witnesses; no repeated run or
+uncontrolled scheduler timing is accepted as stack-safety evidence.
 
 ##### W7B.1 — Alias, application, and fixpoint chains
 

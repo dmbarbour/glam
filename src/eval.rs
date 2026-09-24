@@ -117,3 +117,7 @@ fn with_direct_evaluator<R>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "eval/tests/w7b.rs"]
+mod w7b_tests;
