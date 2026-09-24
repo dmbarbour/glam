@@ -1154,6 +1154,7 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 const EXPECTED_W7_RESOLVED_CALLS: usize = 1_148;
 const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_426_600_492_285_587_613;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
+const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 12_624_383_794_632_597_732;
 
 #[test]
 fn whnf_suspension_and_recursion_census_is_exact() {
@@ -1220,6 +1221,58 @@ fn w7_resolved_call_graph_cycles_are_exact() {
             .collect::<Vec<_>>(),
         EXPECTED_W7_CYCLIC_FUNCTIONS,
         "W7A.1 must leave no statically resolved recursive semantic family"
+    );
+}
+
+#[test]
+fn w7_w8_compatibility_handoff_is_exact_and_not_a_production_entry() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (definitions, _) = collect_resolved_calls(manifest);
+    let declarations = definitions
+        .iter()
+        .filter(|function| function.path == "src/eval/value.rs")
+        .filter(|function| {
+            W8_VALUE_COMPATIBILITY_NAMES
+                .binary_search(&function.name.as_str())
+                .is_ok()
+        })
+        .map(FunctionKey::declaration)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declarations,
+        W8_VALUE_COMPATIBILITY_NAMES
+            .iter()
+            .map(|name| format!("src/eval/value.rs::{name}"))
+            .collect::<Vec<_>>(),
+        "W7A.2 and D.2c must name the same six W8 compatibility declarations"
+    );
+
+    let occurrences = collect_occurrences(manifest);
+    let compatibility = occurrences
+        .iter()
+        .filter(|occurrence| w7_disposition(occurrence) == W7Disposition::W8ValueCompatibility)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        occurrence_fingerprint(&compatibility),
+        EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT,
+        "the exact W8-only W0B occurrence handoff drifted"
+    );
+
+    let external_entries = occurrences
+        .iter()
+        .filter(|occurrence| {
+            matches!(
+                occurrence.signal,
+                Signal::EvalValue | Signal::EvalLazy | Signal::EvalPromise
+            ) && !is_w8_value_compatibility_declaration(&occurrence.declaration)
+        })
+        .map(Occurrence::record)
+        .collect::<Vec<_>>();
+    assert!(
+        external_entries.is_empty(),
+        "ordinary production owners must enter the resumable driver, not W8 compatibility: \
+         {external_entries:#?}"
     );
 }
 

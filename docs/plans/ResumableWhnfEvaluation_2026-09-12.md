@@ -2,9 +2,9 @@
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
 post-W6F review are complete by 2026-09-18. W6G.1-W6G.5 and the mandatory
-post-W6G review are complete by 2026-09-24. W7-W8 remain planned, followed by
-the explicit W6G4R-003 performance follow-up in W9. This is the focused implementation
-plan selected by
+post-W6G review plus W7A are complete by 2026-09-24. W7B-W8 remain planned,
+followed by the explicit W6G4R-003 performance follow-up in W9. This is the
+focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -8095,11 +8095,29 @@ shape rather than using an accidental process stack overflow as its test.
 
 ##### W7A.2 — Exact W8 handoff
 
+**Status:** complete on 2026-09-24.
+
 Latch the remaining compatibility declarations and their fingerprint as the
 only temporary stack-closure exception. Record why none is reachable from the
 ordinary resumable production driver. W8A-B must remove that set rather than
 relabelling it, and W8D must rerun W0B and the small-stack fixtures before the
 whole plan closes.
+
+Completion record: the W7 source gate independently names the same six
+`src/eval/value.rs` declarations as D.2c's `W8ValueCompatibility` manifest:
+`eval_value`, `eval_value_in`, `eval_lazy_in`, `eval_promised_in`,
+`await_deferred_task`, and `deferred_wait_result`. D.2c continues to latch
+their declaration/signature fingerprint at `1_485_448_540_290_006_633`; W7
+additionally latches the 19 W0B calls, loops, waits, and coordinator boundaries
+inside that family at fingerprint `12_624_383_794_632_597_732`.
+
+Every remaining direct `eval_value_in`/`eval_lazy_in`/`eval_promised_in`
+signal originates inside those six declarations. No ordinary production owner
+enters them: client demand, lazy routes, reflection tasks, sparks, and nets all
+enter their resumable owner instead. The exception is therefore test/direct-
+compatibility transport rather than a hidden production stack path. W8 must
+delete the exact declarations and both manifests; moving a replacement into a
+new function is not closure.
 
 #### W7B — Small-stack verification
 
