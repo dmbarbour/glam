@@ -26,7 +26,7 @@ pub(in crate::eval) struct RegionalDictBuiltinMachine {
 
 enum RegionalDictBuiltinState {
     Singleton {
-        key: RegionalKeyConversion,
+        key: Box<RegionalKeyConversion>,
         value: Value,
     },
     Union(RegionalSequentialDemands),
@@ -66,11 +66,11 @@ impl RegionalDictBuiltinMachine {
                     unreachable!("dictionary singleton retains two operands")
                 };
                 RegionalDictBuiltinState::Singleton {
-                    key: RegionalKeyConversion::new(
+                    key: Box::new(RegionalKeyConversion::new(
                         access,
                         access.values().duplicate_value(key),
                         Some(source_owner),
-                    ),
+                    )),
                     value: access.values().duplicate_value(value),
                 }
             }

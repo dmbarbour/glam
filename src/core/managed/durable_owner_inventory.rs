@@ -983,9 +983,12 @@ const DECLARATION_BASELINE_COUNT: usize = 250;
 // is a durable owner. PNC5 adds the builder effect runner and public retained
 // selection phases beneath the same managed builtin checkpoint, accounting for
 // five declarations, five raw values, and three failure fields.
+// W7B replaces recursively boxed dictionary/list key-conversion children with
+// one explicit focus-and-parent stack. Declaration and field totals remain
+// stable; only the reviewed source-shaped fingerprint changes.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
     DeclarationSignals::new([318, 114, 5, 34, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_037_891_169_917_411_508;
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_492_029_001_153_194_707;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

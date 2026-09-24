@@ -1871,6 +1871,9 @@ mod tests {
                 &[
                     "src/api/tests.rs::public_semantic_thunk",
                     "src/eval/net/tests/nc5.rs::block_task_promise",
+                    "src/eval/tests/w7b.rs::application_chain_root_with_depth",
+                    "src/eval/tests/w7b.rs::fixpoint_chain_root",
+                    "src/eval/tests/w7b.rs::lazy_alias_root",
                     "src/evaluation/tests.rs::rooted_promise_value",
                     "src/evaluation/tests.rs::rooted_semantic_lazy_value",
                 ],

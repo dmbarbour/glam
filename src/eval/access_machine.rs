@@ -50,7 +50,7 @@ pub(in crate::eval) struct AccessMachine {
 }
 
 enum AccessConversion {
-    Key(RegionalKeyConversion),
+    Key(Box<RegionalKeyConversion>),
     Path(Box<RegionalKeyList>),
 }
 
@@ -94,7 +94,7 @@ struct ManagedKeyConversionCell {
 }
 
 enum ManagedKeyConversionState {
-    Key(RegionalKeyConversion),
+    Key(Box<RegionalKeyConversion>),
     List(Box<RegionalKeyList>),
 }
 
@@ -107,12 +107,12 @@ pub(in crate::eval) struct RegionalKeyConversion {
 enum RegionalKeyConversionState {
     Demand(RegionalWhnfWork),
     Dict(RegionalDictConversion),
-    List(RegionalKeyListState),
+    List(Box<RegionalKeyListState>),
 }
 
 enum RegionalKeyConversionParent {
     Dict(RegionalDictConversion),
-    List(RegionalKeyListState),
+    List(Box<RegionalKeyListState>),
 }
 
 enum RegionalClassifiedKeyValue {
@@ -279,10 +279,8 @@ impl AccessMachine {
             }
             CoreDataKey::Index => {
                 let argument = self.next_dynamic_argument(access);
-                self.conversion = Some(AccessConversion::Key(RegionalKeyConversion::new(
-                    access,
-                    argument,
-                    Some(self.source_owner),
+                self.conversion = Some(AccessConversion::Key(Box::new(
+                    RegionalKeyConversion::new(access, argument, Some(self.source_owner)),
                 )));
             }
             CoreDataKey::PathIndex => {
@@ -393,11 +391,11 @@ impl KeyConversionMachine {
         else {
             return;
         };
-        let state = ManagedKeyConversionState::Key(RegionalKeyConversion::new(
+        let state = ManagedKeyConversionState::Key(Box::new(RegionalKeyConversion::new(
             access,
             access.clone_root(value),
             *source_owner,
-        ));
+        )));
         self.checkpoint = DurableKeyConversionCheckpoint::Managed(
             ManagedKeyConversionRoot::new_in(access, state),
         );
@@ -556,7 +554,7 @@ impl RegionalKeyConversion {
 
     fn from_list(state: RegionalKeyListState, source_owner: Option<LazyId>) -> Self {
         Self {
-            focus: Some(RegionalKeyConversionState::List(state)),
+            focus: Some(RegionalKeyConversionState::List(Box::new(state))),
             parents: Vec::new(),
             source_owner,
         }
@@ -606,9 +604,15 @@ impl RegionalKeyConversion {
                 match classify_regional_key_value(access, value) {
                     RegionalClassifiedKeyValue::Ready(key) => self.finish(Some(key)),
                     RegionalClassifiedKeyValue::List(value) => {
-                        self.focus = Some(RegionalKeyConversionState::List(
-                            RegionalKeyListState::from_ready(value),
-                        ));
+                        self.focus = Some(RegionalKeyConversionState::List(Box::new(
+                            RegionalKeyListState {
+                                source: None,
+                                lists: vec![value],
+                                chunk: None,
+                                chunk_suffix: None,
+                                converted: Vec::new(),
+                            },
+                        )));
                         RegionalConversionPoll::Yielded
                     }
                     RegionalClassifiedKeyValue::Dict(members) => {
@@ -805,7 +809,13 @@ impl RegionalKeyList {
     ) -> Self {
         Self {
             conversion: RegionalKeyConversion::from_list(
-                RegionalKeyListState::from_ready(value),
+                RegionalKeyListState {
+                    source: None,
+                    lists: vec![value],
+                    chunk: None,
+                    chunk_suffix: None,
+                    converted: Vec::new(),
+                },
                 source_owner,
             ),
         }
@@ -856,16 +866,6 @@ impl RegionalKeyListState {
         Self {
             source: Some(regional_whnf(access, value, source_owner)),
             lists: Vec::new(),
-            chunk: None,
-            chunk_suffix: None,
-            converted: Vec::new(),
-        }
-    }
-
-    fn from_ready(value: Value) -> Self {
-        Self {
-            source: None,
-            lists: vec![value],
             chunk: None,
             chunk_suffix: None,
             converted: Vec::new(),

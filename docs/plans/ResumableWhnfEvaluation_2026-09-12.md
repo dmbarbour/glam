@@ -8214,6 +8214,14 @@ use repeated scheduling as evidence. Terminal route value, reflection result,
 spark cache, and exact subscription retirement are deterministic in every
 case.
 
+The repository-wide W7B gate also keeps the expanded conversion state out of
+unrelated enum variants by boxing only the large payload arms. Source-backed
+ownership, raw-value, managed-edge, root-publication, and WHNF-control
+inventories record the new test roots, access-qualified helper, and explicit
+parent-stack loop. The focused 14-test W7B suite, the access-machine suite,
+all managed inventories, and the complete repository suite are the closure
+criteria; passing a repeated schedule is not.
+
 #### W7C — Budget and fairness verification
 
 ##### W7C.0 — Budget vocabulary decision

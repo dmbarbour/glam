@@ -1114,10 +1114,13 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // boundaries. The route-aware method names preserve those boundary counts;
 // the blocking client driver now delegates bounded polling to the common pump
 // instead of maintaining one additional unbounded source-level polling loop.
-const EXPECTED_OCCURRENCES: usize = 158;
+// W7B replaces recursive dictionary/list key conversion with one explicit
+// parent-stack walk. Its trace visitor contributes one reviewed access-path
+// loop; no recursive semantic call remains.
+const EXPECTED_OCCURRENCES: usize = 159;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 3_270_388_107_992_880_254;
+const EXPECTED_FINGERPRINT: u64 = 4_415_693_485_046_065_581;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -1129,7 +1132,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::UserSizedLoop, 93),
+    (Signal::UserSizedLoop, 94),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
@@ -1137,22 +1140,22 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::OrderedOperands, 8),
     (WorkShape::CollectionWalk, 8),
     (WorkShape::KeyConversion, 2),
-    (WorkShape::AccessPath, 7),
+    (WorkShape::AccessPath, 8),
     (WorkShape::DiagnosticContext, 1),
     (WorkShape::OrchestrationHandoff, 51),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 6_047_825_596_780_081_189;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 980_708_031_703_014_079;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
-    (W7Disposition::ExplicitIteration, 90),
+    (W7Disposition::ExplicitIteration, 91),
     (W7Disposition::Orchestration, 49),
     (W7Disposition::W8ValueCompatibility, 19),
 ];
 
 const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_148;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_426_600_492_285_587_613;
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_154;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 16_061_262_585_134_608_273;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 12_624_383_794_632_597_732;
 

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        881,
+        882,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -953,9 +953,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // W6G4R-001F adds two test-only promise roots that force the exact-route
     // distinction between task-owned and resolver-owned promise producers.
     // Production managed edges remain unchanged.
+    // W7B adds one exact lazy-family root to keep the route-owner fixture live
+    // while two explicitly ordered small-stack pollers exchange ownership.
     assert_eq!(
         occurrence_fingerprint(actual),
-        4_205_394_170_383_848_614,
+        8_116_275_936_377_308_062,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1002,7 +1004,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 201),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 630),
+            ((SourceScope::Test, EdgeSurface::Typed), 631),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
