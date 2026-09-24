@@ -852,6 +852,36 @@ impl EvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn poll_one_executor_work_for_test(&self) -> bool {
+        self.coordinator()
+            .is_some_and(|coordinator| match coordinator.select_worker() {
+                super::coordinator::CoordinatorSelection::Task(work) => {
+                    coordinator.poll_claimed_task(work);
+                    true
+                }
+                super::coordinator::CoordinatorSelection::Spark(work) => {
+                    coordinator.poll_claimed_spark(work);
+                    true
+                }
+                super::coordinator::CoordinatorSelection::None => false,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_manual_spark_worker_for_test(&self) {
+        self.coordinator()
+            .expect("manual spark fixture coordinator should remain live")
+            .executor_started(1);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_manual_spark_worker_for_test(&self) {
+        self.coordinator()
+            .expect("manual spark fixture coordinator should remain live")
+            .executor_stopped();
+    }
+
+    #[cfg(test)]
     pub(crate) fn client_demand_count_for_test(&self) -> usize {
         self.coordinator()
             .map_or(0, |coordinator| coordinator.client_demand_count())

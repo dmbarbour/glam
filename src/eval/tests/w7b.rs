@@ -16,11 +16,13 @@ use crate::core_net::CoreDataKey;
 use crate::eval::access_machine::{ConversionPoll, KeyConversionMachine, KeyListMachine};
 use crate::eval::test_support::{TestExpr, closed_function_value_in};
 use crate::eval::whnf::{
-    RegionalWhnfDrive, RegionalWhnfStep, RegionalWhnfWork, WhnfStepBudget, drive_regional,
+    RegionalWhnfDrive, RegionalWhnfStep, RegionalWhnfWork, WhnfComputation, WhnfStepBudget,
+    drive_regional,
 };
 use crate::evaluation::{
-    EvalContext, EvaluationPollContext, EvaluationStepBudget, EvaluatorStepContext,
-    OwnedEvalContext,
+    EvalContext, EvaluationMachinePoll, EvaluationPollContext, EvaluationPumpOutcome,
+    EvaluationStepBudget, EvaluationTaskBlock, EvaluationTaskMachine, EvaluationWaitPoll,
+    EvaluatorStepContext, OwnedEvalContext, WhnfOwnerPoll, poll_whnf_computation,
 };
 use crate::number::Number;
 use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
@@ -28,6 +30,7 @@ use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_i
 const SMALL_STACK_BYTES: usize = 512 * 1024;
 const SEMANTIC_DEPTH: usize = 4_096;
 const PRODUCER_DEPTH: usize = 512;
+const OWNER_DEPTH: usize = 128;
 const RECURSIVE_CONTROL_ENV: &str = "GLAM_W7B_RECURSIVE_CONTROL";
 
 fn on_small_stack<T: Send + 'static>(
@@ -92,11 +95,19 @@ fn rooted_closed_function(context: &EvalContext, arity: usize, body: TestExpr) -
 }
 
 fn application_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
+    application_chain_root_with_depth(context, leaf, PRODUCER_DEPTH)
+}
+
+fn application_chain_root_with_depth(
+    context: &EvalContext,
+    leaf: Value,
+    depth: usize,
+) -> RuntimeValueRoot {
     let identity = rooted_closed_function(context, 1, TestExpr::Local(0));
     context.values().construct_runtime_value_root(|access| {
         let identity = identity.clone_core_with(access);
         let mut current = leaf;
-        for _ in 0..PRODUCER_DEPTH {
+        for _ in 0..depth {
             current = Value::Lazy(LazyValue::from_application_in(
                 access,
                 access.duplicate_value(&identity),
@@ -105,6 +116,40 @@ fn application_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoo
         }
         current
     })
+}
+
+struct WhnfReflectionTask {
+    context: EvalContext,
+    computation: WhnfComputation,
+}
+
+impl EvaluationTaskMachine for WhnfReflectionTask {
+    fn poll(
+        &mut self,
+        poll_context: &EvaluationPollContext,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        match poll_whnf_computation(
+            &mut self.computation,
+            poll_context,
+            &self.context,
+            step_budget,
+        ) {
+            WhnfOwnerPoll::Ready(value) => EvaluationMachinePoll::Complete(value),
+            WhnfOwnerPoll::Pending(dependency) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(dependency),
+                    observed_epoch: None,
+                    error: None,
+                })
+            }
+            WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            WhnfOwnerPoll::External(boundary) => {
+                unreachable!("the W7B reflection fixture reached external {boundary:?}")
+            }
+        }
+    }
 }
 
 fn fixpoint_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
@@ -148,6 +193,15 @@ fn drive_until_stably_blocked(context: &EvalContext, work_bound: usize) {
         }
     }
     panic!("the forced W7B suspension did not become stably blocked");
+}
+
+fn drive_executor_until_stably_blocked(context: &EvalContext, work_bound: usize) {
+    for _ in 0..work_bound {
+        if !context.poll_one_executor_work_for_test() {
+            return;
+        }
+    }
+    panic!("the forced W7B executor suspension did not become stably blocked");
 }
 
 fn assert_producer_chain(
@@ -532,4 +586,161 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
         assert_eq!(observed.contexts(), [frame]);
         context
     });
+}
+
+#[test]
+fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
+    let (context, promise, wait, _lazy_root, first_owner) =
+        on_small_stack("w7b-lazy-route-first-owner", || {
+            let context = context();
+            let promise = PromisedValue::new(context.values(), "W7B lazy-route suspension");
+            let root = application_chain_root_with_depth(
+                &context,
+                Value::Promised(promise.clone()),
+                OWNER_DEPTH,
+            );
+            let Value::Lazy(lazy) = root.clone_core_for_test() else {
+                unreachable!("the application chain must publish one outer lazy")
+            };
+            let lazy_root = lazy.root(context.values());
+            let wait = super::lazy_root_wait(&context, &lazy_root)
+                .expect("the exact lazy route should be admitted");
+            loop {
+                match context.pump_wait(&wait, 4_096) {
+                    EvaluationPumpOutcome::BudgetExhausted => {}
+                    EvaluationPumpOutcome::NoProgress => break,
+                    EvaluationPumpOutcome::Busy => {
+                        panic!("the single-poller fixture cannot have a busy owner")
+                    }
+                    EvaluationPumpOutcome::TargetReady => {
+                        panic!("the unassigned terminal promise cannot be ready")
+                    }
+                }
+            }
+            assert_eq!(promise.exact_subscription_count(context.values()), 1);
+            (context, promise, wait, lazy_root, thread::current().id())
+        });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(OWNER_DEPTH)),
+    )
+    .expect("the lazy-route suspension should resolve once");
+    let (second_owner, result, _context) =
+        on_small_stack("w7b-lazy-route-second-owner", move || {
+            let owner = thread::current().id();
+            loop {
+                match context.pump_wait(&wait, 4_096) {
+                    EvaluationPumpOutcome::TargetReady => break,
+                    EvaluationPumpOutcome::BudgetExhausted => {}
+                    EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => {
+                        panic!("the assigned exact lazy route must make progress")
+                    }
+                }
+            }
+            let EvaluationWaitPoll::Complete(value) = context.poll_wait(&wait) else {
+                panic!("the exact lazy route must publish its WHNF result")
+            };
+            (owner, *value, context)
+        });
+    assert_ne!(first_owner, second_owner);
+    assert_ready_number(result, OWNER_DEPTH);
+}
+
+#[test]
+fn reflection_hosted_checkpoint_resumes_on_another_small_stack_poller() {
+    let (context, promise, task, first_owner) =
+        on_small_stack("w7b-reflection-first-owner", || {
+            let context = context();
+            let promise = PromisedValue::new(context.values(), "W7B reflection suspension");
+            let root =
+                promised_alias_root(&context, Value::Promised(promise.clone()), SEMANTIC_DEPTH);
+            let computation = WhnfComputation::from_root(root);
+            let task = context
+                .schedule_task(move |task_context| {
+                    Ok(Box::new(WhnfReflectionTask {
+                        context: task_context,
+                        computation,
+                    }))
+                })
+                .expect("the WHNF-hosting reflection fixture should schedule");
+            drive_until_stably_blocked(&context, SEMANTIC_DEPTH + 32);
+            assert!(matches!(
+                context.poll_reflection_task(&task),
+                EvaluationWaitPoll::Pending(_)
+            ));
+            assert_eq!(promise.exact_subscription_count(context.values()), 1);
+            (context, promise, task, thread::current().id())
+        });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+    )
+    .expect("the reflection-hosted suspension should resolve once");
+    let (second_owner, result, _context) =
+        on_small_stack("w7b-reflection-second-owner", move || {
+            let owner = thread::current().id();
+            for _ in 0..SEMANTIC_DEPTH + 32 {
+                match context.poll_reflection_task(&task) {
+                    EvaluationWaitPoll::Complete(value) => {
+                        return (owner, *value, context);
+                    }
+                    EvaluationWaitPoll::Pending(_) => {
+                        assert!(context.poll_one_runtime_work_for_test());
+                    }
+                    other => panic!("the reflection fixture terminated unexpectedly: {other:?}"),
+                }
+            }
+            panic!("the reflection-hosted checkpoint exhausted its work bound")
+        });
+    assert_ne!(first_owner, second_owner);
+    assert_ready_number(result, SEMANTIC_DEPTH);
+}
+
+#[test]
+fn spark_checkpoint_resumes_on_another_small_stack_poller() {
+    let (context, promise, lazy, root, first_owner) =
+        on_small_stack("w7b-spark-first-owner", || {
+            let context = context();
+            context.start_manual_spark_worker_for_test();
+            let promise = PromisedValue::new(context.values(), "W7B spark suspension");
+            let root = application_chain_root_with_depth(
+                &context,
+                Value::Promised(promise.clone()),
+                OWNER_DEPTH,
+            );
+            let Value::Lazy(lazy) = root.clone_core_for_test() else {
+                unreachable!("the spark fixture must publish one outer lazy")
+            };
+            context.spark_root(root.clone());
+            drive_executor_until_stably_blocked(&context, OWNER_DEPTH * 64 + 128);
+            assert_eq!(promise.exact_subscription_count(context.values()), 1);
+            (context, promise, lazy, root, thread::current().id())
+        });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(OWNER_DEPTH)),
+    )
+    .expect("the spark suspension should resolve once");
+    let (second_owner, result, _context, _root) =
+        on_small_stack("w7b-spark-second-owner", move || {
+            let owner = thread::current().id();
+            let result = loop {
+                if let Some(result) = lazy.cached(context.values()) {
+                    break result
+                        .expect("the spark application chain should not fail")
+                        .into_value();
+                }
+                assert!(
+                    context.poll_one_executor_work_for_test(),
+                    "the assigned spark checkpoint must remain runnable"
+                );
+            };
+            context.stop_manual_spark_worker_for_test();
+            (owner, result, context, root)
+        });
+    assert_ne!(first_owner, second_owner);
+    assert_eq!(result, Value::Number(Number::from_usize(OWNER_DEPTH)));
 }

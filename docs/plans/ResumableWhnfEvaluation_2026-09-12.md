@@ -2,7 +2,7 @@
 
 Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
 post-W6F review are complete by 2026-09-18. W6G.1-W6G.5 and the mandatory
-post-W6G review plus W7A are complete by 2026-09-24. W7B-W8 remain planned,
+post-W6G review plus W7A-W7B are complete by 2026-09-24. W7C-W8 remain planned,
 followed by the explicit W6G4R-003 performance follow-up in W9. This is the
 focused implementation plan selected by
 GCI11R-002D.2c.1d in
@@ -8121,6 +8121,8 @@ new function is not closure.
 
 #### W7B — Small-stack verification
 
+**Status:** complete on 2026-09-24.
+
 ##### W7B.0 — Harness and depth baseline
 
 **Status:** complete on 2026-09-24.
@@ -8188,11 +8190,29 @@ same 4,096-level witness now completes on the selected stack.
 
 ##### W7B.3 — Scheduler-owner matrix
 
+**Status:** complete on 2026-09-24.
+
 Exercise representative client-demand, lazy-route, reflection-hosted, and
 spark/deferred owners where the same semantic state may resume on another
 poller. Use zero-, one-, and multiple-worker configurations only where they
 force a distinct owner boundary; all semantic outcomes and exact checkpoints
 must be schedule independent.
+
+Completion record: W7B.1 supplies the zero-worker client-demand handoff. W7B.3
+adds an exact lazy route, a scheduled reflection machine which directly owns
+one `WhnfComputation`, and a best-effort spark whose `StrategyDemandMachine`
+owns the ordinary WHNF checkpoint. Each fixture drives its first owner to one
+exact unassigned-promise subscription on a named 512 KiB thread, assigns that
+promise outside either poller, then resumes on a second named thread whose
+identity must differ. The lazy route and reflection task use the zero-worker
+foreground/background pump distinction. Spark admission alone uses one
+manually declared executor worker because a zero-worker runtime intentionally
+drops the hint; test-only worker polling selects the same executor queue
+without introducing an uncontrolled OS-worker race. A multi-worker variant
+would change only which thread wins, not the owner boundary, so W7B does not
+use repeated scheduling as evidence. Terminal route value, reflection result,
+spark cache, and exact subscription retirement are deterministic in every
+case.
 
 #### W7C — Budget and fairness verification
 
