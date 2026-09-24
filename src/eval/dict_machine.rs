@@ -439,39 +439,66 @@ fn update_dict_path_in(
     path: &[Key],
     new_value: Value,
 ) -> Dict {
-    let Some((head, rest)) = path.split_first() else {
+    if path.is_empty() {
         return dict.clone();
-    };
-    let next = if rest.is_empty() {
-        new_value
-    } else {
-        let prior = dict
+    }
+
+    let mut parents = Vec::with_capacity(path.len().saturating_sub(1));
+    let mut current = dict.clone();
+    let mut index = 0;
+    let next = loop {
+        let head = &path[index];
+        let rest = &path[index + 1..];
+        if rest.is_empty() {
+            break new_value;
+        }
+
+        let prior = current
             .get(head)
             .map(|value| access.duplicate_value(value))
             .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
         match prior {
-            Value::Dict(dict) => Value::Dict(update_dict_path_in(access, &dict, rest, new_value)),
-            Value::Lazy(_) | Value::Promised(_) => builtin_apply3_value_in(
-                access,
-                Builtin::DictUpdate,
-                &key_path_value(access, rest),
-                &new_value,
-                &prior,
-            ),
-            _ => Value::Lazy(LazyValue::error_in(
-                access,
-                format!(
-                    "dictionary update path `{}` traverses a non-dictionary value",
-                    format_name_part(head)
-                ),
-            )),
+            Value::Dict(nested) => {
+                parents.push((current, head.clone()));
+                current = nested;
+                index += 1;
+            }
+            Value::Lazy(_) | Value::Promised(_) => {
+                break builtin_apply3_value_in(
+                    access,
+                    Builtin::DictUpdate,
+                    &key_path_value(access, rest),
+                    &new_value,
+                    &prior,
+                );
+            }
+            _ => {
+                break Value::Lazy(LazyValue::error_in(
+                    access,
+                    format!(
+                        "dictionary update path `{}` traverses a non-dictionary value",
+                        format_name_part(head)
+                    ),
+                ));
+            }
         }
     };
-    if is_undefined_dict_value(access, &next) {
-        dict.remove(head)
+
+    let head = &path[index];
+    let mut result = if is_undefined_dict_value(access, &next) {
+        current.remove(head)
     } else {
-        dict.insert(head.clone(), next)
+        current.insert(head.clone(), next)
+    };
+    while let Some((parent, head)) = parents.pop() {
+        let next = Value::Dict(result);
+        result = if is_undefined_dict_value(access, &next) {
+            parent.remove(&head)
+        } else {
+            parent.insert(head, next)
+        };
     }
+    result
 }
 
 fn key_path_value(access: &crate::core::RuntimeValueAccess<'_>, path: &[Key]) -> Value {
@@ -481,20 +508,91 @@ fn key_path_value(access: &crate::core::RuntimeValueAccess<'_>, path: &[Key]) ->
 }
 
 fn key_value(_access: &crate::core::RuntimeValueAccess<'_>, key: &Key) -> Value {
-    match key {
-        Key::Atom(atom) => Value::Atom(*atom),
-        Key::Number(number) => Value::Number(number.clone()),
-        Key::Binary(bytes) => Value::Binary(bytes.clone()),
-        Key::AbstractGlobalPath(parts) => Value::Atom(crate::core::Atom::from_key(
-            &Key::AbstractGlobalPath(parts.clone()),
-        )),
-        Key::List(items) => Value::List(List::from_values(
-            items.iter().map(|key| key_value(_access, key)).collect(),
-        )),
-        Key::Dict(entries) => {
-            Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                dict.insert(key.clone(), key_value(_access, value))
-            }))
+    enum Frame<'key> {
+        List {
+            items: &'key [Key],
+            next: usize,
+            values: Vec<Value>,
+        },
+        Dict {
+            entries: &'key [(Key, Key)],
+            next: usize,
+            values: Dict,
+        },
+    }
+
+    let mut frames = Vec::new();
+    let mut current = key;
+    loop {
+        let mut value = match current {
+            Key::Atom(atom) => Value::Atom(*atom),
+            Key::Number(number) => Value::Number(number.clone()),
+            Key::Binary(bytes) => Value::Binary(bytes.clone()),
+            Key::AbstractGlobalPath(parts) => Value::Atom(crate::core::Atom::from_key(
+                &Key::AbstractGlobalPath(parts.clone()),
+            )),
+            Key::List(items) if items.is_empty() => Value::List(List::empty()),
+            Key::List(items) => {
+                frames.push(Frame::List {
+                    items,
+                    next: 1,
+                    values: Vec::with_capacity(items.len()),
+                });
+                current = &items[0];
+                continue;
+            }
+            Key::Dict(entries) if entries.is_empty() => Value::Dict(Dict::new_sync()),
+            Key::Dict(entries) => {
+                frames.push(Frame::Dict {
+                    entries,
+                    next: 1,
+                    values: Dict::new_sync(),
+                });
+                current = &entries[0].1;
+                continue;
+            }
+        };
+
+        loop {
+            let Some(frame) = frames.pop() else {
+                return value;
+            };
+            match frame {
+                Frame::List {
+                    items,
+                    next,
+                    mut values,
+                } => {
+                    values.push(value);
+                    if next < items.len() {
+                        frames.push(Frame::List {
+                            items,
+                            next: next + 1,
+                            values,
+                        });
+                        current = &items[next];
+                        break;
+                    }
+                    value = Value::List(List::from_values(values));
+                }
+                Frame::Dict {
+                    entries,
+                    next,
+                    values,
+                } => {
+                    let values = values.insert(entries[next - 1].0.clone(), value);
+                    if next < entries.len() {
+                        frames.push(Frame::Dict {
+                            entries,
+                            next: next + 1,
+                            values,
+                        });
+                        current = &entries[next].1;
+                        break;
+                    }
+                    value = Value::Dict(values);
+                }
+            }
         }
     }
 }

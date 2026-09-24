@@ -5440,30 +5440,41 @@ fn insert_effect_api_path(
     value: Value,
     display_path: &str,
 ) -> Result<Dict, TaskHalt> {
-    let Some((name, rest)) = path.split_first() else {
+    if path.is_empty() {
         return Err(TaskHalt::new("effect API path must not be empty"));
-    };
-    let key = Key::atom_from_text(name);
-    if rest.is_empty() {
-        if api.get(&key).is_some() {
-            return Err(TaskHalt::new(format!(
-                "duplicate effect API name `{display_path}`"
-            )));
-        }
-        return Ok(api.insert(key, value));
     }
 
-    let nested = match api.get(&key) {
-        Some(Value::Dict(nested)) => nested.clone(),
-        Some(_) => {
-            return Err(TaskHalt::new(format!(
-                "effect API path `{display_path}` crosses non-dictionary `{name}`"
-            )));
+    let mut parents = Vec::with_capacity(path.len().saturating_sub(1));
+    let mut current = api;
+    for (index, name) in path.iter().enumerate() {
+        let key = Key::atom_from_text(name);
+        if index + 1 == path.len() {
+            if current.get(&key).is_some() {
+                return Err(TaskHalt::new(format!(
+                    "duplicate effect API name `{display_path}`"
+                )));
+            }
+            current = current.insert(key, value);
+            break;
         }
-        None => Dict::new_sync(),
-    };
-    let nested = insert_effect_api_path(nested, rest, value, display_path)?;
-    Ok(api.insert(key, Value::Dict(nested)))
+
+        let nested = match current.get(&key) {
+            Some(Value::Dict(nested)) => nested.clone(),
+            Some(_) => {
+                return Err(TaskHalt::new(format!(
+                    "effect API path `{display_path}` crosses non-dictionary `{name}`"
+                )));
+            }
+            None => Dict::new_sync(),
+        };
+        parents.push((current, key));
+        current = nested;
+    }
+
+    while let Some((parent, key)) = parents.pop() {
+        current = parent.insert(key, Value::Dict(current));
+    }
+    Ok(current)
 }
 
 fn request_function_in(

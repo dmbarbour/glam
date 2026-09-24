@@ -1114,10 +1114,10 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // boundaries. The route-aware method names preserve those boundary counts;
 // the blocking client driver now delegates bounded polling to the common pump
 // instead of maintaining one additional unbounded source-level polling loop.
-const EXPECTED_OCCURRENCES: usize = 156;
+const EXPECTED_OCCURRENCES: usize = 158;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 6_487_120_116_923_049_700;
+const EXPECTED_FINGERPRINT: u64 = 3_270_388_107_992_880_254;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::EvalValue, 1),
     (Signal::EvalLazy, 1),
@@ -1129,8 +1129,7 @@ const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::StructuralRecursion, 4),
-    (Signal::UserSizedLoop, 87),
+    (Signal::UserSizedLoop, 93),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::TailDemand, 2),
@@ -1138,33 +1137,23 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::OrderedOperands, 8),
     (WorkShape::CollectionWalk, 8),
     (WorkShape::KeyConversion, 2),
-    (WorkShape::AccessPath, 5),
+    (WorkShape::AccessPath, 7),
     (WorkShape::DiagnosticContext, 1),
     (WorkShape::OrchestrationHandoff, 51),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 9_118_067_021_981_578_255;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 6_047_825_596_780_081_189;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
-    (W7Disposition::ExplicitIteration, 84),
+    (W7Disposition::ExplicitIteration, 90),
     (W7Disposition::Orchestration, 49),
     (W7Disposition::W8ValueCompatibility, 19),
-    (W7Disposition::UnapprovedRecursion, 4),
 ];
 
-const EXPECTED_W7A0_UNAPPROVED_RECURSION: &[&str] = &[
-    "src/eval/dict_machine.rs::key_value#1",
-    "src/eval/dict_machine.rs::key_value#2",
-    "src/eval/dict_machine.rs::update_dict_path_in#1",
-    "src/reflection/machine.rs::insert_effect_api_path#1",
-];
+const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 
-const EXPECTED_W7A0_RESOLVED_CALLS: usize = 1_152;
-const EXPECTED_W7A0_RESOLVED_CALL_FINGERPRINT: u64 = 6_358_179_092_932_255_754;
-const EXPECTED_W7A0_CYCLIC_FUNCTIONS: &[&str] = &[
-    "src/eval/dict_machine.rs::key_value",
-    "src/eval/dict_machine.rs::update_dict_path_in",
-    "src/reflection/machine.rs::insert_effect_api_path",
-];
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_148;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_426_600_492_285_587_613;
+const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 
 #[test]
 fn whnf_suspension_and_recursion_census_is_exact() {
@@ -1208,8 +1197,8 @@ fn w7_stack_disposition_gate_is_exact() {
         .map(|occurrence| format!("{}#{}", occurrence.declaration, occurrence.ordinal))
         .collect::<Vec<_>>();
     assert_eq!(
-        unapproved, EXPECTED_W7A0_UNAPPROVED_RECURSION,
-        "W7A.0 must hand every unapproved recursive call to W7A.1 explicitly"
+        unapproved, EXPECTED_W7_UNAPPROVED_RECURSION,
+        "W7A.1 must leave no unapproved recursive semantic call"
     );
 }
 
@@ -1219,8 +1208,8 @@ fn w7_resolved_call_graph_cycles_are_exact() {
     assert_eq!(
         (calls.len(), resolved_call_fingerprint(&calls)),
         (
-            EXPECTED_W7A0_RESOLVED_CALLS,
-            EXPECTED_W7A0_RESOLVED_CALL_FINGERPRINT
+            EXPECTED_W7_RESOLVED_CALLS,
+            EXPECTED_W7_RESOLVED_CALL_FINGERPRINT
         ),
         "the statically resolved W7 call-edge ledger drifted"
     );
@@ -1229,8 +1218,8 @@ fn w7_resolved_call_graph_cycles_are_exact() {
             .into_iter()
             .map(|function| function.declaration())
             .collect::<Vec<_>>(),
-        EXPECTED_W7A0_CYCLIC_FUNCTIONS,
-        "W7A.0 must hand every statically resolved recursive family to W7A.1"
+        EXPECTED_W7_CYCLIC_FUNCTIONS,
+        "W7A.1 must leave no statically resolved recursive semantic family"
     );
 }
 

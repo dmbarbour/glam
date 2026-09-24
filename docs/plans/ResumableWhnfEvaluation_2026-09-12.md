@@ -8063,6 +8063,8 @@ owners. W7A.1 owns the exact remaining set: `key_value` twice,
 
 ##### W7A.1 — Production semantic stack closure
 
+**Status:** complete on 2026-09-24.
+
 Reduce the W0B manifest to zero unapproved production semantic recursion
 outside the exact W8 compatibility set. Any remaining Rust recursion must be
 one of:
@@ -8073,6 +8075,23 @@ one of:
 - a separately owned worklist/trampoline such as cursor-WHNF.
 
 No user-controlled semantic recursion may remain implicit on the Rust stack.
+
+Completion record: the four W7A.0 calls belonged to three functions.
+Dictionary-key reification now uses an explicit list/dictionary frame stack;
+nested dictionary update records its parent dictionaries and reconstructs
+them in reverse; and reflection effect-API path insertion uses the same
+iterative descend/rebuild shape. Their existing eager semantics are unchanged,
+and W7A does not pretend those operations consume the W7C scheduler budget.
+
+The replacements expose six ordinary source loops in place of four recursive
+call sites. The exact W0B baseline is therefore 158 occurrences at fingerprint
+`3_270_388_107_992_880_254`: 90 explicit iterative traversals, 49
+orchestration boundaries, and 19 occurrences wholly inside W8's six
+compatibility declarations. There are zero unapproved recursion dispositions.
+The exact locally resolved call graph now contains 1,148 edges at fingerprint
+`15_426_600_492_285_587_613` and no transitive cycle. W7B owns deliberate
+small-stack depth fixtures; this checkpoint closes the production source
+shape rather than using an accidental process stack overflow as its test.
 
 ##### W7A.2 — Exact W8 handoff
 
