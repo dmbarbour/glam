@@ -1056,6 +1056,22 @@ impl EvalContext {
         self.drive_client_demand(handle)
     }
 
+    #[cfg(test)]
+    pub(crate) fn drive_client_demand_value_for_test(
+        &self,
+        handle: ClientDemandHandle,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+        match self.drive_client_demand(handle)? {
+            ClientDemandResult::Complete(value) => Ok(value),
+            ClientDemandResult::Abandoned => {
+                unreachable!("an explicitly driven client demand remains owned by its caller")
+            }
+            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
+                unreachable!("client failures are returned by drive_client_demand")
+            }
+        }
+    }
+
     pub(crate) fn runs_scheduled_task(&self) -> bool {
         self.scheduled_task
     }

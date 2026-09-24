@@ -5,18 +5,26 @@
 
 use std::hint::black_box;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 
-use crate::core::{CoreValueFactory, Value};
+use crate::core::{
+    CoreValueFactory, EvaluationHalt, FixpointComputation, FunctionValue, LazyValue, PromisedValue,
+    Value,
+};
+use crate::eval::test_support::{TestExpr, closed_function_value_in};
 use crate::eval::whnf::{
     RegionalWhnfDrive, RegionalWhnfStep, RegionalWhnfWork, WhnfStepBudget, drive_regional,
 };
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::{
+    EvalContext, EvaluationPollContext, EvaluatorStepContext, OwnedEvalContext,
+};
 use crate::number::Number;
-use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
 
 const SMALL_STACK_BYTES: usize = 512 * 1024;
 const SEMANTIC_DEPTH: usize = 4_096;
+const PRODUCER_DEPTH: usize = 512;
 const RECURSIVE_CONTROL_ENV: &str = "GLAM_W7B_RECURSIVE_CONTROL";
 
 fn on_small_stack<T: Send + 'static>(
@@ -30,6 +38,157 @@ fn on_small_stack<T: Send + 'static>(
         .expect("the W7B small-stack witness thread should spawn")
         .join()
         .expect("the W7B small-stack witness must not panic")
+}
+
+fn context() -> OwnedEvalContext {
+    EvalContext::isolated(CoreValueFactory::new(
+        allocate_evaluation_runtime_id(),
+        RuntimeIds::new(),
+    ))
+}
+
+fn return_first_capture(
+    _context: &EvaluatorStepContext<'_>,
+    captures: &[Value],
+) -> Result<Value, EvaluationHalt> {
+    Ok(captures[0].clone())
+}
+
+fn lazy_alias_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
+    context.values().construct_runtime_value_root(|access| {
+        let mut current = leaf;
+        for _ in 0..PRODUCER_DEPTH {
+            let lazy = LazyValue::semantic_computation_in(
+                access,
+                "W7B lazy alias",
+                Arc::from([access.duplicate_value(&current)]),
+                return_first_capture,
+            );
+            current = Value::Lazy(lazy);
+        }
+        current
+    })
+}
+
+fn promised_alias_root(context: &EvalContext, leaf: Value, depth: usize) -> RuntimeValueRoot {
+    let mut current = leaf;
+    for _ in 0..depth {
+        let promise = PromisedValue::new(context.values(), "W7B promised alias");
+        crate::core::set_test_promise(context.values(), &promise, current)
+            .expect("a fresh promised alias should accept its assignment");
+        current = Value::Promised(promise);
+    }
+    RuntimeValueRoot::new(context.values(), current)
+}
+
+fn rooted_closed_function(context: &EvalContext, arity: usize, body: TestExpr) -> RuntimeValueRoot {
+    RuntimeValueRoot::new(
+        context.values(),
+        closed_function_value_in(context.values(), arity, body),
+    )
+}
+
+fn application_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
+    let identity = rooted_closed_function(context, 1, TestExpr::Local(0));
+    context.values().construct_runtime_value_root(|access| {
+        let identity = identity.clone_core_with(access);
+        let mut current = leaf;
+        for _ in 0..PRODUCER_DEPTH {
+            current = Value::Lazy(LazyValue::from_application_in(
+                access,
+                access.duplicate_value(&identity),
+                Arc::from([access.duplicate_value(&current)]),
+            ));
+        }
+        current
+    })
+}
+
+fn fixpoint_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
+    // In the test fixture's de Bruijn convention Local(1) is the first of two
+    // arguments. Partially applying it therefore creates a constant function
+    // which ignores the fixpoint marker.
+    let constant_template = rooted_closed_function(context, 2, TestExpr::Local(1));
+    context.values().construct_runtime_value_root(|access| {
+        let Value::Function(template) = constant_template.clone_core_with(access) else {
+            unreachable!("the constant template is a function")
+        };
+        let mut current = leaf;
+        for _ in 0..PRODUCER_DEPTH {
+            let stage = super::net::attach_net_many_in(
+                access,
+                template.duplicate_stage_in(access),
+                vec![access.duplicate_value(&current)],
+            );
+            let function = Value::Function(FunctionValue::new(stage, 1));
+            current = Value::Lazy(LazyValue::computed_fixpoint_in(
+                access,
+                "W7B fixpoint chain",
+                FixpointComputation::Function(function),
+            ));
+        }
+        current
+    })
+}
+
+fn assert_ready_number(result: RuntimeValueRoot, expected: usize) {
+    assert_eq!(
+        result.clone_core_for_test(),
+        Value::Number(Number::from_usize(expected))
+    );
+}
+
+fn drive_until_stably_blocked(context: &EvalContext, work_bound: usize) {
+    for _ in 0..work_bound {
+        if !context.poll_one_runtime_work_for_test() {
+            return;
+        }
+    }
+    panic!("the forced W7B suspension did not become stably blocked");
+}
+
+fn assert_producer_chain(
+    build: fn(&EvalContext, Value) -> RuntimeValueRoot,
+    uninterrupted_thread: &'static str,
+    suspension_thread: &'static str,
+    resumption_thread: &'static str,
+) {
+    on_small_stack(uninterrupted_thread, move || {
+        let context = context();
+        let root = build(&context, Value::Number(Number::from_usize(PRODUCER_DEPTH)));
+        let result = context
+            .evaluate_root_whnf(root)
+            .expect("the uninterrupted producer chain should reach WHNF");
+        assert_ready_number(result, PRODUCER_DEPTH);
+    });
+
+    let (context, promise, handle, first_owner) = on_small_stack(suspension_thread, move || {
+        let context = context();
+        let promise = PromisedValue::new(context.values(), "W7B producer-chain suspension");
+        let root = build(&context, Value::Promised(promise.clone()));
+        let handle = context
+            .demand_whnf(root)
+            .expect("the forced producer-chain demand should be admitted");
+        drive_until_stably_blocked(&context, PRODUCER_DEPTH * 64 + 128);
+        assert!(handle.poll().is_none());
+        assert_eq!(promise.exact_subscription_count(context.values()), 1);
+        (context, promise, handle, thread::current().id())
+    });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(PRODUCER_DEPTH)),
+    )
+    .expect("the forced producer-chain suspension should resolve once");
+    let (second_owner, result, _context) = on_small_stack(resumption_thread, move || {
+        let owner = thread::current().id();
+        let result = context
+            .drive_client_demand_value_for_test(handle)
+            .expect("the assigned producer chain should resume");
+        (owner, result, context)
+    });
+    assert_ne!(first_owner, second_owner);
+    assert_ready_number(result, PRODUCER_DEPTH);
 }
 
 #[inline(never)]
@@ -104,4 +263,113 @@ fn explicit_whnf_worklist_completes_at_the_recursive_control_depth() {
             assert_eq!(budget.remaining(), 0);
         });
     });
+}
+
+#[test]
+fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
+    on_small_stack("w7b-lazy-alias-uninterrupted", || {
+        let context = context();
+        let root = lazy_alias_root(&context, Value::Number(Number::from_usize(SEMANTIC_DEPTH)));
+        let result = context
+            .evaluate_root_whnf(root)
+            .expect("the uninterrupted lazy aliases should reach WHNF");
+        assert_ready_number(result, SEMANTIC_DEPTH);
+    });
+
+    let (context, promise, handle, first_owner) =
+        on_small_stack("w7b-lazy-alias-suspend-owner", || {
+            let context = context();
+            let promise = PromisedValue::new(context.values(), "W7B lazy alias suspension");
+            let root = lazy_alias_root(&context, Value::Promised(promise.clone()));
+            let handle = context
+                .demand_whnf(root)
+                .expect("the forced lazy-alias demand should be admitted");
+            drive_until_stably_blocked(&context, SEMANTIC_DEPTH * 2 + 32);
+            assert!(handle.poll().is_none());
+            assert_eq!(promise.exact_subscription_count(context.values()), 1);
+            (context, promise, handle, thread::current().id())
+        });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+    )
+    .expect("the forced lazy-alias suspension should resolve once");
+    let (second_owner, result, _context) =
+        on_small_stack("w7b-lazy-alias-resume-owner", move || {
+            let owner = thread::current().id();
+            let result = context
+                .drive_client_demand_value_for_test(handle)
+                .expect("the assigned lazy aliases should resume");
+            (owner, result, context)
+        });
+    assert_ne!(first_owner, second_owner);
+    assert_ready_number(result, SEMANTIC_DEPTH);
+}
+
+#[test]
+fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
+    on_small_stack("w7b-promise-alias-uninterrupted", || {
+        let context = context();
+        let root = promised_alias_root(
+            &context,
+            Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+            SEMANTIC_DEPTH,
+        );
+        let result = context
+            .evaluate_root_whnf(root)
+            .expect("the uninterrupted promise aliases should reach WHNF");
+        assert_ready_number(result, SEMANTIC_DEPTH);
+    });
+
+    let (context, promise, handle, first_owner) =
+        on_small_stack("w7b-promise-alias-suspend-owner", || {
+            let context = context();
+            let promise = PromisedValue::new(context.values(), "W7B promise alias suspension");
+            let root =
+                promised_alias_root(&context, Value::Promised(promise.clone()), SEMANTIC_DEPTH);
+            let handle = context
+                .demand_whnf(root)
+                .expect("the forced promise-alias demand should be admitted");
+            drive_until_stably_blocked(&context, SEMANTIC_DEPTH + 32);
+            assert!(handle.poll().is_none());
+            assert_eq!(promise.exact_subscription_count(context.values()), 1);
+            (context, promise, handle, thread::current().id())
+        });
+    crate::core::set_test_promise(
+        context.values(),
+        &promise,
+        Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
+    )
+    .expect("the forced promise-alias suspension should resolve once");
+    let (second_owner, result, _context) =
+        on_small_stack("w7b-promise-alias-resume-owner", move || {
+            let owner = thread::current().id();
+            let result = context
+                .drive_client_demand_value_for_test(handle)
+                .expect("the assigned promise aliases should resume");
+            (owner, result, context)
+        });
+    assert_ne!(first_owner, second_owner);
+    assert_ready_number(result, SEMANTIC_DEPTH);
+}
+
+#[test]
+fn deep_application_chain_completes_and_resumes_on_a_forced_owner() {
+    assert_producer_chain(
+        application_chain_root,
+        "w7b-application-uninterrupted",
+        "w7b-application-suspend-owner",
+        "w7b-application-resume-owner",
+    );
+}
+
+#[test]
+fn deep_fixpoint_chain_completes_and_resumes_on_a_forced_owner() {
+    assert_producer_chain(
+        fixpoint_chain_root,
+        "w7b-fixpoint-uninterrupted",
+        "w7b-fixpoint-suspend-owner",
+        "w7b-fixpoint-resume-owner",
+    );
 }

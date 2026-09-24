@@ -8140,9 +8140,23 @@ uncontrolled scheduler timing is accepted as stack-safety evidence.
 
 ##### W7B.1 — Alias, application, and fixpoint chains
 
+**Status:** complete on 2026-09-24.
+
 Run deep lazy-alias, promise-alias, application, and fixpoint fixtures in both
 uninterrupted and forced-suspension forms. Force the suspension point and the
 resume owner; do not infer it from worker timing.
+
+Completion record: four production-shaped families now run beneath the W7B
+small-stack harness. Promise aliases use the full 4,096-node control depth;
+producer-heavy lazy-alias, function-application, and constant-function
+fixpoint chains use a bounded 512-node routine depth so the fixture measures
+stack behavior without adding tens of seconds of linear scheduler setup to
+every suite run. Each family has an uninterrupted result witness and an
+unassigned terminal-promise witness. The latter is pumped to stable
+quiescence, latches the exact one promise subscription, assigns the promise,
+and moves the retained client-demand computation to a newly spawned poller
+whose thread identity must differ from the suspending poller. No test relies
+on a worker race to choose the boundary or resumption owner.
 
 ##### W7B.2 — Structural paths, collections, and failures
 
