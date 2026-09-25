@@ -46,6 +46,16 @@ impl ClaimedSparkWork {
         self.demand.operation.source()
     }
 
+    #[cfg(test)]
+    pub(in crate::evaluation) fn id_for_test(&self) -> EvaluationWorkId {
+        self.id
+    }
+
+    #[cfg(test)]
+    pub(in crate::evaluation) fn has_prior_dependency_for_test(&self) -> bool {
+        self.prior_dependency.is_some()
+    }
+
     pub(crate) fn poll(
         &mut self,
         poll_context: &crate::evaluation::EvaluationPollContext,

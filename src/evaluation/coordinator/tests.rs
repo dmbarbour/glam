@@ -2662,21 +2662,35 @@ fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
         .expect("open test session should reserve reflection work");
     activate_test_reflection(&coordinator, work);
 
-    let CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
+    let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) =
+        coordinator.select_worker()
+    else {
         panic!("task work should receive the first turn")
     };
-    coordinator.requeue_unpolled_task(claimed);
+    let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Yielded);
+    assert!(!release.terminal);
+    assert!(!release.remains_blocked);
 
     let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
         panic!("spark should receive the alternating turn")
     };
-    coordinator.release_spark(spark, SparkWorkPoll::Complete);
-    let CoordinatorSelection::Task(claimed) = coordinator.select_worker() else {
+    coordinator.release_spark(spark, SparkWorkPoll::Yielded);
+    assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
+
+    let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) =
+        coordinator.select_worker()
+    else {
         panic!("task work should receive the next alternating turn")
     };
-    coordinator.requeue_unpolled_task(claimed);
-    assert!(coordinator.terminalize_reflection(work));
+    let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Terminal);
+    assert!(release.terminal);
     settle_test_reflection(&coordinator, work);
+
+    let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
+        panic!("the yielded spark should receive the fourth alternating turn")
+    };
+    coordinator.release_spark(spark, SparkWorkPoll::Complete);
+    assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
 }
 
 #[test]
