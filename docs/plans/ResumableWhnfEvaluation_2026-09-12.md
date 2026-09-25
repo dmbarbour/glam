@@ -8224,43 +8224,85 @@ criteria; passing a repeated schedule is not.
 
 #### W7C — Budget and fairness verification
 
-##### W7C.0 — Budget vocabulary decision
+##### W7C.0 — Budget vocabulary and scope
 
-Distinguish the inner `EvaluationStepBudget::spent()` count from the
-foreground pump's current reservation of a complete task quantum before a
-poll. Decide whether the pump allowance is a reservation or an exact consumed-
-transition budget, and document any refund/translation rule. All later tests
-must use that one vocabulary; do not claim exact spend from a merely reserved
-quantum.
+The inner `EvaluationStepBudget` is the exact transition counter for one
+claimed machine poll. Its `spent()` value reports units actually consumed by
+that poll, including the one administrative unit charged only when admitted
+delegation consumed none.
+
+The foreground exact-demand pump's scalar argument remains a **reservation
+allowance**. Before each claimed poll it reserves `min(allowance,
+TASK_POLL_QUANTUM)` and does not refund the unused portion. Consequently
+`BudgetExhausted` means that the bounded foreground call has assigned all of
+its reservation allowance; it does not report exact inner spend. This
+conservative rule keeps selection and retry policy independent of the current
+machine's internal transition count. `EvaluationRuntime::pump_background`, in
+contrast, translates the exact inner `spent()` count back to its public
+report. No later test may compare a foreground allowance with exact spend.
 
 ##### W7C.1 — Exact checkpoint budget
 
-Prove that a deep computation yields at the selected exact boundary, retains
-the same checkpoint, reports the selected spent/reserved counts, and
-eventually completes. A zero budget performs no semantic transition or work
-claim.
+###### W7C.1a — Zero and exact inner boundaries
+
+Prove that zero budget performs no semantic transition or work claim, and
+that one- and many-unit `EvaluationStepBudget`s report exact inner spend.
+
+###### W7C.1b — Retained checkpoint progression
+
+Force a deep computation through one-unit claimed polls. Record the same
+owner/checkpoint identity across ordinary budget yields, prove that each poll
+stops at the selected inner boundary, then prove eventual completion. Check
+the foreground reservation result separately from exact inner spend.
 
 ##### W7C.2 — Owner-specific yield and requeue
 
-Ensure client demand, lazy/deferred work, reflection, and sparks requeue an
-ordinary budget yield without installing a dependency subscription. Force the
-yield/reclaim order and distinguish it from a real lazy, promise, reflection,
-or observation dependency.
+###### W7C.2a — Foreground and lazy owners
+
+Ensure client demand and exact lazy/deferred work requeue an ordinary budget
+yield without installing a dependency subscription. Force yield, inspect the
+queued or dormant disposition selected by real demand, and reclaim the same
+record.
+
+###### W7C.2b — Reflection and spark owners
+
+Ensure reflection and sparks requeue an ordinary budget yield without
+installing a dependency subscription. Force the yield/reclaim order and
+distinguish it from a real lazy, promise, reflection, or observation
+dependency.
 
 ##### W7C.3 — Fair ready-work scheduling
 
+###### W7C.3a — Per-role FIFO requeue
+
 Force at least two independently ready records around repeated budget yields
-and prove that each role's selected queue makes progress without granting
-workers foreground authority or granting foreground pumps unrelated work.
-Use latches or explicit poll gates, not repeated parallel runs.
+and prove FIFO requeue for reflection and client-demand queues. The required
+witness is an explicit `A, B, A, B` claim/release trace, not repeated parallel
+runs.
+
+###### W7C.3b — Cross-role fairness and authority
+
+Prove deterministic task/spark alternation while both roles remain ready.
+Retain the negative authority witnesses: workers never select foreground
+client demand, the runtime background pump never selects clients or sparks,
+and a foreground exact pump never selects unrelated work.
 
 ##### W7C.4 — Cost accounting
 
-Observe root registrations, allocations, managed-access entries, checkpoint
-publications, and poll counts. Treat them as regression diagnostics initially,
-except enforce that uninterrupted tail delegation performs no per-step root
+###### W7C.4a — Existing counters and local probes
+
+Use the collector's allocated-slot and root-registration counters, the
+runtime-value-access depth probe, explicit poll counters, and stable
+checkpoint/owner identities. Do not add synchronization to production paths
+merely to count a test event; keep any missing publication count local to the
+owning fixture.
+
+###### W7C.4b — Enforced no-churn invariants
+
+Enforce that uninterrupted tail delegation performs no per-step root
 registration and that a retained aggregate checkpoint does not republish
-roots per frame or per repoll.
+roots per frame or per repoll. Allocation and access-entry totals remain
+diagnostic baselines until profiling justifies a semantic threshold.
 
 W4E supplies the static interaction-net counters and a test-only work-item
 fuse for stopping a net at a known pre-completion boundary. Reuse those as

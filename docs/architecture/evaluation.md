@@ -194,9 +194,12 @@ token records its original grant, remaining units, and exact declared spend.
 Delegating reflection phases charge an administrative unit only when their
 child consumed none, so a one-unit quantum can still advance nested WHNF work
 without hiding a renewed sub-budget. The current demand pump deliberately
-reserves its whole task quantum before polling and does not refund unused
-units; the finer accounting is observational until scheduler policy is
-revisited.
+interprets its outer scalar as a reservation allowance: it reserves a whole
+task quantum before polling and does not refund unused units. Its
+`BudgetExhausted` result therefore describes exhausted reservation, not exact
+inner spend. The runtime background pump instead translates exact inner spend
+into its public report. Finer foreground accounting remains observational
+until scheduler policy is revisited.
 
 Successful type-erased machine polls cross that release boundary as a
 `RuntimeValueRoot`, never a bare `core::Value`. Evaluator results are published

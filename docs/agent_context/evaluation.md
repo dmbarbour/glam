@@ -325,6 +325,13 @@ control-flow overview.
   ID. It must not upgrade the external owner lease: worker and task contexts
   may need to finish exact dependencies
   after the client has released that lease.
+- Keep evaluator quantum vocabulary exact. `EvaluationStepBudget::spent()` is
+  the transition count consumed inside one claimed poll. The foreground exact
+  demand driver's scalar is instead a conservative reservation allowance: it
+  reserves a whole quantum and does not refund unused units. Its
+  `BudgetExhausted` result must never be presented as an exact-spend report.
+  The runtime background pump does translate exact inner spend into its public
+  report.
 - Preserve inactive per-heap allocation cursors across ordinary worker
   quantums, but explicitly release all such thread-local cache records when a
   worker terminates. This exit boundary must run only after scoped mutators

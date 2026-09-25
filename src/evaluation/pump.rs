@@ -412,13 +412,13 @@ pub(super) fn pump_demand(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
-    step_budget: usize,
+    reservation_allowance: usize,
 ) -> EvaluationPumpOutcome {
     pump_demand_on_route(
         coordinator,
         context,
         target,
-        step_budget,
+        reservation_allowance,
         &mut ExactDemandRoute::default(),
     )
 }
@@ -427,7 +427,7 @@ pub(super) fn pump_demand_on_route(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
-    mut step_budget: usize,
+    mut reservation_allowance: usize,
     route: &mut ExactDemandRoute,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
@@ -441,7 +441,7 @@ pub(super) fn pump_demand_on_route(
         if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
         }
-        if step_budget == 0 {
+        if reservation_allowance == 0 {
             return EvaluationPumpOutcome::BudgetExhausted;
         }
 
@@ -480,8 +480,8 @@ pub(super) fn pump_demand_on_route(
 
         let work_id = work.id();
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
-        let quantum = step_budget.min(TASK_POLL_QUANTUM);
-        step_budget -= quantum;
+        let quantum = reservation_allowance.min(TASK_POLL_QUANTUM);
+        reservation_allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let poll = claimed.poll(&mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());

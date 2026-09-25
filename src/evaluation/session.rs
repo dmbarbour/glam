@@ -1947,15 +1947,25 @@ impl EvalContext {
     pub(crate) fn pump_wait(
         &self,
         wait: &EvaluationWaitToken,
-        step_budget: usize,
+        reservation_allowance: usize,
     ) -> EvaluationPumpOutcome {
-        self.pump_wait_on_route(wait, step_budget, &mut ExactDemandRoute::default())
+        self.pump_wait_on_route(
+            wait,
+            reservation_allowance,
+            &mut ExactDemandRoute::default(),
+        )
     }
 
+    /// Pumps the exact foreground route within a conservative reservation
+    /// allowance.
+    ///
+    /// Each selected machine poll reserves its complete quantum up front.
+    /// Unlike `EvaluationRuntime::pump_background`, this compatibility driver
+    /// does not refund unused inner `EvaluationStepBudget` units.
     pub(crate) fn pump_wait_on_route(
         &self,
         wait: &EvaluationWaitToken,
-        step_budget: usize,
+        reservation_allowance: usize,
         route: &mut ExactDemandRoute,
     ) -> EvaluationPumpOutcome {
         let Some(coordinator) = self.coordinator() else {
@@ -1965,7 +1975,7 @@ impl EvalContext {
                 EvaluationPumpOutcome::NoProgress
             };
         };
-        pump_demand_on_route(&coordinator, self, wait, step_budget, route)
+        pump_demand_on_route(&coordinator, self, wait, reservation_allowance, route)
     }
 
     /// Runs every executable task until all are terminal or one complete pass
