@@ -1,10 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W5 and their mandatory reviews plus W6A-W6F and the mandatory
-post-W6F review are complete by 2026-09-18. W6G.1-W6G.5 and the mandatory
-post-W6G review plus W7A-W7B are complete by 2026-09-24. W7C-W8 remain planned,
-followed by the explicit W6G4R-003 performance follow-up in W9. This is the
-focused implementation plan selected by
+Status: W0-W8 and their mandatory reviews are complete by 2026-09-27,
+followed by the planned explicit W6G4R-003 performance follow-up in W9. This
+is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -8593,7 +8591,7 @@ interlock, and Gate G3 prerequisites now agree that D.2c is zero while
 D.2b/D.2d-D.2g and P3-P5 remain open. Every durable WHNF and specialized lazy
 checkpoint owner is named in the ledger; no new root family was introduced.
 
-#### W8D — Full verification and review
+#### W8D — Full verification and review — Complete (2026-09-27)
 
 Run:
 
@@ -8620,6 +8618,18 @@ Review Phase W9 against the then-current coordinator before beginning it. Its
 release-accounting repair is deliberately sequenced after semantic stack,
 budget, and compatibility closure so this performance residual does not
 distort those transitions.
+
+Completion record: formatting, all-feature Clippy, ordinary/aggressive W7,
+ordinary/aggressive D.2c closure, the 116-test inventory suite, the complete
+ordinary workspace suite, and every named interaction-net profiling fixture
+pass. The complete aggressive workspace command was also run: it fails in the
+still-inventoried D.2d-D.2g raw-owner partitions and did not settle after the
+main list reached its final tests. This preserves rather than obscures the
+declared I11D.1/Gate G3 blocker. The dated
+[`ResumableWhnfW8_2026-09-27.md`](../reviews/ResumableWhnfW8_2026-09-27.md)
+review accounts for all twenty invariants, the completion criteria, one
+test-only net-facade ownership gap, P3-P5, Gate G3, and W9 drift. No new unsafe
+or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 

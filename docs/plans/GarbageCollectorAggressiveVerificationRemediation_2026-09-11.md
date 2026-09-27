@@ -1685,12 +1685,19 @@ compatibility manifest and persistent-edge P3 whenever the last evaluator
 consumer permits removing a core declaration; declarations still used by
 D.2d-D.2g remain explicitly assigned there.
 
-**D.2c.9c — Full verification.** Run every family suite ordinarily and with
+**D.2c.9c — Full verification.** Complete (2026-09-27). Run every family suite ordinarily and with
 `aggressive-gc-verification`, then the complete required workspace checks.
 Publish counts for removed raw APIs, retained downstream compatibility
 declarations, mutator admissions, and root registrations. No race fix may rely
 on repetition; ordering-sensitive claims require a barrier, probe, or model
 test which forces both schedules.
+
+Completion record: ordinary and aggressive W7 and D.2c closure suites pass,
+the exact inventory suite passes, and the complete ordinary workspace passes.
+The complete aggressive workspace command still fails in D.2d-D.2g owners and
+does not settle after those failures; that is retained as the I11D.1/Gate G3
+blocker rather than attributed to the now-empty D.2c partition. See the linked
+W8 review for exact evidence and dispositions.
 
 Exit: `src/eval` has no authority-free API which accepts or returns raw
 `core::Value`; callback-free work uses a passed `EvaluationValueAccess`;
