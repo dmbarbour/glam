@@ -705,11 +705,12 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::reserve_reflection_completion_activation#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests.rs::patient_deferred_demand_retries_when_disturbance_races_no_progress::impl CompleteAfterObservation::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseAfterRelease::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseThenYield::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl CacheLazyFailure::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -984,7 +985,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // W6G.5a removes one delayed test-only promise-root introduction: the
         // forced scheduler fixture now receives the promise root constructed
         // by its existing regional helper.
-        ("src/evaluation/tests.rs", GatewayCounts::new(15, 0)),
+        ("src/evaluation/tests.rs", GatewayCounts::new(16, 0)),
         // W7C reads one retained checkpoint under bounded access after
         // constructing its promise-chain fixture in one scoped region.
         ("src/evaluation/tests/w7c.rs", GatewayCounts::new(1, 0)),
@@ -1165,7 +1166,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        23
+        22
     );
 }
 

@@ -72,10 +72,7 @@ pub(crate) use operator::{
 pub(crate) use sequence::list_output_bytes;
 #[cfg(test)]
 pub(crate) use sequence::list_to_value_items;
-#[allow(
-    unused_imports,
-    reason = "W8 retains the direct compatibility evaluator for tests until the family migration closes"
-)]
+#[cfg(test)]
 pub use value::eval_value;
 #[cfg(test)]
 pub(crate) use value::eval_value_in;
@@ -105,6 +102,7 @@ pub(crate) use value::promise_root_wait;
 #[cfg(test)]
 use value::*;
 
+#[cfg(test)]
 fn with_direct_evaluator<R>(
     context: &EvalContext,
     operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,

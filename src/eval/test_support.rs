@@ -5,6 +5,33 @@
 use super::*;
 use crate::core::RuntimeValueAccess;
 
+pub(crate) struct ResumableTestValueDemand {
+    handle: crate::evaluation::ClientDemandHandle,
+}
+
+impl ResumableTestValueDemand {
+    pub(crate) fn new(context: &EvalContext, value: &Value) -> Self {
+        let root = context
+            .values()
+            .construct_runtime_value_root(|access| access.duplicate_value(value));
+        let handle = context
+            .demand_whnf(root)
+            .expect("test value demand should be admitted");
+        Self { handle }
+    }
+
+    pub(crate) fn advance(&mut self, context: &EvalContext) -> Result<Value, EvaluationHalt> {
+        let Some(result) = context.advance_client_demand_for_test(&mut self.handle)? else {
+            panic!("test value demand is currently claimed by another thread")
+        };
+        let crate::evaluation::ClientDemandResult::Complete(value) = result else {
+            unreachable!("terminal client failure is returned as an evaluation halt")
+        };
+        let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+        Ok(poll.evaluate(context, |evaluator| evaluator.project_root(&value)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TestExpr {
     Value(Value),

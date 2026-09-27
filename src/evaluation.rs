@@ -27,6 +27,8 @@ mod pump;
 mod session;
 mod whnf;
 pub(crate) use access::{EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext};
+#[cfg(test)]
+pub(crate) use coordinator::{ClientDemandHandle, ClientDemandResult};
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskCancellation,

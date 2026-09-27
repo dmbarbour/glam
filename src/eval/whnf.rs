@@ -1506,9 +1506,8 @@ mod tests {
         let client =
             fs::read_to_string(manifest.join("src/evaluation/coordinator/client_demand.rs"))
                 .expect("client-demand source should be readable");
-        assert!(
-            client.contains("ClientDemandOperation(pub(in crate::evaluation) WhnfComputation)")
-        );
+        assert!(client.contains("pub(crate) struct ClientDemandOperation {"));
+        assert!(client.contains("computation: WhnfComputation"));
 
         let reflection = fs::read_to_string(manifest.join("src/reflection/machine.rs"))
             .expect("reflection machine source should be readable");

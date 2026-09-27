@@ -2279,7 +2279,7 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     assert!(resources.upgrade().is_some());
     assert!(profile.upgrade().is_some());
     assert!(value_domain.upgrade().is_some());
-    assert_eq!(eval::eval_value(&context, &unit).unwrap(), unit);
+    assert_eq!(context.values().unit(), unit);
 
     drop(context);
     assert!(resources.upgrade().is_none());

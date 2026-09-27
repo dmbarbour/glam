@@ -26,7 +26,12 @@ impl ClientDemandOperation {
         context: &EvalContext,
         step_budget: &mut super::EvaluationStepBudget,
     ) -> coordinator::ClientDemandPoll {
-        match super::whnf::poll_computation(&mut self.0, poll_context, context, step_budget) {
+        match super::whnf::poll_computation(
+            &mut self.computation,
+            poll_context,
+            context,
+            step_budget,
+        ) {
             super::whnf::WhnfOwnerPoll::Ready(value) => {
                 coordinator::ClientDemandPoll::Complete(value)
             }

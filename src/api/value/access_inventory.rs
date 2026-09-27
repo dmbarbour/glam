@@ -143,6 +143,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "W6C.6 shared durable strategy-demand owner"
     ),
     entry!(
+        "src/eval/test_support.rs",
+        0,
+        1,
+        0,
+        "test-only resumable client-demand input root",
+        "W8A.1 retained-state suspension fixture"
+    ),
+    entry!(
         "src/eval/value.rs",
         0,
         0,
@@ -668,7 +676,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_without_parking#1|surface=compatibility-new|scope=test",
+    "src/eval/test_support.rs::impl ResumableTestValueDemand::new#1|surface=scoped-factory|scope=test",
+    "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands#1|surface=compatibility-new|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
@@ -773,6 +782,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_runtime#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::parked_client_is_external_activity_while_task_deadlocks_remain_typed#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#2|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",

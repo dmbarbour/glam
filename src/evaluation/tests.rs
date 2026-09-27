@@ -5,7 +5,9 @@ use glam_gc::CollectionError;
 use std::sync::{Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::core::{EvaluationHalt, LazyCycle, LazyValue, ManagedPromiseRoot, PromisedValue};
+use crate::core::{
+    EvaluationHalt, LazyCycle, LazyValue, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
+};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
@@ -4258,36 +4260,73 @@ fn patient_claimed_task_wait_releases_mutator() {
         session.demand.default_reflection_profile.clone(),
     )
     .with_claimed_task_wait_probe(waiting_sender);
-    let lazy = inert_lazy_for(context.values(), "patient worker-owned dependency");
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
-    let wait = context
-        .lazy_task(&lazy, move |_, _| {
-            Box::new(CompleteAfterRelease {
-                started: Some(started_sender),
-                release: release_receiver,
-            })
-        })
-        .expect("patient dependency should register");
-    let background_root = context
-        .schedule_task({
-            let wait = wait.clone();
-            move |_| Ok(Box::new(BlockOnceOnWait(Some(wait))))
-        })
-        .expect("the patient dependency should have a causal reflection root");
+    let release_receiver = Mutex::new(release_receiver);
+    let producer_values = context.values().clone();
+    let lazy = LazyValue::host_call(
+        context.values(),
+        "patient worker-owned dependency",
+        move |_| {
+            started_sender
+                .send(())
+                .expect("patient start receiver should remain open");
+            release_receiver
+                .lock()
+                .expect("patient producer release receiver should remain usable")
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the patient producer");
+            Ok(RuntimeValueRoot::new(
+                &producer_values,
+                producer_values.unit(),
+            ))
+        },
+    );
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let mut handle = context
+        .demand_whnf(RuntimeValueRoot::new(context.values(), Value::Lazy(lazy)))
+        .expect("patient demand should be admitted");
+    let mut blocked = None;
+    for _ in 0..8 {
+        if let Some(ClientDemandSnapshot::Blocked {
+            dependency: WorkDependency::Wait(wait),
+            subscription_epoch,
+        }) = coordinator.client_demand_snapshot(handle.work())
+        {
+            blocked = Some((wait, subscription_epoch));
+            break;
+        }
+        let claim = coordinator
+            .claim_client_demand(handle.work())
+            .expect("unblocked patient demand must remain claimable");
+        coordinator.poll_claimed_client_demand(claim);
+    }
+    let (dependency, subscription_epoch) =
+        blocked.expect("patient demand must publish its exact lazy wait");
+    let producer_work = coordinator
+        .work_for_wait(&dependency)
+        .expect("the patient's exact producer must be registered");
+    let claimed = coordinator
+        .claim_work(producer_work)
+        .expect("the test must claim the exact producer before driving the patient demand");
+    assert!(
+        handle
+            .abandon_if_stably_blocked(subscription_epoch, [None, None])
+            .is_none(),
+        "the claimed exact producer must prevent stable-block abandonment"
+    );
+
+    let producer_coordinator = Arc::clone(&coordinator);
+    let producer = std::thread::spawn(move || producer_coordinator.poll_claimed_task(claimed));
     started_receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("worker should claim the patient dependency");
+        .expect("producer thread should enter the host callback");
 
-    let evaluation_context = context.clone();
-    let evaluated_lazy = lazy.clone();
     let (result_sender, result_receiver) = mpsc::channel();
+    let evaluation_context = context.clone();
     let evaluation = std::thread::spawn(move || {
         result_sender
-            .send(crate::eval::eval_value(
-                &evaluation_context,
-                &Value::Lazy(evaluated_lazy),
-            ))
+            .send(evaluation_context.drive_client_demand_for_test(handle))
             .expect("patient result receiver should remain live");
     });
     waiting_receiver
@@ -4301,27 +4340,17 @@ fn patient_claimed_task_wait_releases_mutator() {
     release_sender
         .send(())
         .expect("worker release receiver should remain live");
-    assert_eq!(
+    assert!(matches!(
         result_receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("patient evaluation should resume"),
-        Ok(context.values().unit())
-    );
+        Ok(ClientDemandResult::Complete(value))
+            if value.clone_core_for_test() == context.values().unit()
+    ));
+    producer.join().expect("patient producer should not panic");
     evaluation
         .join()
         .expect("patient evaluator should not panic");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while matches!(
-        context.poll_reflection_task(&background_root),
-        EvaluationWaitPoll::Pending(_)
-    ) && Instant::now() < deadline
-    {
-        std::thread::yield_now();
-    }
-    assert!(matches!(
-        context.poll_reflection_task(&background_root),
-        EvaluationWaitPoll::Complete(_)
-    ));
 }
 
 #[test]
@@ -4329,6 +4358,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
     struct CompleteAfterObservation {
         context: EvalContext,
         observed: RuntimeObservationEpoch,
+        lazy: ManagedLazyRoot,
     }
 
     impl EvaluationTaskMachine for CompleteAfterObservation {
@@ -4344,7 +4374,18 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
                     error: None,
                 })
             } else {
-                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+                let value = crate::core::EvaluatedValue::try_from(crate::core::keys::unit_value())
+                    .expect("unit is already in WHNF");
+                let published = self
+                    .context
+                    .values()
+                    .with_runtime_value_access(|access| self.lazy.cache(&access, Ok(value)));
+                match published {
+                    Ok(value) => {
+                        EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
+                    }
+                    Err(failure) => EvaluationMachinePoll::Failed(context.root_failure(failure)),
+                }
             }
         }
     }
@@ -4368,7 +4409,13 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
     context
         .lazy_task(&lazy, {
             let context = context.clone();
-            move |_, _| Box::new(CompleteAfterObservation { context, observed })
+            move |_, lazy| {
+                Box::new(CompleteAfterObservation {
+                    context,
+                    observed,
+                    lazy,
+                })
+            }
         })
         .expect("observed deferred dependency should register");
 

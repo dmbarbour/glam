@@ -923,14 +923,7 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
     }
 }
 
-const W8_VALUE_COMPATIBILITY_NAMES: &[&str] = &[
-    "await_deferred_task",
-    "deferred_wait_result",
-    "eval_lazy_in",
-    "eval_promised_in",
-    "eval_value",
-    "eval_value_in",
-];
+const W8_VALUE_COMPATIBILITY_NAMES: &[&str] = &[];
 
 fn declaration_name(declaration: &str) -> &str {
     declaration
@@ -1369,60 +1362,48 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W7B replaces recursive dictionary/list key conversion with one explicit
 // parent-stack walk. Its trace visitor contributes one reviewed access-path
 // loop; no recursive semantic call remains.
-const EXPECTED_OCCURRENCES: usize = 159;
+const EXPECTED_OCCURRENCES: usize = 139;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 4_415_693_485_046_065_581;
+const EXPECTED_FINGERPRINT: u64 = 8_820_319_160_638_934_767;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::EvalValue, 1),
-    (Signal::EvalLazy, 1),
-    (Signal::EvalPromise, 1),
-    (Signal::RetryableWait, 9),
-    (Signal::UnassignedPromise, 2),
+    (Signal::RetryableWait, 4),
+    (Signal::UnassignedPromise, 1),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 21),
+    (Signal::CoordinatorBoundary, 13),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
-    (Signal::UserSizedLoop, 94),
+    (Signal::UserSizedLoop, 91),
 ];
 const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
-    (WorkShape::TailDemand, 2),
-    (WorkShape::DemandThenInspect, 79),
+    (WorkShape::DemandThenInspect, 69),
     (WorkShape::OrderedOperands, 8),
     (WorkShape::CollectionWalk, 8),
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 8),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 51),
+    (WorkShape::OrchestrationHandoff, 43),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 980_708_031_703_014_079;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 10_818_898_040_122_239_742;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
     (W7Disposition::ExplicitIteration, 91),
-    (W7Disposition::Orchestration, 49),
-    (W7Disposition::W8ValueCompatibility, 19),
+    (W7Disposition::Orchestration, 48),
 ];
 
 const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_154;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 16_061_262_585_134_608_273;
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 17_165_432_442_858_401_497;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
-const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 12_624_383_794_632_597_732;
-const EXPECTED_W8_CALLS: usize = 395;
-const EXPECTED_W8_CALL_FINGERPRINT: u64 = 13_110_559_393_966_915_317;
+const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 14_695_981_039_346_656_037;
+const EXPECTED_W8_CALLS: usize = 360;
+const EXPECTED_W8_CALL_FINGERPRINT: u64 = 15_431_565_785_583_668_834;
 const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
     (
         (W8Surface::EvalValue, W8CallerDisposition::TestMigration),
-        287,
-    ),
-    (
-        (
-            W8Surface::EvalValueIn,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        1,
+        270,
     ),
     (
         (W8Surface::EvalValueIn, W8CallerDisposition::TestMigration),
@@ -1430,65 +1411,12 @@ const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
     ),
     (
         (
-            W8Surface::EvalLazyIn,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        1,
-    ),
-    (
-        (W8Surface::EvalLazyIn, W8CallerDisposition::TestMigration),
-        1,
-    ),
-    (
-        (
-            W8Surface::EvalPromisedIn,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        1,
-    ),
-    (
-        (
-            W8Surface::AwaitDeferredTask,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        3,
-    ),
-    (
-        (
-            W8Surface::DeferredWaitResult,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        3,
-    ),
-    (
-        (
-            W8Surface::WithDirectEvaluator,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        1,
-    ),
-    (
-        (
             W8Surface::WithDirectEvaluator,
             W8CallerDisposition::TestMigration,
         ),
-        80,
-    ),
-    (
-        (
-            W8Surface::HaltBlocked,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        5,
+        79,
     ),
     ((W8Surface::HaltBlocked, W8CallerDisposition::Production), 4),
-    (
-        (
-            W8Surface::HaltUnassignedPromise,
-            W8CallerDisposition::CompatibilityInternal,
-        ),
-        1,
-    ),
     (
         (
             W8Surface::HaltUnassignedPromise,
@@ -1508,10 +1436,10 @@ const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[
     ("src/eval/object_machine.rs", 10),
     ("src/eval/sequence.rs", 3),
     ("src/eval/test_support.rs", 3),
-    ("src/eval/tests.rs", 175),
-    ("src/eval/value.rs", 5),
+    ("src/eval/tests.rs", 158),
+    ("src/eval/value.rs", 4),
     ("src/eval/value/tests/w4.rs", 9),
-    ("src/evaluation/tests.rs", 9),
+    ("src/evaluation/tests.rs", 8),
     ("src/g_syntax/macro_expansion/tests.rs", 2),
     ("src/g_syntax/tests.rs", 22),
     ("src/reflection/machine/tests.rs", 10),
@@ -1724,24 +1652,25 @@ fn reflection_has_no_unowned_recursive_whnf_demand() {
 }
 
 #[test]
-fn whnf_census_rejects_tail_and_nested_misclassification() {
+fn whnf_census_rejects_retired_tail_demand_and_nested_misclassification() {
     let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
-    for target_shape in [WorkShape::TailDemand, WorkShape::DemandThenInspect] {
-        let mut misclassified = occurrences.clone();
-        let target = misclassified
-            .iter_mut()
-            .find(|occurrence| occurrence.classification.remaining == target_shape)
-            .unwrap_or_else(|| panic!("census must contain a {target_shape:?} witness"));
-        target.classification.remaining = if target_shape == WorkShape::TailDemand {
-            WorkShape::DemandThenInspect
-        } else {
-            WorkShape::TailDemand
-        };
-        assert!(
-            validate_classifications(&misclassified).is_err(),
-            "the exact census must reject a {target_shape:?} classification substitution"
-        );
-    }
+    assert!(
+        occurrences
+            .iter()
+            .all(|occurrence| occurrence.classification.remaining != WorkShape::TailDemand),
+        "W8A.1 must retire the direct tail-demand compatibility evaluator"
+    );
+
+    let mut misclassified = occurrences.clone();
+    let target = misclassified
+        .iter_mut()
+        .find(|occurrence| occurrence.classification.remaining == WorkShape::DemandThenInspect)
+        .expect("the census must contain a demand-and-inspect witness");
+    target.classification.remaining = WorkShape::TailDemand;
+    assert!(
+        validate_classifications(&misclassified).is_err(),
+        "the exact census must reject a demand-and-inspect classification substitution"
+    );
 }
 
 #[test]
@@ -1755,12 +1684,10 @@ fn synchronous_whnf_demand_uses_the_runtime_owned_client_submachine() {
         .expect("the evaluation pump source should be readable");
 
     assert!(session.contains("let handle = self\n            .demand_whnf(value)"));
-    assert!(client.contains(
-        "pub(crate) struct ClientDemandOperation(pub(in crate::evaluation) WhnfComputation);"
-    ));
-    assert!(pump.contains(
-        "super::whnf::poll_computation(&mut self.0, poll_context, context, step_budget)"
-    ));
+    assert!(client.contains("pub(crate) struct ClientDemandOperation {"));
+    assert!(client.contains("computation: WhnfComputation"));
+    assert!(client.contains("originating_task: Option<EvaluationTaskId>"));
+    assert!(pump.contains("&mut self.computation,"));
     assert!(
         !pump.contains("crate::eval::eval_value_in"),
         "the runtime-owned client operation must not restart recursive evaluation"

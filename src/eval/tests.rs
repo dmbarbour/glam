@@ -10,7 +10,7 @@ use crate::core::{
 use crate::core_net::CoreRuntimeNet;
 use crate::evaluation::{
     EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskMachine, EvaluationWaitPoll,
-    ReflectionTaskLauncher, ReflectionTaskResultPolicy,
+    EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
 
@@ -34,6 +34,13 @@ fn fail_promise_message(
     message: impl Into<Arc<str>>,
 ) -> Result<(), Arc<EvaluationFailure>> {
     crate::core::fail_test_promise_message(context.values(), promise, message)
+}
+
+fn retryable_halt_wait(error: &EvaluationHalt) -> Option<EvaluationWaitToken> {
+    error
+        .blocked_on()
+        .map(|wait| wait.0.clone())
+        .or_else(|| error.unassigned_promise_root()?.producer()?.try_wait())
 }
 
 fn unit_value() -> Value {
@@ -2027,8 +2034,9 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
             .contains("recursively observed itself")
     );
 
-    let blocked = eval_value(&observer, &value).unwrap_err();
-    assert!(blocked.blocked_on().is_some());
+    let mut observer_demand = ResumableTestValueDemand::new(&observer, &value);
+    let blocked = observer_demand.advance(&observer).unwrap_err();
+    assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 1);
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 1);
@@ -2037,7 +2045,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     set_promise(&session, &fixpoint, n(42)).unwrap();
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
-    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
     assert_eq!(
         session.poll_wait(&wait),
         EvaluationWaitPoll::Complete(Box::new(crate::runtime::RuntimeValueRoot::new(
@@ -2069,10 +2077,15 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     assert!(
         eval_value(&observer, &value)
             .unwrap_err()
-            .blocked_on()
-            .is_some()
+            .unassigned_promise_root()
+            .is_some(),
+        "the resumable client owner should expose the unassigned promise rather than an adapter wait"
     );
-    assert_eq!(fixpoint.exact_subscription_count(session.values()), 1);
+    assert_eq!(
+        fixpoint.exact_subscription_count(session.values()),
+        0,
+        "abandoning the cooperative client demand must retire its exact subscription"
+    );
     session.fail_wait(owner_task.wait(), "producer failed deliberately");
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     assert_eq!(
@@ -2272,22 +2285,22 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
         FixpointComputation::Function(function),
     ));
 
-    let producer_block = eval_value(&owner, &fixpoint).unwrap_err();
-    let producer_wait = producer_block
-        .blocked_on()
+    let mut producer_demand = ResumableTestValueDemand::new(&owner, &fixpoint);
+    let producer_block = producer_demand.advance(&owner).unwrap_err();
+    let producer_wait = retryable_halt_wait(&producer_block)
         .expect("producer should suspend on its reflection gate");
-    let observer_block = eval_value(&observer, &fixpoint).unwrap_err();
-    let fixpoint_wait = observer_block
-        .blocked_on()
-        .expect("observer should wait on the fixpoint itself");
+    let mut observer_demand = ResumableTestValueDemand::new(&observer, &fixpoint);
+    let observer_block = observer_demand.advance(&observer).unwrap_err();
+    let fixpoint_wait =
+        retryable_halt_wait(&observer_block).expect("observer should wait on the fixpoint itself");
     assert_eq!(
         producer_wait, fixpoint_wait,
         "all observers should wait on the session-owned lazy task"
     );
 
-    owner.complete_wait(&producer_wait.0);
-    assert_eq!(eval_value(&owner, &fixpoint).unwrap(), n(42));
-    assert_eq!(eval_value(&observer, &fixpoint).unwrap(), n(42));
+    owner.complete_wait(&producer_wait);
+    assert_eq!(producer_demand.advance(&owner).unwrap(), n(42));
+    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
 }
 
 #[test]
@@ -2581,7 +2594,7 @@ fn forwarding_chain_preserves_one_structured_failure() {
 }
 
 #[test]
-fn concurrent_host_calls_share_one_rooted_producer_without_parking() {
+fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands() {
     let values = crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
@@ -2621,36 +2634,25 @@ fn concurrent_host_calls_share_one_rooted_producer_without_parking() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("producer should claim the lazy task");
 
-    let (observed_sender, observed_receiver) = std::sync::mpsc::channel();
-    let observer_context = context.clone();
+    let (waiting_sender, waiting_receiver) = std::sync::mpsc::channel();
+    let observer_context =
+        EvalContext::clone(&context).with_claimed_task_wait_probe(waiting_sender);
     let observer_value = value.clone();
-    let observer = std::thread::spawn(move || {
-        observed_sender
-            .send(eval_value(&observer_context, &observer_value))
-            .expect("test should still be waiting for its observer");
-    });
-    let observed = observed_receiver
+    let observer = std::thread::spawn(move || eval_value(&observer_context, &observer_value));
+    waiting_receiver
         .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("a contending observer must return instead of parking");
-    let first_wait = observed
-        .expect_err("contending observation should block cooperatively")
-        .blocked_on()
-        .expect("contending observation should expose the lazy task wait");
-    let second_wait = eval_value(&context, &value)
-        .expect_err("a second contending observation should also block")
-        .blocked_on()
-        .expect("all contending observations should expose the wait");
-    assert_eq!(first_wait, second_wait);
-    assert_eq!(
-        context.pump_wait(&first_wait.0, 256),
-        crate::evaluation::EvaluationPumpOutcome::Busy,
-        "a claimed producer is busy rather than quiescent"
-    );
+        .expect("the contending client demand must wait on the claimed producer");
 
     let (lock, changed) = &*release;
     *lock.lock().expect("test release lock was poisoned") = true;
     changed.notify_all();
-    observer.join().expect("observer should finish");
+    assert_eq!(
+        observer
+            .join()
+            .expect("observer should finish")
+            .expect("observer should share the producer result"),
+        n(42)
+    );
     assert_eq!(
         producer.join().expect("producer should finish").unwrap(),
         n(42)
@@ -6188,13 +6190,15 @@ fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, E
 
 #[test]
 fn metadata_update_reorders_copies_and_clears_hidden_values() {
-    let context = test_context();
+    // The fixture carries raw managed function values between calls, so it
+    // must not share a heap with parallel tests which explicitly collect.
+    let context = isolated_test_context();
     let left = Value::metadata_carrier(n(1));
     let right = Value::metadata_carrier(n(2));
 
     let swapped = run_metadata_update(
         &context,
-        metadata_reorder_function(&[1, 0]),
+        metadata_reorder_function_in(context.values(), &[1, 0]),
         vec![left.clone(), right.clone()],
     )
     .expect("metadata update should support permutation");
@@ -6209,7 +6213,7 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
 
     let copied = run_metadata_update(
         &context,
-        metadata_reorder_function(&[0, 0]),
+        metadata_reorder_function_in(context.values(), &[0, 0]),
         vec![left, right],
     )
     .expect("metadata update should support copying");
@@ -6224,7 +6228,8 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
 
     let cleared = run_metadata_update(
         &context,
-        closed_function_value(
+        closed_function_value_in(
+            context.values(),
             1,
             TestExpr::List(Arc::from([
                 Arc::new(builtin2_expr(
@@ -6579,13 +6584,18 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
     )
     .expect("effectful metadata update should remain latent");
 
-    let blocked = evaluated_metadata(&context, &outputs[0])
+    let metadata = outputs[0]
+        .associated_metadata()
+        .expect("metadata update output must remain sealed");
+    let mut demand = ResumableTestValueDemand::new(&context, &metadata);
+    let blocked = demand
+        .advance(&context)
         .expect_err("an unlaunched metadata task should block");
     let wait = blocked
         .blocked_on()
         .expect("the metadata projection should expose its task wait");
     context.complete_wait_with_value(&wait.0, Value::List(List::from_values(vec![n(42)])));
-    assert_eq!(evaluated_metadata(&context, &outputs[0]).unwrap(), n(42));
+    assert_eq!(demand.advance(&context).unwrap(), n(42));
 }
 
 #[test]
@@ -7119,13 +7129,17 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
 fn reflection_task_result_survives_first_session_close_and_returns_completion_value() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let computation = Value::reflection_task_result(owner.values(), n(0));
-    let blocked = eval_value(&owner, &computation)
+    let mut owner_demand = ResumableTestValueDemand::new(&owner, &computation);
+    let blocked = owner_demand
+        .advance(&owner)
         .expect_err("an unlaunched reflection result task should block");
     let owner_wait = blocked
         .blocked_on()
         .expect("the result computation should expose its stable wait");
 
-    let cross_session = eval_value(&observer, &computation)
+    let mut observer_demand = ResumableTestValueDemand::new(&observer, &computation);
+    let cross_session = observer_demand
+        .advance(&observer)
         .expect_err("a cross-session observer should follow the owner task");
     assert!(cross_session.blocked_on().is_some());
     assert_eq!(
@@ -7139,7 +7153,8 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
     );
 
     drop(owner);
-    let resumed = eval_value(&observer, &computation)
+    let resumed = observer_demand
+        .advance(&observer)
         .expect_err("the later session should resume the lazy-owned promise checkpoint");
     let resumed_wait = resumed
         .blocked_on()
@@ -7149,7 +7164,7 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
         "closing the first demand session must not retire the runtime-owned lazy route"
     );
     observer.complete_wait_with_value(&resumed_wait.0, n(43));
-    assert_eq!(eval_value(&observer, &computation).unwrap(), n(43));
+    assert_eq!(observer_demand.advance(&observer).unwrap(), n(43));
 }
 
 #[test]
@@ -7355,17 +7370,15 @@ fn reflection_task_result_propagates_cancellation() {
 
 #[test]
 fn reflection_gate_waits_before_continuing_target_demand() {
-    let context = annotation_test_context();
+    // This fixture forces collection explicitly, so it must not share the
+    // process-wide test value domain with parallel raw-value fixtures.
+    let context = isolated_test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
-    let target = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "reflection target",
-        move |_| {
-            forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let target = Value::semantic_thunk(context.values(), "reflection target", move |_| {
+        forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
     let gate = reflection_annotation(&context, n(0), target.clone());
     let Value::Lazy(gate_lazy) = &gate else {
         panic!("a reflection annotation should construct a lazy gate")
@@ -7379,11 +7392,17 @@ fn reflection_gate_waits_before_continuing_target_demand() {
         .collect_managed_for_test()
         .expect("the waiting reflection gate must remain traced");
 
-    let first = eval_value(&context, &gate).expect_err("new reflection task should block");
+    let mut first_demand = ResumableTestValueDemand::new(&context, &gate);
+    let first = first_demand
+        .advance(&context)
+        .expect_err("new reflection task should block");
     let wait = first
         .blocked_on()
         .expect("gate should report its task wait");
-    let second = eval_value(&context, &gate).expect_err("queued reflection task should block");
+    let mut second_demand = ResumableTestValueDemand::new(&context, &gate);
+    let second = second_demand
+        .advance(&context)
+        .expect_err("queued reflection task should block");
 
     assert_eq!(second.blocked_on(), Some(wait.clone()));
     assert_eq!(
@@ -7395,7 +7414,9 @@ fn reflection_gate_waits_before_continuing_target_demand() {
 
     context.complete_wait(&wait.0);
     assert_eq!(
-        eval_value(&context, &gate).expect("completed gate should continue target demand"),
+        first_demand
+            .advance(&context)
+            .expect("completed gate should continue target demand"),
         n(42)
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -7411,10 +7432,15 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
     let Value::Lazy(gate_lazy) = &gate else {
         panic!("reflection annotation should produce a lazy gate")
     };
-    let blocked = eval_value(&owner, &gate).expect_err("new reflection task should block");
+    let mut owner_demand = ResumableTestValueDemand::new(&owner, &gate);
+    let blocked = owner_demand
+        .advance(&owner)
+        .expect_err("new reflection task should block");
 
-    let cross_session =
-        eval_value(&observer, &gate).expect_err("cross-session gate task should block");
+    let mut observer_demand = ResumableTestValueDemand::new(&observer, &gate);
+    let cross_session = observer_demand
+        .advance(&observer)
+        .expect_err("cross-session gate task should block");
     assert!(cross_session.blocked_on().is_some());
     assert_eq!(
         gate_lazy.cached(owner.values()),
@@ -7423,21 +7449,24 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
     );
 
     owner.complete_wait(&blocked.blocked_on().unwrap().0);
-    assert_eq!(eval_value(&observer, &gate).unwrap(), n(42));
+    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
 }
 
 #[test]
 fn reflection_gate_memoizes_task_failure() {
     let context = annotation_test_context();
     let gate = reflection_annotation(&context, n(0), n(42));
-    let blocked = eval_value(&context, &gate).expect_err("new reflection task should block");
+    let mut demand = ResumableTestValueDemand::new(&context, &gate);
+    let blocked = demand
+        .advance(&context)
+        .expect_err("new reflection task should block");
     let wait = blocked
         .blocked_on()
         .expect("gate should report its task wait");
 
     context.fail_wait(&wait.0, "reflection task failed deliberately");
 
-    let first = eval_value(&context, &gate).unwrap_err();
+    let first = demand.advance(&context).unwrap_err();
     assert_eq!(first.to_string(), "reflection task failed deliberately");
     assert_eq!(
         failure_context_items(&first),
@@ -7560,11 +7589,12 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
         &crate::core::test_value_factory(),
         applied,
     ));
-    let blocked =
-        eval_value(&context, &computation).expect_err("call should wait for its reflection gate");
-    let wait = blocked
-        .blocked_on()
-        .expect("call should report a task wait");
+    let mut demand = ResumableTestValueDemand::new(&context, &computation);
+    let blocked = demand
+        .advance(&context)
+        .expect_err("call should wait for its reflection gate");
+    let wait = retryable_halt_wait(&blocked)
+        .expect("call should retain a route to the reflection task wait");
     assert_eq!(
         runtime.test_with(&crate::core::test_value_factory(), |net| net
             .active_pairs()
@@ -7578,13 +7608,8 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
         "specialization waits must not retain a net batch lease"
     );
 
-    context.complete_wait(&wait.0);
-    let observer = test_context();
-    let resumed = Value::Lazy(LazyValue::from_net_computation(
-        &crate::core::test_value_factory(),
-        NetValue::new(runtime),
-    ));
-    assert_eq!(eval_value(&observer, &resumed).unwrap(), n(42));
+    context.complete_wait(&wait);
+    assert_eq!(demand.advance(&context).unwrap(), n(42));
 }
 
 #[test]
@@ -7603,11 +7628,12 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
     let runtime = applied.runtime().duplicate_for_test(context.values());
     let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
 
-    let blocked = eval_value(&context, &computation)
+    let mut demand = ResumableTestValueDemand::new(&context, &computation);
+    let blocked = demand
+        .advance(&context)
         .expect_err("call should wait while its function remains behind a reflection gate");
-    let wait = blocked
-        .blocked_on()
-        .expect("function call should report the gate's exact task wait");
+    let wait = retryable_halt_wait(&blocked)
+        .expect("function call should retain a route to the gate's exact task wait");
     assert_eq!(
         runtime.test_with(&crate::core::test_value_factory(), |net| net
             .active_pairs()
@@ -7621,12 +7647,9 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
         "the blocked callable must not retain a net batch lease"
     );
 
-    context.complete_wait(&wait.0);
-    let resumed = Value::Lazy(LazyValue::from_net_computation(
-        context.values(),
-        NetValue::new(runtime),
-    ));
-    let application = eval_value(&context, &resumed)
+    context.complete_wait(&wait);
+    let application = demand
+        .advance(&context)
         .expect("completed gate should expose the function application");
     assert_eq!(eval_value(&context, &application).unwrap(), n(42));
 }
@@ -7654,7 +7677,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
         .expect("operator call should start ready");
     let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
 
-    let blocked = eval_value(&context, &computation)
+    let mut demand = ResumableTestValueDemand::new(&context, &computation);
+    let blocked = demand
+        .advance(&context)
         .expect_err("operator should wait for its reflection gate");
     let wait = blocked
         .blocked_on()
@@ -7677,7 +7702,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     ));
 
     context.complete_wait(&wait.0);
-    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+    assert_eq!(demand.advance(&context).unwrap(), n(42));
 }
 
 #[test]

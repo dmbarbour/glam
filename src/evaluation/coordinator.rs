@@ -595,7 +595,12 @@ impl ClaimedClientDemand {
             self.demand.values().runtime_id(),
             "client-demand operation must match its claimed demand session"
         );
-        let context = super::EvalContext::for_client_demand(self.demand.demand());
+        let originating_task = self
+            .operation
+            .as_ref()
+            .expect("claimed client demand must retain its operation")
+            .originating_task();
+        let context = super::EvalContext::for_client_demand(self.demand.demand(), originating_task);
         let operation = self
             .operation
             .as_mut()

@@ -11,12 +11,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(test)]
-use crate::core::LazyValue;
 use crate::core::{
-    Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
-    PromisedValue, Value,
+    Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, Value,
 };
+#[cfg(test)]
+use crate::core::{LazyValue, PromisedValue};
 use crate::core_net::CoreWaitToken;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -472,7 +471,7 @@ pub(crate) struct EvalContext {
     task: Arc<OnceLock<Result<EvaluationTaskId, Arc<str>>>>,
     local_promise_owner: Option<Arc<LocalPromiseOwner>>,
     scheduled_task: bool,
-    waits_for_claimed_tasks: bool,
+    retry_observed_client_no_progress: bool,
     originating_task: Option<EvaluationTaskId>,
     #[cfg(test)]
     claimed_task_wait_probe: Option<std::sync::mpsc::Sender<()>>,
@@ -556,7 +555,7 @@ impl EvalContext {
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -589,7 +588,7 @@ impl EvalContext {
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -609,7 +608,7 @@ impl EvalContext {
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -620,7 +619,10 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn for_client_demand(session: Arc<EvaluationDemandState>) -> Self {
+    pub(crate) fn for_client_demand(
+        session: Arc<EvaluationDemandState>,
+        originating_task: Option<EvaluationTaskId>,
+    ) -> Self {
         let task_profile = session.default_reflection_profile.clone();
         Self {
             session,
@@ -632,8 +634,8 @@ impl EvalContext {
             // poll instead of retaining this Rust stack while its producer
             // waits.
             scheduled_task: true,
-            waits_for_claimed_tasks: false,
-            originating_task: None,
+            retry_observed_client_no_progress: false,
+            originating_task,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -646,7 +648,7 @@ impl EvalContext {
     pub(crate) fn for_lazy_route(session: Arc<EvaluationDemandState>) -> Self {
         // The runtime background demand owns the annotation profile. A route
         // is never permitted to inherit a caller-specific task profile.
-        Self::for_client_demand(session)
+        Self::for_client_demand(session, None)
     }
 
     pub(crate) fn with_task_profile(
@@ -660,7 +662,7 @@ impl EvalContext {
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -676,7 +678,7 @@ impl EvalContext {
         task_profile: Arc<ReflectionTaskProfile>,
     ) -> Self {
         Self {
-            waits_for_claimed_tasks: true,
+            retry_observed_client_no_progress: true,
             ..Self::with_task_profile(session, task_profile)
         }
     }
@@ -696,7 +698,7 @@ impl EvalContext {
             task,
             local_promise_owner: None,
             scheduled_task: true,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: Some(id),
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -723,7 +725,7 @@ impl EvalContext {
             task,
             local_promise_owner: None,
             scheduled_task: true,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task,
             #[cfg(test)]
             claimed_task_wait_probe: None,
@@ -833,7 +835,13 @@ impl EvalContext {
         &self,
         value: RuntimeValueRoot,
     ) -> Result<ClientDemandHandle, Arc<str>> {
-        self.admit_client_demand(ClientDemandOperation::new(value))
+        let originating_task = self
+            .task
+            .get()
+            .and_then(|task| task.as_ref().ok())
+            .copied()
+            .or(self.originating_task);
+        self.admit_client_demand(ClientDemandOperation::new(value, originating_task))
     }
 
     #[cfg(test)]
@@ -1035,6 +1043,15 @@ impl EvalContext {
                                 self.wait_for_client_progress(&coordinator, &handle, generation);
                                 continue;
                             }
+                            EvaluationPumpOutcome::NoProgress
+                                if self.retry_observed_client_no_progress
+                                    && self.retry_after_no_progress_on_route(
+                                        wait,
+                                        &mut exact_demand_route,
+                                    ) =>
+                            {
+                                continue;
+                            }
                             EvaluationPumpOutcome::NoProgress => {}
                         }
                     } else {
@@ -1086,6 +1103,57 @@ impl EvalContext {
         self.drive_client_demand(handle)
     }
 
+    /// Advances one retained test demand until it completes or exposes its
+    /// current exact dependency without abandoning the resumable operation.
+    ///
+    /// W8 uses this only for fixtures which deliberately withhold a host-side
+    /// completion. The normal synchronous driver remains patient; this seam
+    /// exists so those tests do not reconstruct the retired recursive
+    /// evaluator or discard continuation state merely to inspect a wait.
+    #[cfg(test)]
+    pub(crate) fn advance_client_demand_for_test(
+        &self,
+        handle: &mut ClientDemandHandle,
+    ) -> Result<Option<ClientDemandResult>, crate::core::EvaluationHalt> {
+        let coordinator = self
+            .coordinator_for_admission()
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        let mut exact_demand_route = ExactDemandRoute::default();
+
+        loop {
+            if let Some(result) = handle.poll() {
+                return terminal_client_demand_result(result).map(Some);
+            }
+            if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
+                coordinator.poll_claimed_client_demand(claimed);
+                continue;
+            }
+
+            let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
+                return terminal_client_demand_result(handle.wait()).map(Some);
+            };
+            let dependency = match snapshot {
+                ClientDemandSnapshot::Queued => continue,
+                ClientDemandSnapshot::Running => return Ok(None),
+                ClientDemandSnapshot::Blocked { dependency, .. } => dependency,
+            };
+            if let Some(wait) = dependency.producer_wait() {
+                if matches!(
+                    self.pump_wait_on_route(&wait, 4_096, &mut exact_demand_route),
+                    EvaluationPumpOutcome::TargetReady
+                ) {
+                    continue;
+                }
+            } else if let CausalChildSelection::Claimed(work) =
+                coordinator.claim_causal_child_work(None, self.causal_task_ids())
+            {
+                coordinator.poll_claimed_task(work);
+                continue;
+            }
+            return Err(client_demand_halt(dependency));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn drive_client_demand_value_for_test(
         &self,
@@ -1102,17 +1170,9 @@ impl EvalContext {
         }
     }
 
-    pub(crate) fn runs_scheduled_task(&self) -> bool {
-        self.scheduled_task
-    }
-
     #[cfg(test)]
     pub(crate) fn poll_context_count(&self) -> usize {
         self.session.poll_contexts.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn waits_for_claimed_tasks(&self) -> bool {
-        self.waits_for_claimed_tasks
     }
 
     #[cfg(test)]
@@ -1352,6 +1412,7 @@ impl EvalContext {
         coordinator.reserve_lazy_route(root.clone(), wait)
     }
 
+    #[cfg(test)]
     pub(crate) fn promise_task<F>(
         &self,
         promise: &PromisedValue,
@@ -1434,7 +1495,7 @@ impl EvalContext {
             task: Arc::new(OnceLock::new()),
             local_promise_owner: None,
             scheduled_task: false,
-            waits_for_claimed_tasks: false,
+            retry_observed_client_no_progress: false,
             originating_task: None,
             claimed_task_wait_probe: None,
             deferred_pump_pause: None,
@@ -2102,6 +2163,7 @@ impl EvalContext {
         promise.assignment(self.values()).and_then(Result::err)
     }
 
+    #[cfg(test)]
     pub(crate) fn lazy_failure_for_wait(
         &self,
         wait: &EvaluationWaitToken,

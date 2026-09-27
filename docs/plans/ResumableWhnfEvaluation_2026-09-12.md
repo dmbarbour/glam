@@ -8416,7 +8416,7 @@ The inventory records both per-surface/per-disposition counts and per-file
 migration counts, so a renamed recursive helper or an unreviewed production
 entry cannot silently replace this baseline.
 
-##### W8A.1 — Remove recursive wait transport
+##### W8A.1 — Remove recursive wait transport — Complete (2026-09-27)
 
 Remove `await_deferred_task`, the recursive blocked/unassigned-promise paths,
 and adapters which translate a bare `EvaluationHalt` after losing evaluator
@@ -8434,6 +8434,33 @@ fuse counts every net-driver work item and can stop within a normalization
 batch. Keep that test-only fuse through W8 unless a separately reviewed
 net-work budget can force the same boundary deterministically.
 
+Completion record: the dedicated `await_deferred_task`,
+`deferred_wait_result`, `deferred_task_failure`, `eval_lazy_in`, and
+`eval_promised_in` transports are deleted. The two remaining `eval_value`
+test wrappers are test-only and enter `evaluate_compatibility_whnf`, whose
+runtime-owned `ClientDemandOperation` retains the one resumable
+`WhnfComputation`; no wrapper recursively invokes an evaluator after reducing
+that state to a bare halt. The production D.2c W8 compatibility manifest is
+therefore already empty, while the five independently live net/client
+`EvaluationHalt` constructions remain.
+
+Seventeen central evaluator-suite calls which deliberately stop at a
+host-controlled dependency moved early from W8B.1d to a test-only
+`ResumableTestValueDemand`. It retains the same client handle across halt and
+resumption instead of abandoning continuation state. A forced-order host-call
+fixture now proves that a contending patient client reaches the coordinator
+wait before one shared producer is released. The remaining exact W8 census is
+360 calls at fingerprint `15_431_565_785_583_668_834`: 355 test migrations and
+the same five production retryable-halt uses. The central-suite batch is now
+158 calls.
+
+Client admission also preserves an existing caller task identity in the
+operation. Polling still uses the runtime-global reflection profile and a
+runtime-owned client context; the identity exists only so task-owned promises
+retain recursive-self-demand semantics after the wrapper cutover. Fixtures
+which force collection now use isolated value domains, closing the parallel
+raw-value lifetime race exposed by the new schedule.
+
 #### W8B — Retire direct evaluator compatibility
 
 ##### W8B.1 — Migrate direct-wrapper callers
@@ -8444,8 +8471,8 @@ solely because a test wants a concise assertion.
 
 ###### W8B.1a — Install the resumable test driver and migrate support seams
 
-Add one test-only convenience which enters the runtime-owned synchronous
-client driver, then migrate the 12 calls in `eval/sequence.rs`,
+Reuse the W8A.1 test-only resumable-demand convenience, then migrate the 12
+calls in `eval/sequence.rs`,
 `eval/test_support.rs`, the test-only portions of `eval/value.rs`, and
 `eval/builtins.rs`. The convenience must not construct an
 `EvaluatorStepContext` directly.
@@ -8463,7 +8490,7 @@ only where they test a regional transition rather than whole-value demand.
 
 ###### W8B.1d — Migrate the central evaluator suite
 
-Migrate the 175 calls in `eval/tests.rs` as one mechanically coherent suite,
+Migrate the remaining 158 calls in `eval/tests.rs` as one mechanically coherent suite,
 partitioning further by test family if review or verification becomes noisy.
 
 ###### W8B.1e — Migrate cross-layer fixtures

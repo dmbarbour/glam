@@ -325,7 +325,7 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // result; all production lazy sources now install under their lazy.
     (CheckpointApi::FromRoot, 17),
     (CheckpointApi::FromApplicationCheckpoint, 1),
-    (CheckpointApi::FromPromiseRoot, 2),
+    (CheckpointApi::FromPromiseRoot, 1),
     (CheckpointApi::ApplicationFramePending, 1),
     (CheckpointApi::RuntimeId, 1),
     // Fully regional source scanning latches exact source ownership across
@@ -338,8 +338,8 @@ const EXPECTED_API_COUNTS: &[(CheckpointApi, usize)] = &[
     // construction source owner.
     (CheckpointApi::WithSourceOwner, 51),
 ];
-const EXPECTED_OCCURRENCES: usize = 73;
-const EXPECTED_FINGERPRINT: u64 = 15_245_403_297_860_273_448;
+const EXPECTED_OCCURRENCES: usize = 72;
+const EXPECTED_FINGERPRINT: u64 = 942_544_374_147_702_613;
 
 #[test]
 fn durable_whnf_checkpoint_boundary_is_exact() {

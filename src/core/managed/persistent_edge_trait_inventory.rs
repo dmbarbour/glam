@@ -959,7 +959,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // while two explicitly ordered small-stack pollers exchange ownership.
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_258_510_228_138_494_021,
+        9_490_166_597_721_190_462,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1004,9 +1004,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 201),
+            ((SourceScope::Production, EdgeSurface::Typed), 200),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 632),
+            ((SourceScope::Test, EdgeSurface::Typed), 633),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

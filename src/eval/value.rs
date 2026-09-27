@@ -8,11 +8,10 @@ use crate::core::{
     keys,
 };
 use crate::core_net::CoreDataKey;
-use crate::core_net::CoreWaitToken;
 use crate::evaluation::{
-    EvalContext, EvaluationMachinePoll, EvaluationPumpOutcome, EvaluationTaskBlock,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, WhnfOwnerPoll, WorkDependency,
-    interpret_whnf_poll, poll_lazy_checkpoint, poll_whnf_computation,
+    EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskMachine,
+    EvaluatorStepContext, WhnfOwnerPoll, WorkDependency, interpret_whnf_poll, poll_lazy_checkpoint,
+    poll_whnf_computation,
 };
 #[cfg(test)]
 use crate::list::ListItem;
@@ -177,23 +176,17 @@ fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationF
     ))
 }
 
-#[allow(
-    dead_code,
-    reason = "W8 retains the direct compatibility evaluator for tests until the family migration closes"
-)]
+#[cfg(test)]
 pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| eval_value_in(evaluator, value))
+    context.evaluate_compatibility_whnf(value)
 }
 
+#[cfg(test)]
 pub(crate) fn eval_value_in(
     context: &EvaluatorStepContext<'_>,
     value: &Value,
 ) -> Result<Value, EvaluationHalt> {
-    match value {
-        Value::Lazy(lazy) => eval_lazy_in(context, lazy),
-        Value::Promised(promise) => eval_promised_in(context, promise),
-        other => Ok(other.clone()),
-    }
+    context.context().evaluate_compatibility_whnf(value)
 }
 
 enum LazyTaskWork {
@@ -1548,6 +1541,7 @@ impl EvaluationTaskMachine for PromiseFollower {
     }
 }
 
+#[cfg(test)]
 pub(super) fn promise_wait(
     context: &EvalContext,
     promise: &PromisedValue,
@@ -1580,27 +1574,7 @@ pub(crate) fn promise_root_wait(
 
 #[cfg(test)]
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| eval_lazy_in(evaluator, lazy))
-}
-
-pub(super) fn eval_lazy_in(
-    context: &EvaluatorStepContext<'_>,
-    lazy: &LazyValue,
-) -> Result<Value, EvaluationHalt> {
-    loop {
-        if let Some(result) = context.with_value_access(|access| access.lazy(lazy).cached()) {
-            return result
-                .map(EvaluatedValue::into_value)
-                .map_err(EvaluationHalt::failure);
-        }
-        let wait = context
-            .context()
-            .lazy_root_task(&context.with_value_access(|access| lazy.root_in(access.values())))
-            .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-        if let Some(value) = await_deferred_task(context, wait, "lazy value")? {
-            return Ok(value);
-        }
-    }
+    eval_value(context, &Value::Lazy(lazy.clone()))
 }
 
 pub(crate) fn lazy_root_wait(
@@ -1608,99 +1582,6 @@ pub(crate) fn lazy_root_wait(
     lazy: &ManagedLazyRoot,
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.lazy_root_task(lazy)
-}
-
-fn await_deferred_task(
-    context: &EvaluatorStepContext<'_>,
-    wait: crate::evaluation::EvaluationWaitToken,
-    kind: &str,
-) -> Result<Option<Value>, EvaluationHalt> {
-    let mut exact_demand_route = crate::evaluation::ExactDemandRoute::default();
-    let poll = context.context().poll_wait(&wait);
-    if !matches!(&poll, EvaluationWaitPoll::Pending(_)) {
-        return deferred_wait_result(context, &wait, kind, poll);
-    }
-    #[cfg(test)]
-    if context.context().pause_deferred_pump(&wait) {
-        return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
-    }
-    if context.context().runs_scheduled_task() {
-        return match context
-            .context()
-            .pump_wait_on_route(&wait, 256, &mut exact_demand_route)
-        {
-            EvaluationPumpOutcome::TargetReady => {
-                deferred_wait_result(context, &wait, kind, context.context().poll_wait(&wait))
-            }
-            EvaluationPumpOutcome::Busy
-            | EvaluationPumpOutcome::NoProgress
-            | EvaluationPumpOutcome::BudgetExhausted => {
-                Err(EvaluationHalt::blocked(CoreWaitToken(wait)))
-            }
-        };
-    }
-    loop {
-        match context
-            .context()
-            .pump_wait_on_route(&wait, 256, &mut exact_demand_route)
-        {
-            EvaluationPumpOutcome::TargetReady => break,
-            EvaluationPumpOutcome::Busy if context.context().waits_for_claimed_tasks() => {
-                context
-                    .context()
-                    .wait_for_claimed_task_on_route(&wait, &mut exact_demand_route);
-            }
-            EvaluationPumpOutcome::Busy => {
-                return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
-            }
-            EvaluationPumpOutcome::NoProgress => {
-                if context.context().waits_for_claimed_tasks()
-                    && context
-                        .context()
-                        .retry_after_no_progress_on_route(&wait, &mut exact_demand_route)
-                {
-                    continue;
-                }
-                return Err(EvaluationHalt::blocked(CoreWaitToken(wait)));
-            }
-            EvaluationPumpOutcome::BudgetExhausted => {}
-        }
-    }
-    deferred_wait_result(context, &wait, kind, context.context().poll_wait(&wait))
-}
-
-fn deferred_wait_result(
-    context: &EvaluatorStepContext<'_>,
-    wait: &crate::evaluation::EvaluationWaitToken,
-    kind: &str,
-    poll: EvaluationWaitPoll,
-) -> Result<Option<Value>, EvaluationHalt> {
-    match poll {
-        EvaluationWaitPoll::Complete(value) => Ok(Some(context.project_root(&value))),
-        EvaluationWaitPoll::Failed(error) => {
-            Err(deferred_task_failure(context.context(), wait, error))
-        }
-        EvaluationWaitPoll::Pending(wait) => Err(EvaluationHalt::blocked(CoreWaitToken(wait))),
-        EvaluationWaitPoll::Cancelled => Err(EvaluationHalt::new(format!(
-            "{kind} evaluation was cancelled"
-        ))),
-        EvaluationWaitPoll::Abandoned => Ok(None),
-        EvaluationWaitPoll::Exited => Err(EvaluationHalt::new(format!(
-            "{kind} producer exited without a result"
-        ))),
-        EvaluationWaitPoll::Killed(error) => Err(EvaluationHalt::failure(error.into_failure())),
-    }
-}
-
-fn deferred_task_failure(
-    context: &EvalContext,
-    wait: &crate::evaluation::EvaluationWaitToken,
-    failure: crate::runtime::RuntimeFailureRoot,
-) -> EvaluationHalt {
-    context
-        .lazy_failure_for_wait(wait)
-        .map(EvaluationHalt::failure)
-        .unwrap_or_else(|| EvaluationHalt::failure(failure.into_failure()))
 }
 
 #[cfg(test)]
@@ -1712,52 +1593,6 @@ fn produce_test_lazy_source_in(
         LazySource::SemanticComputation(computation) => computation.evaluate(context),
         LazySource::SemanticThunk(thunk) => thunk(context),
         _ => unreachable!("only test-only semantic sources use this callback boundary"),
-    }
-}
-
-fn eval_promised_in(
-    context: &EvaluatorStepContext<'_>,
-    promise: &PromisedValue,
-) -> Result<Value, EvaluationHalt> {
-    loop {
-        let (assignment, producer, id) = context.with_value_access(|access| {
-            let promise = access.promise(promise);
-            (promise.assignment(), promise.producer(), promise.id())
-        });
-        if let Some(assignment) = assignment {
-            if assignment.is_err()
-                && let Some(producer) = &producer
-            {
-                producer.acknowledge_propagated_failure();
-            }
-            let value = assignment.map_err(EvaluationHalt::failure)?;
-            if !context.with_value_access(|access| is_deferred_value(access.values(), &value)) {
-                return Ok(value);
-            }
-            let wait = promise_wait(context.context(), promise)
-                .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
-                return Ok(value);
-            }
-            continue;
-        }
-        if let Some(task) = producer {
-            if context.context().observes_as_task(task.owner()) {
-                return Err(EvaluationHalt::new(format!(
-                    "reflection promise {} recursively observed itself in task {}",
-                    id.get(),
-                    task.owner().get()
-                )));
-            }
-            let wait = promise_wait(context.context(), promise)
-                .map_err(|error| EvaluationHalt::new(error.as_ref()))?;
-            if let Some(value) = await_deferred_task(context, wait, "promised value")? {
-                return Ok(value);
-            }
-            continue;
-        }
-        let root = context.with_value_access(|access| promise.root_in(access.values()));
-        return Err(EvaluationHalt::unassigned_root(root));
     }
 }
 

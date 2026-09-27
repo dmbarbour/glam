@@ -17,15 +17,25 @@ use super::{
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
-pub(crate) struct ClientDemandOperation(pub(in crate::evaluation) WhnfComputation);
+pub(crate) struct ClientDemandOperation {
+    pub(in crate::evaluation) computation: WhnfComputation,
+    originating_task: Option<EvaluationTaskId>,
+}
 
 impl ClientDemandOperation {
-    pub(crate) fn new(value: RuntimeValueRoot) -> Self {
-        Self(WhnfComputation::from_root(value))
+    pub(crate) fn new(value: RuntimeValueRoot, originating_task: Option<EvaluationTaskId>) -> Self {
+        Self {
+            computation: WhnfComputation::from_root(value),
+            originating_task,
+        }
     }
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.0.runtime_id()
+        self.computation.runtime_id()
+    }
+
+    pub(crate) fn originating_task(&self) -> Option<EvaluationTaskId> {
+        self.originating_task
     }
 }
 
