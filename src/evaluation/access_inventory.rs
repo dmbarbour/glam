@@ -720,6 +720,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::rooted_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::task_owned_promise_lazy_cycle_fails_in_both_publication_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/evaluation/tests/w7c.rs::exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::project_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/diagnostic_formatter.rs::value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -984,6 +985,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // forced scheduler fixture now receives the promise root constructed
         // by its existing regional helper.
         ("src/evaluation/tests.rs", GatewayCounts::new(15, 0)),
+        // W7C reads one retained checkpoint under bounded access after
+        // constructing its promise-chain fixture in one scoped region.
+        ("src/evaluation/tests/w7c.rs", GatewayCounts::new(1, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
         ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),

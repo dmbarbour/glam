@@ -278,5 +278,5 @@ impl EvaluationDemandState {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-#[path = "evaluation/w7c_tests.rs"]
+#[path = "evaluation/tests/w7c.rs"]
 mod w7c_tests;
