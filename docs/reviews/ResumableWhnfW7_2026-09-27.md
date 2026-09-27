@@ -87,9 +87,11 @@ have satisfied the negative control. The child now captures stderr and must
 report `stack overflow` in addition to exiting unsuccessfully. The semantic
 worklist fixtures continue to complete on the same requested 512 KiB stack.
 
-### WHNFW7R-003 — Confirmed: one initial checkpoint root is intentional
+### WHNFW7R-003 — Resolved: one initial checkpoint root is intentional
 
 **Severity:** none; accounting clarification.
+
+**Disposition:** closed; no remediation required.
 
 The no-churn requirement applies after the aggregate checkpoint is installed.
 The first retained WHNF transition registers one steady checkpoint root; later
@@ -98,9 +100,11 @@ zero-root installation rule failed deterministically and conflicted with the
 reviewed W6G ownership design. The existing root baseline is therefore kept:
 one durable checkpoint owner, not one root per continuation frame or repoll.
 
-### WHNFW7R-004 — Accepted: W7B intentionally advances the W7A inventory baseline
+### WHNFW7R-004 — Resolved: W7B intentionally advances the W7A inventory baseline
 
 **Severity:** none; justified chronological drift.
+
+**Disposition:** closed; no remediation required.
 
 W7A closed at 158 occurrences, including 90 explicit iterations, 49
 orchestration occurrences, and 19 W8 compatibility occurrences, with 1,148
@@ -115,9 +119,11 @@ completion record remains a chronological checkpoint rather than being
 rewritten to pretend the later W7B representation already existed. Current
 source constants and tests latch the final values.
 
-### WHNFW7R-005 — Accepted: routine producer-family depths compose with the structural proof
+### WHNFW7R-005 — Resolved: routine producer-family depths compose with the structural proof
 
 **Severity:** none; deliberate verification cost boundary.
+
+**Disposition:** closed; no remediation required.
 
 The common explicit WHNF worklist and promise-alias witness run at depth 4,096.
 Producer-heavy lazy, application, and fixpoint chains use depth 512, while the
