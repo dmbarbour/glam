@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2b complete; GCI11R-002D.2c-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2c complete; GCI11R-002D.2d-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -1218,7 +1218,16 @@ remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
-Status: implementation in progress; D.2c.0a-D.2c.1a complete on 2026-09-12.
+Status: complete on 2026-09-27 through the focused resumable-WHNF plan.
+
+Completion summary: the original evaluator partition is zero. Callback-free
+operations receive caller-owned `EvaluationValueAccess`; every suspendable
+path owns managed or rooted continuation state and reopens bounded access only
+for a regional transition. W8 retired the direct evaluator gate and
+whole-value wrappers, converted all whole-value fixtures to client demand, and
+put the exact source and raw-value inventories into closure mode. The remaining
+`EvalContext::evaluate_compatibility_whnf` facade belongs to D.2d orchestration,
+not this evaluator partition.
 
 Migrate the original 201 evaluator-operation and builtin violations as
 call-tree families beneath `EvaluationValueAccess`. A callback-free evaluator
@@ -1662,13 +1671,13 @@ re-entry tests in both modes.
 
 ###### GCI11R-002D.2c.9 — Evaluator Closure and Handoff
 
-**D.2c.9a — Compatibility retirement.** Remove the seven durable-context
+**D.2c.9a — Compatibility retirement.** Complete (2026-09-27). Remove the seven durable-context
 signatures and the central direct-evaluator compatibility gate when no
 production caller remains. Remove or narrow every context-free raw-value
 helper. A test-only facade may remain only with an exact fixture disposition;
 it cannot reopen production admission.
 
-**D.2c.9b — Inventory reconciliation.** Reduce D.2c's exact raw-value partition
+**D.2c.9b — Inventory reconciliation.** Complete (2026-09-27). Reduce D.2c's exact raw-value partition
 to zero. Put `src/eval/access_inventory.rs`, the D.2b.2e root-traffic and
 mutator-introduction ledgers, poll-spanning owner records, and relevant
 durable/active-owner inventories into closure mode. Update D.2b's 40-entry

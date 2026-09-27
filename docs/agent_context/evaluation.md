@@ -26,10 +26,22 @@ control-flow overview.
   opens it by installing a logical-copy cursor. A net-backed `Value::Lazy` is
   instead an explicit zero-arity computation and must expose `Data` when
   forced; an exposed `Bind` is an error.
-- `eval_value` is the single outer-WHNF demand operation. It follows every
-  top-level lazy or promised result while leaving lazy dictionary fields and
-  list elements untouched. `EvaluatedValue` records only that non-deferred
-  structural boundary; it does not authorize inspecting an opaque net.
+- Runtime-owned client demand is the synchronous outer-WHNF entry. It follows
+  every top-level lazy or promised result while leaving lazy dictionary fields
+  and list elements untouched. Each durable caller owns a `WhnfComputation`;
+  bounded polls resume its managed state rather than replaying the original
+  demand. `EvaluatedValue` records only that non-deferred structural boundary;
+  it does not authorize inspecting an opaque net.
+- A `WhnfComputation` begins with one rooted seed and atomically replaces it
+  with one `ManagedWhnfRoot` during bounded access. Never discard the old owner
+  before the new managed owner is installed. Lazy producer checkpoints live
+  beneath the lazy itself; client, promise, reflection, and spark computations
+  remain owned by their durable machines.
+- Preserve one canonical continuation state across `Pending` and `Yielded`.
+  Do not reinitialize focus, continuation frames, followed identities, or
+  source-owner/cycle state merely because an outer machine was rescheduled.
+  The retired direct evaluator gate and whole-value wrappers must not return;
+  regional tests may use only the bounded normal-poll test step.
 - A failed demand returns `core::EvaluationHalt`: either a permanent
   `Arc<EvaluationFailure>`, a scheduler wait, or an unassigned promise.
   Pollable computations may propagate all three cases. Only the permanent
@@ -331,7 +343,9 @@ control-flow overview.
   reserves a whole quantum and does not refund unused units. Its
   `BudgetExhausted` result must never be presented as an exact-spend report.
   The runtime background pump does translate exact inner spend into its public
-  report.
+  report. Nested WHNF and list-front machines borrow the same mutable budget;
+  they never recreate an allowance from the remaining count. An outer
+  administrative phase charges one transition only when its child spent none.
 - Preserve inactive per-heap allocation cursors across ordinary worker
   quantums, but explicitly release all such thread-local cache records when a
   worker terminates. This exit boundary must run only after scoped mutators

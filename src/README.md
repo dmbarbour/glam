@@ -53,13 +53,13 @@ not define language semantics or collect subsystem invariants.
 | `core/managed.rs` | Factory-qualified collector access and `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
 | `core/managed/*_inventory.rs` | Source-backed durable-root, recursive-identity, containment, active-RAII, and Gate G2 composition gates; I11A independently certifies the complete production graph inventory without duplicating its owning source-count baselines |
-| `core/managed/raw_value_api_inventory.rs` | Test-only GCI11R-002D syntax-backed inventory of every production signature carrying private `core::Value`, including aliases, standard operations, access classification, the D.1b-rooted orchestration seam, and the remaining latched D.2 violations |
+| `core/managed/raw_value_api_inventory.rs` | Test-only GCI11R-002D syntax-backed inventory of every production signature carrying private `core::Value`, including aliases, standard operations, access classification, the D.1b-rooted orchestration seam, the closed D.2c evaluator partition, and the remaining latched D.2b/D.2d-D.2g violations |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns a no-auto heap, managed recursive identities are live, I6/I7 retain exact immutable-shell and persistent-container walks, I8 closes the net cycle matrix, I9 closes runtime-root lifecycle/retirement, I10 closes external containment, I11A passes Gate G2, and I11B/I11C exercise controlled production collection plus worker/finalizer schedules while I11D retains the missing Gate G3 verification and production remains `NoAuto` |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation and mutation for managed core interaction nets; raw shared-net ownership is absent from the core specialization |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, edge-free reflection observations, one-use activation permits, cooperative pumping, and runtime pumping |
-| `evaluation/access.rs` | I3 scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, post-scope reflection activation, remaining non-effect direct-evaluator compatibility, and temporary machine-completion root seam |
+| `evaluation/access.rs` | Scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, and post-scope reflection activation; the step context has one poll-derived access route and no direct evaluator compatibility gate |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `evaluation/whnf.rs` | Narrow translation from semantic WHNF dependencies to coordinator work dependencies |
@@ -79,7 +79,7 @@ not define language semantics or collect subsystem invariants.
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade, cut-wide observation/branch-local edit protocol, read-only host validation, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
-| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, rooted request interpretation, bounded standard-effect fusion, and isolated search |
+| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, resumable rooted WHNF request decoding, bounded standard-effect fusion, and isolated search |
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
 | `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |

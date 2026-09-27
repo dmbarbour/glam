@@ -8569,7 +8569,7 @@ tests, so a compatibility wrapper cannot return as test support. The complete
 W0B/W7 census and all raw-value inventories pass without a replacement
 compatibility category.
 
-#### W8C — Inventory and documentation closure
+#### W8C — Inventory and documentation closure — Complete (2026-09-27)
 
 Update:
 
@@ -8583,6 +8583,15 @@ Update:
 
 Remove chronological implementation detail from current architecture docs;
 retain it in this plan's completion records and later review.
+
+Completion record: the current architecture now describes the canonical WHNF
+submachine and hosted reflection decoder without the retired direct evaluator
+gate or phase chronology. The agent invariants latch atomic seed promotion,
+state-preserving resumption, and shared-budget accounting. The source README,
+raw-value closure guard, ownership ledger, parent D.2c record, persistent-edge
+interlock, and Gate G3 prerequisites now agree that D.2c is zero while
+D.2b/D.2d-D.2g and P3-P5 remain open. Every durable WHNF and specialized lazy
+checkpoint owner is named in the ledger; no new root family was introduced.
 
 #### W8D — Full verification and review
 

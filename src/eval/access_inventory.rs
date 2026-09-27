@@ -1,12 +1,10 @@
-//! I3B.1 inventory of managed-access evaluator surfaces and direct production
-//! entries into recursive evaluation.
+//! Inventory of managed-access evaluator surfaces and the retired direct
+//! production entries into recursive evaluation.
 //!
-//! These compatibility calls do not yet inspect managed semantic pointers,
-//! and production collection remains `NoAuto`. The inventory prevents a new
-//! authority-free entry from appearing while I3B-I3E replace each listed
-//! caller with a scheduler- or runtime-service-owned evaluator-step context.
-//! The context-surface inventory separately accounts for every scoped
-//! evaluator function and every durable I3B.2/I3D/I3E seam below `src/eval`.
+//! Production collection remains `NoAuto`. The inventory prevents a new
+//! authority-free entry or direct admission gate from appearing. The
+//! context-surface inventory separately accounts for every scoped evaluator
+//! function and every durable seam below `src/eval`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -261,7 +259,7 @@ fn evaluator_context_surfaces_are_complete() {
 }
 
 #[test]
-fn direct_evaluator_compatibility_entries_are_complete() {
+fn direct_evaluator_entries_are_retired() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     collect_rust_sources(&manifest.join("src"), &mut sources);

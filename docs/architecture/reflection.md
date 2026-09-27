@@ -156,6 +156,26 @@ and value construction but no evaluator authority, so suspension cannot replay
 prior callback activity. Poll and evaluator authorities are thread-bound and
 cannot be retained by the `Send` effect machine.
 
+### Hosted WHNF Request Decoding
+
+`EffectDecodeWork` owns either one scalar WHNF demand or one request decoder;
+it never clones the operation in order to retry it. Request decoding first
+selects the request tag inside bounded evaluator access and roots the selected
+payload before leaving that region. `RequestDecodeState` then advances from
+`Select` to `PayloadWhnf`, through incremental `PayloadItems` list-front work,
+and, for resume requests, through `ResumeTask` and `ResumeContinuation` before
+publishing the rooted request.
+
+Every payload demand owns its `WhnfComputation`, and list-front iteration and
+nested WHNF polls borrow the same `EvaluationStepBudget`. `Pending` retains the
+exact dependency and `Yielded` retains the exact decoder state, so neither
+outcome repeats tag selection, list traversal, or continuation construction.
+Host dispatch begins only after decoding is complete and evaluator access has
+closed. An unsupported external boundary becomes a structured task halt rather
+than invoking host code under evaluator access. Scalar and specialization
+demands follow the same rule; a specialization callback receives an evaluated
+public value only after its owned WHNF computation completes.
+
 The production fast path may fuse a bounded chain of task-local `.seq`, `.r`,
 `.get`, and `.set` operations plus one immediately available Glam
 continuation. The explicit unfused path remains the semantic test oracle.

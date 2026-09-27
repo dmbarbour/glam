@@ -6583,7 +6583,10 @@ as well as test-only fixtures which deliberately return raw managed values
 between access regions. Gate G3 remains closed until those paths are
 classified and repaired; the feature is retained as their deterministic
 reproducer rather than weakened into a passing but uninformative mode.
-Complete the linked GCI11R-002A-H remediation and repository certification
+The linked remediation's D.2c evaluator partition is complete: W8 retired its
+direct gate and raw evaluator APIs. D.2d-D.2g, the remaining repository
+certification, and the persistent-edge P4/P5 cutover are still open. Complete
+the linked GCI11R-002A-H remediation and repository certification
 before marking this checkpoint complete or beginning I11D.2.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection

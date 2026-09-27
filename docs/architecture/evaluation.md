@@ -67,13 +67,10 @@ Retaining `Values`, a demand context, or a runtime service can therefore keep
 value construction usable without also preserving the scheduler, executor,
 runtime facade, or default reflection profile. Production non-inline values
 already use registered roots over managed outer value nodes, but collection
-remains `NoAuto`. Gate G2 and I11B permit explicit, crate-private collection at
-controlled serial test boundaries. I11C additionally exercises private worker
-and finalizer schedules; its finalizer ordering is deterministically probed,
-while I11D still owes an authoritative worker/collector admission-wait latch.
-These fixtures do not expose routine maintenance or change heap policy. Gate
-G3 certification, runtime maintenance, and any automatic policy remain later
-gates.
+remains `NoAuto`. Private controlled-collection fixtures exercise serial,
+worker, and finalizer schedules without exposing a routine maintenance API or
+changing heap policy. Repository-wide aggressive verification, runtime
+maintenance, and any automatic policy remain later certification gates.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
@@ -175,17 +172,16 @@ coordinator-owned adapter in cooperative and executor paths, so the executor
 contains no separate value-admission policy. Every carrier temporarily retains
 the validated demand state but exposes neither that route nor a mutator to the
 machine. Its only managed-access operation opens a lifetime-bound region for a
-bounded callback-free substep and closes it before returning. Whole
-`eval_value`, lazy-source, and effect operations may reach dependencies or
-callbacks, so they do not open one poll-wide region; spark demand now enters
-through its scoped strategy implementation. Resumable scheduler-visible
-machine boundaries publish dependencies as `Blocked`; direct and patient
-drivers pump and wait only while retaining the mutator-free evaluator-step
-context. An opaque deferred-source Rust callback cannot yet suspend and resume,
-so its temporary compatibility path may cooperatively pump a dependency, but
-it also inherits no managed-access region. Claim release, terminal publication,
-cancellation, destruction, coordinator waits, and worker sleeps therefore run
-without inherited mutator authority.
+bounded callback-free substep and closes it before returning. Whole-value,
+lazy-source, and effect operations may reach dependencies or callbacks, so they
+do not open one poll-wide region; spark demand enters through its scoped
+strategy implementation. Resumable scheduler-visible machine boundaries
+publish dependencies as `Blocked`; direct and patient drivers pump and wait
+only while retaining the mutator-free evaluator-step context. An opaque host
+callback is invoked only after regional access closes, and any later semantic
+demand re-enters through an explicit rooted machine boundary. Claim release,
+terminal publication, cancellation, destruction, coordinator waits, and worker
+sleeps therefore run without inherited mutator authority.
 
 Each claimed evaluator quantum also owns one stack-local
 `EvaluationStepBudget`. Budget-aware nested machines borrow that same mutable
@@ -200,6 +196,33 @@ task quantum before polling and does not refund unused units. Its
 inner spend. The runtime background pump instead translates exact inner spend
 into its public report. Finer foreground accounting remains observational
 until scheduler policy is revisited.
+
+## WHNF Submachine Flow
+
+Every durable whole-value owner carries one `WhnfComputation`. It begins with a
+`RuntimeValueRoot`; its first bounded access promotes that seed atomically into
+one `ManagedWhnfRoot`. The canonical managed state retains the current focus,
+continuation frames, followed lazy and promise identities, and the optional
+source-owner and cycle-promise state needed by the owning machine. Resuming the
+same computation therefore continues from its last transition rather than
+restarting demand from the original value.
+
+A bounded poll returns one of five kinds of outcome: a rooted ready value, an
+exact semantic dependency, an exhausted shared step budget, an explicit
+external boundary, or a rooted permanent failure. The access region closes
+before the outer machine translates a dependency into coordinator work, waits,
+invokes a callback, or publishes a result. Nested WHNF work borrows the same
+mutable `EvaluationStepBudget`; it never manufactures a fresh allowance.
+
+When lazy production must suspend, progress is installed beneath the owning
+lazy instead of being retained by a scheduler-only side table. Ordinary WHNF
+uses the managed WHNF checkpoint directly. Host-call, net-WHNF, access,
+object-fixpoint, list-effect, and saturated-builtin families use typed managed
+checkpoint cells whose state is traced through the same lazy owner. Client
+demand, promise following, reflection decoding, and sparks retain their own
+durable `WhnfComputation` while scheduled. No direct evaluator gate exists:
+whole-value demand enters through these owned machines, while regional tests
+and implementation helpers use a bounded normal poll context.
 
 Successful type-erased machine polls cross that release boundary as a
 `RuntimeValueRoot`, never a bare `core::Value`. Evaluator results are published
@@ -289,16 +312,13 @@ Within a claimed or explicitly owner-driven poll, `EvaluatorStepContext` pairs
 the poll authority with the durable evaluator context without activating the
 collector. It is thread-bound and may survive dependency/callback
 orchestration. Only its `with_value_access` operation enters a callback-free
-managed region, so the recursive evaluator can be migrated without making a
-whole `eval_value` call one mutator lifetime. The direct-compatibility gate is
-retained only for internal compatibility and tests: I3D and I3E removed every
-external production entry, and a source-tree closure latch rejects any new
-one. A closure inventory accounts for every
+managed region, so recursive evaluation does not make a whole-value demand one
+mutator lifetime. A source-tree closure latch rejects the retired direct
+evaluator gate and wrappers. A closure inventory accounts for every
 context-bearing function below `src/eval`: scoped functions retain
 `EvaluatorStepContext`, while every remaining durable `EvalContext` surface
-names its I3B.2/I3C/I3D/I3E or I10 owner. Separate latches cover all external
-direct calls, the single compatibility constructor, and the dispatcher
-downgrade set.
+names its durable owner. Separate latches cover retired direct entry names and
+the dispatcher downgrade set.
 
 The core value/application/sequence spine now consumes this step context.
 Client demand and deferred lazy/promise machines derive it from their checked
@@ -306,10 +326,9 @@ poll claim; result rooting also occurs through that same carrier. Diagnostic,
 compiler, and reflection clients use their scheduler-owned
 demand/interpreter services. Explicit durable builtin seams enter the
 evaluator spine only after an admitted poll has established their step
-context. The compatibility gate opens no ambient access
-region: explicit deferred callbacks, reflection, net, and builtin seams receive
-only their durable evaluator context, and no `EvaluationValueAccess` crosses a
-pump, wait, callback, or machine poll.
+context. Deferred callbacks, reflection, net, and builtin seams receive only
+their durable evaluator context, and no `EvaluationValueAccess` crosses a pump,
+wait, callback, or machine poll.
 `wait_for_claimed_task` is an ordinary coordinator wait and retains only this
 durable, mutator-free context. The interaction-net disturbance wait is a
 separate narrow exception: its bracketed local claim and acyclic handoff prove
@@ -330,10 +349,9 @@ spark outcomes cross that region only after the checkpoint transition closes.
 Immediate families still return directly to the source owner, which roots
 their result before regional access closes.
 
-The direct `apply_builtin` wrapper is test-only. The broader direct evaluator
-compatibility facade remains for W8 and legacy library/test helpers, but no
-runtime builtin dispatch, callback, wait, scheduler handoff, reflection
-activation, or host operation enters through it. Reflection and
+The direct `apply_builtin` wrapper is test-only and performs one bounded
+regional operation. Whole-value tests use runtime-owned client demand; there is
+no broader direct evaluator facade. Reflection and
 metadata-reflection annotations perform regional recognition and input
 validation before crossing their named durable handoffs; `seq` and `spark`
 likewise publish scheduler work only after managed access closes.

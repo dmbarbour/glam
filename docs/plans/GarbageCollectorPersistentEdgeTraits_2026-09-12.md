@@ -621,6 +621,13 @@ unfinished D.2b implementation. Their exact declaration/operation manifest
 is unchanged; downstream phases reduce it and P4 performs final trait
 removal.
 
+Progress, 2026-09-27, after parent D.2c/W8: the raw evaluator and builtin
+partition is zero, and no replacement implicit managed-edge trait was added.
+The 51-entry carrier interlock remains because D.2b and D.2d-D.2g still own
+core declarations and downstream consumers. P4 therefore remains closed until
+those parent partitions remove the dependencies and the exact manifest reaches
+zero; W8 completion alone is not authorization for the trait cutover.
+
 Planned W6B.4b.2 interlock, 2026-09-16: the private runtime-only
 `CallableCheckpoint` is a linear progress carrier, not another cloneable
 value shell. Its associated type has no `Clone`, `Debug`, `PartialEq`, or `Eq`

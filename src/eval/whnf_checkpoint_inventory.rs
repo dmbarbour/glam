@@ -1,4 +1,4 @@
-//! W6G.3a source-backed inventory of the durable WHNF checkpoint boundary.
+//! Source-backed inventory of the durable WHNF checkpoint boundary.
 //!
 //! The aggregate-cell transition keeps ordinary access-free demand construction
 //! cheap and moves access-qualified structured construction directly into
