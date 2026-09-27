@@ -124,7 +124,8 @@ fn hidden_builtin_replays_all_strict_operation_forms() {
         )
     });
     assert!(matches!(
-        crate::eval::eval_value(&context, &call).expect("valid netlist should replay"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &call)
+            .expect("valid netlist should replay"),
         Value::Net(_)
     ));
 }
@@ -409,8 +410,9 @@ fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
     let construction = with_access(&context, |access| {
         Value::Lazy(LazyValue::from_root(&construction_root, access))
     });
-    let Value::Net(net) = crate::eval::eval_value(&context, &construction)
-        .expect("data must not demand its as-yet-unassigned backedge")
+    let Value::Net(net) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
+            .expect("data must not demand its as-yet-unassigned backedge")
     else {
         panic!("construction with a lazy backedge must produce a net")
     };
@@ -482,9 +484,10 @@ fn effect_returning_results(access: &RuntimeValueAccess<'_>, results: List) -> V
 
 fn assert_one_net_construction_context(context: &EvalContext, effect: Value) {
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
-    let failure = crate::eval::eval_value(context, &construction)
-        .expect_err("the construction fixture must fail")
-        .into_permanent_failure();
+    let failure =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &construction)
+            .expect_err("the construction fixture must fail")
+            .into_permanent_failure();
     let frame = crate::diagnostic::evaluation_context_frame("net_construction");
     assert_eq!(
         failure
@@ -577,8 +580,9 @@ fn public_construction_selects_only_the_first_two_results() {
         )
     });
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
-    let error = crate::eval::eval_value(&context, &construction)
-        .expect_err("two construction results must be ambiguous");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
+            .expect_err("two construction results must be ambiguous");
     assert!(
         error.to_string().contains("produced multiple results"),
         "{error}"
@@ -606,14 +610,16 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 0);
     let error =
-        crate::eval::eval_value(&context, &construction).expect_err("empty construction must fail");
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
+            .expect_err("empty construction must fail");
     assert!(
         error.to_string().contains("produced no successful result"),
         "{error}"
     );
     assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let repeated = crate::eval::eval_value(&context, &construction)
-        .expect_err("failed construction remains memoized");
+    let repeated =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
+            .expect_err("failed construction remains memoized");
     assert!(
         repeated
             .to_string()
@@ -646,7 +652,7 @@ fn run_builder_at(
         Builtin::ListAt,
         vec![Value::Number((index as i64).into()), results],
     );
-    let outcome = crate::eval::eval_value(context, &selected)
+    let outcome = crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &selected)
         .expect("builder outcome should evaluate at the requested index");
     with_access(context, |access| {
         super::builder::decode_outcome(access, &outcome)
@@ -681,7 +687,7 @@ fn builder_result_at(
         Builtin::ListAt,
         vec![Value::Number((index as i64).into()), results],
     );
-    crate::eval::eval_value(context, &selected)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &selected)
 }
 
 fn path(
@@ -1971,7 +1977,7 @@ fn hidden_builder_fix_reports_recursive_future_observation() {
     });
 
     let [future, _state] = run_builder_at(&context, fixed, state, 0);
-    let error = crate::eval::eval_value(&context, &future)
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &future)
         .expect_err("strictly observing a fixpoint's own value must report a cycle");
     assert!(error.to_string().contains("cycle"), "{error}");
 }

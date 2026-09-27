@@ -842,7 +842,9 @@ fn drive_net_work(
     context: &EvalContext,
     request: &NormalizationRequest,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| drive_net_work_in(evaluator, request))
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
+        drive_net_work_in(evaluator, request)
+    })
 }
 
 pub(in crate::eval) fn drive_net_semantic_action(
@@ -1036,7 +1038,9 @@ impl NormalizationRequest {
 
     #[cfg(test)]
     fn drive(&self, context: &EvalContext) -> Result<NetInterfaceOutcome, EvaluationHalt> {
-        super::with_direct_evaluator(context, |evaluator| self.drive_in(evaluator))
+        crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
+            self.drive_in(evaluator)
+        })
     }
 }
 
@@ -1578,7 +1582,7 @@ pub(super) fn classify_core_callable(
     context: &EvalContext,
     value: Value,
 ) -> Result<CoreCallable, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         evaluator.with_value_access(|access| classify_core_callable_in(&access, value))
     })
 }
@@ -1801,7 +1805,7 @@ fn progress_exact_core_call(
     runtime: &CoreRuntimeNet,
     call: Call,
 ) -> Result<bool, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         progress_exact_core_call_in(
             evaluator,
             runtime,
@@ -1856,7 +1860,7 @@ fn progress_exact_core_operator_call(
     runtime: &CoreRuntimeNet,
     call: OperatorCall,
 ) -> Result<bool, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         progress_core_operator_call(evaluator, runtime, call)
     })
 }
@@ -2032,7 +2036,7 @@ mod driver_tests {
         interface: Port,
     ) -> RootedNormalizationRequest {
         let context = test_context();
-        let request = super::with_direct_evaluator(&context, |evaluator| {
+        let request = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
         });
         RootedNormalizationRequest {
@@ -2056,7 +2060,7 @@ mod driver_tests {
         });
         let exposed = runtime.test_with(&values, RuntimeNet::exposed);
         let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(runtime.clone())));
-        let _request = super::with_direct_evaluator(&context, |evaluator| {
+        let _request = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             NormalizationRequest::cursor_whnf(&runtime, exposed, evaluator)
         });
 
@@ -2291,7 +2295,7 @@ mod driver_tests {
         }
         let (runtime, call) = claimed_core_call_in(&values, Value::Promised(focus));
 
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(2);
             assert!(progress_exact_core_call_in(evaluator, &runtime, call, &mut budget).unwrap());
         });
@@ -2304,7 +2308,7 @@ mod driver_tests {
             runtime
                 .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
                 .expect("published checkpoint remains runnable");
-            super::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
                 progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
             })
@@ -2332,7 +2336,7 @@ mod driver_tests {
             })
             .expect("unassigned callable promise blocks its exact checkpoint");
 
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(with_core_net_access(evaluator, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
@@ -2340,7 +2344,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("retried checkpoint is claimable");
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
             progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
         })
@@ -2349,7 +2353,7 @@ mod driver_tests {
             .test_with(context.values(), |net| net.callable_checkpoint(call.pair))
             .expect("successor checkpoint remains published while blocked");
         assert_ne!(successor.generation, blocked.call.generation);
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert_eq!(
                 with_core_net_access(evaluator, &runtime, |runtime| {
                     runtime.block_callable_checkpoint(blocked.call, blocked.wait.clone())
@@ -2762,20 +2766,21 @@ mod driver_tests {
         assert!(target.test_claim_pairless_cursor_obligation(&test_value_factory(), cursor));
         let request = normalization_request(&target, interface);
         let mut driver = NetDriver::new(&request);
-        let contention = match crate::eval::with_direct_evaluator(&context, |evaluator| {
-            drive_net_driver_work_in(evaluator, &mut driver)
-        })
-        .unwrap()
-        {
-            NetDriverOutcome::Contended(contention) => contention,
-            _ => panic!("claimed demanded cursor must report contention"),
-        };
+        let contention =
+            match crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                drive_net_driver_work_in(evaluator, &mut driver)
+            })
+            .unwrap()
+            {
+                NetDriverOutcome::Contended(contention) => contention,
+                _ => panic!("claimed demanded cursor must report contention"),
+            };
         assert!(matches!(
             target.test_advance_claimed_cursor(&test_value_factory(), cursor),
             Some(crate::interaction_net::CursorProgress::Materialized { .. })
         ));
         contention.wait_for_disturbance();
-        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+        let outcome = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             loop {
                 match drive_net_driver_work_in(evaluator, &mut driver)? {
                     NetDriverOutcome::Progressed => driver.restart_from_request_root(),
@@ -2826,15 +2831,16 @@ mod driver_tests {
         let follower = std::thread::spawn(move || {
             let context = test_context();
             let mut registered_tx = Some(registered_tx);
-            let result = crate::eval::with_direct_evaluator(&context, |evaluator| {
-                drive_net_interface_with_contention_handoff(evaluator, &request, || {
-                    registered_tx
-                        .take()
-                        .expect("one evaluator handoff should register once")
-                        .send(())
-                        .unwrap();
-                })
-            });
+            let result =
+                crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                    drive_net_interface_with_contention_handoff(evaluator, &request, || {
+                        registered_tx
+                            .take()
+                            .expect("one evaluator handoff should register once")
+                            .send(())
+                            .unwrap();
+                    })
+                });
             result_tx.send(result).unwrap();
         });
 
@@ -2895,13 +2901,12 @@ mod driver_tests {
         let request = normalization_request(&runtime, interface);
         let mut driver = NetDriver::new(&request);
         let contention =
-            crate::eval::with_direct_evaluator(
-                &context,
-                |evaluator| match drive_net_driver_work_in(evaluator, &mut driver)? {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                match drive_net_driver_work_in(evaluator, &mut driver)? {
                     NetDriverOutcome::Contended(contention) => Ok::<_, EvaluationHalt>(contention),
                     _ => panic!("the forced batch owner must cause a contention handoff"),
-                },
-            )
+                }
+            })
             .expect("batch admission contention is not an evaluation failure");
         assert_eq!(
             driver.worklist.items.len(),
@@ -2912,7 +2917,7 @@ mod driver_tests {
         release_tx.send(()).unwrap();
         leader.join().expect("normalization owner must finish");
         contention.wait_for_disturbance();
-        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+        let outcome = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             drive_net_driver_work_in(evaluator, &mut driver)
         })
         .expect("the retained work item must resume after publication");
@@ -2975,12 +2980,13 @@ mod driver_tests {
         let request = normalization_request(&runtime, interface);
         let mut driver = NetDriver::new(&request);
 
-        let parked = match crate::eval::with_direct_evaluator(&context, |evaluator| {
-            drive_net_driver_work_in(evaluator, &mut driver)
-        }) {
-            Err(error) => error,
-            Ok(_) => panic!("the unresolved callable promise must park the persistent driver"),
-        };
+        let parked =
+            match crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                drive_net_driver_work_in(evaluator, &mut driver)
+            }) {
+                Err(error) => error,
+                Ok(_) => panic!("the unresolved callable promise must park the persistent driver"),
+            };
         let wait = parked
             .blocked_on()
             .expect("the parked driver must retain its exact semantic wait");
@@ -3002,7 +3008,7 @@ mod driver_tests {
             context.pump_wait(&wait.0, 256),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         ));
-        let outcome = crate::eval::with_direct_evaluator(&context, |evaluator| {
+        let outcome = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             loop {
                 match drive_net_driver_work_in(evaluator, &mut driver)? {
                     NetDriverOutcome::Progressed => driver.restart_from_request_root(),
@@ -3051,25 +3057,27 @@ mod driver_tests {
         let runtime = instantiate(builder.finish(result));
         let interface = runtime.test_with(context.values(), |net| net.exposed());
         let _runtime_root = context.values().root_core_net(&runtime);
-        let mut machine = crate::eval::with_direct_evaluator(&context, |evaluator| {
-            NetWhnfMachine::new(evaluator, runtime.clone(), interface, "test net")
-        });
+        let mut machine =
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                NetWhnfMachine::new(evaluator, runtime.clone(), interface, "test net")
+            });
         context.values().with_runtime_value_access(|access| {
             assert!(machine.retained_runtime().same_net_in(&runtime, &access));
         });
 
         let mut park_budget = crate::evaluation::EvaluationStepBudget::new(256);
-        let parked = match crate::eval::with_direct_evaluator(&context, |evaluator| {
-            loop {
-                match machine.poll(evaluator, &mut park_budget) {
-                    Ok(NetWhnfPoll::Yielded) => {}
-                    outcome => break outcome,
+        let parked =
+            match crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                loop {
+                    match machine.poll(evaluator, &mut park_budget) {
+                        Ok(NetWhnfPoll::Yielded) => {}
+                        outcome => break outcome,
+                    }
                 }
-            }
-        }) {
-            Err(error) => error,
-            Ok(_) => panic!("the unresolved callable must park the net-WHNF owner"),
-        };
+            }) {
+                Err(error) => error,
+                Ok(_) => panic!("the unresolved callable must park the net-WHNF owner"),
+            };
         let wait = parked
             .blocked_on()
             .expect("the owner must expose its exact semantic wait");
@@ -3087,7 +3095,7 @@ mod driver_tests {
         ));
 
         let mut resume_budget = crate::evaluation::EvaluationStepBudget::new(256);
-        let value = crate::eval::with_direct_evaluator(&context, |evaluator| {
+        let value = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             loop {
                 match machine.poll(evaluator, &mut resume_budget)? {
                     NetWhnfPoll::Ready(value) => return Ok::<_, EvaluationHalt>(value),
@@ -3098,7 +3106,7 @@ mod driver_tests {
         .expect("the owner must resume through the same managed net");
         assert!(matches!(value, Value::Lazy(_)));
         assert_eq!(
-            crate::eval::eval_value(&context, &value)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
                 .expect("the returned net payload must retain ordinary lazy demand"),
             context.values().unit()
         );
@@ -3132,7 +3140,7 @@ mod driver_tests {
         builder.wire(argument, value);
         let runtime = instantiate(builder.finish(result));
         let interface = runtime.test_with(context.values(), |net| net.exposed());
-        let machine = crate::eval::with_direct_evaluator(context, |evaluator| {
+        let machine = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
             NetWhnfMachine::new(evaluator, runtime, interface, "NC1C budget fixture")
         });
         let root = context.values().root_core_net(machine.retained_runtime());
@@ -3148,7 +3156,7 @@ mod driver_tests {
 
         let mut zero_machine = assigned_callable_machine(&context);
         let mut zero = crate::evaluation::EvaluationStepBudget::new(0);
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(matches!(
                 zero_machine.poll(evaluator, &mut zero).unwrap(),
                 NetWhnfPoll::Yielded
@@ -3163,7 +3171,7 @@ mod driver_tests {
 
         let mut one_machine = assigned_callable_machine(&context);
         let mut one = crate::evaluation::EvaluationStepBudget::new(1);
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(matches!(
                 one_machine.poll(evaluator, &mut one).unwrap(),
                 NetWhnfPoll::Yielded
@@ -3181,7 +3189,7 @@ mod driver_tests {
             );
         });
         let mut final_one = crate::evaluation::EvaluationStepBudget::new(1);
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(matches!(
                 one_machine.poll(evaluator, &mut final_one).unwrap(),
                 NetWhnfPoll::Ready(_)
@@ -3192,7 +3200,7 @@ mod driver_tests {
 
         let mut many_machine = assigned_callable_machine(&context);
         let mut many = crate::evaluation::EvaluationStepBudget::new(5);
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(matches!(
                 many_machine.poll(evaluator, &mut many).unwrap(),
                 NetWhnfPoll::Ready(_)
@@ -3282,7 +3290,7 @@ mod driver_tests {
         let (runtime, call) = claimed_core_call(Value::Builtin(Builtin::Add));
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreCallClaim::fresh(&access, &runtime, call)
                     .expect("claimed call must issue its scoped guard");
@@ -3309,7 +3317,7 @@ mod driver_tests {
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::eval::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 evaluator.with_value_access(|access| {
                     let _claim = CoreCallClaim::fresh(&access, &runtime, call)
                         .expect("claimed call must issue its scoped guard");
@@ -3340,7 +3348,7 @@ mod driver_tests {
         });
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 assert!(CoreCallClaim::fresh(&access, &runtime, call).is_none());
             });
@@ -3364,7 +3372,7 @@ mod driver_tests {
             })
             .expect("unassigned callable promise must block the checkpoint");
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(with_core_net_access(evaluator, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
@@ -3372,7 +3380,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("ready checkpoint must be claimable");
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
                     .expect("exact checkpoint must issue its scoped claim");
@@ -3403,7 +3411,7 @@ mod driver_tests {
             })
             .expect("unassigned callable promise must block the checkpoint");
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(with_core_net_access(evaluator, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
@@ -3413,7 +3421,7 @@ mod driver_tests {
             .expect("ready checkpoint must be claimable");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::eval::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 evaluator.with_value_access(|access| {
                     let _claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
                         .expect("exact checkpoint must issue its scoped claim");
@@ -3447,7 +3455,7 @@ mod driver_tests {
         assert_ne!(wrong_wait, blocked.wait);
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mismatch = crate::interaction_net::BlockedCallableCheckpoint {
                 call: blocked.call,
                 wait: wrong_wait,
@@ -3611,7 +3619,7 @@ mod driver_tests {
         }
         let (runtime, call) = claimed_core_call(Value::Promised(focus));
 
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(2);
             assert!(progress_exact_core_call_in(evaluator, &runtime, call, &mut budget).unwrap());
         });
@@ -3634,7 +3642,7 @@ mod driver_tests {
                 reduction.kind,
                 ReductionKind::CallableCheckpoint { .. }
             ));
-            super::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
                 progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
             })
@@ -3670,7 +3678,7 @@ mod driver_tests {
             .with_runtime_value_access(|access| promise.duplicate_in(&access));
         let (runtime, call) = claimed_core_call(Value::Promised(call_promise));
 
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
             let progress = evaluator.with_value_access(|access| {
                 let claim = CoreCallClaim::fresh(&access, &runtime, call).unwrap();
@@ -3701,7 +3709,7 @@ mod driver_tests {
             crate::evaluation::EvaluationWaitPoll::Pending(_)
         ));
 
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(with_core_net_access(evaluator, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
@@ -3723,26 +3731,27 @@ mod driver_tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(values.clone());
         let (runtime, call) = claimed_core_call_in(&values, context.values().unit());
-        let checkpoint = super::with_direct_evaluator(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                let state = crate::eval::whnf::NetWhnfState::from_regional(
-                    &access,
-                    crate::eval::whnf::RegionalWhnfWork::from_focus(
+        let checkpoint =
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+                evaluator.with_value_access(|access| {
+                    let state = crate::eval::whnf::NetWhnfState::from_regional(
                         &access,
-                        Value::Builtin(Builtin::Add),
-                    ),
-                );
-                let Ok(checkpoint) = access
-                    .net(&runtime)
-                    .install_claimed_call_checkpoint(call, state)
-                else {
-                    panic!("claimed call accepts one checkpoint")
-                };
-                checkpoint
-            })
-        });
+                        crate::eval::whnf::RegionalWhnfWork::from_focus(
+                            &access,
+                            Value::Builtin(Builtin::Add),
+                        ),
+                    );
+                    let Ok(checkpoint) = access
+                        .net(&runtime)
+                        .install_claimed_call_checkpoint(call, state)
+                    else {
+                        panic!("claimed call accepts one checkpoint")
+                    };
+                    checkpoint
+                })
+            });
 
-        let failure = super::with_direct_evaluator(&context, |evaluator| {
+        let failure = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             settle_callable_checkpoint_boundary(
                 evaluator,
                 &runtime,
@@ -3784,7 +3793,7 @@ mod driver_tests {
             .expect("outer promise delegates to the unresolved inner promise");
         let (runtime, call) = claimed_core_call(context.values().unit());
 
-        let expected = super::with_direct_evaluator(&context, |evaluator| {
+        let expected = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let state = crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
                     &access,
@@ -3818,7 +3827,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("initial checkpoint is runnable");
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
             progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
         })
@@ -3831,7 +3840,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("yielded checkpoint is runnable");
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
             progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
         })
@@ -3851,7 +3860,7 @@ mod driver_tests {
             context.pump_wait(&blocked.wait.0, 256),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
         ));
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             assert!(with_core_net_access(evaluator, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
@@ -3860,7 +3869,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("completed dependency makes the checkpoint runnable");
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
                     .expect("exact checkpoint claim moves state into regional ownership");
@@ -3883,7 +3892,7 @@ mod driver_tests {
         runtime
             .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
             .expect("restored checkpoint is runnable");
-        super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
             progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
         })
@@ -3903,7 +3912,7 @@ mod driver_tests {
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreOperatorClaim::fresh(&access, &runtime, call)
                     .expect("claimed operator call must issue its scoped guard");
@@ -3933,7 +3942,7 @@ mod driver_tests {
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::eval::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 evaluator.with_value_access(|access| {
                     let _claim = CoreOperatorClaim::fresh(&access, &runtime, call)
                         .expect("claimed operator call must issue its scoped guard");
@@ -3967,7 +3976,7 @@ mod driver_tests {
         });
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 assert!(CoreOperatorClaim::fresh(&access, &runtime, call).is_none());
             });
@@ -3990,7 +3999,7 @@ mod driver_tests {
             builtin_operator(&access, BuiltinCall::new(Builtin::Add))
         });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 CoreOperatorClaim::fresh(&access, &runtime, call)
                     .expect("ready operator call must be claimable")
@@ -4005,7 +4014,7 @@ mod driver_tests {
             .expect("unassigned operator promise must block the call");
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreOperatorClaim::retry(&access, &runtime, blocked.clone())
                     .expect("the exact blocked operator wait must be reclaimable");
@@ -4035,7 +4044,7 @@ mod driver_tests {
             builtin_operator(&access, BuiltinCall::new(Builtin::Add))
         });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 CoreOperatorClaim::fresh(&access, &runtime, call)
                     .expect("ready operator call must be claimable")
@@ -4050,7 +4059,7 @@ mod driver_tests {
             .expect("unassigned operator promise must block the call");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::eval::with_direct_evaluator(&context, |evaluator| {
+            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 evaluator.with_value_access(|access| {
                     let _claim = CoreOperatorClaim::retry(&access, &runtime, blocked.clone())
                         .expect("the exact blocked operator wait must be reclaimable");
@@ -4079,7 +4088,7 @@ mod driver_tests {
             builtin_operator(&access, BuiltinCall::new(Builtin::Add))
         });
         let (runtime, call) = claimed_core_operator_call(operator, context.values().unit());
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 CoreOperatorClaim::fresh(&access, &runtime, call)
                     .expect("ready operator call must be claimable")
@@ -4099,7 +4108,7 @@ mod driver_tests {
         assert_ne!(wrong_wait, blocked.wait);
         let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mismatch = BlockedOperatorCall {
                 pair: blocked.pair,
                 wait: wrong_wait,
@@ -4169,8 +4178,9 @@ mod driver_tests {
             context.values(),
             NetValue::new(blocked_runtime),
         ));
-        let blocked = eval_value(&context, &blocked)
-            .expect_err("the emitted application must retain its promise wait");
+        let blocked =
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &blocked)
+                .expect_err("the emitted application must retain its promise wait");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
 
         let failed_operator = context.values().with_runtime_value_access(|access| {
@@ -4183,7 +4193,9 @@ mod driver_tests {
             context.values(),
             NetValue::new(failed_runtime),
         ));
-        let failure = eval_value(&context, &failed).expect_err("unit is permanently non-callable");
+        let failure =
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &failed)
+                .expect_err("unit is permanently non-callable");
         assert!(
             failure
                 .to_string()

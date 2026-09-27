@@ -26,7 +26,7 @@ fn progress_checkpoint(
     pair: ActivePairKey,
     budget: usize,
 ) -> Result<(), EvaluationHalt> {
-    super::super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
         progress_callable_checkpoint(evaluator, runtime, pair, &mut budget)
     })
@@ -37,7 +37,7 @@ fn normalization_request_in(
     runtime: &CoreRuntimeNet,
     interface: Port,
 ) -> NormalizationRequest {
-    super::super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
     })
 }
@@ -47,7 +47,7 @@ fn resume_blocked_checkpoint(
     runtime: &CoreRuntimeNet,
     blocked: &crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>,
 ) -> Result<(), EvaluationHalt> {
-    super::super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         assert!(with_core_net_access(evaluator, runtime, |runtime| {
             runtime.retry_blocked_callable_checkpoint(blocked)
         }));
@@ -88,7 +88,7 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let outer_id = outer.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(outer));
 
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
         assert!(progress_exact_core_call_in(
             evaluator,
@@ -178,7 +178,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let first_id = first.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
 
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
         progress_exact_core_call_in(evaluator, &runtime, call, &mut budget)
     })
@@ -236,7 +236,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     crate::core::set_test_promise(context.values(), &leading, Value::Lazy(failed_lazy))
         .expect("leader accepts failed lazy focus");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(leading));
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
         progress_exact_core_call_in(evaluator, &runtime, call, &mut budget)
     })
@@ -524,7 +524,7 @@ fn install_checkpoint(
     crate::interaction_net::CallableCheckpointCall,
 ) {
     let (runtime, call) = claimed_core_call_in(context.values(), context.values().unit());
-    let checkpoint = super::super::with_direct_evaluator(context, |evaluator| {
+    let checkpoint = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         evaluator.with_value_access(|access| {
             let state = build(&access);
             let Ok(checkpoint) = access
@@ -544,7 +544,7 @@ fn claimed_checkpoint_semantic_observation(
     runtime: &CoreRuntimeNet,
     pair: ActivePairKey,
 ) -> crate::eval::whnf::NetWhnfObservation {
-    super::super::with_direct_evaluator(context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         evaluator.with_value_access(|access| {
             let claim = CoreCheckpointClaim::take(&access, runtime, pair)
                 .expect("ready checkpoint must expose its complete regional state");
@@ -610,7 +610,7 @@ fn two_workers_contend_for_one_linear_checkpoint_payload() {
     let interlock = Arc::new(Barrier::new(2));
     let first_interlock = Arc::clone(&interlock);
     let first = std::thread::spawn(move || {
-        super::super::with_direct_evaluator(&first_context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&first_context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreCheckpointClaim::take(&access, &first_runtime, call.pair)
                     .expect("first worker must acquire the exact checkpoint payload");
@@ -623,7 +623,7 @@ fn two_workers_contend_for_one_linear_checkpoint_payload() {
     let second_interlock = Arc::clone(&interlock);
     let second = std::thread::spawn(move || {
         second_interlock.wait();
-        super::super::with_direct_evaluator(&second_context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&second_context, |evaluator| {
             evaluator.with_value_access(|access| {
                 assert!(
                     CoreCheckpointClaim::take(&access, &second_runtime, call.pair).is_none(),
@@ -642,7 +642,7 @@ fn two_workers_contend_for_one_linear_checkpoint_payload() {
     );
     assert!(!runtime.test_with(setup.values(), |net| net.pair_is_claimed(call.pair)));
     reduce_checkpoint(setup.values(), &runtime, call.pair);
-    super::super::with_direct_evaluator(&setup, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&setup, |evaluator| {
         evaluator.with_value_access(|access| {
             drop(
                 CoreCheckpointClaim::take(&access, &runtime, call.pair)
@@ -661,7 +661,7 @@ fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
     reduce_checkpoint(context.values(), &runtime, call.pair);
 
     let before_publication = catch_unwind(AssertUnwindSafe(|| {
-        super::super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let _claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
                     .expect("pre-publication unwind must own the payload");
@@ -679,7 +679,7 @@ fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
 
     reduce_checkpoint(context.values(), &runtime, call.pair);
     let after_publication = catch_unwind(AssertUnwindSafe(|| {
-        super::super::with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
                 let claim = CoreCheckpointClaim::take(&access, &runtime, call.pair)
                     .expect("restored predecessor must remain claimable");
@@ -698,7 +698,7 @@ fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
     assert!(!runtime.test_with(context.values(), |net| net.pair_is_claimed(call.pair)));
 
     reduce_checkpoint(context.values(), &runtime, call.pair);
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.with_value_access(|access| {
             assert!(
                 access
@@ -756,7 +756,7 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
     values
         .collect_managed_for_test()
         .expect("collection at the original claimed call must succeed");
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(0);
         assert!(progress_exact_core_call_in(
             evaluator,
@@ -881,7 +881,7 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
         .expect("first promise delegates to the terminal promise");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
 
-    super::super::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
         progress_exact_core_call_in(evaluator, &runtime, call, &mut budget)
     })

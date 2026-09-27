@@ -8495,11 +8495,17 @@ demand boundary, and the two regional W4 fixtures use the bounded normal-poll
 test step. The focused evaluator-family suites pass. The exact W8 inventory
 now contains 295 references at fingerprint `16_192_753_402_195_190_958`.
 
-###### W8B.1c — Migrate interaction-net fixtures
+###### W8B.1c — Migrate interaction-net fixtures — Complete (2026-09-27)
 
 Migrate the 82 calls in `eval/net.rs`, `eval/net/tests/nc5.rs`, and
 `eval/builtins/net/tests/mod.rs`. Preserve direct regional-access fixtures
 only where they test a regional transition rather than whole-value demand.
+
+Completion record: the ten whole-value net fixtures now use client demand,
+while all 72 direct regional entries use `evaluate_test_step`. The focused
+net and public-construction suites pass, including their exact checkpoint and
+route-loss assertions. No `with_direct_evaluator` caller remains; the W8
+inventory is 213 references at fingerprint `9_532_845_863_969_803_327`.
 
 ###### W8B.1d — Migrate the central evaluator suite
 
