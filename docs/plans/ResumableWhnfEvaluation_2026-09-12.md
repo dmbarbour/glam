@@ -8224,7 +8224,11 @@ criteria; passing a repeated schedule is not.
 
 #### W7C — Budget and fairness verification
 
+**Status:** complete on 2026-09-27.
+
 ##### W7C.0 — Budget vocabulary and scope
+
+**Status:** complete on 2026-09-25.
 
 The inner `EvaluationStepBudget` is the exact transition counter for one
 claimed machine poll. Its `spent()` value reports units actually consumed by
@@ -8243,6 +8247,8 @@ report. No later test may compare a foreground allowance with exact spend.
 
 ##### W7C.1 — Exact checkpoint budget
 
+**Status:** complete on 2026-09-25.
+
 ###### W7C.1a — Zero and exact inner boundaries
 
 Prove that zero budget performs no semantic transition or work claim, and
@@ -8256,6 +8262,8 @@ stops at the selected inner boundary, then prove eventual completion. Check
 the foreground reservation result separately from exact inner spend.
 
 ##### W7C.2 — Owner-specific yield and requeue
+
+**Status:** complete on 2026-09-25.
 
 ###### W7C.2a — Foreground and lazy owners
 
@@ -8273,6 +8281,8 @@ dependency.
 
 ##### W7C.3 — Fair ready-work scheduling
 
+**Status:** complete on 2026-09-25.
+
 ###### W7C.3a — Per-role FIFO requeue
 
 Force at least two independently ready records around repeated budget yields
@@ -8288,6 +8298,8 @@ client demand, the runtime background pump never selects clients or sparks,
 and a foreground exact pump never selects unrelated work.
 
 ##### W7C.4 — Cost accounting
+
+**Status:** complete on 2026-09-27.
 
 ###### W7C.4a — Existing counters and local probes
 
@@ -8313,6 +8325,44 @@ same checkpoint eventually completes after one or more budget yields. Keep
 the focused profiling fixtures in
 `scripts/check-interaction-net-profiling.sh` rather than rerunning the complete
 ordinary suite under instrumentation.
+
+Completion record: W7C keeps the two real budget meanings distinct. A claimed
+machine receives an exact stack-owned `EvaluationStepBudget`, and the runtime
+background pump reports that exact spend. The foreground exact-demand pump's
+argument is now named and documented as a reservation allowance: it reserves
+a complete selected quantum and does not refund unused inner units. Zero
+allowance returns before selection, while the existing zero/one/many inner
+budget fixture latches exact declared spend.
+
+The focused W7C fixture drives one managed lazy containing a 96-link chain of
+already-assigned promises with one-unit foreground reservations. Its first
+poll installs one canonical WHNF checkpoint. Eight forced repolls keep the
+same work record free of a dependency, add neither a registered root nor an
+allocated managed slot, and remain at managed-access depth one; later
+one-unit polls reach the exact terminal value. This measures the retained
+aggregate checkpoint without confusing foreground reservation with exact
+inner spend.
+
+Owner and fairness witnesses use explicit claim/release order. Reflection
+machines and client demands produce `A, B, A, B` traces across ordinary
+yields. Reflection waits retain zero exact subscriptions, yielded clients are
+`Queued`, an exact lazy route has no published dependency, and a yielded spark
+is reclaimed by the same stable work ID with no prior dependency. The
+cross-role worker fixture now forces `task, spark, task, spark` using actual
+yield releases rather than unpolled requeue. The runtime background pump
+still leaves a simultaneously ready client untouched, while the existing
+exact foreground and selector-negative fixtures keep unrelated work and
+foreground authority out of worker paths. Every schedule is forced;
+repetition is not used as concurrency evidence.
+
+The new test source is classified explicitly in the runtime-root,
+managed-access, persistent-edge, and regional-constructor ledgers. The
+focused W7C suite, all 119 inventory tests, `cargo fmt --check`, all-feature
+clippy, the complete repository test suite, and
+`scripts/check-interaction-net-profiling.sh` pass. Allocation totals and
+managed-access entry frequency remain diagnostic profiling questions; the
+enforced contract is the absence of per-repoll checkpoint/root churn and
+nested managed access.
 
 ### Phase W8 — Compatibility Retirement and Documentation
 
