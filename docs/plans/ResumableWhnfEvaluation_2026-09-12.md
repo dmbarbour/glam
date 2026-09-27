@@ -8553,11 +8553,21 @@ to its admitted poll carrier. Client demand, sparks, reflection results, and
 scheduled machines continue to share the existing yielded/pending protocol;
 no compensating boundary or renamed wrapper was introduced.
 
-##### W8B.3 — Close exact inventories
+##### W8B.3 — Close exact inventories — Complete (2026-09-27)
 
 Require the D.2c W8 compatibility manifest to be empty, remove its obsolete
 checkpoint enum/fingerprint, and rerun W0B. No new declaration may inherit the
 compatibility disposition as a replacement.
+
+Completion record: the empty D.2c manifest no longer has a W8 compatibility
+checkpoint or fallback classification, and W7 no longer has a compatibility
+disposition. The obsolete empty-handoff and hashed caller ledgers are replaced
+by one package-wide exact source ledger: all eight retired entry-point names
+must remain absent as declarations and calls, while the only accepted matches
+are the five live retryable-halt constructors. This direct ledger also covers
+tests, so a compatibility wrapper cannot return as test support. The complete
+W0B/W7 census and all raw-value inventories pass without a replacement
+compatibility category.
 
 #### W8C — Inventory and documentation closure
 

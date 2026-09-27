@@ -96,7 +96,6 @@ enum D2cCheckpoint {
     W6A0aLazyOwnerHandoff,
     W6A0bNumericProjection,
     W6A0cKeyTagUndefined,
-    W8ValueCompatibility,
     W6A1ApplicationLeaves,
     W6A2ApplicationWork,
     W6A3SequenceLeaves,
@@ -370,18 +369,6 @@ impl ApiOccurrence {
                 "value_to_key_in" | "tagged_payload_in" | "is_semantically_undefined_in",
             ) => W6A0cKeyTagUndefined,
             (
-                ValueDemand,
-                _,
-                "eval_value"
-                | "eval_value_in"
-                | "eval_lazy_in"
-                | "eval_promised_in"
-                | "await_deferred_task"
-                | "deferred_wait_result"
-                | "produce_lazy_source_in",
-            ) => W8ValueCompatibility,
-
-            (
                 ApplicationAndSequence,
                 "src/eval/application.rs",
                 "apply_effect_function_value" | "effect_value" | "non_callable_error",
@@ -535,7 +522,7 @@ impl ApiOccurrence {
 
             (NetBuiltins, "src/eval/builtins/net.rs", _) => W6F5NetDispatch,
             _ => panic!(
-                "{} has no reviewed resumable-WHNF W6/W8 checkpoint",
+                "{} has no reviewed resumable-WHNF W6 checkpoint",
                 self.declaration
             ),
         };
@@ -1694,7 +1681,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
             .entry(
                 occurrence
                     .d2c_checkpoint()
-                    .expect("D.2c occurrence needs a W6 or W8 checkpoint"),
+                    .expect("D.2c occurrence needs a W6 checkpoint"),
             )
             .or_default()
             .push(occurrence.clone());
@@ -1707,7 +1694,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
     let expected_counts = BTreeMap::new();
     assert_eq!(
         actual_counts, expected_counts,
-        "every D.2c declaration needs one bounded W6/W8 implementation checkpoint"
+        "every D.2c declaration needs one bounded W6 implementation checkpoint"
     );
 
     let actual_fingerprints = groups
@@ -1717,7 +1704,7 @@ fn d2c_w6_checkpoint_manifest_is_exact() {
     let expected_fingerprints = BTreeMap::new();
     assert_eq!(
         actual_fingerprints, expected_fingerprints,
-        "a D.2c declaration or signature moved between W6/W8 checkpoints"
+        "a D.2c declaration or signature moved between W6 checkpoints"
     );
 }
 

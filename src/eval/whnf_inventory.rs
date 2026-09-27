@@ -102,7 +102,6 @@ enum WorkShape {
 enum W7Disposition {
     ExplicitIteration,
     Orchestration,
-    W8ValueCompatibility,
     UnapprovedRecursion,
 }
 
@@ -243,9 +242,9 @@ struct LocalCall {
     target: LocalCallTarget,
 }
 
-/// W8's exact compatibility surface, including the direct evaluator gate and
-/// the two retryable-halt constructors which decide whether
-/// `EvaluationHalt` can collapse into a permanent failure.
+/// Retired W8 compatibility entry points and the two live retryable-halt
+/// constructors which decide whether `EvaluationHalt` can collapse into a
+/// permanent failure.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum W8Surface {
     EvalValue,
@@ -254,16 +253,10 @@ enum W8Surface {
     EvalPromisedIn,
     AwaitDeferredTask,
     DeferredWaitResult,
+    ProduceLazySourceIn,
     WithDirectEvaluator,
     HaltBlocked,
     HaltUnassignedPromise,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum W8CallerDisposition {
-    CompatibilityInternal,
-    Production,
-    TestMigration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,16 +264,18 @@ struct W8Call {
     declaration: String,
     ordinal: usize,
     surface: W8Surface,
-    disposition: W8CallerDisposition,
 }
 
 impl W8Call {
     fn record(&self) -> String {
-        format!(
-            "{}#{}|{:?}|{:?}",
-            self.declaration, self.ordinal, self.surface, self.disposition
-        )
+        format!("{}#{}|{:?}", self.declaration, self.ordinal, self.surface)
     }
+}
+
+#[derive(Default)]
+struct W8BoundaryInventory {
+    retired_declarations: Vec<String>,
+    calls: Vec<W8Call>,
 }
 
 struct W8CallerVisitor<'path> {
@@ -288,8 +283,8 @@ struct W8CallerVisitor<'path> {
     module: Vec<String>,
     impl_name: Option<String>,
     function: Option<String>,
-    test_context: bool,
     ordinals: BTreeMap<String, usize>,
+    retired_declarations: Vec<String>,
     calls: Vec<W8Call>,
 }
 
@@ -300,8 +295,8 @@ impl<'path> W8CallerVisitor<'path> {
             module: Vec::new(),
             impl_name: None,
             function: None,
-            test_context: is_test_source(path),
             ordinals: BTreeMap::new(),
+            retired_declarations: Vec::new(),
             calls: Vec::new(),
         }
     }
@@ -320,12 +315,18 @@ impl<'path> W8CallerVisitor<'path> {
         parts.join("::")
     }
 
-    fn visit_function(&mut self, name: String, attributes: &[Attribute], body: &syn::Block) {
+    fn visit_function(&mut self, name: String, body: &syn::Block) {
         let prior_function = self.function.replace(name);
-        let prior_test = self.test_context;
-        self.test_context |= is_test_only(attributes);
+        if retired_w8_surface(
+            self.function
+                .as_deref()
+                .expect("a visited function has a name"),
+        )
+        .is_some()
+        {
+            self.retired_declarations.push(self.declaration());
+        }
         self.visit_block(body);
-        self.test_context = prior_test;
         self.function = prior_function;
     }
 
@@ -333,18 +334,10 @@ impl<'path> W8CallerVisitor<'path> {
         let declaration = self.declaration();
         let ordinal = self.ordinals.entry(declaration.clone()).or_default();
         *ordinal += 1;
-        let disposition = if is_w8_value_compatibility_declaration(&declaration) {
-            W8CallerDisposition::CompatibilityInternal
-        } else if self.test_context {
-            W8CallerDisposition::TestMigration
-        } else {
-            W8CallerDisposition::Production
-        };
         self.calls.push(W8Call {
             declaration,
             ordinal: *ordinal,
             surface,
-            disposition,
         });
     }
 }
@@ -354,31 +347,25 @@ impl<'ast> Visit<'ast> for W8CallerVisitor<'_> {
         let Some((_, items)) = &node.content else {
             return;
         };
-        let prior_test = self.test_context;
-        self.test_context |= is_test_only(&node.attrs);
         self.module.push(node.ident.to_string());
         for item in items {
             self.visit_item(item);
         }
         self.module.pop();
-        self.test_context = prior_test;
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let prior_impl = self.impl_name.replace(type_name(&node.self_ty));
-        let prior_test = self.test_context;
-        self.test_context |= is_test_only(&node.attrs);
         visit::visit_item_impl(self, node);
-        self.test_context = prior_test;
         self.impl_name = prior_impl;
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+        self.visit_function(node.sig.ident.to_string(), &node.block);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+        self.visit_function(node.sig.ident.to_string(), &node.block);
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
@@ -692,29 +679,23 @@ fn path_string(path: &syn::Path) -> String {
         .join("::")
 }
 
-fn is_test_source(path: &Path) -> bool {
-    if path
-        .components()
-        .any(|component| component.as_os_str() == "tests")
-    {
-        return true;
-    }
-    path.file_name().is_some_and(|name| {
-        let name = name.to_string_lossy();
-        name == "tests.rs" || name.ends_with("_tests.rs") || name == "test_support.rs"
-    })
-}
-
-fn w8_surface(path: &syn::Path) -> Option<W8Surface> {
-    let name = path.segments.last()?.ident.to_string();
-    match name.as_str() {
+fn retired_w8_surface(name: &str) -> Option<W8Surface> {
+    match name {
         "eval_value" => Some(W8Surface::EvalValue),
         "eval_value_in" => Some(W8Surface::EvalValueIn),
         "eval_lazy_in" => Some(W8Surface::EvalLazyIn),
         "eval_promised_in" => Some(W8Surface::EvalPromisedIn),
         "await_deferred_task" => Some(W8Surface::AwaitDeferredTask),
         "deferred_wait_result" => Some(W8Surface::DeferredWaitResult),
+        "produce_lazy_source_in" => Some(W8Surface::ProduceLazySourceIn),
         "with_direct_evaluator" => Some(W8Surface::WithDirectEvaluator),
+        _ => None,
+    }
+}
+
+fn w8_surface(path: &syn::Path) -> Option<W8Surface> {
+    let name = path.segments.last()?.ident.to_string();
+    retired_w8_surface(&name).or_else(|| match name.as_str() {
         "blocked" | "unassigned_root"
             if path
                 .segments
@@ -730,7 +711,7 @@ fn w8_surface(path: &syn::Path) -> Option<W8Surface> {
             })
         }
         _ => None,
-    }
+    })
 }
 
 fn is_direct_recursive_call(
@@ -923,43 +904,23 @@ fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
     }
 }
 
-const W8_VALUE_COMPATIBILITY_NAMES: &[&str] = &[];
-
-fn declaration_name(declaration: &str) -> &str {
-    declaration
-        .rsplit("::")
-        .next()
-        .expect("an inventory declaration must end with its function name")
-}
-
-fn is_w8_value_compatibility_declaration(declaration: &str) -> bool {
-    declaration.starts_with("src/eval/value.rs::")
-        && W8_VALUE_COMPATIBILITY_NAMES
-            .binary_search(&declaration_name(declaration))
-            .is_ok()
-}
-
 fn w7_disposition(occurrence: &Occurrence) -> W7Disposition {
-    if is_w8_value_compatibility_declaration(&occurrence.declaration) {
-        W7Disposition::W8ValueCompatibility
-    } else {
-        match occurrence.signal {
-            Signal::StructuralRecursion => W7Disposition::UnapprovedRecursion,
-            Signal::UserSizedLoop => W7Disposition::ExplicitIteration,
-            Signal::EvalValue
-            | Signal::EvalLazy
-            | Signal::EvalPromise
-            | Signal::ApplyValue
-            | Signal::ApplyValues
-            | Signal::ReflectionEvaluate
-            | Signal::RetryableWait
-            | Signal::UnassignedPromise
-            | Signal::DependencyTranslation
-            | Signal::CoordinatorBoundary
-            | Signal::ReflectionBoundary
-            | Signal::HostBoundary
-            | Signal::NetBoundary => W7Disposition::Orchestration,
-        }
+    match occurrence.signal {
+        Signal::StructuralRecursion => W7Disposition::UnapprovedRecursion,
+        Signal::UserSizedLoop => W7Disposition::ExplicitIteration,
+        Signal::EvalValue
+        | Signal::EvalLazy
+        | Signal::EvalPromise
+        | Signal::ApplyValue
+        | Signal::ApplyValues
+        | Signal::ReflectionEvaluate
+        | Signal::RetryableWait
+        | Signal::UnassignedPromise
+        | Signal::DependencyTranslation
+        | Signal::CoordinatorBoundary
+        | Signal::ReflectionBoundary
+        | Signal::HostBoundary
+        | Signal::NetBoundary => W7Disposition::Orchestration,
     }
 }
 
@@ -1048,7 +1009,7 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     occurrences
 }
 
-fn collect_w8_calls(manifest: &Path) -> Vec<W8Call> {
+fn collect_w8_boundary_inventory(manifest: &Path) -> W8BoundaryInventory {
     let mut sources = Vec::new();
     collect_rust_sources(&manifest.join("src"), &mut sources);
     let tests = manifest.join("tests");
@@ -1058,7 +1019,7 @@ fn collect_w8_calls(manifest: &Path) -> Vec<W8Call> {
     sources.sort();
     sources.dedup();
 
-    let mut calls = Vec::new();
+    let mut inventory = W8BoundaryInventory::default();
     for path in sources {
         let relative = path
             .strip_prefix(manifest)
@@ -1072,43 +1033,14 @@ fn collect_w8_calls(manifest: &Path) -> Vec<W8Call> {
         });
         let mut visitor = W8CallerVisitor::new(relative);
         visitor.visit_file(&syntax);
-        calls.extend(visitor.calls);
+        inventory
+            .retired_declarations
+            .extend(visitor.retired_declarations);
+        inventory.calls.extend(visitor.calls);
     }
-    calls.sort_by_key(W8Call::record);
-    calls
-}
-
-fn w8_call_fingerprint(calls: &[W8Call]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    calls.iter().fold(FNV_OFFSET, |mut fingerprint, call| {
-        for byte in call.record().bytes().chain([0xff]) {
-            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-        }
-        fingerprint
-    })
-}
-
-fn w8_call_counts(calls: &[W8Call]) -> BTreeMap<(W8Surface, W8CallerDisposition), usize> {
-    calls.iter().fold(BTreeMap::new(), |mut counts, call| {
-        *counts.entry((call.surface, call.disposition)).or_default() += 1;
-        counts
-    })
-}
-
-fn w8_test_migration_counts(calls: &[W8Call]) -> BTreeMap<String, usize> {
-    calls
-        .iter()
-        .filter(|call| call.disposition == W8CallerDisposition::TestMigration)
-        .fold(BTreeMap::new(), |mut counts, call| {
-            let path = call
-                .declaration
-                .split("::")
-                .next()
-                .expect("a W8 call record starts with its source path");
-            *counts.entry(path.to_owned()).or_default() += 1;
-            counts
-        })
+    inventory.retired_declarations.sort();
+    inventory.calls.sort_by_key(W8Call::record);
+    inventory
 }
 
 fn collect_resolved_calls(manifest: &Path) -> (BTreeSet<FunctionKey>, Vec<ResolvedCall>) {
@@ -1397,26 +1329,12 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
 const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 17_165_432_442_858_401_497;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
-const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 14_695_981_039_346_656_037;
-const EXPECTED_W8_CALLS: usize = 5;
-const EXPECTED_W8_CALL_FINGERPRINT: u64 = 14_333_976_427_563_422_922;
-const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
-    ((W8Surface::HaltBlocked, W8CallerDisposition::Production), 4),
-    (
-        (
-            W8Surface::HaltUnassignedPromise,
-            W8CallerDisposition::Production,
-        ),
-        1,
-    ),
-];
-const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
-    "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked|Production",
-    "src/eval/net.rs::drive_net_semantic_action#2|HaltBlocked|Production",
-    "src/eval/net.rs::drive_net_semantic_action#3|HaltBlocked|Production",
-    "src/evaluation/session.rs::client_demand_halt#1|HaltBlocked|Production",
-    "src/evaluation/session.rs::client_demand_halt#2|HaltUnassignedPromise|Production",
+    "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",
+    "src/eval/net.rs::drive_net_semantic_action#2|HaltBlocked",
+    "src/eval/net.rs::drive_net_semantic_action#3|HaltBlocked",
+    "src/evaluation/session.rs::client_demand_halt#1|HaltBlocked",
+    "src/evaluation/session.rs::client_demand_halt#2|HaltUnassignedPromise",
 ];
 
 #[test]
@@ -1488,110 +1406,40 @@ fn w7_resolved_call_graph_cycles_are_exact() {
 }
 
 #[test]
-fn w7_w8_compatibility_handoff_is_exact_and_not_a_production_entry() {
+fn retired_w8_compatibility_and_retryable_halt_boundaries_are_exact() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let (definitions, _) = collect_resolved_calls(manifest);
-    let declarations = definitions
-        .iter()
-        .filter(|function| function.path == "src/eval/value.rs")
-        .filter(|function| {
-            W8_VALUE_COMPATIBILITY_NAMES
-                .binary_search(&function.name.as_str())
-                .is_ok()
-        })
-        .map(FunctionKey::declaration)
-        .collect::<Vec<_>>();
+    let inventory = collect_w8_boundary_inventory(manifest);
     assert_eq!(
-        declarations,
-        W8_VALUE_COMPATIBILITY_NAMES
-            .iter()
-            .map(|name| format!("src/eval/value.rs::{name}"))
-            .collect::<Vec<_>>(),
-        "W7A.2 and D.2c must name the same six W8 compatibility declarations"
+        inventory.retired_declarations,
+        Vec::<String>::new(),
+        "retired W8 compatibility entry points must not be reintroduced under their old names"
     );
 
-    let occurrences = collect_occurrences(manifest);
-    let compatibility = occurrences
-        .iter()
-        .filter(|occurrence| w7_disposition(occurrence) == W7Disposition::W8ValueCompatibility)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        occurrence_fingerprint(&compatibility),
-        EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT,
-        "the exact W8-only W0B occurrence handoff drifted"
-    );
-
-    let external_entries = occurrences
+    let direct_value_entries = collect_occurrences(manifest)
         .iter()
         .filter(|occurrence| {
             matches!(
                 occurrence.signal,
                 Signal::EvalValue | Signal::EvalLazy | Signal::EvalPromise
-            ) && !is_w8_value_compatibility_declaration(&occurrence.declaration)
+            )
         })
         .map(Occurrence::record)
         .collect::<Vec<_>>();
     assert!(
-        external_entries.is_empty(),
-        "ordinary production owners must enter the resumable driver, not W8 compatibility: \
-         {external_entries:#?}"
-    );
-}
-
-#[test]
-fn w8_compatibility_callers_and_remaining_halt_roles_are_exact() {
-    let calls = collect_w8_calls(Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert_eq!(
-        (
-            calls.len(),
-            w8_call_fingerprint(&calls),
-            w8_call_counts(&calls),
-            w8_test_migration_counts(&calls),
-        ),
-        (
-            EXPECTED_W8_CALLS,
-            EXPECTED_W8_CALL_FINGERPRINT,
-            EXPECTED_W8_CALL_COUNTS.iter().copied().collect(),
-            EXPECTED_W8_TEST_MIGRATION_COUNTS
-                .iter()
-                .map(|(path, count)| ((*path).to_owned(), *count))
-                .collect(),
-        ),
-        "the exact W8 compatibility caller census drifted"
+        direct_value_entries.is_empty(),
+        "ordinary production owners must not restore direct whole-value compatibility demand: \
+         {direct_value_entries:#?}"
     );
 
-    let production_compatibility = calls
+    let remaining_retryable_halts = inventory
+        .calls
         .iter()
-        .filter(|call| call.disposition == W8CallerDisposition::Production)
-        .filter(|call| {
-            !matches!(
-                call.surface,
-                W8Surface::HaltBlocked | W8Surface::HaltUnassignedPromise
-            )
-        })
-        .map(W8Call::record)
-        .collect::<Vec<_>>();
-    assert!(
-        production_compatibility.is_empty(),
-        "W8 compatibility must have no ordinary production caller: \
-         {production_compatibility:#?}"
-    );
-
-    let remaining_retryable_halts = calls
-        .iter()
-        .filter(|call| call.disposition == W8CallerDisposition::Production)
-        .filter(|call| {
-            matches!(
-                call.surface,
-                W8Surface::HaltBlocked | W8Surface::HaltUnassignedPromise
-            )
-        })
         .map(W8Call::record)
         .collect::<Vec<_>>();
     assert_eq!(
         remaining_retryable_halts, EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS,
-        "W8A.0's EvaluationHalt disposition must follow live retryable callers"
+        "retired W8 compatibility calls must stay absent and W8A.0's EvaluationHalt \
+         disposition must follow the five live retryable callers"
     );
 }
 
