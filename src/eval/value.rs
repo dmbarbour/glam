@@ -176,21 +176,6 @@ fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationF
     ))
 }
 
-#[cfg(test)]
-#[allow(dead_code, reason = "W8B.2 deletes the retired wrapper")]
-pub fn eval_value(context: &EvalContext, value: &Value) -> Result<Value, EvaluationHalt> {
-    context.evaluate_compatibility_whnf(value)
-}
-
-#[cfg(test)]
-#[allow(dead_code, reason = "W8B.2 deletes the retired wrapper")]
-pub(crate) fn eval_value_in(
-    context: &EvaluatorStepContext<'_>,
-    value: &Value,
-) -> Result<Value, EvaluationHalt> {
-    context.context().evaluate_compatibility_whnf(value)
-}
-
 enum LazyTaskWork {
     Produce,
     WhnfCheckpoint,
@@ -1572,12 +1557,6 @@ pub(crate) fn promise_root_wait(
             context: task_context,
         })
     })
-}
-
-#[cfg(test)]
-#[allow(dead_code, reason = "W8B.2 deletes the retired wrapper")]
-pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
-    context.evaluate_compatibility_whnf(&Value::Lazy(lazy.clone()))
 }
 
 pub(crate) fn lazy_root_wait(

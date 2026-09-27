@@ -187,8 +187,7 @@ impl AdmissionOccurrence {
             match self.declaration.as_str() {
                 "src/api/value.rs::impl Values::with_access"
                 | "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root"
-                | "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access"
-                | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::with_value_access" => {
+                | "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access" => {
                     AdmissionDisposition::CanonicalGateway
                 }
                 "src/api/value.rs::impl Value::clone_core_in_own_domain"
@@ -695,7 +694,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/whnf/tests/w3b_application.rs::saturated_result_is_demanded_before_any_extra_argument_is_applied#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#2|surface=runtime-access|scope=test|nested=1|carrier=none",
@@ -951,7 +949,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             "src/eval/whnf/tests/w3b_application.rs",
             GatewayCounts::new(4, 0),
         ),
-        ("src/evaluation/access.rs", GatewayCounts::new(5, 0)),
+        ("src/evaluation/access.rs", GatewayCounts::new(4, 0)),
         // D.2b.2 terminal promise assignment is access-qualified before its
         // detached completion wake is delivered.
         (
@@ -1154,7 +1152,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     };
     assert_eq!(
         production_disposition_count(AdmissionDisposition::CanonicalGateway),
-        6
+        5
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),

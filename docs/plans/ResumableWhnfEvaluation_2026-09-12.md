@@ -8536,12 +8536,22 @@ macro-expansion, and reflection suites pass. No test-migration reference
 remains; the exact W8 census contains only the five intentional production
 halt constructors at fingerprint `14_333_976_427_563_422_922`.
 
-##### W8B.2 — Delete the gate and wrappers
+##### W8B.2 — Delete the gate and wrappers — Complete (2026-09-27)
 
 Remove the direct evaluator constructor, `eval_value`/`eval_value_in` family,
 and wrappers made unnecessary by the shared synchronous driver. Reconcile
 `EvaluationMachinePoll`, client demand, spark, and reflection result
 boundaries with the final yielded/pending protocol.
+
+Completion record: the `eval_value`, `eval_value_in`, and `eval_lazy`
+wrappers, their exports, `with_direct_evaluator`, and the
+`DirectCompatibility` evaluator admission are deleted. Regional tests enter
+only through a normal `EvaluationPollContext`; whole-value callers enter the
+runtime-owned client-demand driver. Consequently `EvaluatorStepContext`
+never opens a value-domain access region independently and merely delegates
+to its admitted poll carrier. Client demand, sparks, reflection results, and
+scheduled machines continue to share the existing yielded/pending protocol;
+no compensating boundary or renamed wrapper was introduced.
 
 ##### W8B.3 — Close exact inventories
 

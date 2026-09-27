@@ -72,12 +72,6 @@ pub(crate) use operator::{
 pub(crate) use sequence::list_output_bytes;
 #[cfg(test)]
 pub(crate) use sequence::list_to_value_items;
-#[cfg(test)]
-#[allow(unused_imports, reason = "W8B.2 deletes the retired wrapper export")]
-pub use value::eval_value;
-#[cfg(test)]
-#[allow(unused_imports, reason = "W8B.2 deletes the retired wrapper export")]
-pub(crate) use value::eval_value_in;
 pub(crate) use value::failure_diagnostic_value_in;
 pub(crate) use value::lazy_root_wait;
 pub(crate) use value::poll_lazy_route;
@@ -103,18 +97,6 @@ use test_support::*;
 pub(crate) use value::promise_root_wait;
 #[cfg(test)]
 use value::*;
-
-#[cfg(test)]
-#[allow(dead_code, reason = "W8B.2 deletes the retired direct admission")]
-fn with_direct_evaluator<R>(
-    context: &EvalContext,
-    operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
-) -> R {
-    let evaluator = EvaluatorStepContext::for_direct_compatibility(context);
-    let result = operation(&evaluator);
-    evaluator.finish();
-    result
-}
 
 #[cfg(test)]
 mod tests;

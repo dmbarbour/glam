@@ -64,8 +64,20 @@ pub(crate) fn annotation_test_context() -> OwnedEvalContext {
 
 pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt> {
     let context = test_context();
-    let mut value =
-        context.evaluate_compatibility_whnf(&lower_test_computation_value(expr.clone()))?;
+    eval_closed_expr_in(&context, expr)
+}
+
+pub(super) fn eval_closed_expr_in(
+    context: &EvalContext,
+    expr: &TestExpr,
+) -> Result<Value, EvaluationHalt> {
+    let code = lower_test_function_code_in(context.values(), 0, expr.clone());
+    assert_eq!(code.capture_count(), 0, "test computation must be closed");
+    let computation = Value::Lazy(LazyValue::from_net_computation(
+        context.values(),
+        NetValue::new(code.runtime().duplicate_for_test(context.values())),
+    ));
+    let mut value = context.evaluate_compatibility_whnf(&computation)?;
     while matches!(&value, Value::Lazy(lazy)
     if lazy.source_snapshot(context.values()).is_some_and(|source| {
         matches!(source, crate::core::LazySource::FunctionCall { .. })

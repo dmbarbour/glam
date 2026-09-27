@@ -4791,40 +4791,45 @@ fn function_nets_capture_outer_values() {
 
 #[test]
 fn partial_builtins_share_lazy_arguments() {
+    let context = isolated_test_context();
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
     let argument = TestExpr::Value(Value::semantic_thunk(
-        &crate::core::test_value_factory(),
+        context.values(),
         "partial argument",
         move |_| {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(40))
         },
     ));
-    let make_partial = function_expr(
+    let make_partial = function_expr_in(
+        context.values(),
         1,
         TestExpr::Apply(
             Arc::new(TestExpr::Value(Value::Builtin(Builtin::Add))),
             Arc::new(TestExpr::Local(0)),
         ),
     );
-    let partial = eval_closed_expr(&TestExpr::Apply(Arc::new(make_partial), Arc::new(argument)))
-        .expect("a partial builtin should retain its argument lazily");
+    let partial = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(Arc::new(make_partial), Arc::new(argument)),
+    )
+    .expect("a partial builtin should retain its argument lazily");
 
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &test_context(),
-            &apply_value(&test_context(), partial.clone(), n(2)).unwrap(),
+            &context,
+            &apply_value(&context, partial.clone(), n(2)).unwrap(),
         )
         .unwrap(),
         n(42)
     );
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &test_context(),
-            &apply_value(&test_context(), partial, n(3)).unwrap(),
+            &context,
+            &apply_value(&context, partial, n(3)).unwrap(),
         )
         .unwrap(),
         n(43)

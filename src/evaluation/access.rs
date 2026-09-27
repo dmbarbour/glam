@@ -51,14 +51,6 @@ pub(crate) struct EvaluatorStepContext<'step> {
 
 enum EvaluatorStepAdmission<'step> {
     Poll(&'step EvaluationPollContext),
-    /// Temporary direct entry retained only by W8's legacy test helpers.
-    ///
-    /// Runtime builtin dispatch and scheduled machines no longer use this
-    /// route. It opens no ambient mutator; each operation still receives only
-    /// a bounded access region. W8 removes the remaining compatibility entry.
-    #[cfg(test)]
-    #[allow(dead_code, reason = "W8B.2 deletes the retired direct admission")]
-    DirectCompatibility,
 }
 
 /// Temporary liveness carried only until one evaluator step has installed its
@@ -144,18 +136,6 @@ impl<'scope> EvaluationValueAccess<'scope> {
 }
 
 impl EvaluatorStepContext<'_> {
-    #[cfg(test)]
-    #[allow(dead_code, reason = "W8B.2 deletes the retired direct admission")]
-    pub(crate) fn for_direct_compatibility(context: &EvalContext) -> EvaluatorStepContext<'_> {
-        EvaluatorStepContext {
-            admission: EvaluatorStepAdmission::DirectCompatibility,
-            context,
-            pending_reflection_activations: RefCell::new(Vec::new()),
-            pending_managed_publications: RefCell::new(Vec::new()),
-            _thread_bound: PhantomData,
-        }
-    }
-
     pub(crate) fn context(&self) -> &EvalContext {
         self.context
     }
@@ -166,14 +146,6 @@ impl EvaluatorStepContext<'_> {
     ) -> R {
         match self.admission {
             EvaluatorStepAdmission::Poll(poll) => poll.with_value_access(self.context, operation),
-            #[cfg(test)]
-            EvaluatorStepAdmission::DirectCompatibility => {
-                self.context.values().with_runtime_value_access(|values| {
-                    let access = EvaluationValueAccess::try_new(self.context, values)
-                        .expect("direct evaluator access must retain its value domain");
-                    operation(access)
-                })
-            }
         }
     }
 

@@ -171,7 +171,7 @@ const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
     ),
     context_entry!(
         "src/eval/value.rs",
-        [16, 7],
+        [15, 5],
         "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints; W6G.1f.3g.2a polls the numeric checkpoint under bounded access"
     ),
 ];
@@ -320,7 +320,7 @@ fn lazy_producer_roles_are_explicit_and_complete() {
 }
 
 #[test]
-fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
+fn direct_evaluator_admission_is_retired() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
     collect_rust_sources(&manifest.join("src"), &mut sources);
@@ -340,10 +340,9 @@ fn direct_evaluator_admission_has_one_internal_compatibility_gate() {
             (count != 0).then(|| (relative.to_path_buf(), count))
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        actual,
-        [(PathBuf::from("src/eval.rs"), 1)].into_iter().collect(),
-        "direct evaluation must retain one centralized internal admission"
+    assert!(
+        actual.is_empty(),
+        "W8B.2 must leave no direct evaluator admission: {actual:?}"
     );
 }
 
