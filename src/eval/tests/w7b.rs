@@ -322,16 +322,20 @@ fn selected_depth_overflows_an_equivalent_recursive_fixture() {
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .unwrap_or(module_path!());
     let test_name = format!("{module}::recursive_depth_control_child");
-    let status = Command::new(std::env::current_exe().expect("the test executable should exist"))
+    let output = Command::new(std::env::current_exe().expect("the test executable should exist"))
         .args(["--exact", test_name.as_str(), "--nocapture"])
         .env(RECURSIVE_CONTROL_ENV, "1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .expect("the isolated recursive control should launch");
     assert!(
-        !status.success(),
+        !output.status.success(),
         "the W7B semantic depth must exceed the equivalent recursive small-stack fixture"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("stack overflow"),
+        "the recursive control must fail specifically by exhausting its selected stack: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

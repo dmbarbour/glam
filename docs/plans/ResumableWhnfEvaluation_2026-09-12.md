@@ -8364,6 +8364,14 @@ managed-access entry frequency remain diagnostic profiling questions; the
 enforced contract is the absence of per-repoll checkpoint/root churn and
 nested managed access.
 
+#### Post-W7 review — Complete (2026-09-27)
+
+See the dated [W7 review](../reviews/ResumableWhnfW7_2026-09-27.md). It found
+no production correctness defect. It repaired the client/spark real-yield
+witnesses and recursive-control oracle, accepted the W7B inventory change and
+routine family depths with explicit evidence, and tightened W8 around its
+caller-census partition, profiling fuse, and verification gates.
+
 ### Phase W8 — Compatibility Retirement and Documentation
 
 #### W8A — Retire retryable recursive-halt transport
@@ -8377,6 +8385,12 @@ current union representation—to decide whether `EvaluationHalt` becomes a
 permanent-failure carrier, aliases `EvaluationFailure`, or remains a narrow
 compatibility name.
 
+Before W8B.1 begins, partition its test-call-site migration into bounded
+checkpoints from this census. Do not combine production transport deletion
+with hundreds of mechanical test edits, and do not replace `eval_value` with
+a renamed helper that reconstructs the direct evaluator; any retained test
+convenience must drive the shared resumable owner.
+
 ##### W8A.1 — Remove recursive wait transport
 
 Remove `await_deferred_task`, the recursive blocked/unassigned-promise paths,
@@ -8388,9 +8402,11 @@ W4E removed the synchronous nested-evaluation path from a claimed
 `ApplyArity` operator pair. Compatibility retirement must not reconstruct that
 path: over-application continues through `LazySource::Application` or an
 equivalent durable WHNF child owner whose argument cursor survives a yield.
-Retain the W4E exact-signature and pre-completion inverse fixtures; replace
-their test-only work fuse only when W7's general budget mechanism can force the
-same boundary deterministically.
+Retain the W4E exact-signature and pre-completion inverse fixtures. W7's
+production budget counts semantic transitions, whereas W4E's static profiling
+fuse counts every net-driver work item and can stop within a normalization
+batch. Keep that test-only fuse through W8 unless a separately reviewed
+net-work budget can force the same boundary deterministically.
 
 #### W8B — Retire direct evaluator compatibility
 
@@ -8435,8 +8451,12 @@ Run:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q --lib w7
+cargo test -q --features aggressive-gc-verification --lib w7
+cargo test -q --lib inventory
 cargo test -q
 cargo test -q --features aggressive-gc-verification
+scripts/check-interaction-net-profiling.sh
 ```
 
 Run the selected Miri/model-checking subsets if the implementation adds new

@@ -21,6 +21,7 @@ use crate::number::Number;
 use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
 
 const CHECKPOINT_DEPTH: usize = 96;
+const FIFO_CHECKPOINT_DEPTH: usize = 192;
 
 fn context() -> OwnedEvalContext {
     EvalContext::isolated(CoreValueFactory::new(
@@ -36,7 +37,7 @@ fn return_first_capture(
     Ok(captures[0].clone())
 }
 
-fn checkpointed_promise_chain_root(context: &EvalContext, depth: usize) -> RuntimeValueRoot {
+fn assigned_promise_chain_value(context: &EvalContext, depth: usize) -> Value {
     let mut current = Value::Number(Number::from_usize(depth));
     for _ in 0..depth {
         let promise = PromisedValue::new(context.values(), "W7C assigned promise alias");
@@ -44,6 +45,18 @@ fn checkpointed_promise_chain_root(context: &EvalContext, depth: usize) -> Runti
             .expect("a fresh promise alias should accept its assignment");
         current = Value::Promised(promise);
     }
+    current
+}
+
+fn assigned_promise_chain_root(context: &EvalContext, depth: usize) -> RuntimeValueRoot {
+    RuntimeValueRoot::new(
+        context.values(),
+        assigned_promise_chain_value(context, depth),
+    )
+}
+
+fn checkpointed_promise_chain_root(context: &EvalContext, depth: usize) -> RuntimeValueRoot {
+    let current = assigned_promise_chain_value(context, depth);
     context.values().construct_runtime_value_root(|access| {
         Value::Lazy(LazyValue::semantic_computation_in(
             access,
@@ -248,12 +261,9 @@ fn client_budget_yields_requeue_fifo_without_subscriptions() {
     let coordinator = context
         .coordinator()
         .expect("coordinator should remain live");
-    let clients = [11, 22].map(|value| {
+    let clients = [11, 22].map(|_| {
         context
-            .demand_whnf(RuntimeValueRoot::new(
-                context.values(),
-                Value::Number(value.into()),
-            ))
+            .demand_whnf(assigned_promise_chain_root(&context, FIFO_CHECKPOINT_DEPTH))
             .expect("the W7C client fixture should admit")
     });
 
@@ -269,11 +279,17 @@ fn client_budget_yields_requeue_fifo_without_subscriptions() {
             coordinator.client_demand_snapshot(clients[1 - expected].work()),
             Some(ClientDemandSnapshot::Queued)
         ));
-        coordinator.release_client_demand(claimed, super::coordinator::ClientDemandPoll::Yielded);
+        coordinator.poll_claimed_client_demand(claimed);
         assert!(matches!(
             coordinator.client_demand_snapshot(clients[expected].work()),
             Some(ClientDemandSnapshot::Queued)
         ));
+        assert!(
+            coordinator
+                .work_dependency_by_id(clients[expected].work())
+                .is_none(),
+            "an ordinary client budget yield must not publish a dependency"
+        );
     }
 
     for client in clients {
@@ -289,14 +305,14 @@ fn spark_budget_yield_requeues_the_same_record_without_a_dependency() {
         .coordinator()
         .expect("coordinator should remain live");
     coordinator.executor_started(1);
-    context.spark_root(checkpointed_promise_chain_root(&context, CHECKPOINT_DEPTH));
+    context.spark_root(assigned_promise_chain_root(&context, CHECKPOINT_DEPTH));
 
     let CoordinatorSelection::Spark(first) = coordinator.select_worker() else {
         panic!("the admitted spark should be selected")
     };
     let work = first.id_for_test();
     assert!(!first.has_prior_dependency_for_test());
-    coordinator.release_spark(first, SparkWorkPoll::Yielded);
+    coordinator.poll_claimed_spark(first);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
     assert!(coordinator.work_dependency_by_id(work).is_none());
 
