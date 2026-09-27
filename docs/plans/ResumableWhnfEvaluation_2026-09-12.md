@@ -8469,13 +8469,21 @@ Move remaining tests and internal helpers to the shared synchronous driver or
 an explicitly bounded submachine fixture. Do not keep a recursive evaluator
 solely because a test wants a concise assertion.
 
-###### W8B.1a — Install the resumable test driver and migrate support seams
+###### W8B.1a — Install the resumable test driver and migrate support seams — Complete (2026-09-27)
 
-Reuse the W8A.1 test-only resumable-demand convenience, then migrate the 12
+Reuse the W8A.1 test-only resumable-demand convenience, then migrate the 11
 calls in `eval/sequence.rs`,
 `eval/test_support.rs`, the test-only portions of `eval/value.rs`, and
 `eval/builtins.rs`. The convenience must not construct an
 `EvaluatorStepContext` directly.
+
+Completion record: whole-value support fixtures now enter
+`evaluate_compatibility_whnf` directly, while regional fixtures use the
+test-only `EvalContext::evaluate_test_step`. The latter constructs the normal
+poll carrier and one bounded evaluator quantum rather than reopening W8's
+direct evaluator admission. This removes all 11 inventoried calls from the
+four support files and leaves 349 W8 references at fingerprint
+`18_010_786_563_890_857_301`.
 
 ###### W8B.1b — Migrate evaluator-family fixtures
 

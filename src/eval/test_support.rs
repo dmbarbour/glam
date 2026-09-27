@@ -64,12 +64,13 @@ pub(crate) fn annotation_test_context() -> OwnedEvalContext {
 
 pub(super) fn eval_closed_expr(expr: &TestExpr) -> Result<Value, EvaluationHalt> {
     let context = test_context();
-    let mut value = eval_value(&context, &lower_test_computation_value(expr.clone()))?;
+    let mut value =
+        context.evaluate_compatibility_whnf(&lower_test_computation_value(expr.clone()))?;
     while matches!(&value, Value::Lazy(lazy)
     if lazy.source_snapshot(context.values()).is_some_and(|source| {
         matches!(source, crate::core::LazySource::FunctionCall { .. })
     })) {
-        value = eval_value(&context, &value)?;
+        value = context.evaluate_compatibility_whnf(&value)?;
     }
     Ok(value)
 }
@@ -91,7 +92,7 @@ pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
         Value::Builtin(Builtin::DictSingleton),
         vec![value.clone(), Value::Number(1.into())],
     )?;
-    let Value::Dict(singleton) = eval_value(&context, &singleton)? else {
+    let Value::Dict(singleton) = context.evaluate_compatibility_whnf(&singleton)? else {
         unreachable!("dictionary singleton must produce a dictionary")
     };
     Ok(singleton

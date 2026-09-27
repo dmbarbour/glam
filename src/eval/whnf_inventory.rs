@@ -1398,23 +1398,23 @@ const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
 const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 17_165_432_442_858_401_497;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 14_695_981_039_346_656_037;
-const EXPECTED_W8_CALLS: usize = 360;
-const EXPECTED_W8_CALL_FINGERPRINT: u64 = 15_431_565_785_583_668_834;
+const EXPECTED_W8_CALLS: usize = 349;
+const EXPECTED_W8_CALL_FINGERPRINT: u64 = 18_010_786_563_890_857_301;
 const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
     (
         (W8Surface::EvalValue, W8CallerDisposition::TestMigration),
-        270,
+        266,
     ),
     (
         (W8Surface::EvalValueIn, W8CallerDisposition::TestMigration),
-        6,
+        4,
     ),
     (
         (
             W8Surface::WithDirectEvaluator,
             W8CallerDisposition::TestMigration,
         ),
-        79,
+        74,
     ),
     ((W8Surface::HaltBlocked, W8CallerDisposition::Production), 4),
     (
@@ -1429,15 +1429,11 @@ const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[
     ("src/api/tests.rs", 8),
     ("src/eval/access_machine.rs", 7),
     ("src/eval/builtin_machine.rs", 28),
-    ("src/eval/builtins.rs", 1),
     ("src/eval/builtins/net/tests/mod.rs", 8),
     ("src/eval/net.rs", 58),
     ("src/eval/net/tests/nc5.rs", 16),
     ("src/eval/object_machine.rs", 10),
-    ("src/eval/sequence.rs", 3),
-    ("src/eval/test_support.rs", 3),
     ("src/eval/tests.rs", 158),
-    ("src/eval/value.rs", 4),
     ("src/eval/value/tests/w4.rs", 9),
     ("src/evaluation/tests.rs", 8),
     ("src/g_syntax/macro_expansion/tests.rs", 2),

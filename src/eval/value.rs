@@ -1574,7 +1574,7 @@ pub(crate) fn promise_root_wait(
 
 #[cfg(test)]
 pub(super) fn eval_lazy(context: &EvalContext, lazy: &LazyValue) -> Result<Value, EvaluationHalt> {
-    eval_value(context, &Value::Lazy(lazy.clone()))
+    context.evaluate_compatibility_whnf(&Value::Lazy(lazy.clone()))
 }
 
 pub(crate) fn lazy_root_wait(
@@ -1615,7 +1615,7 @@ pub(super) fn force_list_thunk_in(
     thunk: &ListThunk,
 ) -> Result<List, EvaluationHalt> {
     let thunk = context.with_value_access(|access| thunk.duplicate_as_value_in(access.values()));
-    match eval_value_in(context, &thunk)? {
+    match context.context().evaluate_compatibility_whnf(&thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => Err(EvaluationHalt::new(format!(
@@ -1629,7 +1629,7 @@ pub(crate) fn pop_list_front(
     context: &EvalContext,
     list: &List,
 ) -> Result<Option<(Value, List)>, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| pop_list_front_in(evaluator, list))
+    context.evaluate_test_step(|evaluator| pop_list_front_in(evaluator, list))
 }
 
 #[cfg(test)]
@@ -1900,7 +1900,7 @@ mod ownership_tests {
             .collect_managed_for_test()
             .expect("stale checkpoint storage should be collectible");
 
-        crate::eval::with_direct_evaluator(&context, |evaluator| {
+        context.evaluate_test_step(|evaluator| {
             let EvaluationMachinePoll::Complete(value) = machine.poll_net_whnf_checkpoint(
                 evaluator,
                 &mut crate::evaluation::EvaluationStepBudget::new(1),

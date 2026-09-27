@@ -8,7 +8,7 @@ pub(crate) fn list_to_value_items(
     context: &EvalContext,
     list: &List,
 ) -> Result<Vec<Value>, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| list_to_value_items_in(evaluator, list))
+    context.evaluate_test_step(|evaluator| list_to_value_items_in(evaluator, list))
 }
 
 #[cfg(test)]
@@ -41,9 +41,7 @@ pub(super) fn list_to_binary_bytes(
     list: &List,
     subject: &str,
 ) -> Result<Vec<u8>, EvaluationHalt> {
-    with_direct_evaluator(context, |evaluator| {
-        list_to_binary_bytes_in(evaluator, list, subject)
-    })
+    context.evaluate_test_step(|evaluator| list_to_binary_bytes_in(evaluator, list, subject))
 }
 
 #[cfg(test)]
@@ -60,14 +58,17 @@ pub(super) fn list_to_binary_bytes_in(
         },
         &mut |values| {
             for value in values.iter() {
-                match eval_value_in(context, value).map_err(|error| {
-                    context.with_value_access(|access| {
-                        error.with_context(
-                            access.values(),
-                            evaluation_context_frame_in(access.values(), "binary_extraction"),
-                        )
-                    })
-                })? {
+                match context
+                    .context()
+                    .evaluate_compatibility_whnf(value)
+                    .map_err(|error| {
+                        context.with_value_access(|access| {
+                            error.with_context(
+                                access.values(),
+                                evaluation_context_frame_in(access.values(), "binary_extraction"),
+                            )
+                        })
+                    })? {
                     Value::Number(number) => {
                         let byte = number.to_u8_if_integer().ok_or_else(|| {
                             EvaluationHalt::new(format!(

@@ -26,7 +26,7 @@ pub(super) fn apply_builtin(
     arguments: Vec<Value>,
     argument: Value,
 ) -> Result<Value, EvaluationHalt> {
-    super::with_direct_evaluator(context, |evaluator| {
+    context.evaluate_test_step(|evaluator| {
         evaluator
             .with_value_access(|access| apply_builtin_in(&access, builtin, arguments, argument))
     })

@@ -38,7 +38,7 @@ use super::{
     evaluation_failure,
 };
 #[cfg(test)]
-use super::{PendingTestPromiseTask, ReflectionTaskLauncher};
+use super::{EvaluatorStepContext, PendingTestPromiseTask, ReflectionTaskLauncher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationSessionRun {
@@ -933,6 +933,21 @@ impl EvalContext {
         let value = self.evaluate_root_whnf(input)?;
         let poll = EvaluationPollContext::for_context(self);
         Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
+    }
+
+    /// Runs one explicitly bounded evaluator quantum for a regional test.
+    ///
+    /// Unlike W8's retired direct-evaluator admission, this enters through
+    /// the normal poll carrier and therefore exercises the same publication
+    /// boundary as a scheduled machine. Whole-value fixtures should use the
+    /// runtime-owned client-demand driver instead.
+    #[cfg(test)]
+    pub(crate) fn evaluate_test_step<R>(
+        &self,
+        operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
+    ) -> R {
+        let poll = EvaluationPollContext::for_context(self);
+        poll.evaluate(self, operation)
     }
 
     /// Demands one already-owned value and preserves the client-demand result
