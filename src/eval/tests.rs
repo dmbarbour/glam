@@ -186,7 +186,11 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         );
     }
 
-    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
+            .unwrap(),
+        n(42)
+    );
     assert_eq!(context.client_demand_count_for_test(), 0);
     assert!(computation_lazy.source_snapshot(context.values()).is_none());
     assert!(computation_lazy.cached(context.values()).is_some());
@@ -323,15 +327,16 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the lazy parts tail should suspend local-name construction");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the lazy parts tail should suspend local-name construction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the object local-name checkpoint must retain its completed prefix");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact lazy parts tail");
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(2)])))
@@ -342,7 +347,8 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
         .expect("the assigned parts tail must remain live beneath the checkpoint");
 
     let Value::List(name) =
-        eval_value(&observer, &application).expect("local-name construction should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("local-name construction should resume")
     else {
         panic!("object local name should produce a list")
     };
@@ -388,15 +394,16 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the promised specification should suspend object extension");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the promised specification should suspend object extension");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the object-extension checkpoint must retain its completed object demand");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact specification demand");
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     let resolved_spec = Value::Dict(
@@ -416,7 +423,8 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
         .expect("the assigned specification must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
-        eval_value(&observer, &application).expect("object extension should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("object extension should resume")
     else {
         panic!("object extension should produce an object dictionary")
     };
@@ -463,15 +471,16 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the promised extension should suspend composition");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the promised extension should suspend composition");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the composed-definitions checkpoint must retain its completed prior stage");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact extension stage");
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     let extension_defs = closed_function_value_in(
@@ -489,7 +498,8 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
         .expect("the assigned extension must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
-        eval_value(&observer, &application).expect("composed definitions should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("composed definitions should resume")
     else {
         panic!("composed definitions should produce a dictionary")
     };
@@ -554,8 +564,9 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the nested promised prior should suspend object override");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the nested promised prior should suspend object override");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
@@ -563,7 +574,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         .values()
         .collect_managed_for_test()
         .expect("the override checkpoint must retain its completed outer prefix and stack");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact nested prior demand");
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
@@ -581,7 +592,8 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         .expect("the assigned nested prior must remain live beneath the override stack");
 
     let Value::Dict(result) =
-        eval_value(&observer, &application).expect("object override should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("object override should resume")
     else {
         panic!("object override should produce a dictionary")
     };
@@ -617,7 +629,8 @@ fn object_instance_from_parts_builds_through_the_resumable_builtin_owner() {
     .expect("parts-based object construction should build");
 
     let Value::Dict(object) =
-        eval_value(&context, &application).expect("parts-based object construction should finish")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect("parts-based object construction should finish")
     else {
         panic!("parts-based object construction should produce a dictionary")
     };
@@ -659,15 +672,16 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("dictionary definitions should wait after demanding their base");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("dictionary definitions should wait after demanding their base");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the dictionary-definitions checkpoint must retain its completed base");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact definitions dictionary");
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     set_promise(
@@ -682,7 +696,8 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
         .expect("the assigned definitions dictionary must remain live beneath the checkpoint");
 
     let Value::Dict(result) =
-        eval_value(&observer, &application).expect("dictionary definitions should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("dictionary definitions should resume")
     else {
         panic!("dictionary definitions should produce a dictionary")
     };
@@ -727,15 +742,16 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the promised specification should suspend plain-dictionary conversion");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the promised specification should suspend plain-dictionary conversion");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the object-from-dictionary checkpoint must retain the dictionary");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact dictionary specification");
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
@@ -746,7 +762,8 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
         .expect("the assigned object specification must remain live beneath the checkpoint");
 
     let Value::Dict(object) =
-        eval_value(&observer, &application).expect("plain-dictionary conversion should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("plain-dictionary conversion should resume")
     else {
         panic!("plain-dictionary conversion should produce an object dictionary")
     };
@@ -897,7 +914,9 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     );
 
     assert_eq!(
-        eval_lazy(&context, &success).expect("lazy source should succeed"),
+        context
+            .evaluate_compatibility_whnf(&Value::Lazy(success.clone()))
+            .expect("lazy source should succeed"),
         unit_value()
     );
     assert!(success.source_snapshot(context.values()).is_none());
@@ -917,7 +936,9 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
         },
     );
 
-    let error = eval_lazy(&context, &failure).expect_err("lazy source should fail");
+    let error = context
+        .evaluate_compatibility_whnf(&Value::Lazy(failure.clone()))
+        .expect_err("lazy source should fail");
     assert_eq!(error.to_string(), "expected lazy failure");
     assert!(failure.source_snapshot(context.values()).is_none());
     assert!(
@@ -1009,14 +1030,25 @@ fn raw_net_values_are_opaque_while_net_computations_expose_data() {
     let net = closed_net(|builder| builder.data(n(42)));
     let raw = Value::Net(net.clone());
 
-    assert_eq!(eval_value(&test_context(), &raw).unwrap(), raw);
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &raw).unwrap(),
+        raw
+    );
 
     let computation = Value::Lazy(LazyValue::from_net_computation(
         &crate::core::test_value_factory(),
         net,
     ));
-    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
-    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+            .unwrap(),
+        n(42)
+    );
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+            .unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -1052,8 +1084,9 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
         ],
     )
     .expect("net-arity application construction should remain lazy");
-    let error = eval_value(&test_context(), &application)
-        .expect_err("failure while evaluating net arity must propagate");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+            .expect_err("failure while evaluating net arity must propagate");
     assert_eq!(
         failure_context_items(&error),
         [evaluation_context_frame("net_arity")]
@@ -1077,14 +1110,16 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
         vec![Value::Promised(arity.clone()), net],
     )
     .expect("net-arity application should build");
-    let blocked = eval_value(&context, &application)
-        .expect_err("net arity must suspend at its first operand");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect_err("net arity must suspend at its first operand");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(net_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&context, &arity, n(0)).expect("the arity should accept its assignment");
     assert_eq!(
-        eval_value(&context, &application).expect("net arity should resume in source order"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect("net arity should resume in source order"),
         n(42)
     );
     assert_eq!(net_demands.load(Ordering::SeqCst), 1);
@@ -1113,15 +1148,16 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
     };
     let application_root = application_lazy.root(context.values());
 
-    let blocked = eval_value(&context, &application)
-        .expect_err("net arity must suspend at its unresolved net");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect_err("net arity must suspend at its unresolved net");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
     context
         .values()
         .collect_managed_for_test()
         .expect("the net checkpoint must retain its completed arity and pending net demand");
-    eval_value(&context, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
         .expect_err("a later route must resume the same net dependency");
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
 
@@ -1137,7 +1173,8 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
         .collect_managed_for_test()
         .expect("the assigned net must remain live beneath the checkpoint");
     let Value::Function(function) =
-        eval_value(&context, &application).expect("net arity should resume at its net")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect("net arity should resume at its net")
     else {
         panic!("positive net arity should produce a function")
     };
@@ -1156,7 +1193,11 @@ fn observing_a_function_net_preserves_the_net_value() {
     let expected = identity.clone();
 
     assert_eq!(
-        eval_value(&test_context(), &Value::Net(identity)).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_context(),
+            &Value::Net(identity)
+        )
+        .unwrap(),
         Value::Net(expected)
     );
 }
@@ -1173,8 +1214,9 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
         identity,
     ));
 
-    let error = eval_value(&test_context(), &value)
-        .expect_err("a net computation must expose data rather than a bind");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
+            .expect_err("a net computation must expose data rather than a bind");
     assert_eq!(
         error.to_string(),
         "lazy net computation exposed a bind instead of data"
@@ -1193,8 +1235,9 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
         inert,
     ));
 
-    let error = eval_value(&test_context(), &value)
-        .expect_err("an inert net computation must not produce a value");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
+            .expect_err("an inert net computation must not produce a value");
     assert_eq!(
         error.to_string(),
         "lazy net computation reached a non-data normal form"
@@ -1218,15 +1261,16 @@ fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
     let function = FunctionValue::new(one_argument_stage, 2);
     let partial = apply_function_values(&test_context(), function, vec![n(0)])
         .expect("partial application should not inspect the staged interface");
-    let partial = eval_value(&test_context(), &partial)
-        .expect("partial application should produce a function value");
+    let partial =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &partial)
+            .expect("partial application should produce a function value");
     let Value::Function(partial) = partial else {
         panic!("partial application should retain an ordinary function value")
     };
     assert_eq!(partial.remaining_arity(), 1);
 
     assert_eq!(
-        eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_context(),
             &apply_function_values(&test_context(), partial, vec![n(1)]).unwrap(),
         )
@@ -1243,7 +1287,11 @@ fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
         Value::Builtin(Builtin::NetArity),
         [n(0), Value::Net(data_net)],
     );
-    assert_eq!(eval_value(&test_context(), &computation).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+            .unwrap(),
+        n(42)
+    );
 
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
@@ -1254,12 +1302,19 @@ fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
         Value::Builtin(Builtin::NetArity),
         [n(1), Value::Net(identity)],
     );
-    let Value::Function(function) = eval_value(&test_context(), &function).unwrap() else {
+    let Value::Function(function) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &function)
+            .unwrap()
+    else {
         panic!("positive net arity should produce a function value")
     };
     assert_eq!(function.remaining_arity(), 1);
     let result = apply_test_values(Value::Function(function), [n(43)]);
-    assert_eq!(eval_value(&test_context(), &result).unwrap(), n(43));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
+            .unwrap(),
+        n(43)
+    );
 }
 
 #[test]
@@ -1278,7 +1333,7 @@ fn saturated_function_calls_reject_a_remaining_bind() {
     let result = apply_function_values(&test_context(), malformed, vec![n(0)]).unwrap();
 
     assert_eq!(
-        eval_value(&test_context(), &result)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
             .unwrap_err()
             .to_string(),
         "function call exposed a bind instead of data"
@@ -1294,7 +1349,7 @@ fn zero_arity_apply_operator_is_data_identity() {
         .with_runtime_value_access(|access| apply_arity_operator(&access, 0, Arc::from([])));
 
     assert_eq!(
-        with_direct_evaluator(&context, |evaluator| {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| apply_core_operator(&access, &operator, &data))
         })
         .unwrap(),
@@ -1306,8 +1361,10 @@ fn zero_arity_apply_operator_is_data_identity() {
 fn compiled_function_values_reuse_one_shared_interaction_net() {
     let function = closed_function_value(1, TestExpr::Local(0));
     let (Value::Function(first), Value::Function(second)) = (
-        eval_value(&test_context(), &function).unwrap(),
-        eval_value(&test_context(), &function).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &function)
+            .unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &function)
+            .unwrap(),
     ) else {
         panic!("closed functions should evaluate to shared function stages");
     };
@@ -1324,8 +1381,11 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
 #[test]
 fn curried_function_partial_application_retains_a_shared_stage() {
     let function = closed_function_value(3, TestExpr::Local(2));
-    let partially_applied = eval_value(&test_context(), &apply_test_values(function, [n(11)]))
-        .expect("first application should construct the remaining function stage");
+    let partially_applied = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_context(),
+        &apply_test_values(function, [n(11)]),
+    )
+    .expect("first application should construct the remaining function stage");
     let Value::Function(first_stage) = &partially_applied else {
         panic!("partial application should produce another function stage");
     };
@@ -1344,7 +1404,11 @@ fn curried_function_partial_application_retains_a_shared_stage() {
     });
 
     let result = apply_test_values(partially_applied, [n(22), n(33)]);
-    assert_eq!(eval_value(&test_context(), &result).unwrap(), n(11));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
+            .unwrap(),
+        n(11)
+    );
 }
 
 #[test]
@@ -1359,7 +1423,7 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
     );
     let unresolved_function = closed_function_value(1, TestExpr::Local(0));
 
-    let partial = eval_value(
+    let partial = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_test_values(forwards_argument, [unresolved_function]),
     )
@@ -1367,7 +1431,11 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
     assert!(matches!(partial, Value::Function(_)));
 
     assert_eq!(
-        eval_value(&test_context(), &apply_test_values(partial, [n(42)])).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_context(),
+            &apply_test_values(partial, [n(42)])
+        )
+        .unwrap(),
         n(42)
     );
 }
@@ -1388,7 +1456,11 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
         [n(11), lazy_argument("second"), lazy_argument("third")],
     );
 
-    assert_eq!(eval_value(&test_context(), &application).unwrap(), n(11));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+            .unwrap(),
+        n(11)
+    );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
@@ -1405,7 +1477,11 @@ fn batched_application_preserves_captured_access() {
     let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
     let application = apply_test_values(function, [dict, n(0)]);
 
-    assert_eq!(eval_value(&test_context(), &application).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+            .unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -1446,12 +1522,17 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
     let value = Value::Promised(promised.clone());
 
     assert_eq!(
-        eval_value(&context, &value).unwrap_err().to_string(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+            .unwrap_err()
+            .to_string(),
         "promised value was observed before initialization"
     );
     assert_eq!(promised.assignment(context.values()), None);
     set_promise(&context, &promised, n(42)).unwrap();
-    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -1469,13 +1550,15 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
         "promise-demanding deferred computation",
         move |context| {
             counted_attempts.fetch_add(1, Ordering::SeqCst);
-            eval_value_in(context, &promised_value)
+            context
+                .context()
+                .evaluate_compatibility_whnf(&promised_value)
         },
     );
     let value = Value::Lazy(lazy.clone());
 
-    let blocked =
-        eval_value(&observer, &value).expect_err("the unresolved input promise should block");
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        .expect_err("the unresolved input promise should block");
     assert!(blocked.blocked_on().is_some());
     assert!(
         lazy.cached(session.values()).is_none(),
@@ -1487,14 +1570,20 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     );
 
     set_promise(&session, &promise, n(42)).unwrap();
-    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
+        n(42)
+    );
     assert!(
         attempts.load(Ordering::SeqCst) >= 2,
         "resuming the producer should retry the deferred computation"
     );
 
     let completed_attempts = attempts.load(Ordering::SeqCst);
-    assert_eq!(eval_value(&observer, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
+        n(42)
+    );
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         completed_attempts,
@@ -1538,8 +1627,8 @@ fn deferred_computation_caches_one_structured_failure() {
     );
     let value = Value::Lazy(lazy.clone());
 
-    let error =
-        eval_value(&context, &value).expect_err("the deferred computation should fail permanently");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        .expect_err("the deferred computation should fail permanently");
     let observed_failure = error.into_permanent_failure();
     let cached_failure = lazy
         .cached(context.values())
@@ -1555,7 +1644,7 @@ fn deferred_computation_caches_one_structured_failure() {
     assert_eq!(diagnostic.get(&detail), Some(&n(7)));
 
     assert_eq!(
-        eval_value(&context, &value)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
             .expect_err("the cached value should remain failed")
             .into_permanent_failure(),
         cached_failure
@@ -1614,7 +1703,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
             Value::Promised(continuation.clone()),
         ],
     )
-    .and_then(|value| eval_value(&session, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
     .expect("sequence construction should remain lazy") else {
         panic!("list effect sequence must construct a list")
     };
@@ -1640,7 +1729,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         Value::Builtin(Builtin::ListEffectCut),
         vec![Value::Promised(cut_operation.clone())],
     )
-    .and_then(|value| eval_value(&session, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
     .expect("cut construction should remain lazy") else {
         panic!("list effect cut must construct a list")
     };
@@ -1664,7 +1753,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         Value::Builtin(Builtin::ListEffectFix),
         vec![fix_function],
     )
-    .and_then(|value| eval_value(&session, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
     .expect("fix construction should remain lazy") else {
         panic!("list effect fix must construct a list")
     };
@@ -1702,7 +1791,7 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
         Value::Builtin(Builtin::ListEffectFix),
         vec![function],
     )
-    .and_then(|value| eval_value(&session, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
     .expect("list effect fix construction should not demand its function") else {
         panic!("list effect fix must construct a list")
     };
@@ -1742,8 +1831,9 @@ fn interaction_net_builtin_dispatches_into_the_construction_owner() {
     )
     .expect("interaction-net application should build");
 
-    let blocked = eval_value(&observer, &construction)
-        .expect_err("builtin dispatch should reach the net-construction demand");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &construction)
+            .expect_err("builtin dispatch should reach the net-construction demand");
     assert!(blocked.blocked_on().is_some());
     let Value::Lazy(lazy) = construction else {
         panic!("interaction-net construction must remain memoized as a lazy value")
@@ -1769,7 +1859,7 @@ fn deferred_computation_caches_one_text_failure() {
     );
     let value = Value::Lazy(lazy.clone());
 
-    let first = eval_value(&context, &value)
+    let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err("the deferred computation should fail")
         .into_permanent_failure();
     let cached = lazy
@@ -1778,7 +1868,7 @@ fn deferred_computation_caches_one_text_failure() {
         .expect_err("the terminal cache should contain a failure");
     assert!(Arc::ptr_eq(&first, &cached));
 
-    let second = eval_value(&context, &value)
+    let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err("the cached deferred computation should remain failed")
         .into_permanent_failure();
     assert!(Arc::ptr_eq(&cached, &second));
@@ -1811,9 +1901,10 @@ fn deferred_computation_preserves_context_annotation_frames() {
         },
     );
 
-    let failure = eval_value(&context, &Value::Lazy(lazy))
-        .expect_err("the annotated deferred computation should fail")
-        .into_permanent_failure();
+    let failure =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
+            .expect_err("the annotated deferred computation should fail")
+            .into_permanent_failure();
     assert_eq!(failure.contexts(), [frame]);
 }
 
@@ -1828,7 +1919,8 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     );
     let value = Value::Lazy(lazy.clone());
 
-    let blocked = eval_value(&context, &value).expect_err("empty promise should block its lazy");
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        .expect_err("empty promise should block its lazy");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
     assert!(lazy.cached(context.values()).is_none());
@@ -1836,7 +1928,10 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 
     set_promise(&context, &promise, n(42)).unwrap();
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
-    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        n(42)
+    );
     assert_eq!(
         lazy.cached(context.values()),
         Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
@@ -1854,7 +1949,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     );
     let value = Value::Lazy(lazy);
 
-    let blocked = eval_value(&context, &value)
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err("an unresolved resolver promise should block its follower");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
@@ -1863,7 +1958,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
         .expect("the unresolved resolver promise should fail once");
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(
-        eval_value(&context, &value)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
             .expect_err("the woken follower should expose the resolver failure")
             .to_string(),
         "resolver failed deliberately"
@@ -1885,19 +1980,29 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     let lazy_a = lazy_for(&promise_a);
     let lazy_b = lazy_for(&promise_b);
 
-    assert!(eval_value(&observer, &lazy_a).is_err());
-    assert!(eval_value(&observer, &lazy_b).is_err());
+    assert!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_a).is_err()
+    );
+    assert!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_b).is_err()
+    );
     assert_eq!(promise_a.exact_subscription_count(owner.values()), 1);
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
 
     set_promise(&owner, &promise_a, n(41)).expect("promise A should accept its assignment");
     assert_eq!(promise_a.exact_subscription_count(owner.values()), 0);
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
-    assert_eq!(eval_value(&observer, &lazy_a).unwrap(), n(41));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_a).unwrap(),
+        n(41)
+    );
 
     set_promise(&owner, &promise_b, n(42)).expect("promise B should accept its assignment");
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 0);
-    assert_eq!(eval_value(&observer, &lazy_b).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_b).unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -1911,7 +2016,11 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap();
 
     assert_eq!(
-        eval_value(&context, &Value::Promised(promise.clone())).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &context,
+            &Value::Promised(promise.clone())
+        )
+        .unwrap(),
         n(42)
     );
     assert_eq!(
@@ -1955,9 +2064,12 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     fail_promise(&session, &promise, failure.clone())
         .expect("new promise should accept one permanent failure");
 
-    let observed = eval_value(&observer, &Value::Promised(promise))
-        .expect_err("failed promise should expose its permanent failure")
-        .into_permanent_failure();
+    let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &Value::Promised(promise),
+    )
+    .expect_err("failed promise should expose its permanent failure")
+    .into_permanent_failure();
     assert!(Arc::ptr_eq(&failure, &observed));
     assert_eq!(observed.emission_value(), Some(&emission));
     assert_eq!(observed.contexts(), [frame]);
@@ -1980,8 +2092,11 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     set_promise(&context, &promise, Value::Promised(promise.clone()))
         .expect("promise should accept its own named assignment");
 
-    let error = eval_value(&context, &Value::Promised(promise.clone()))
-        .expect_err("strict promise recursion should remain blocked");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Promised(promise.clone()),
+    )
+    .expect_err("strict promise recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     assert!(matches!(
@@ -2001,8 +2116,11 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     );
     set_promise(&context, &promise, Value::Lazy(lazy.clone())).unwrap();
 
-    let error = eval_value(&context, &Value::Promised(promise.clone()))
-        .expect_err("strict mixed recursion should remain blocked");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Promised(promise.clone()),
+    )
+    .expect_err("strict mixed recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     assert!(context.lazy_failure(&lazy).is_none());
@@ -2027,7 +2145,8 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
         .clone();
     let value = Value::Promised(fixpoint.clone());
 
-    let recursive = eval_value(&owner, &value).unwrap_err();
+    let recursive =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&owner, &value).unwrap_err();
     assert!(
         recursive
             .to_string()
@@ -2075,7 +2194,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     let value = Value::Promised(fixpoint.clone());
 
     assert!(
-        eval_value(&observer, &value)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
             .unwrap_err()
             .unassigned_promise_root()
             .is_some(),
@@ -2089,7 +2208,9 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     session.fail_wait(owner_task.wait(), "producer failed deliberately");
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     assert_eq!(
-        eval_value(&observer, &value).unwrap_err().to_string(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+            .unwrap_err()
+            .to_string(),
         "producer failed deliberately"
     );
     assert!(matches!(
@@ -2201,7 +2322,8 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
         FixpointComputation::Function(function),
     ));
 
-    let error = eval_value(&context, &fixpoint).unwrap_err();
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &fixpoint)
+        .unwrap_err();
     assert!(
         error.to_string().contains("lazy dependency cycle"),
         "{error}"
@@ -2226,7 +2348,9 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
 
     let observer = context.with_new_task().unwrap();
     assert_eq!(
-        eval_value(&observer, &fixpoint).unwrap_err().to_string(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
+            .unwrap_err()
+            .to_string(),
         error.to_string()
     );
 }
@@ -2256,7 +2380,7 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
     )
     .expect("fixpoint application should build");
 
-    let blocked = eval_value(&observer, &fixpoint)
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
         .expect_err("the unresolved function should suspend fixpoint construction");
     assert!(blocked.blocked_on().is_some());
 
@@ -2267,7 +2391,8 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
     )
     .expect("the owner should resolve the promised function");
     assert_eq!(
-        eval_value(&observer, &fixpoint).expect("fixpoint construction should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
+            .expect("fixpoint construction should resume"),
         n(42)
     );
 }
@@ -2320,16 +2445,24 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     let fixpoint = Value::Lazy(lazy.clone());
 
     let first_block =
-        eval_value(&first, &fixpoint).expect_err("the first session should wait for the promise");
-    let second_block = eval_value(&second, &fixpoint)
-        .expect_err("the second session should own an independent wait");
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint)
+            .expect_err("the first session should wait for the promise");
+    let second_block =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&second, &fixpoint)
+            .expect_err("the second session should own an independent wait");
     assert!(first_block.blocked_on().is_some());
     assert!(second_block.blocked_on().is_some());
     assert!(lazy.cached(first.values()).is_none());
 
     set_promise(&first, &promise, n(42)).unwrap();
-    assert_eq!(eval_value(&first, &fixpoint).unwrap(), n(42));
-    assert_eq!(eval_value(&second, &fixpoint).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint).unwrap(),
+        n(42)
+    );
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&second, &fixpoint).unwrap(),
+        n(42)
+    );
     assert_eq!(cached_value(&lazy), n(42));
 }
 
@@ -2344,8 +2477,11 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
         FixpointComputation::Function(function),
     );
 
-    let error = eval_value(&context, &Value::Lazy(fixpoint.clone()))
-        .expect_err("the source failure should fail the fixpoint");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(fixpoint.clone()),
+    )
+    .expect_err("the source failure should fail the fixpoint");
     assert_eq!(error.to_string(), "fixpoint source failed");
 
     let source_failure = source.cached(context.values()).unwrap().unwrap_err();
@@ -2375,7 +2511,10 @@ fn deferred_values_use_the_runtime_default_context() {
         },
     );
 
-    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -2407,7 +2546,8 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
         move |_| Ok(forwarded.clone()),
     );
 
-    let forced = eval_value(&context, &root).expect("root should reach dictionary WHNF");
+    let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &root)
+        .expect("root should reach dictionary WHNF");
     let Value::Dict(dict) = forced else {
         panic!("forcing should expose the outer dictionary")
     };
@@ -2444,8 +2584,11 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
         .set(lazy.clone())
         .expect("guarded self reference should be installed once");
 
-    let forced = eval_value(&context, &Value::Lazy(lazy.clone()))
-        .expect("a lazy reference under a dictionary constructor is guarded");
+    let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(lazy.clone()),
+    )
+    .expect("a lazy reference under a dictionary constructor is guarded");
     let Value::Dict(dict) = forced else {
         panic!("guarded recursive value should expose a dictionary")
     };
@@ -2473,7 +2616,10 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
     let value = Value::Lazy(root.clone());
 
     assert_eq!(context.deferred_task_count(), 0);
-    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        n(42)
+    );
     assert_eq!(
         context.deferred_task_count(),
         0,
@@ -2481,7 +2627,10 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
     );
     assert_eq!(cached_value(&target_lazy), n(42));
     assert_eq!(cached_value(&root), n(42));
-    assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        n(42)
+    );
     assert_eq!(
         context.deferred_task_count(),
         0,
@@ -2510,7 +2659,11 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
     );
 
     assert_eq!(
-        eval_value(&context, &Value::Lazy(root.clone())).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &context,
+            &Value::Lazy(root.clone())
+        )
+        .unwrap(),
         n(42)
     );
     assert_eq!(cached_value(&leaf), n(42));
@@ -2584,8 +2737,11 @@ fn forwarding_chain_preserves_one_structured_failure() {
         Arc::from([Value::Lazy(leaf.clone())]),
     );
 
-    let error = eval_value(&context, &Value::Lazy(root.clone()))
-        .expect_err("forwarding into an error should fail");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(root.clone()),
+    )
+    .expect_err("forwarding into an error should fail");
     assert_eq!(error.to_string(), "shared failure");
 
     let leaf_failure = leaf.cached(context.values()).unwrap().unwrap_err();
@@ -2629,7 +2785,12 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     let value = Value::Lazy(lazy);
     let producer_context = context.clone();
     let producer_value = value.clone();
-    let producer = std::thread::spawn(move || eval_value(&producer_context, &producer_value));
+    let producer = std::thread::spawn(move || {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &producer_context,
+            &producer_value,
+        )
+    });
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("producer should claim the lazy task");
@@ -2638,7 +2799,12 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     let observer_context =
         EvalContext::clone(&context).with_claimed_task_wait_probe(waiting_sender);
     let observer_value = value.clone();
-    let observer = std::thread::spawn(move || eval_value(&observer_context, &observer_value));
+    let observer = std::thread::spawn(move || {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &observer_context,
+            &observer_value,
+        )
+    });
     waiting_receiver
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("the contending client demand must wait on the claimed producer");
@@ -2671,8 +2837,9 @@ fn host_call_rejects_a_foreign_runtime_root() {
         Ok(crate::runtime::RuntimeValueRoot::new(&foreign, n(42)))
     });
 
-    let error = eval_value(&context, &Value::Lazy(lazy))
-        .expect_err("a host call cannot publish another runtime's value");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
+            .expect_err("a host call cannot publish another runtime's value");
     assert!(error.to_string().contains("host call returned a value"));
 }
 
@@ -2681,7 +2848,9 @@ fn ready_lazy_errors_fail_when_observed() {
     let value = Value::error(&crate::core::test_value_factory(), "deliberate failure");
 
     assert_eq!(
-        eval_value(&test_context(), &value).unwrap_err().to_string(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
+            .unwrap_err()
+            .to_string(),
         "deliberate failure"
     );
 }
@@ -2858,7 +3027,7 @@ fn evaluates_recursive_dictionary_net() {
             &crate::core::Key::binary_from_text("asm"),
         )])
         .expect("asm should exist");
-    let asm = eval_value(&test_context(), asm)
+    let asm = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), asm)
         .expect("asm binding should evaluate lazily to a dictionary");
     let Value::Dict(asm) = asm else {
         panic!("asm should evaluate to a dictionary");
@@ -3046,7 +3215,9 @@ fn list_concat_defers_outer_children_and_observes_the_suffix_from_the_back() {
         List::from_values(vec![Value::binary_from_text("B")]),
     ));
     let flattened = apply_values(&context, Value::Builtin(Builtin::ListConcat), vec![outer])
-        .and_then(|value| eval_value(&context, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        })
         .expect("list concat should expose one transformed spine node");
     let Value::List(flattened) = flattened else {
         panic!("list concat should produce a list")
@@ -3060,7 +3231,7 @@ fn list_concat_defers_outer_children_and_observes_the_suffix_from_the_back() {
         Value::Builtin(Builtin::ListSplitEnd),
         vec![n(1), Value::List(flattened)],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect("the flattened suffix should remain observable from the back");
     let Value::Dict(split) = split else {
         panic!("split_end should produce a dictionary")
@@ -3082,7 +3253,9 @@ fn list_concat_delays_invalid_strict_elements_until_their_output_is_observed() {
     let context = test_context();
     let outer = Value::List(List::from_values(vec![n(99), Value::binary_from_text("B")]));
     let flattened = apply_values(&context, Value::Builtin(Builtin::ListConcat), vec![outer])
-        .and_then(|value| eval_value(&context, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        })
         .expect("list concat should localize a strict-item failure");
     let Value::List(flattened) = flattened else {
         panic!("list concat should produce a list")
@@ -3093,7 +3266,7 @@ fn list_concat_delays_invalid_strict_elements_until_their_output_is_observed() {
         Value::Builtin(Builtin::ListSplitEnd),
         vec![n(1), Value::List(flattened)],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect("the valid suffix should not observe the invalid prefix item");
     let Value::Dict(split) = split else {
         panic!("split_end should produce a dictionary")
@@ -3120,8 +3293,9 @@ fn list_concat_resumes_after_its_source_becomes_available() {
     )
     .expect("list-concat application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved source should suspend list concat");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved source should suspend list concat");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(
@@ -3131,7 +3305,8 @@ fn list_concat_resumes_after_its_source_becomes_available() {
     )
     .expect("the owner should resolve the concat source");
     let Value::List(flattened) =
-        eval_value(&observer, &application).expect("list concat should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("list concat should resume")
     else {
         panic!("list concat should produce a list")
     };
@@ -3153,7 +3328,8 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
         Builtin::Append,
         vec![Value::binary_from_text("Hi"), sum],
     );
-    let value = eval_value(&context, &append).expect("append should preserve lazy chunk");
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &append)
+        .expect("append should preserve lazy chunk");
     let value_root = context
         .values()
         .with_runtime_value_access(|access| access.root_runtime_value(value));
@@ -3281,7 +3457,8 @@ fn lazy_arguments_share_forced_values() {
         context.values(),
         NetValue::new(code.runtime().duplicate_for_test(context.values())),
     ));
-    let value = eval_value(&context, &computation).expect("lambda body should evaluate");
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
+        .expect("lambda body should evaluate");
 
     assert_eq!(value, n(4));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3372,8 +3549,9 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
 
     let application = apply_value(&test_context(), carrier.clone(), n(0))
         .expect("application construction should remain lazy");
-    let application_error = eval_value(&test_context(), &application)
-        .expect_err("a sealed unit carrier must not be callable");
+    let application_error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+            .expect_err("a sealed unit carrier must not be callable");
     assert_eq!(
         application_error.to_string(),
         "application requires a function value, received Sealed"
@@ -3469,7 +3647,9 @@ fn evaluates_slice_and_map_builtins() {
     let items = list_to_value_items(&test_context(), &mapped)
         .expect("mapped list should be readable")
         .iter()
-        .map(|value| eval_value(&test_context(), value))
+        .map(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), value)
+        })
         .collect::<Result<Vec<_>, _>>()
         .expect("mapped values should evaluate");
     assert_eq!(items, vec![n(2), n(3), n(4)]);
@@ -3495,7 +3675,7 @@ fn map_defers_concat_children_and_callable_until_the_selected_item_is_observed()
         Value::Builtin(Builtin::Map),
         vec![callable, source],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect("map should expose one transformed spine node");
     assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
 
@@ -3511,7 +3691,7 @@ fn map_defers_concat_children_and_callable_until_the_selected_item_is_observed()
         Value::Builtin(Builtin::ListSplitEnd),
         vec![n(1), Value::List(mapped)],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect("the mapped suffix should remain observable from the back");
     let Value::Dict(split) = split else {
         panic!("split_end should produce a dictionary")
@@ -3537,7 +3717,7 @@ fn map_delays_a_non_callable_failure_until_an_item_is_observed() {
         Value::Builtin(Builtin::Map),
         vec![n(99), Value::List(List::from_values(vec![n(1)]))],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect("map must not validate its callable eagerly");
     let Value::List(mapped) = mapped else {
         panic!("map should produce a list")
@@ -3572,13 +3752,16 @@ fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable()
     .expect("map application should build");
 
     let blocked =
-        eval_value(&observer, &application).expect_err("the unresolved source should suspend map");
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved source should suspend map");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&owner, &source, Value::List(List::from_values(vec![n(8)])))
         .expect("the owner should resolve the map source");
-    let Value::List(mapped) = eval_value(&observer, &application).expect("map should resume")
+    let Value::List(mapped) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("map should resume")
     else {
         panic!("map should produce a list")
     };
@@ -3754,15 +3937,16 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved list item should suspend pattern equality");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved list item should suspend pattern equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the pattern-equality checkpoint must trace its literal and list state");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised list item");
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &item, n(i64::from(b'A')))
@@ -3772,10 +3956,13 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         .collect_managed_for_test()
         .expect("the assigned pattern-equality checkpoint must remain live");
 
-    let effect = eval_value(&observer, &application)
-        .expect("pattern equality should resume from the list item");
+    let effect =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("pattern equality should resume from the list item");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
-        .and_then(|value| eval_value(&observer, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        })
         .expect("the resumed pattern effect should be handled");
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
@@ -3869,15 +4056,16 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved subject item should suspend path equality");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved subject item should suspend path equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the path-pattern checkpoint must trace its completed expected path");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised subject item");
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &actual_item, n(42))
@@ -3887,10 +4075,13 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         .collect_managed_for_test()
         .expect("the assigned path-pattern checkpoint must remain live");
 
-    let effect = eval_value(&observer, &application)
-        .expect("path equality should resume from the subject item");
+    let effect =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("path equality should resume from the subject item");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
-        .and_then(|value| eval_value(&observer, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        })
         .expect("the resumed pattern effect should be handled");
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
@@ -3973,15 +4164,16 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved leaf should suspend dictionary extraction");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved leaf should suspend dictionary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("dictionary extraction must trace its completed path prefix and frames");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised dictionary leaf");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &promised_leaf, n(7)).expect("the owner should resolve the leaf");
@@ -3990,10 +4182,13 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
         .collect_managed_for_test()
         .expect("the assigned dictionary extraction checkpoint must remain live");
 
-    let effect = eval_value(&observer, &application)
-        .expect("dictionary extraction should resume from the leaf");
+    let effect =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("dictionary extraction should resume from the leaf");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
-        .and_then(|value| eval_value(&observer, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        })
         .expect("the resumed pattern effect should be handled");
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
@@ -4104,15 +4299,16 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved second member should suspend emptiness traversal");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved second member should suspend emptiness traversal");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the dictionary-emptiness checkpoint must trace completed members");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised member");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
@@ -4122,10 +4318,13 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
         .collect_managed_for_test()
         .expect("the assigned dictionary-emptiness checkpoint must remain live");
 
-    let effect = eval_value(&observer, &application)
-        .expect("dictionary emptiness should resume from the second member");
+    let effect =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("dictionary emptiness should resume from the second member");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
-        .and_then(|value| eval_value(&observer, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        })
         .expect("the resumed pattern effect should be handled");
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
@@ -4343,16 +4542,20 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
     )
     .expect("pattern-unsnoc application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved suffix should suspend pattern unsnoc");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved suffix should suspend pattern unsnoc");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(9)])))
         .expect("the owner should resolve the promised suffix");
 
-    let effect = eval_value(&observer, &application)
-        .expect("pattern unsnoc should resume without observing its prefix");
+    let effect =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("pattern unsnoc should resume without observing its prefix");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
-        .and_then(|value| eval_value(&observer, &value))
+        .and_then(|value| {
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        })
         .expect("the resumed pattern effect should be handled");
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
@@ -4410,13 +4613,16 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
     let application = apply_values(&observer, Value::Builtin(Builtin::TextLines), vec![source])
         .expect("text-lines application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved byte should suspend text lines");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved byte should suspend text lines");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &item, n(b'b' as i64)).expect("the owner should resolve the promised byte");
-    let Value::List(lines) = eval_value(&observer, &application).expect("text lines should resume")
+    let Value::List(lines) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("text lines should resume")
     else {
         panic!("text lines should produce a list")
     };
@@ -4444,8 +4650,9 @@ fn text_lines_resumes_a_promised_list_chunk() {
     let application = apply_values(&observer, Value::Builtin(Builtin::TextLines), vec![source])
         .expect("text-lines application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved list chunk should suspend text lines");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved list chunk should suspend text lines");
     assert!(blocked.blocked_on().is_some());
     set_promise(
         &owner,
@@ -4454,7 +4661,9 @@ fn text_lines_resumes_a_promised_list_chunk() {
     )
     .expect("the owner should resolve the promised list tail");
 
-    let Value::List(lines) = eval_value(&observer, &application).expect("text lines should resume")
+    let Value::List(lines) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("text lines should resume")
     else {
         panic!("text lines should produce a list")
     };
@@ -4605,7 +4814,7 @@ fn partial_builtins_share_lazy_arguments() {
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(
-        eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_context(),
             &apply_value(&test_context(), partial.clone(), n(2)).unwrap(),
         )
@@ -4613,7 +4822,7 @@ fn partial_builtins_share_lazy_arguments() {
         n(42)
     );
     assert_eq!(
-        eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_context(),
             &apply_value(&test_context(), partial, n(3)).unwrap(),
         )
@@ -4657,7 +4866,11 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
     };
     assert!(matches!(item, Value::Lazy(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(eval_value(&test_context(), &item).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &item)
+            .unwrap(),
+        n(42)
+    );
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
 }
@@ -4681,8 +4894,11 @@ fn closed_semantic_list_holes_remain_host_observable() {
 #[test]
 fn dropped_arguments_do_not_prevent_later_bindings_from_resolving() {
     let function = closed_function_value(2, TestExpr::Local(0));
-    let value = eval_value(&test_context(), &apply_test_values(function, [n(1), n(42)]))
-        .expect("function with dropped argument should evaluate");
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_context(),
+        &apply_test_values(function, [n(1), n(42)]),
+    )
+    .expect("function with dropped argument should evaluate");
 
     assert_eq!(value, n(42));
 }
@@ -4736,10 +4952,13 @@ fn effect_values_apply_by_extending_the_effect_function() {
 
     let value = apply_value(
         &test_context(),
-        eval_value(&test_context(), &function).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &function)
+            .unwrap(),
         api,
     )
-    .and_then(|value| eval_value(&test_context(), &value))
+    .and_then(|value| {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
+    })
     .expect("extended effect function should evaluate with an API");
     assert_eq!(value, n(42));
 }
@@ -4757,14 +4976,16 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
     )
     .expect("effect application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved function should suspend effect application");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved function should suspend effect application");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&owner, &function, Value::Builtin(Builtin::Add))
         .expect("the owner should resolve the promised function");
     assert_eq!(
-        eval_value(&observer, &application).expect("effect application should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("effect application should resume"),
         n(42)
     );
 }
@@ -4809,7 +5030,7 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
     };
     let call_root = call_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &call)
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
         .expect_err("the unresolved argument tail should suspend effect dispatch");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
@@ -4818,7 +5039,8 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         .values()
         .collect_managed_for_test()
         .expect("the effect-call checkpoint must trace its completed prefix");
-    eval_value(&observer, &call).expect_err("a later route must resume the exact argument tail");
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
+        .expect_err("a later route must resume the exact argument tail");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(23)])))
@@ -4828,7 +5050,8 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         .collect_managed_for_test()
         .expect("the assigned effect-call checkpoint must remain live");
     assert_eq!(
-        eval_value(&observer, &call).expect("effect dispatch should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
+            .expect("effect dispatch should resume"),
         n(42)
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
@@ -4866,15 +5089,16 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
     };
     let operation_root = operation_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &operation)
-        .expect_err("the unresolved list tail should suspend effect map");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
+            .expect_err("the unresolved list tail should suspend effect map");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the effect-map checkpoint must trace its suspended list front");
-    eval_value(&observer, &operation)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
         .expect_err("a later route must resume the exact effect-map list front");
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
 
@@ -4885,7 +5109,8 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         .collect_managed_for_test()
         .expect("the assigned effect-map checkpoint must remain live");
     assert_eq!(
-        eval_value(&observer, &operation).expect("effect map should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
+            .expect("effect map should resume"),
         Value::List(List::empty())
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
@@ -4932,8 +5157,11 @@ fn non_callable_application_reports_semantic_value_kinds() {
     ] {
         let application = apply_value(&test_context(), value, n(0))
             .expect("application construction should remain lazy");
-        let error = eval_value(&test_context(), &application)
-            .expect_err("applying a non-callable value should fail");
+        let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_context(),
+            &application,
+        )
+        .expect_err("applying a non-callable value should fail");
         assert_eq!(error.to_string(), expected);
     }
 }
@@ -5032,7 +5260,9 @@ fn dictionaries_remain_lazy_under_eval_value() {
         fixture_computation(TestExpr::Value(n(42))),
     ));
 
-    let evaluated = eval_value(&test_context(), &value).expect("dict should stay lazy");
+    let evaluated =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
+            .expect("dict should stay lazy");
 
     assert_eq!(evaluated, value);
 }
@@ -5130,8 +5360,11 @@ fn dictionary_unions_merge_nested_dictionaries_transitively() {
     let Value::Lazy(greeting) = greeting else {
         panic!("greeting should stay lazy until demanded");
     };
-    let greeting = eval_value(&test_context(), &Value::Lazy(greeting.clone()))
-        .expect("nested dict union should evaluate when demanded");
+    let greeting = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_context(),
+        &Value::Lazy(greeting.clone()),
+    )
+    .expect("nested dict union should evaluate when demanded");
     let Value::Dict(greeting) = greeting else {
         panic!("greeting should evaluate to a merged dictionary");
     };
@@ -5198,8 +5431,9 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
     )
     .expect("dictionary union application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved right operand should suspend dictionary union");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved right operand should suspend dictionary union");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
@@ -5210,8 +5444,9 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
         Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
     )
     .expect("the owner should resolve the right operand");
-    let value = eval_value(&observer, &application)
-        .expect("dictionary union should resume after promise assignment");
+    let value =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("dictionary union should resume after promise assignment");
     let Value::Dict(dict) = value else {
         panic!("dictionary union should produce a dictionary");
     };
@@ -5241,8 +5476,9 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
     )
     .expect("duplicate merge application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved right operand should suspend duplicate merge");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved right operand should suspend duplicate merge");
     assert!(blocked.blocked_on().is_some());
 
     let right_key = Key::atom_from_text("right");
@@ -5252,8 +5488,9 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
         Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
     )
     .expect("the owner should resolve the duplicate operand");
-    let value = eval_value(&observer, &application)
-        .expect("duplicate merge should resume after promise assignment");
+    let value =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("duplicate merge should resume after promise assignment");
     let Value::Dict(dict) = value else {
         panic!("duplicate merge should produce a dictionary");
     };
@@ -5284,15 +5521,17 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
     let application = apply_values(&observer, Value::Builtin(Builtin::ListAt), vec![n(1), list])
         .expect("list-at application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved tail should suspend list-at");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved tail should suspend list-at");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
         .expect("the owner should resolve the list tail");
     assert_eq!(
-        eval_value(&observer, &application).expect("list-at should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("list-at should resume"),
         n(42)
     );
     assert_eq!(
@@ -5323,14 +5562,16 @@ fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
     )
     .expect("split-end application should build");
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved tail should suspend split-end");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved tail should suspend split-end");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
         .expect("the owner should resolve the list tail");
 
-    let Value::Dict(split) = eval_value(&observer, &application)
-        .expect("split-end should resume without observing its prefix")
+    let Value::Dict(split) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("split-end should resume without observing its prefix")
     else {
         panic!("split-end should produce a dictionary")
     };
@@ -5366,8 +5607,11 @@ fn dictionary_unions_defer_ambiguous_keys_until_observed() {
         panic!("ambiguous duplicate should stay as a stuck expression");
     };
 
-    let err = eval_value(&test_context(), &Value::Lazy(ambiguous.clone()))
-        .expect_err("ambiguous key should fail only when demanded");
+    let err = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_context(),
+        &Value::Lazy(ambiguous.clone()),
+    )
+    .expect_err("ambiguous key should fail only when demanded");
 
     assert_eq!(
         err.to_string(),
@@ -5462,7 +5706,7 @@ fn names_can_traverse_dictionary_union_bindings() {
     );
 
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(
+    let resolved = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &value,
@@ -5498,7 +5742,7 @@ fn names_can_expand_list_valued_path_segments() {
 
     let root = crate::core::Dict::new_sync().insert(foo.clone(), nested);
     let value = eval_closed_expr(&fixpoint_dict(root)).expect("root should evaluate");
-    let resolved = eval_value(
+    let resolved = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &value,
@@ -5528,7 +5772,7 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
         Key::atom_from_text("present"),
         Value::Dict(crate::core::Dict::new_sync()),
     ));
-    let resolved = eval_value(
+    let resolved = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &root,
@@ -5567,7 +5811,7 @@ fn anno_builtin_continues_demand_after_assertions_pass() {
         ),
     );
 
-    let value = eval_value(
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &root,
@@ -5609,7 +5853,7 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
         ),
     );
 
-    let error = eval_value(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &Value::Dict(crate::core::Dict::new_sync()),
@@ -5740,15 +5984,16 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved diagnostic context should suspend the assertion");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved diagnostic context should suspend the assertion");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(value_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the annotation checkpoint must trace completed assertion work");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact diagnostic-context promise");
     assert_eq!(value_demands.load(Ordering::SeqCst), 1);
 
@@ -5762,8 +6007,9 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
         .values()
         .collect_managed_for_test()
         .expect("the assigned annotation checkpoint must remain live");
-    let failure = eval_value(&observer, &application)
-        .expect_err("the resumed non-unit assertion should fail");
+    let failure =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the resumed non-unit assertion should fail");
     assert_eq!(
         failure.to_string(),
         "assertion result: unit expected, received Number"
@@ -5820,10 +6066,13 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     assert_eq!(error.to_string(), "handler failed");
     let diagnostic =
         halt_diagnostic_value(&error).expect("permanent errors must project to diagnostics");
-    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+    let Value::Dict(diagnostic) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &diagnostic)
+            .unwrap()
+    else {
         panic!("failure diagnostic must be a dictionary");
     };
-    let operation = eval_value(
+    let operation = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         diagnostic
             .get(&Key::atom_from_text("operation"))
@@ -5831,7 +6080,7 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     )
     .unwrap();
     assert_eq!(operation, atom("emit"));
-    let message = eval_value(
+    let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         diagnostic
             .get(&*keys::MSG)
@@ -5841,7 +6090,7 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     let Value::Dict(message) = message else {
         panic!("diagnostic msg must be a dictionary");
     };
-    let contexts = eval_value(
+    let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         message
             .get(&*keys::CONTEXT)
@@ -5878,10 +6127,13 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
 
     let diagnostic =
         halt_diagnostic_value(&error).expect("message-construction failure must remain permanent");
-    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+    let Value::Dict(diagnostic) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &diagnostic)
+            .unwrap()
+    else {
         panic!("message-construction failure must project to a diagnostic");
     };
-    let message = eval_value(
+    let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         diagnostic
             .get(&*keys::MSG)
@@ -5891,7 +6143,7 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
     let Value::Dict(message) = message else {
         panic!("diagnostic msg must be a dictionary");
     };
-    let contexts = eval_value(
+    let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         message
             .get(&*keys::CONTEXT)
@@ -5952,10 +6204,13 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
 
 fn failure_context_items(error: &EvaluationHalt) -> Vec<Value> {
     let diagnostic = halt_diagnostic_value(error).expect("test error should be permanent");
-    let Value::Dict(diagnostic) = eval_value(&test_context(), &diagnostic).unwrap() else {
+    let Value::Dict(diagnostic) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &diagnostic)
+            .unwrap()
+    else {
         panic!("failure diagnostic must be a dictionary");
     };
-    let message = eval_value(
+    let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         diagnostic
             .get(&*keys::MSG)
@@ -5965,7 +6220,7 @@ fn failure_context_items(error: &EvaluationHalt) -> Vec<Value> {
     let Value::Dict(message) = message else {
         panic!("diagnostic msg must be a dictionary");
     };
-    let contexts = eval_value(
+    let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         message
             .get(&*keys::CONTEXT)
@@ -6021,14 +6276,16 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         vec![annotation(), unit],
     )
     .expect("metadata annotation should accept demanded canonical unit");
-    let first = eval_value(&context, &first).expect("metadata initialization should evaluate");
+    let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
+        .expect("metadata initialization should evaluate");
     let second = apply_values(
         &context,
         Value::Builtin(Builtin::Anno),
         vec![annotation(), unit_value()],
     )
     .expect("metadata annotation should reuse its canonical carrier");
-    let second = eval_value(&context, &second).expect("metadata initialization should evaluate");
+    let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &second)
+        .expect("metadata initialization should evaluate");
 
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
     assert_eq!(first, initial_metadata());
@@ -6045,11 +6302,18 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         vec![first.clone(), n(42)],
     )
     .expect("initial metadata should already satisfy shallow sequencing");
-    assert_eq!(eval_value(&context, &seq_result).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &seq_result).unwrap(),
+        n(42)
+    );
 
     let spark_result = apply_values(&context, Value::Builtin(Builtin::Spark), vec![first, n(43)])
         .expect("initial metadata should be safe to spark");
-    assert_eq!(eval_value(&context, &spark_result).unwrap(), n(43));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &spark_result)
+            .unwrap(),
+        n(43)
+    );
 }
 
 #[test]
@@ -6072,7 +6336,7 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
             vec![annotation(), target],
         )
         .expect("annotation application should remain lazy");
-        let error = eval_value(&context, &result)
+        let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result)
             .expect_err("metadata initialization must require canonical unit");
         assert_eq!(
             error.to_string(),
@@ -6092,7 +6356,7 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
     )
     .expect("an unrecognized annotation should apply lazily");
     assert_eq!(
-        eval_value(&context, &old_initial)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &old_initial)
             .expect("an unrecognized annotation should preserve its target"),
         n(42),
         "the old initializer must not create a sealed carrier"
@@ -6113,7 +6377,7 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
         vec![old_update, target.clone()],
     )
     .expect("an unrecognized annotation should preserve its target");
-    let result = eval_value(&context, &result)
+    let result = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result)
         .expect("the unrecognized annotation should evaluate to its target");
     assert_eq!(result, target);
     let Value::List(result) = result else {
@@ -6185,7 +6449,7 @@ fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, E
     let metadata = carrier
         .associated_metadata()
         .expect("metadata update output must remain sealed");
-    eval_value(context, &metadata)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &metadata)
 }
 
 #[test]
@@ -6286,15 +6550,16 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved carrier should suspend metadata extraction");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved carrier should suspend metadata extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the metadata checkpoint must trace its completed carrier prefix");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised carrier");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
 
@@ -6305,7 +6570,8 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         .collect_managed_for_test()
         .expect("the assigned metadata checkpoint must remain live");
     let Value::List(carriers) =
-        eval_value(&observer, &application).expect("metadata extraction should resume")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("metadata extraction should resume")
     else {
         panic!("metadata update should produce carrier outputs")
     };
@@ -6453,7 +6719,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         Value::Builtin(Builtin::Anno),
         vec![annotation, n(1)],
     )
-    .and_then(|value| eval_value(&context, &value))
+    .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
     .expect_err("metadata update target must be a list");
     assert_eq!(
         error.to_string(),
@@ -6753,7 +7019,9 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         Value::Builtin(Builtin::Anno),
         vec![annotation, n(1)],
     )
-    .and_then(|value| eval_value(&invalid_context, &value))
+    .and_then(|value| {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&invalid_context, &value)
+    })
     .expect_err("effectful metadata target must be a list");
     assert_eq!(
         error.to_string(),
@@ -6822,7 +7090,7 @@ fn list_annotations_rebalance_and_flatten_lists() {
             context.values(),
             NetValue::new(code.runtime().duplicate_for_test(context.values())),
         ));
-        eval_value(&context, &computation)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
     };
 
     let deque = eval(builtin2_expr(
@@ -6903,15 +7171,16 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
     };
     let application_root = application_lazy.root(observer.values());
 
-    let blocked = eval_value(&observer, &application)
-        .expect_err("the unresolved byte should suspend binary extraction");
+    let blocked =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect_err("the unresolved byte should suspend binary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
         .expect("the binary checkpoint must trace its completed byte prefix");
-    eval_value(&observer, &application)
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err("a later route must resume the exact promised byte");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
@@ -6922,7 +7191,8 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
         .collect_managed_for_test()
         .expect("the assigned binary checkpoint must remain live");
     assert_eq!(
-        eval_value(&observer, &application).expect("binary extraction should resume"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("binary extraction should resume"),
         Value::binary_from_text("ab")
     );
     assert_eq!(
@@ -7006,7 +7276,8 @@ fn reflection_source_reserves_inside_and_activates_after_evaluator_access_closes
 
     let value = Value::reflection_task_result(context.values(), n(0));
     assert_eq!(
-        eval_value(&context, &value).expect("reflection result should complete"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+            .expect("reflection result should complete"),
         unit_value()
     );
     assert_eq!(
@@ -7075,7 +7346,10 @@ fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle()
             }))
             .expect("fresh retirement fixture should accept its reflection launcher");
         let value = Value::reflection_task_result(&values, n(0));
-        assert_eq!(eval_value(&context, &value).unwrap(), n(42));
+        assert_eq!(
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+            n(42)
+        );
         assert_eq!(
             values.external_owner_count_for_test(),
             0,
@@ -7090,17 +7364,16 @@ fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle()
 }
 #[test]
 fn reflection_task_result_returns_arbitrary_lazy_value_once() {
-    let context = annotation_test_context();
+    // This fixture retains raw managed values across launcher installation and
+    // repeated client demands, so it must not share the process-wide test heap
+    // with parallel fixtures which explicitly collect.
+    let context = isolated_test_context();
     let result_forces = Arc::new(AtomicUsize::new(0));
     let counted_result_forces = result_forces.clone();
-    let result = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "returned reflection result",
-        move |_| {
-            counted_result_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let result = Value::semantic_thunk(context.values(), "returned reflection result", move |_| {
+        counted_result_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
     let builds = Arc::new(AtomicUsize::new(0));
     let result_policies = Arc::new(Mutex::new(Vec::new()));
     context
@@ -7111,10 +7384,17 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let computation = Value::reflection_task_result(&crate::core::test_value_factory(), n(0));
+    let computation = Value::reflection_task_result(context.values(), n(0));
     let copy = computation.clone();
-    assert_eq!(eval_value(&context, &computation).unwrap(), n(42));
-    assert_eq!(eval_value(&context, &copy).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
+            .unwrap(),
+        n(42)
+    );
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &copy).unwrap(),
+        n(42)
+    );
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert_eq!(result_forces.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -7304,8 +7584,11 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
         "an unobserved autonomous failure remains reportable"
     );
 
-    let propagated = eval_value(&observer, &Value::Promised(promise))
-        .expect_err("observing the completion promise should propagate the task failure");
+    let propagated = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &Value::Promised(promise),
+    )
+    .expect_err("observing the completion promise should propagate the task failure");
     assert_eq!(
         propagated.to_string(),
         "unobserved autonomous reflection failure"
@@ -7332,7 +7615,7 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let error = eval_value(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
     )
@@ -7360,7 +7643,7 @@ fn reflection_task_result_propagates_cancellation() {
         }))
         .expect("fresh test session should accept its reflection launcher");
 
-    let error = eval_value(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
     )
@@ -7420,7 +7703,10 @@ fn reflection_gate_waits_before_continuing_target_demand() {
         n(42)
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(eval_value(&context, &gate).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap(),
+        n(42)
+    );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
     drop(gate_root);
 }
@@ -7472,7 +7758,8 @@ fn reflection_gate_memoizes_task_failure() {
         failure_context_items(&first),
         [evaluation_context_frame("reflection_annotation")]
     );
-    let second = eval_value(&context, &gate).unwrap_err();
+    let second =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap_err();
     assert_eq!(second.to_string(), "reflection task failed deliberately");
     assert_eq!(
         failure_context_items(&second),
@@ -7518,7 +7805,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         .collect_managed_for_test()
         .expect("the rooted reflection gate must survive collection before launch");
 
-    let first = eval_value(&context, &gate)
+    let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate)
         .expect_err("the reflection gate should retain its structured task failure")
         .into_permanent_failure();
     context
@@ -7539,7 +7826,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         .expect_err("the terminal gate cache should contain its failure");
     assert!(Arc::ptr_eq(&first, &cached));
 
-    let second = eval_value(&context, &gate)
+    let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate)
         .expect_err("the reflection gate should reuse its cached failure")
         .into_permanent_failure();
     assert!(Arc::ptr_eq(&cached, &second));
@@ -7651,7 +7938,11 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
     let application = demand
         .advance(&context)
         .expect("completed gate should expose the function application");
-    assert_eq!(eval_value(&context, &application).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -7718,8 +8009,9 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
         vec![unforced],
     )
     .expect("partial builtin application should accept its first argument");
-    let partial = eval_value(&test_context(), &partial)
-        .expect("partial builtin application should produce a partial builtin");
+    let partial =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &partial)
+            .expect("partial builtin application should produce a partial builtin");
 
     match partial {
         Value::PartialBuiltin(call) => {
@@ -7765,7 +8057,10 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
 
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        n(42)
+    );
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -7784,7 +8079,10 @@ fn zero_worker_spark_returns_target_without_forcing_work() {
     )
     .unwrap();
 
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        n(42)
+    );
 }
 
 #[test]
@@ -7831,7 +8129,10 @@ fn zero_worker_spark_discards_hidden_metadata_demand() {
     )
     .expect("spark should return its target with no workers");
 
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        n(42)
+    );
 }
 
 fn wait_for_lazy_cache(context: &EvalContext, lazy: &LazyValue, message: &str) {
@@ -8123,13 +8424,14 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
         vec![carrier.clone(), n(42)],
     )
     .expect("strategy application should remain lazy");
-    let blocked = eval_value(&observer, &applied)
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
         .expect_err("seq should block on unresolved hidden metadata");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&observer, &promise, n(7)).unwrap();
     assert_eq!(
-        eval_value(&observer, &applied).expect("seq should resume after hidden metadata completes"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
+            .expect("seq should resume after hidden metadata completes"),
         n(42)
     );
 }
@@ -8187,7 +8489,7 @@ fn strategy_annotations_share_builtin_semantics() {
         Key::atom_from_text("seq"),
         Value::error(&crate::core::test_value_factory(), "annotation forced"),
     ));
-    let error = eval_value(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         &apply_values(
             &context,
@@ -8213,5 +8515,8 @@ fn strategy_annotations_share_builtin_semantics() {
         vec![spark_annotation, n(42)],
     )
     .unwrap();
-    assert_eq!(eval_value(&context, &result).unwrap(), n(42));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        n(42)
+    );
 }

@@ -8507,10 +8507,19 @@ net and public-construction suites pass, including their exact checkpoint and
 route-loss assertions. No `with_direct_evaluator` caller remains; the W8
 inventory is 213 references at fingerprint `9_532_845_863_969_803_327`.
 
-###### W8B.1d — Migrate the central evaluator suite
+###### W8B.1d — Migrate the central evaluator suite — Complete (2026-09-27)
 
 Migrate the remaining 158 calls in `eval/tests.rs` as one mechanically coherent suite,
 partitioning further by test family if review or verification becomes noisy.
+
+Completion record: 157 whole-value calls now enter the runtime-owned client
+demand boundary and the one semantic-thunk callback delegates through its
+caller context. The sole regional operator assertion uses the bounded
+normal-poll test step, and the two lazy-source assertions no longer depend on
+an `eval_lazy` wrapper. The complete 209-test evaluator suite passes. One
+reflection fixture uncovered a pre-existing shared-test-heap lifetime race;
+it now constructs and observes all managed values in an isolated domain. The
+W8 inventory is 55 references at fingerprint `14_085_316_444_850_499_064`.
 
 ###### W8B.1e — Migrate cross-layer fixtures
 
