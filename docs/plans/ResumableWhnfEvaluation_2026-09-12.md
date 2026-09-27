@@ -8485,10 +8485,15 @@ direct evaluator admission. This removes all 11 inventoried calls from the
 four support files and leaves 349 W8 references at fingerprint
 `18_010_786_563_890_857_301`.
 
-###### W8B.1b — Migrate evaluator-family fixtures
+###### W8B.1b — Migrate evaluator-family fixtures — Complete (2026-09-27)
 
 Migrate the 54 calls in `eval/access_machine.rs`, `eval/builtin_machine.rs`,
 `eval/object_machine.rs`, and `eval/value/tests/w4.rs`.
+
+Completion record: all 52 whole-value calls now use the runtime-owned client
+demand boundary, and the two regional W4 fixtures use the bounded normal-poll
+test step. The focused evaluator-family suites pass. The exact W8 inventory
+now contains 295 references at fingerprint `16_192_753_402_195_190_958`.
 
 ###### W8B.1c — Migrate interaction-net fixtures
 

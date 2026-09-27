@@ -1266,8 +1266,9 @@ mod tests {
         };
         let access_root = access_lazy.root(context.values());
 
-        let blocked = crate::eval::eval_value(&context, &access)
-            .expect_err("the dynamic key must wait on its exact promise");
+        let blocked =
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+                .expect_err("the dynamic key must wait on its exact promise");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         context
             .values()
@@ -1277,7 +1278,8 @@ mod tests {
             .expect("the dynamic key promise should accept its assignment");
 
         assert_eq!(
-            crate::eval::eval_value(&context, &access).expect("computed access should resume"),
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+                .expect("computed access should resume"),
             Value::binary_from_text("found")
         );
         drop(access_root);
@@ -1296,12 +1298,13 @@ mod tests {
             Value::Dict(Dict::new_sync().insert(member, Value::Promised(promise.clone())));
         let access = access_value(&context, [CoreDataKey::Index], vec![base, dynamic]);
 
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("the recursive key member must remain a dependency");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(7.into()))
             .expect("the recursive key promise should accept its assignment");
         assert_eq!(
-            crate::eval::eval_value(&context, &access).expect("recursive key should resume"),
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+                .expect("recursive key should resume"),
             Value::binary_from_text("recursive")
         );
     }
@@ -1322,7 +1325,7 @@ mod tests {
         ));
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
 
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("the computed path must wait at its deferred chunk");
         crate::core::set_test_promise(
             context.values(),
@@ -1331,7 +1334,8 @@ mod tests {
         )
         .expect("the path chunk promise should accept its assignment");
         assert_eq!(
-            crate::eval::eval_value(&context, &access).expect("computed path should resume"),
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+                .expect("computed path should resume"),
             Value::binary_from_text("path")
         );
     }
@@ -1363,14 +1367,14 @@ mod tests {
         };
         let access_root = access_lazy.root(context.values());
 
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("the first route must suspend at the middle path chunk");
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the edge-owned access state must survive first-route loss");
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("a later route must resume the exact middle dependency");
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
 
@@ -1380,7 +1384,7 @@ mod tests {
             Value::List(List::from_values(vec![Value::Number(2.into())])),
         )
         .expect("the middle path promise should accept its assignment");
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("the completed path must next demand the selected base");
         context
             .values()
@@ -1397,7 +1401,7 @@ mod tests {
             )),
         )
         .expect("the selected base promise should accept its assignment");
-        crate::eval::eval_value(&context, &access)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err("the selected value must be demanded before completion");
         context
             .values()
@@ -1406,13 +1410,13 @@ mod tests {
         crate::core::set_test_promise(context.values(), &result, Value::binary_from_text("done"))
             .expect("the selected result promise should accept its assignment");
         assert_eq!(
-            crate::eval::eval_value(&context, &access)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("the resumed route should demand the selected result"),
             Value::binary_from_text("done")
         );
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
         assert_eq!(
-            crate::eval::eval_value(&context, &access)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("a terminal route must use the access cache"),
             Value::binary_from_text("done")
         );
@@ -1431,7 +1435,7 @@ mod tests {
             vec![base.clone(), Value::binary_from_text("x")],
         );
         assert_eq!(
-            crate::eval::eval_value(&context, &invalid)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &invalid)
                 .expect_err("a path operand itself must remain a list")
                 .to_string(),
             "path-list operand must evaluate to a list value"
@@ -1446,7 +1450,7 @@ mod tests {
         let path = Value::List(List::from_thunk(ListThunk::Lazy(chunk)));
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
         assert_eq!(
-            crate::eval::eval_value(&context, &access)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("a deferred binary chunk remains a logical list segment"),
             Value::binary_from_text("byte")
         );

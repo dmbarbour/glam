@@ -871,7 +871,7 @@ mod tests {
             FixpointComputation::ObjectInstance(Value::Promised(spec.clone())),
         ));
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("object construction must first wait for its spec");
         let spec_value = Value::Dict(
             Dict::new_sync()
@@ -884,18 +884,19 @@ mod tests {
         crate::core::set_test_promise(context.values(), &spec, spec_value)
             .expect("the object spec promise should accept its assignment");
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("object construction must resume at its name");
         crate::core::set_test_promise(context.values(), &name, Value::binary_from_text("root"))
             .expect("the object name promise should accept its assignment");
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("object construction must resume at its dependency chunk");
         crate::core::set_test_promise(context.values(), &deps, Value::List(List::empty()))
             .expect("the dependency chunk should accept its assignment");
 
         let Value::Dict(result) =
-            crate::eval::eval_value(&context, &object).expect("object construction should finish")
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+                .expect("object construction should finish")
         else {
             panic!("object construction must produce a dictionary")
         };
@@ -920,7 +921,7 @@ mod tests {
             FixpointComputation::ObjectInstance(root_spec),
         ));
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("linearization must wait for the nested dependency spec");
         crate::core::set_test_promise(
             context.values(),
@@ -934,7 +935,8 @@ mod tests {
         .expect("the dependency spec should accept its assignment");
 
         let Value::Dict(result) =
-            crate::eval::eval_value(&context, &object).expect("linearization should resume")
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+                .expect("linearization should resume")
         else {
             panic!("object construction must produce a dictionary")
         };
@@ -963,7 +965,7 @@ mod tests {
             FixpointComputation::ObjectInstance(spec),
         ));
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("the first definitions application must suspend");
         let second_stage = closed_function_value_in(
             context.values(),
@@ -973,7 +975,7 @@ mod tests {
         crate::core::set_test_promise(context.values(), &first_result, second_stage)
             .expect("the first application should accept its function result");
 
-        crate::eval::eval_value(&context, &object)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err("the second definitions application must suspend");
         let expected =
             Dict::new_sync().insert(Key::binary_from_text("answer"), Value::Number(42.into()));
@@ -985,7 +987,8 @@ mod tests {
         .expect("the second application should accept its dictionary result");
 
         let Value::Dict(result) =
-            crate::eval::eval_value(&context, &object).expect("the definitions fold should resume")
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+                .expect("the definitions fold should resume")
         else {
             panic!("object construction must produce a dictionary")
         };
@@ -1023,8 +1026,9 @@ mod tests {
             FixpointComputation::ObjectInstance(spec),
         ));
 
-        let Value::Dict(result) = crate::eval::eval_value(&context, &object)
-            .expect("composed definitions should resume after the extension function call")
+        let Value::Dict(result) =
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+                .expect("composed definitions should resume after the extension function call")
         else {
             panic!("object construction must produce a dictionary")
         };

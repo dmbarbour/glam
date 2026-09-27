@@ -34,7 +34,7 @@ fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
     );
     let rooted = lazy.root(context.values());
 
-    crate::eval::with_direct_evaluator(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.with_value_access(|access| {
             let lazy = access.lazy_root(&rooted);
             let initial = ManagedLazyCheckpointEdge::allocate_regional_in(
@@ -324,7 +324,7 @@ fn list_front(context: &EvalContext, list: Value) -> Option<(Value, Value)> {
     ));
     let poll = crate::evaluation::EvaluationPollContext::for_context(context);
     for attempt in 0..256 {
-        let outcome = crate::eval::with_direct_evaluator(context, |evaluator| {
+        let outcome = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
             machine.poll(
                 &poll,
                 evaluator,
@@ -448,13 +448,15 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
     let value = context
         .values()
         .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
-    let blocked = eval_value(&context, &value).expect_err("the result promise is unresolved");
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        .expect_err("the result promise is unresolved");
     assert!(blocked.blocked_on().is_some());
 
     crate::core::set_test_promise(context.values(), &result, number(17))
         .expect("the fixpoint result promise should accept its assignment");
     assert_eq!(
-        eval_value(&context, &value).expect("the resumed fixpoint"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+            .expect("the resumed fixpoint"),
         number(17)
     );
 }
@@ -1355,13 +1357,15 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     #[cfg(feature = "interaction-net-profiling")]
     let profile_before = context.values().interaction_net_profile_snapshot();
 
-    eval_value(&context, &object).expect_err("the base application must suspend");
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+        .expect_err("the base application must suspend");
     collect_between_handoffs(&context);
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(context.values(), &base_result, self_function)
         .expect("the retained base application should accept its function result");
 
-    eval_value(&context, &object).expect_err("the self application must suspend");
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+        .expect_err("the self application must suspend");
     collect_between_handoffs(&context);
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(
@@ -1372,7 +1376,8 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     .expect("the retained self application should accept its result");
 
     let Value::Dict(value) =
-        eval_value(&context, &object).expect("the retained mixin should finish")
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
+            .expect("the retained mixin should finish")
     else {
         panic!("the counted mixin must produce an object dictionary")
     };
@@ -1543,7 +1548,7 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
             vec![number(index as i64), mapped.clone()],
         );
         assert_eq!(
-            crate::eval::eval_value(&context, &selected)
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selected)
                 .expect("direct-result item should evaluate"),
             expected
         );
@@ -1605,7 +1610,7 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     let fixed = drive_list_effect_after_route_loss(&context, &retained, machine);
     let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
     assert_eq!(
-        crate::eval::eval_value(&context, &first)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
             .expect("the first fixed alternative should evaluate"),
         number(44)
     );
@@ -1621,7 +1626,7 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     let fixed = drive_list_effect_after_route_loss(&context, &retained, cached);
     let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
     assert_eq!(
-        crate::eval::eval_value(&context, &first)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
             .expect("the cached fixed alternative should evaluate"),
         number(44)
     );
@@ -1636,7 +1641,7 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
 fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
     let context = isolated_context();
     let function = fix_function_returning_its_future_twice(&context);
-    let fixed = crate::eval::eval_value(
+    let fixed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         &Value::builtin_call(context.values(), Builtin::ListEffectFix, vec![function]),
     )
@@ -2197,7 +2202,7 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("the selected builder fix alternative must use the outcome schema")
     });
-    let value = crate::eval::eval_value(&context, &value)
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect("the selected builder continuation value should evaluate");
     assert_eq!(value, number(82));
     assert_eq!(function_demands.load(Ordering::SeqCst), 1);
@@ -2261,8 +2266,9 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
     let repeated = context
         .values()
         .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
-    let Value::Net(second_net) = crate::eval::eval_value(&context, &repeated)
-        .expect("a second demand should observe the completed construction")
+    let Value::Net(second_net) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &repeated)
+            .expect("a second demand should observe the completed construction")
     else {
         panic!("memoized construction must remain a net")
     };
@@ -2653,7 +2659,10 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let result = context
         .values()
         .with_runtime_value_access(|access| result_root.clone_core_with(&access));
-    assert_eq!(eval_value(&context, &result).unwrap(), number(44));
+    assert_eq!(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        number(44)
+    );
     let observed_calls = Arc::clone(&calls);
     let lazy_root = context.values().with_runtime_value_access(|access| {
         let result = result_root.clone_core_with(&access);
