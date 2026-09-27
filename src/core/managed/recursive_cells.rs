@@ -1876,6 +1876,7 @@ mod tests {
                     "src/eval/tests/w7b.rs::lazy_alias_root",
                     "src/evaluation/tests.rs::rooted_promise_value",
                     "src/evaluation/tests.rs::rooted_semantic_lazy_value",
+                    "src/evaluation/tests/w7c.rs::checkpointed_promise_chain_root",
                 ],
             ),
         ];
