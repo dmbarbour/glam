@@ -8376,7 +8376,7 @@ caller-census partition, profiling fuse, and verification gates.
 
 #### W8A — Retire retryable recursive-halt transport
 
-##### W8A.0 — Exact compatibility census and halt decision inputs
+##### W8A.0 — Exact compatibility census and halt decision inputs — Complete (2026-09-27)
 
 Begin from the D.2c `W8ValueCompatibility` manifest: six `ValueDemand`
 declarations at fingerprint `1_485_448_540_290_006_633`. Inventory their real
@@ -8391,12 +8391,38 @@ with hundreds of mechanical test edits, and do not replace `eval_value` with
 a renamed helper that reconstructs the direct evaluator; any retained test
 convenience must drive the shared resumable owner.
 
+Completion record: a source-backed AST census now latches 395 relevant calls
+at fingerprint `13_110_559_393_966_915_317`. Of these, 16 are internal to the
+six compatibility declarations, 374 are test-only migration work, and five
+are independent production uses of retryable `EvaluationHalt` state. There is
+no ordinary production caller of `eval_value`, `eval_value_in`,
+`eval_lazy_in`, `eval_promised_in`, `await_deferred_task`,
+`deferred_wait_result`, or `with_direct_evaluator` outside the compatibility
+family itself.
+
+The five live retryable-halt uses decide the representation question. Three
+`drive_net_semantic_action` branches translate blocked interaction-net calls
+into an exact wait, while `client_demand_halt` translates one generic wait and
+one unassigned promise at the runtime-owned synchronous client boundary.
+`EvaluationHalt` therefore remains the narrow value-demand halt carrier; it
+must not alias `EvaluationFailure` or collapse into a permanent-failure-only
+type during W8. W8A.1 removes the six obsolete family's five blocked and one
+unassigned-promise constructions without disturbing those live boundaries.
+
+The 374 test calls occupy 17 exact source groups. W8B.1 is partitioned below
+into batches of 12 reusable-support calls, 54 evaluator-family calls, 82 net
+fixture calls, 175 central evaluator-suite calls, and 51 cross-layer calls.
+The inventory records both per-surface/per-disposition counts and per-file
+migration counts, so a renamed recursive helper or an unreviewed production
+entry cannot silently replace this baseline.
+
 ##### W8A.1 — Remove recursive wait transport
 
 Remove `await_deferred_task`, the recursive blocked/unassigned-promise paths,
 and adapters which translate a bare `EvaluationHalt` after losing evaluator
-state. Apply the `EvaluationHalt` disposition selected from W8A.0's remaining
-callers. Do not preserve the union solely for obsolete call sites.
+state. Retain `EvaluationHalt` and its retryable variants for the five live
+net/client boundary uses selected by W8A.0, but do not preserve any constructor
+or adapter solely for the obsolete value-wrapper family.
 
 W4E removed the synchronous nested-evaluation path from a claimed
 `ApplyArity` operator pair. Compatibility retirement must not reconstruct that
@@ -8415,6 +8441,37 @@ net-work budget can force the same boundary deterministically.
 Move remaining tests and internal helpers to the shared synchronous driver or
 an explicitly bounded submachine fixture. Do not keep a recursive evaluator
 solely because a test wants a concise assertion.
+
+###### W8B.1a — Install the resumable test driver and migrate support seams
+
+Add one test-only convenience which enters the runtime-owned synchronous
+client driver, then migrate the 12 calls in `eval/sequence.rs`,
+`eval/test_support.rs`, the test-only portions of `eval/value.rs`, and
+`eval/builtins.rs`. The convenience must not construct an
+`EvaluatorStepContext` directly.
+
+###### W8B.1b — Migrate evaluator-family fixtures
+
+Migrate the 54 calls in `eval/access_machine.rs`, `eval/builtin_machine.rs`,
+`eval/object_machine.rs`, and `eval/value/tests/w4.rs`.
+
+###### W8B.1c — Migrate interaction-net fixtures
+
+Migrate the 82 calls in `eval/net.rs`, `eval/net/tests/nc5.rs`, and
+`eval/builtins/net/tests/mod.rs`. Preserve direct regional-access fixtures
+only where they test a regional transition rather than whole-value demand.
+
+###### W8B.1d — Migrate the central evaluator suite
+
+Migrate the 175 calls in `eval/tests.rs` as one mechanically coherent suite,
+partitioning further by test family if review or verification becomes noisy.
+
+###### W8B.1e — Migrate cross-layer fixtures
+
+Migrate the remaining 51 calls in the API, evaluation, syntax, macro, and
+reflection test suites. These tests must cross the same public or
+runtime-owned boundary their production subject uses rather than importing a
+private direct evaluator for convenience.
 
 ##### W8B.2 — Delete the gate and wrappers
 

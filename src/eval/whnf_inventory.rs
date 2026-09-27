@@ -243,6 +243,154 @@ struct LocalCall {
     target: LocalCallTarget,
 }
 
+/// W8's exact compatibility surface, including the direct evaluator gate and
+/// the two retryable-halt constructors which decide whether
+/// `EvaluationHalt` can collapse into a permanent failure.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum W8Surface {
+    EvalValue,
+    EvalValueIn,
+    EvalLazyIn,
+    EvalPromisedIn,
+    AwaitDeferredTask,
+    DeferredWaitResult,
+    WithDirectEvaluator,
+    HaltBlocked,
+    HaltUnassignedPromise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum W8CallerDisposition {
+    CompatibilityInternal,
+    Production,
+    TestMigration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct W8Call {
+    declaration: String,
+    ordinal: usize,
+    surface: W8Surface,
+    disposition: W8CallerDisposition,
+}
+
+impl W8Call {
+    fn record(&self) -> String {
+        format!(
+            "{}#{}|{:?}|{:?}",
+            self.declaration, self.ordinal, self.surface, self.disposition
+        )
+    }
+}
+
+struct W8CallerVisitor<'path> {
+    path: &'path Path,
+    module: Vec<String>,
+    impl_name: Option<String>,
+    function: Option<String>,
+    test_context: bool,
+    ordinals: BTreeMap<String, usize>,
+    calls: Vec<W8Call>,
+}
+
+impl<'path> W8CallerVisitor<'path> {
+    fn new(path: &'path Path) -> Self {
+        Self {
+            path,
+            module: Vec::new(),
+            impl_name: None,
+            function: None,
+            test_context: is_test_source(path),
+            ordinals: BTreeMap::new(),
+            calls: Vec::new(),
+        }
+    }
+
+    fn declaration(&self) -> String {
+        let mut parts = vec![self.path.display().to_string()];
+        parts.extend(self.module.iter().cloned());
+        if let Some(name) = &self.impl_name {
+            parts.push(name.clone());
+        }
+        parts.push(
+            self.function
+                .clone()
+                .unwrap_or_else(|| "<module>".to_owned()),
+        );
+        parts.join("::")
+    }
+
+    fn visit_function(&mut self, name: String, attributes: &[Attribute], body: &syn::Block) {
+        let prior_function = self.function.replace(name);
+        let prior_test = self.test_context;
+        self.test_context |= is_test_only(attributes);
+        self.visit_block(body);
+        self.test_context = prior_test;
+        self.function = prior_function;
+    }
+
+    fn record(&mut self, surface: W8Surface) {
+        let declaration = self.declaration();
+        let ordinal = self.ordinals.entry(declaration.clone()).or_default();
+        *ordinal += 1;
+        let disposition = if is_w8_value_compatibility_declaration(&declaration) {
+            W8CallerDisposition::CompatibilityInternal
+        } else if self.test_context {
+            W8CallerDisposition::TestMigration
+        } else {
+            W8CallerDisposition::Production
+        };
+        self.calls.push(W8Call {
+            declaration,
+            ordinal: *ordinal,
+            surface,
+            disposition,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for W8CallerVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let Some((_, items)) = &node.content else {
+            return;
+        };
+        let prior_test = self.test_context;
+        self.test_context |= is_test_only(&node.attrs);
+        self.module.push(node.ident.to_string());
+        for item in items {
+            self.visit_item(item);
+        }
+        self.module.pop();
+        self.test_context = prior_test;
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let prior_impl = self.impl_name.replace(type_name(&node.self_ty));
+        let prior_test = self.test_context;
+        self.test_context |= is_test_only(&node.attrs);
+        visit::visit_item_impl(self, node);
+        self.test_context = prior_test;
+        self.impl_name = prior_impl;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(surface) = w8_surface(&path.path)
+        {
+            self.record(surface);
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
 struct CallGraphVisitor<'path> {
     path: &'path Path,
     module: Vec<String>,
@@ -542,6 +690,47 @@ fn path_string(path: &syn::Path) -> String {
         .map(|part| part.ident.to_string())
         .collect::<Vec<_>>()
         .join("::")
+}
+
+fn is_test_source(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "tests")
+    {
+        return true;
+    }
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name == "tests.rs" || name.ends_with("_tests.rs") || name == "test_support.rs"
+    })
+}
+
+fn w8_surface(path: &syn::Path) -> Option<W8Surface> {
+    let name = path.segments.last()?.ident.to_string();
+    match name.as_str() {
+        "eval_value" => Some(W8Surface::EvalValue),
+        "eval_value_in" => Some(W8Surface::EvalValueIn),
+        "eval_lazy_in" => Some(W8Surface::EvalLazyIn),
+        "eval_promised_in" => Some(W8Surface::EvalPromisedIn),
+        "await_deferred_task" => Some(W8Surface::AwaitDeferredTask),
+        "deferred_wait_result" => Some(W8Surface::DeferredWaitResult),
+        "with_direct_evaluator" => Some(W8Surface::WithDirectEvaluator),
+        "blocked" | "unassigned_root"
+            if path
+                .segments
+                .iter()
+                .rev()
+                .nth(1)
+                .is_some_and(|segment| segment.ident == "EvaluationHalt") =>
+        {
+            Some(if name == "blocked" {
+                W8Surface::HaltBlocked
+            } else {
+                W8Surface::HaltUnassignedPromise
+            })
+        }
+        _ => None,
+    }
 }
 
 fn is_direct_recursive_call(
@@ -866,6 +1055,69 @@ fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
     occurrences
 }
 
+fn collect_w8_calls(manifest: &Path) -> Vec<W8Call> {
+    let mut sources = Vec::new();
+    collect_rust_sources(&manifest.join("src"), &mut sources);
+    let tests = manifest.join("tests");
+    if tests.exists() {
+        collect_rust_sources(&tests, &mut sources);
+    }
+    sources.sort();
+    sources.dedup();
+
+    let mut calls = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(manifest)
+            .expect("W8 caller source must belong to the package");
+        let source = fs::read_to_string(&path).expect("W8 caller source should be readable");
+        let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
+            panic!(
+                "{} must parse for the W8 caller census: {error}",
+                relative.display()
+            )
+        });
+        let mut visitor = W8CallerVisitor::new(relative);
+        visitor.visit_file(&syntax);
+        calls.extend(visitor.calls);
+    }
+    calls.sort_by_key(W8Call::record);
+    calls
+}
+
+fn w8_call_fingerprint(calls: &[W8Call]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    calls.iter().fold(FNV_OFFSET, |mut fingerprint, call| {
+        for byte in call.record().bytes().chain([0xff]) {
+            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+        fingerprint
+    })
+}
+
+fn w8_call_counts(calls: &[W8Call]) -> BTreeMap<(W8Surface, W8CallerDisposition), usize> {
+    calls.iter().fold(BTreeMap::new(), |mut counts, call| {
+        *counts.entry((call.surface, call.disposition)).or_default() += 1;
+        counts
+    })
+}
+
+fn w8_test_migration_counts(calls: &[W8Call]) -> BTreeMap<String, usize> {
+    calls
+        .iter()
+        .filter(|call| call.disposition == W8CallerDisposition::TestMigration)
+        .fold(BTreeMap::new(), |mut counts, call| {
+            let path = call
+                .declaration
+                .split("::")
+                .next()
+                .expect("a W8 call record starts with its source path");
+            *counts.entry(path.to_owned()).or_default() += 1;
+            counts
+        })
+}
+
 fn collect_resolved_calls(manifest: &Path) -> (BTreeSet<FunctionKey>, Vec<ResolvedCall>) {
     let mut definitions = BTreeSet::new();
     let mut local_calls = Vec::new();
@@ -1158,6 +1410,119 @@ const EXPECTED_W7_RESOLVED_CALLS: usize = 1_154;
 const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 16_061_262_585_134_608_273;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 12_624_383_794_632_597_732;
+const EXPECTED_W8_CALLS: usize = 395;
+const EXPECTED_W8_CALL_FINGERPRINT: u64 = 13_110_559_393_966_915_317;
+const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
+    (
+        (W8Surface::EvalValue, W8CallerDisposition::TestMigration),
+        287,
+    ),
+    (
+        (
+            W8Surface::EvalValueIn,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        1,
+    ),
+    (
+        (W8Surface::EvalValueIn, W8CallerDisposition::TestMigration),
+        6,
+    ),
+    (
+        (
+            W8Surface::EvalLazyIn,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        1,
+    ),
+    (
+        (W8Surface::EvalLazyIn, W8CallerDisposition::TestMigration),
+        1,
+    ),
+    (
+        (
+            W8Surface::EvalPromisedIn,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        1,
+    ),
+    (
+        (
+            W8Surface::AwaitDeferredTask,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        3,
+    ),
+    (
+        (
+            W8Surface::DeferredWaitResult,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        3,
+    ),
+    (
+        (
+            W8Surface::WithDirectEvaluator,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        1,
+    ),
+    (
+        (
+            W8Surface::WithDirectEvaluator,
+            W8CallerDisposition::TestMigration,
+        ),
+        80,
+    ),
+    (
+        (
+            W8Surface::HaltBlocked,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        5,
+    ),
+    ((W8Surface::HaltBlocked, W8CallerDisposition::Production), 4),
+    (
+        (
+            W8Surface::HaltUnassignedPromise,
+            W8CallerDisposition::CompatibilityInternal,
+        ),
+        1,
+    ),
+    (
+        (
+            W8Surface::HaltUnassignedPromise,
+            W8CallerDisposition::Production,
+        ),
+        1,
+    ),
+];
+const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[
+    ("src/api/tests.rs", 8),
+    ("src/eval/access_machine.rs", 7),
+    ("src/eval/builtin_machine.rs", 28),
+    ("src/eval/builtins.rs", 1),
+    ("src/eval/builtins/net/tests/mod.rs", 8),
+    ("src/eval/net.rs", 58),
+    ("src/eval/net/tests/nc5.rs", 16),
+    ("src/eval/object_machine.rs", 10),
+    ("src/eval/sequence.rs", 3),
+    ("src/eval/test_support.rs", 3),
+    ("src/eval/tests.rs", 175),
+    ("src/eval/value.rs", 5),
+    ("src/eval/value/tests/w4.rs", 9),
+    ("src/evaluation/tests.rs", 9),
+    ("src/g_syntax/macro_expansion/tests.rs", 2),
+    ("src/g_syntax/tests.rs", 22),
+    ("src/reflection/machine/tests.rs", 10),
+];
+const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
+    "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked|Production",
+    "src/eval/net.rs::drive_net_semantic_action#2|HaltBlocked|Production",
+    "src/eval/net.rs::drive_net_semantic_action#3|HaltBlocked|Production",
+    "src/evaluation/session.rs::client_demand_halt#1|HaltBlocked|Production",
+    "src/evaluation/session.rs::client_demand_halt#2|HaltUnassignedPromise|Production",
+];
 
 #[test]
 fn whnf_suspension_and_recursion_census_is_exact() {
@@ -1276,6 +1641,62 @@ fn w7_w8_compatibility_handoff_is_exact_and_not_a_production_entry() {
         external_entries.is_empty(),
         "ordinary production owners must enter the resumable driver, not W8 compatibility: \
          {external_entries:#?}"
+    );
+}
+
+#[test]
+fn w8_compatibility_callers_and_remaining_halt_roles_are_exact() {
+    let calls = collect_w8_calls(Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(
+        (
+            calls.len(),
+            w8_call_fingerprint(&calls),
+            w8_call_counts(&calls),
+            w8_test_migration_counts(&calls),
+        ),
+        (
+            EXPECTED_W8_CALLS,
+            EXPECTED_W8_CALL_FINGERPRINT,
+            EXPECTED_W8_CALL_COUNTS.iter().copied().collect(),
+            EXPECTED_W8_TEST_MIGRATION_COUNTS
+                .iter()
+                .map(|(path, count)| ((*path).to_owned(), *count))
+                .collect(),
+        ),
+        "the exact W8 compatibility caller census drifted"
+    );
+
+    let production_compatibility = calls
+        .iter()
+        .filter(|call| call.disposition == W8CallerDisposition::Production)
+        .filter(|call| {
+            !matches!(
+                call.surface,
+                W8Surface::HaltBlocked | W8Surface::HaltUnassignedPromise
+            )
+        })
+        .map(W8Call::record)
+        .collect::<Vec<_>>();
+    assert!(
+        production_compatibility.is_empty(),
+        "W8 compatibility must have no ordinary production caller: \
+         {production_compatibility:#?}"
+    );
+
+    let remaining_retryable_halts = calls
+        .iter()
+        .filter(|call| call.disposition == W8CallerDisposition::Production)
+        .filter(|call| {
+            matches!(
+                call.surface,
+                W8Surface::HaltBlocked | W8Surface::HaltUnassignedPromise
+            )
+        })
+        .map(W8Call::record)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining_retryable_halts, EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS,
+        "W8A.0's EvaluationHalt disposition must follow live retryable callers"
     );
 }
 
