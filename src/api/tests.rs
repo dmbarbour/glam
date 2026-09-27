@@ -161,7 +161,7 @@ fn definition_context(value: &CoreValue) -> Option<&Dict> {
 }
 
 fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<CoreValue> {
-    let emission = eval::eval_value(
+    let emission = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &assembler.eval_context(),
         &diagnostic.emission().clone_core_for_test(),
     )
@@ -169,7 +169,7 @@ fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Co
     let CoreValue::Dict(emission) = emission else {
         panic!("diagnostic emission should be a dictionary");
     };
-    let message = eval::eval_value(
+    let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &assembler.eval_context(),
         emission
             .get(&*keys::MSG)
@@ -179,7 +179,7 @@ fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Co
     let CoreValue::Dict(message) = message else {
         panic!("diagnostic msg should be a dictionary");
     };
-    let contexts = eval::eval_value(
+    let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &assembler.eval_context(),
         message
             .get(&*keys::CONTEXT)
@@ -1864,8 +1864,11 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let broken =
         access_path(&assembler, module.value(), "broken").expect("fixture should define broken");
-    let error = eval::eval_value(&assembler.eval_context(), &broken.clone_core_for_test())
-        .expect_err("the broken definition should fail");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &assembler.eval_context(),
+        &broken.clone_core_for_test(),
+    )
+    .expect_err("the broken definition should fail");
     let failure = error.into_permanent_failure();
     let context = failure
         .contexts()
@@ -1894,8 +1897,11 @@ fn source_definitions_add_shallow_opaque_origin_context() {
     let call = assembler
         .apply(&later, [assembler.values().integer(1)])
         .expect("calling a source function should remain lazy");
-    let error = eval::eval_value(&assembler.eval_context(), &call.clone_core_for_test())
-        .expect_err("the function body should fail when called");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &assembler.eval_context(),
+        &call.clone_core_for_test(),
+    )
+    .expect_err("the function body should fail when called");
     let failure = error.into_permanent_failure();
     assert!(
         failure
@@ -1907,7 +1913,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let object_member = access_path(&assembler, module.value(), "container.broken")
         .expect("fixture should define the nested object member");
-    let error = eval::eval_value(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &assembler.eval_context(),
         &object_member.clone_core_for_test(),
     )
@@ -1929,11 +1935,18 @@ fn source_definitions_add_shallow_opaque_origin_context() {
 
     let manual = access_path(&assembler, module.value(), "manual")
         .expect("fixture should define a manual context");
-    let error = eval::eval_value(&assembler.eval_context(), &manual.clone_core_for_test())
-        .expect_err("the manually contextualized expression should fail");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &assembler.eval_context(),
+        &manual.clone_core_for_test(),
+    )
+    .expect_err("the manually contextualized expression should fail");
     let failure = error.into_permanent_failure();
     let manual_origin = failure.contexts().iter().find_map(|frame| {
-        let CoreValue::Dict(frame) = eval::eval_value(&assembler.eval_context(), frame).ok()?
+        let CoreValue::Dict(frame) = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &assembler.eval_context(),
+            frame,
+        )
+        .ok()?
         else {
             return None;
         };

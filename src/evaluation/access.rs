@@ -57,6 +57,7 @@ enum EvaluatorStepAdmission<'step> {
     /// route. It opens no ambient mutator; each operation still receives only
     /// a bounded access region. W8 removes the remaining compatibility entry.
     #[cfg(test)]
+    #[allow(dead_code, reason = "W8B.2 deletes the retired direct admission")]
     DirectCompatibility,
 }
 
@@ -144,6 +145,7 @@ impl<'scope> EvaluationValueAccess<'scope> {
 
 impl EvaluatorStepContext<'_> {
     #[cfg(test)]
+    #[allow(dead_code, reason = "W8B.2 deletes the retired direct admission")]
     pub(crate) fn for_direct_compatibility(context: &EvalContext) -> EvaluatorStepContext<'_> {
         EvaluatorStepContext {
             admission: EvaluatorStepAdmission::DirectCompatibility,

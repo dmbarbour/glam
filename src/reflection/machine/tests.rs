@@ -1085,10 +1085,12 @@ fn task_halt_contexts(assembler: &Assembler, halt: &TaskHalt) -> Vec<Value> {
         halt.clone().into_failure().as_ref(),
     );
     let context = assembler.eval_context();
-    let Value::Dict(diagnostic) = eval::eval_value(&context, &diagnostic).unwrap() else {
+    let Value::Dict(diagnostic) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &diagnostic).unwrap()
+    else {
         panic!("task halt diagnostic must be a dictionary")
     };
-    let message = eval::eval_value(
+    let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         diagnostic
             .get(&*keys::MSG)
@@ -1098,7 +1100,7 @@ fn task_halt_contexts(assembler: &Assembler, halt: &TaskHalt) -> Vec<Value> {
     let Value::Dict(message) = message else {
         panic!("task halt msg must be a dictionary")
     };
-    let contexts = eval::eval_value(
+    let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
         message
             .get(&*keys::CONTEXT)
@@ -6552,7 +6554,8 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
         .into_iter()
         .map(|mut item| {
             loop {
-                item = eval::eval_value(&context, &item).unwrap();
+                item = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &item)
+                    .unwrap();
                 if !matches!(item, Value::Lazy(_) | Value::Promised(_)) {
                     break item;
                 }
@@ -6761,13 +6764,16 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("same-runtime task observations should complete")
     };
-    let observed = eval::eval_value(&observer, &observed.clone_core_for_test())
-        .expect("task observation result should evaluate");
+    let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &observed.clone_core_for_test(),
+    )
+    .expect("task observation result should evaluate");
     let Value::Dict(observed) = observed else {
         panic!("task observation fixture should return a dictionary")
     };
     let field = |name: &str| {
-        eval::eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer,
             observed
                 .get(&Key::atom_from_text(name))
@@ -6783,7 +6789,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         panic!("complete task status should be tagged data")
     };
     assert_eq!(
-        eval::eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer,
             complete_status
                 .get(&*keys::OK)
@@ -6894,13 +6900,15 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("a same-runtime observer should read the published task handles")
     };
-    let Value::Dict(handles) = eval::eval_value(&handle_reader, &handles.clone_core_for_test())
-        .expect("the published task-handle dictionary should evaluate")
-    else {
+    let Value::Dict(handles) = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &handle_reader,
+        &handles.clone_core_for_test(),
+    )
+    .expect("the published task-handle dictionary should evaluate") else {
         panic!("the task-handle fixture should publish a dictionary")
     };
     let handle = |name: &str| {
-        eval::eval_value(
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &handle_reader,
             handles
                 .get(&Key::atom_from_text(name))
@@ -8490,9 +8498,12 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     context.fail_wait_with_failure(owner_task.wait(), failure.clone());
 
     for (promise, wait) in unresolved.into_iter().zip(waits) {
-        let observed = eval::eval_value(&owner, &Value::Promised(promise))
-            .expect_err("unresolved owned promise should inherit producer failure")
-            .into_permanent_failure();
+        let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &owner,
+            &Value::Promised(promise),
+        )
+        .expect_err("unresolved owned promise should inherit producer failure")
+        .into_permanent_failure();
         assert!(Arc::ptr_eq(&failure, &observed));
         assert_eq!(observed.emission_value(), Some(&emission));
         assert_eq!(observed.contexts(), std::slice::from_ref(&frame));
@@ -8503,7 +8514,11 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     }
 
     assert_eq!(
-        eval::eval_value(&owner, &Value::Promised(resolved)).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &owner,
+            &Value::Promised(resolved)
+        )
+        .unwrap(),
         Value::Number(Number::integer(42)),
         "producer failure must not replace an earlier assignment"
     );
@@ -8548,9 +8563,12 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
             context.complete_wait(owner_task.wait());
         }
 
-        let observed = eval::eval_value(&owner, &Value::Promised(promise))
-            .expect_err("terminal task should fail its unfinished promise")
-            .into_permanent_failure();
+        let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &owner,
+            &Value::Promised(promise),
+        )
+        .expect_err("terminal task should fail its unfinished promise")
+        .into_permanent_failure();
         assert_eq!(observed.to_string(), expected);
         let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
             panic!("unfinished promise wait should publish its synthesized failure")

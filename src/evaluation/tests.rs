@@ -1011,7 +1011,11 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     let promise = PromisedValue::new(owner.values(), "cross-session lazy input");
     let lazy = LazyValue::semantic_thunk(owner.values(), "cross-session client lazy", {
         let promise = promise.clone();
-        move |context| crate::eval::eval_value_in(context, &Value::Promised(promise.clone()))
+        move |context| {
+            context
+                .context()
+                .evaluate_compatibility_whnf(&Value::Promised(promise.clone()))
+        }
     });
     let root = RuntimeValueRoot::new(owner.values(), Value::Lazy(lazy.clone()));
     let owner_demand = owner
@@ -4230,11 +4234,12 @@ fn scheduled_nested_dependency_runs_without_mutator() {
     let nested_for_outer = nested.clone();
     let outer =
         LazyValue::semantic_thunk(context.values(), "outer scheduled dependency", move |ctx| {
-            crate::eval::eval_value_in(ctx, &Value::Lazy(nested_for_outer.clone()))
+            ctx.context()
+                .evaluate_compatibility_whnf(&Value::Lazy(nested_for_outer.clone()))
         });
 
     assert_eq!(
-        crate::eval::eval_value(&context, &Value::Lazy(outer)),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(outer)),
         Ok(context.values().unit())
     );
     assert!(
@@ -4424,7 +4429,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
     let evaluated_lazy = lazy.clone();
     let evaluation = std::thread::spawn(move || {
         result_sender
-            .send(crate::eval::eval_value(
+            .send(crate::evaluation::EvalContext::evaluate_compatibility_whnf(
                 &evaluation_context,
                 &Value::Lazy(evaluated_lazy),
             ))
@@ -4780,8 +4785,11 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
         EvaluationWaitPoll::Abandoned
     );
     assert_eq!(
-        crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
-            .expect("another session should reclaim the lazy"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &observer,
+            &Value::Lazy(lazy.clone())
+        )
+        .expect("another session should reclaim the lazy"),
         expected
     );
     assert!(forced.load(Ordering::Acquire));
@@ -4843,8 +4851,11 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
     set_promise(&observer, &promise, Value::Number(53.into()))
         .expect("the shared dependency should accept its assignment");
     assert_eq!(
-        crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
-            .expect("a later session should resume the lazy-owned checkpoint"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &observer,
+            &Value::Lazy(lazy.clone())
+        )
+        .expect("a later session should resume the lazy-owned checkpoint"),
         Value::Number(53.into())
     );
     assert!(matches!(
@@ -4964,7 +4975,11 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
     let second = crate::eval::lazy_root_wait(&context, &root).expect("route should re-admit");
     assert_ne!(second.get(), first_id);
     assert_eq!(
-        crate::eval::eval_value(&context, &Value::Lazy(lazy.clone())).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &context,
+            &Value::Lazy(lazy.clone())
+        )
+        .unwrap(),
         Value::Number(53.into())
     );
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
@@ -5082,7 +5097,8 @@ fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
     set_promise(&context, &promise, Value::Number(73.into()))
         .expect("the source gate should settle once");
     assert_eq!(
-        crate::eval::eval_value(&context, &Value::Lazy(lazy)).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
+            .unwrap(),
         Value::Number(73.into())
     );
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
@@ -5307,8 +5323,11 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
             Arc::from([]),
             Arc::from([Value::Promised(promise.clone())]),
         );
-        let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
-            .expect_err("the unresolved task promise should block its follower");
+        let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &observer,
+            &Value::Lazy(lazy.clone()),
+        )
+        .expect_err("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
         assert_eq!(promise.exact_subscription_count(observer.values()), 1);
         (promise, lazy)
@@ -5321,7 +5340,7 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
             .is_some_and(|assignment| assignment.is_err())
     );
     assert!(
-        crate::eval::eval_value(&observer, &Value::Lazy(lazy))
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy))
             .expect_err("owner abandonment should fail the exact follower")
             .to_string()
             .contains("was abandoned")
@@ -5342,14 +5361,17 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
         Arc::from([Value::Promised(promise.clone())]),
     );
 
-    let blocked = crate::eval::eval_value(&observer, &Value::Lazy(lazy.clone()))
-        .expect_err("the unresolved task promise should block its follower");
+    let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &Value::Lazy(lazy.clone()),
+    )
+    .expect_err("the unresolved task promise should block its follower");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(observer.values()), 1);
     assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     assert!(
-        crate::eval::eval_value(&observer, &Value::Lazy(lazy))
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy))
             .expect_err("producer cancellation should fail the exact follower")
             .to_string()
             .contains("was cancelled")
@@ -5522,8 +5544,11 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             |_| Ok(crate::core::keys::unit_value()),
         );
         assert_eq!(
-            crate::eval::eval_value(&context, &Value::Lazy(lazy))
-                .expect("successful lazy should evaluate"),
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+                &context,
+                &Value::Lazy(lazy)
+            )
+            .expect("successful lazy should evaluate"),
             crate::core::keys::unit_value()
         );
 
@@ -5533,7 +5558,11 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             |_| Err(crate::core::EvaluationHalt::new("long-lived lazy failure")),
         );
         assert!(
-            crate::eval::eval_value(&context, &Value::Lazy(lazy)).is_err(),
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+                &context,
+                &Value::Lazy(lazy)
+            )
+            .is_err(),
             "failed lazy should terminate without retaining its task record"
         );
 
@@ -7726,8 +7755,11 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     assert!(lazy.cached(context.values()).is_none());
     assert_deferred_task_retired(&context, &lazy);
     assert_eq!(
-        crate::eval::eval_value(&context, &Value::Lazy(lazy.clone()))
-            .expect("a later demand should reclaim the lazy source"),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &context,
+            &Value::Lazy(lazy.clone())
+        )
+        .expect("a later demand should reclaim the lazy source"),
         expected
     );
     assert!(
@@ -8792,8 +8824,11 @@ fn wait_for_spark_work_counts(
 fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
     let claimed = claim_next_spark(coordinator);
     let context = EvalContext::for_spark(claimed.demand_session());
-    let halt = crate::eval::eval_value(&context, &claimed.value().clone_core_for_test())
-        .expect_err("the unresolved promise should park its spark follower");
+    let halt = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &claimed.value().clone_core_for_test(),
+    )
+    .expect_err("the unresolved promise should park its spark follower");
     let dependency = if let Some(wait) = halt.blocked_on() {
         coordinator::WorkDependency::Wait(wait.0)
     } else if let Some(promise) = halt.unassigned_promise_root() {
@@ -8907,8 +8942,11 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
         panic!("the promise spark should be claimable")
     };
     let spark_context = EvalContext::for_spark(claimed.demand_session());
-    let halt = crate::eval::eval_value(&spark_context, &claimed.value().clone_core_for_test())
-        .expect_err("the unresolved promise should halt the spark");
+    let halt = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &spark_context,
+        &claimed.value().clone_core_for_test(),
+    )
+    .expect_err("the unresolved promise should halt the spark");
     let dependency = coordinator::WorkDependency::Promise(
         halt.unassigned_promise_root()
             .expect("the halt should preserve the promise")
@@ -9028,7 +9066,9 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     let followed_promise = promise.clone();
     let lazy =
         LazyValue::semantic_thunk(context.values(), "reusable spark claim", move |context| {
-            crate::eval::eval_value_in(context, &Value::Promised(followed_promise.clone()))
+            context
+                .context()
+                .evaluate_compatibility_whnf(&Value::Promised(followed_promise.clone()))
         });
     context.spark(Value::Lazy(lazy.clone()));
     wait_for_spark_work_counts(
@@ -9073,7 +9113,7 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
         observer_session.demand.default_reflection_profile.clone(),
     );
     assert_eq!(
-        crate::eval::eval_value(&observer, &Value::Lazy(lazy)),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy)),
         Ok(context.values().unit()),
         "a later demand must be able to reclaim the abandoned lazy"
     );

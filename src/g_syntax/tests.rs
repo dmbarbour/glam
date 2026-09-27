@@ -36,8 +36,11 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     };
     crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
         .expect("future should not be set yet");
-    crate::eval::eval_value(&test_eval_context(), &lowered.definitions)
-        .expect("lowered module should evaluate")
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_eval_context(),
+        &lowered.definitions,
+    )
+    .expect("lowered module should evaluate")
 }
 
 fn assert_reserved_keyword_diagnostic(source: &str, keyword: &str) {
@@ -59,7 +62,8 @@ fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
     let context = test_eval_context();
     let mut current = definitions.clone();
     for part in path {
-        let current_value = crate::eval::eval_value(&context, &current).ok()?;
+        let current_value =
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &current).ok()?;
         let Value::Dict(dict) = current_value else {
             return None;
         };
@@ -72,7 +76,8 @@ fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
 
 fn resolved_value_at_path(definitions: &Value, path: &[&str]) -> Value {
     let value = value_at_atom_path(definitions, path).expect("binding should exist");
-    crate::eval::eval_value(&test_eval_context(), &value).expect("binding should resolve")
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), &value)
+        .expect("binding should resolve")
 }
 
 fn resolved_value_at_path_with_context(
@@ -99,7 +104,7 @@ fn fully_evaluated_value_with_context(
     mut value: Value,
 ) -> Value {
     while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        match crate::eval::eval_value(context, &value) {
+        match crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &value) {
             Ok(evaluated) => value = evaluated,
             Err(blocked) if blocked.blocked_on().is_some() => {
                 let wait = blocked
@@ -129,7 +134,8 @@ fn fully_evaluated_value_with_context(
 fn fully_evaluated_value(mut value: Value) -> Value {
     let context = test_eval_context();
     while matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-        value = crate::eval::eval_value(&context, &value).expect("value should fully evaluate");
+        value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+            .expect("value should fully evaluate");
     }
     value
 }
@@ -137,7 +143,7 @@ fn fully_evaluated_value(mut value: Value) -> Value {
 fn fully_evaluated_error(mut value: Value) -> crate::core::EvaluationHalt {
     let context = test_eval_context();
     loop {
-        match crate::eval::eval_value(&context, &value) {
+        match crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
             Ok(other) => panic!("value should fail instead of evaluating to {other:?}"),
             Err(error) => return error,
@@ -167,14 +173,17 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
         &mut |values| {
             for value in values {
                 let value = fully_evaluated_value(
-                    crate::eval::eval_value(&test_eval_context(), value)
-                        .map_err(|err| err.to_string())?,
+                    crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+                        &test_eval_context(),
+                        value,
+                    )
+                    .map_err(|err| err.to_string())?,
                 );
                 bytes.borrow_mut().extend(output_bytes(&value));
             }
             Ok(())
         },
-        &mut |thunk| match crate::eval::eval_value(
+        &mut |thunk| match crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_eval_context(),
             &match thunk {
                 crate::core::ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
@@ -273,8 +282,11 @@ fn reflection_test_module(
         .expect("final module binding should be unset");
 
     let eval_context = assembler.eval_context();
-    let definitions = crate::eval::eval_value(&eval_context, &lowered.definitions)
-        .expect("reflection-enabled module should expose its dictionary");
+    let definitions = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &eval_context,
+        &lowered.definitions,
+    )
+    .expect("reflection-enabled module should expose its dictionary");
     let definitions_root = context
         .values()
         .construct_runtime_value_root(|_| definitions.clone());
@@ -330,8 +342,11 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
             .expect("final module binding should start unassigned");
 
         let eval_context = assembler.eval_context();
-        let module = crate::eval::eval_value(&eval_context, &lowered.definitions)
-            .expect("the source reflection-cycle module should expose its dictionary");
+        let module = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &eval_context,
+            &lowered.definitions,
+        )
+        .expect("the source reflection-cycle module should expose its dictionary");
         assert!(matches!(
             resolved_value_at_path_with_context(&eval_context, &module, &["meta", "x"]),
             Value::List(_)
@@ -2354,7 +2369,7 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
         reflection_test_module(source, &["recursive_do_cycle"], &[]);
     let mut probe = value_at_atom_path(&definitions, &["probe"]).expect("probe should exist");
     let error = loop {
-        match crate::eval::eval_value(&eval_context, &probe) {
+        match crate::evaluation::EvalContext::evaluate_compatibility_whnf(&eval_context, &probe) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => probe = next,
             Ok(other) => panic!("strict recursive observation produced {other:?}"),
             Err(error) => break error.to_string(),
@@ -4438,8 +4453,11 @@ fn object_parents_reject_implicit_dictionary_conversion() {
         let value = evaluated_module_value(&context, &lowered);
         let result =
             value_at_atom_path(&value, &["asm", "result"]).expect("result binding should exist");
-        let error = crate::eval::eval_value(&test_eval_context(), &result)
-            .expect_err("plain dictionary parent should fail");
+        let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_eval_context(),
+            &result,
+        )
+        .expect_err("plain dictionary parent should fail");
         assert!(
             error
                 .to_string()
@@ -4459,8 +4477,9 @@ fn object_from_dict_rejects_existing_objects() {
 
     let value = evaluated_module_value(&context, &lowered);
     let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
-    let error = crate::eval::eval_value(&test_eval_context(), &result)
-        .expect_err("converting an existing object should fail");
+    let error =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), &result)
+            .expect_err("converting an existing object should fail");
     assert_eq!(
         error.to_string(),
         "object_from_dict requires a plain dictionary, not an object"
@@ -5269,7 +5288,10 @@ fn effect_then_requires_unit_result_when_observed() {
     let value = evaluated_module_value(&context, &lowered);
     let mut result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
     let err = loop {
-        match crate::eval::eval_value(&test_eval_context(), &result) {
+        match crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_eval_context(),
+            &result,
+        ) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => result = next,
             Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
             Err(err) => break err,
@@ -5611,15 +5633,16 @@ fn lowers_builtin_imports_to_module_dictionaries() {
     let std = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("std"))])
         .expect("std import should exist");
-    let std = crate::eval::eval_value(&test_eval_context(), std)
-        .expect("std import should evaluate to a dictionary");
+    let std =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), std)
+            .expect("std import should evaluate to a dictionary");
     let floor = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("floor"))])
         .expect("inline math import should expose floor");
     let mod_fn = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("mod"))])
         .expect("inline math import should expose mod");
-    let list_len_import = crate::eval::eval_value(
+    let list_len_import = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &core_global_access(
             &context,
@@ -5627,7 +5650,7 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         ),
     )
     .expect("list.len import should resolve");
-    let list_spec = crate::eval::eval_value(
+    let list_spec = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &core_global_access(
             &context,
@@ -5635,7 +5658,7 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         ),
     )
     .expect("list.spec import should resolve");
-    let list_head_import = crate::eval::eval_value(
+    let list_head_import = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &core_global_access(
             &context,
@@ -5643,7 +5666,7 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         ),
     )
     .expect("list.head import should resolve");
-    let list_tail_import = crate::eval::eval_value(
+    let list_tail_import = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &core_global_access(
             &context,
@@ -5651,7 +5674,7 @@ fn lowers_builtin_imports_to_module_dictionaries() {
         ),
     )
     .expect("list.tail import should resolve");
-    let list_pure_import = crate::eval::eval_value(
+    let list_pure_import = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &core_global_access(
             &context,
@@ -5708,7 +5731,11 @@ fn lowers_builtin_imports_to_module_dictionaries() {
             let std_list = std
                 .get(&Key::atom_from_text("list"))
                 .expect("std import should expose list");
-            let Value::Dict(std_list) = crate::eval::eval_value(&test_eval_context(), std_list)
+            let Value::Dict(std_list) =
+                crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+                    &test_eval_context(),
+                    std_list,
+                )
                 .expect("std.list should evaluate")
             else {
                 panic!("std.list should evaluate to a dictionary");
@@ -5771,11 +5798,16 @@ fn lowers_builtin_imports_to_module_dictionaries() {
     assert!(matches!(std, Value::Dict(_)));
     assert!(matches!(anno, Value::Builtin(crate::core::Builtin::Anno)));
     assert!(matches!(
-        crate::eval::eval_value(&test_eval_context(), &std_not).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), &std_not)
+            .unwrap(),
         Value::Function(_) | Value::Net(_)
     ));
     assert!(matches!(
-        crate::eval::eval_value(&test_eval_context(), &std_could).unwrap(),
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_eval_context(),
+            &std_could
+        )
+        .unwrap(),
         Value::Function(_) | Value::Net(_)
     ));
     assert!(matches!(floor, Value::Builtin(crate::core::Builtin::Floor)));
@@ -6489,8 +6521,9 @@ fn inline_builtin_imports_follow_ordered_module_updates() {
     let math = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("math"))])
         .expect("std import should merge into existing math");
-    let math = crate::eval::eval_value(&test_eval_context(), math)
-        .expect("merged math binding should evaluate");
+    let math =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), math)
+            .expect("merged math binding should evaluate");
 
     let Value::Dict(math) = math else {
         panic!("math should evaluate to a dictionary");

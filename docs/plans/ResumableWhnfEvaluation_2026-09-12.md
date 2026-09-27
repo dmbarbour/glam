@@ -8463,7 +8463,7 @@ raw-value lifetime race exposed by the new schedule.
 
 #### W8B — Retire direct evaluator compatibility
 
-##### W8B.1 — Migrate direct-wrapper callers
+##### W8B.1 — Migrate direct-wrapper callers — Complete (2026-09-27)
 
 Move remaining tests and internal helpers to the shared synchronous driver or
 an explicitly bounded submachine fixture. Do not keep a recursive evaluator
@@ -8521,12 +8521,20 @@ reflection fixture uncovered a pre-existing shared-test-heap lifetime race;
 it now constructs and observes all managed values in an isolated domain. The
 W8 inventory is 55 references at fingerprint `14_085_316_444_850_499_064`.
 
-###### W8B.1e — Migrate cross-layer fixtures
+###### W8B.1e — Migrate cross-layer fixtures — Complete (2026-09-27)
 
-Migrate the remaining 51 calls in the API, evaluation, syntax, macro, and
+Migrate the remaining 50 calls in the API, evaluation, syntax, macro, and
 reflection test suites. These tests must cross the same public or
 runtime-owned boundary their production subject uses rather than importing a
 private direct evaluator for convenience.
+
+Completion record: W8A.1 had already migrated one of the originally counted
+51 calls. The remaining 50 cross-layer fixtures now enter the runtime-owned
+client-demand boundary directly, including semantic callbacks which delegate
+through their existing evaluator context. The focused API, evaluation,
+macro-expansion, and reflection suites pass. No test-migration reference
+remains; the exact W8 census contains only the five intentional production
+halt constructors at fingerprint `14_333_976_427_563_422_922`.
 
 ##### W8B.2 — Delete the gate and wrappers
 

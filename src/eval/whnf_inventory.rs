@@ -1398,17 +1398,9 @@ const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
 const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 17_165_432_442_858_401_497;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_COMPATIBILITY_OCCURRENCE_FINGERPRINT: u64 = 14_695_981_039_346_656_037;
-const EXPECTED_W8_CALLS: usize = 55;
-const EXPECTED_W8_CALL_FINGERPRINT: u64 = 14_085_316_444_850_499_064;
+const EXPECTED_W8_CALLS: usize = 5;
+const EXPECTED_W8_CALL_FINGERPRINT: u64 = 14_333_976_427_563_422_922;
 const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
-    (
-        (W8Surface::EvalValue, W8CallerDisposition::TestMigration),
-        47,
-    ),
-    (
-        (W8Surface::EvalValueIn, W8CallerDisposition::TestMigration),
-        3,
-    ),
     ((W8Surface::HaltBlocked, W8CallerDisposition::Production), 4),
     (
         (
@@ -1418,13 +1410,7 @@ const EXPECTED_W8_CALL_COUNTS: &[((W8Surface, W8CallerDisposition), usize)] = &[
         1,
     ),
 ];
-const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[
-    ("src/api/tests.rs", 8),
-    ("src/evaluation/tests.rs", 8),
-    ("src/g_syntax/macro_expansion/tests.rs", 2),
-    ("src/g_syntax/tests.rs", 22),
-    ("src/reflection/machine/tests.rs", 10),
-];
+const EXPECTED_W8_TEST_MIGRATION_COUNTS: &[(&str, usize)] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked|Production",
     "src/eval/net.rs::drive_net_semantic_action#2|HaltBlocked|Production",

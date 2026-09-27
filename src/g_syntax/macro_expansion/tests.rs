@@ -256,7 +256,7 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() {
     let (assembler, reflection) = compile_effects(".env ['glam,'reasoning,'role]");
     let execution = assembler.test_compilation_execution();
-    let result = eval::eval_value(
+    let result = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         execution.macro_context(),
         &Value::reflection_task_result(&assembler.core_values(), reflection.clone_core_for_test()),
     )
@@ -292,8 +292,11 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
         reflection.clone_core_for_test(),
         keys::unit_value(),
     );
-    let error = eval::eval_value(&assembler.eval_context(), &gate)
-        .expect_err("assembler observation should start and block the gate");
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &assembler.eval_context(),
+        &gate,
+    )
+    .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());
     let macro_effect = public_value(
         &assembler.core_values(),
