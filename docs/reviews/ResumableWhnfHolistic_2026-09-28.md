@@ -819,25 +819,119 @@ P5 still reconciles final trait removal with Gate G3 and repository-wide
 aggressive verification. The count correction is WHNFHR-008; it does not
 justify starting P4 early or interrupting HR8 for an implementation repair.
 
-## Preliminary reconciliation questions
+## HR8 — Verification audit and forward-path synthesis
 
-These are questions for the later passes, not findings yet:
+### Verification ledger
 
-1. Does the current aggregate managed checkpoint fully satisfy the original
-   “exact state after every completed prefix” rule across every specialized
-   machine, or do any phase owners still recreate child WHNF work?
+| Lane | Current evidence | Disposition |
+| --- | --- | --- |
+| ordinary semantic/resumption | 85-test `whnf`, 60-test `checkpoint`, 81-test `resumes`, 41-test `without_replay`, and focused host/reflection/metadata/net filters pass | focused semantics green |
+| focused aggressive GC | 86-test `whnf`, 62-test `checkpoint`, 21-test W7, D.2c, and persistent-edge filters pass | focused WHNF ownership green after WHNFHR-001/003/004 fixture repairs |
+| complete ordinary workspace | 1,876 library tests pass with two ignored, followed by every integration group | green after WHNFHR-010 isolated the collecting builder fixture |
+| complete aggressive workspace | initial 240-second deliberate run reached 1,651/1,881 library tests, reported 54 failures, and timed out with long-running tests still active | known Gate G3 blocker; a post-WHNFHR-010 rerun remains below |
+| forced concurrency order | route claim/release, route loss, guarded-release interference, mixed waiter classes, lazy producer contention, publication-before/after-subscription, abandonment/cancellation, and two-worker linear checkpoint fixtures use channels, barriers, or explicit probes | authoritative; repetition is not cited |
+| small stack and budgets | 7 `small_stack`, 13 `budget`, and 21 W7 tests pass; depth and zero/one/many quantum fixtures remain source-latched | green |
+| interaction-net profile | exact reduction/driver signature, route counters, diagnostic, and named script retained | script pending final routine run |
+| inventories/negative gates | 119 ordinary and 119 aggressive inventory filters, exact 252 raw-value owner map, zero D.2c, exact 11-entry D.2d manifest, 885-entry persistent-edge manifest | green for reviewed scope |
+| Miri/Loom | the underlying `glam-gc` collector has its separate Gate G1 Miri/Loom record; this WHNF transition added no unsafe collector primitive and did not add a WHNF-specific Loom model | not used as semantic/concurrency evidence here; safe synchronization is covered by forced schedules, while concurrent marking remains blocked by WHNFHR-005 |
+| unverified/future assumptions | concurrent marker interaction with checkpoint mutexes, root-frame replacement, zero parent raw-value violations, zero persistent trait interlocks, and full aggressive settlement | named future gates, not claimed complete |
+
+Fresh focused commands in this pass also produced 14 passing subscription
+tests, eight exact-route tests, four background-pump tests, five claim-release
+tests, eleven host-call tests, eleven reflection-gate tests, five metadata
+reflection tests, two cursor-driver tests, and six normalization-batch tests.
+
+### Repository-wide aggressive boundary
+
+The deliberate command was time-bounded rather than allowed to retain the
+review indefinitely:
+
+```text
+timeout --signal=TERM --kill-after=10s 240s \
+  cargo test -q --features aggressive-gc-verification
+
+status: 124
+progress: 1651 / 1881 library tests
+failures observed before cutoff: 54
+```
+
+The observed failures clustered as follows:
+
+| Cluster | Observed failures | Current owner |
+| --- | ---: | --- |
+| evaluation/coordinator lifecycle | 33 | D.2d production owners plus 002E fixture migration and 002F ordering |
+| public API | 8 | D.2g and 002E |
+| macro expansion | 7 | D.2e and 002E/002F |
+| hidden net builder | 4 | 002E fixture publication and 002F full-parallel interference |
+| reflection machine | 1 | D.2f and 002E |
+| recursive-cell source inventory | 1 | 002F interference/certification audit; the focused inventory gate passes |
+
+At cutoff, `external_request_during_finalization_is_coalesced`, one nested
+source-macro fixture, and one reflection-state `try` fixture had each exceeded
+60 seconds. This reproduces the known non-settlement boundary rather than
+closing it. Most importantly, the repaired
+`hidden_builder_whole_state_checkpoint_restores_reset_scope` passed exactly
+and in the focused aggressive checkpoint filter but appeared in the full
+parallel failure list. The subsequent ordinary full run reproduced the same
+builder cluster and exposed a shared-heap test defect: this one fixture forced
+collection through the process-wide test value factory while parallel tests
+held raw values in that heap. WHNFHR-010 moves the collector fixture to a
+private value domain and classifies its two new rooted helpers. The complete
+ordinary suite then passes. This is constructive evidence; repeated passing
+runs are not used as the repair proof.
+
+No failure in this bounded run overturns the focused WHNF state/trace result,
+but neither does focused success certify the repository. WHNFHR-009 assigns
+the explicit remaining boundary to the parent phases.
+
+### Forward path
+
+The reviewed dependency order is:
+
+1. resume D.2d from its new exact eleven-entry manifest: promise publication,
+   reflection admission, and bounded projections, retaining one measured
+   compatibility bridge;
+2. migrate D.2e front-end/macro and D.2f reflection families using the same
+   caller-owned access and rooted-handoff patterns;
+3. migrate D.2g public/compiler/diagnostic callers, including the last
+   production compatibility-facade consumers;
+4. close D.2h at zero production violations and remove or make the facade
+   explicitly test-only;
+5. perform 002E fixture publication migration and 002F forced schedule
+   adaptation, including the exact-versus-full builder discrepancy, then close
+   clusters in 002G and certify in 002H;
+6. update the P3 manifest after each parent phase; begin P4 only when its
+   parent dependency set is zero, then reconcile P5 with D.2h and Gate G3; and
+7. reconsider automatic/concurrent collection only after Gate G3 and the
+   explicit CG0/CG1 checkpoint-tracing handshake.
+
+This order avoids both identified forms of redundant work: D.2e/D.2g share
+the existing compatibility orchestration while migrating rather than cloning
+it, and P4 does not repair traits which later parent representation work would
+remove differently.
+
+## Reconciliation answers
+
+1. Resolved by HR2-HR3: every specialized machine retains the exact focus,
+   continuation, and family state after a completed prefix; no reviewed family
+   recreates child WHNF work after a genuine suspension or budget yield.
 2. Resolved by HR6: the declaration is D.2d, its production callers are D.2e
    and D.2g, and D.2h owns final production removal after those caller
    migrations.
 3. Resolved by HR7: the eight are cursor/frontier and net-driver retry-carrier
    traits; all are transitional conveniences assigned to P4 replacement.
-4. Does every stateful machine's edge visitor cover precisely the fields it can
-   retain across a poll, including pure net construction and callable
-   checkpoints?
-5. Does the managed checkpoint mutex remain valid for the current STW
-   collector while leaving a clear path to concurrent marking/root frames?
-6. Which known aggressive-workspace failures are production boundaries versus
-   test-fixture lifetime errors or schedule interference?
+4. Resolved by HR2: compile-exhaustive state destructuring and per-family edge
+   inventories cover pure net construction, callable checkpoints, and every
+   reviewed poll-retained field; aggressive fixtures validate representative
+   edges rather than replacing the source proof.
+5. Resolved for the current collector by HR2/WHNFHR-005: stop-the-world
+   mutator exclusion makes the mutex trace contract sound. CG0/CG1 own the
+   root-frame or coherent-snapshot replacement before concurrent marking.
+6. Resolved as an ownership map by HR8/WHNFHR-009: D.2d-D.2h own production
+   raw-value boundaries, 002E owns general fixture publication, 002F owns
+   forced schedule/probe interference, and 002G-H own cluster closure and
+   repository certification. Individual broad-suite failures remain to be
+   proven against those owners rather than inferred from their names.
 7. Resolved by HR6: D.2d remains next, split into four implementation families
    plus an explicit downstream facade handoff rather than premature removal.
 
@@ -1108,3 +1202,50 @@ through parent D.2d-D.2g. P4 remains gated on a zero parent manifest and must
 replace these conveniences through ownership transfer, access-qualified
 duplication, or explicit diagnostic projection rather than grandfathering
 them.
+
+### WHNFHR-009 — Owned: repository-wide aggressive verification still fails and does not settle
+
+**Severity:** high release/gate blocker; not newly introduced by the focused
+WHNF review.
+
+A deliberate 240-second full aggressive run reported 54 failures across API,
+builder, coordinator/evaluation, macro, reflection, and source-inventory
+clusters, then timed out after 1,651 of 1,881 library tests. Three tests had
+already exceeded 60 seconds. This is consistent with the declared Gate G3
+blocker, but the exact-versus-full discrepancy for the repaired whole-state
+builder fixture shows why focused passing filters cannot substitute for
+repository certification.
+
+Production raw-value ownership is assigned to D.2d-D.2h. General fixture
+publication is assigned to GCI11R-002E; schedule/probe interference and the
+builder discrepancy are assigned to 002F with a new forced-barrier
+requirement; 002G closes clusters and 002H reruns repository certification.
+P5 and Gate G3 consume that result. Until then, the complete aggressive suite
+is explicitly red and non-settling. No remediation inside the already closed
+D.2c WHNF partition is justified merely by this broad run.
+
+### WHNFHR-010 — Resolved: a forced-collection fixture collected the shared test heap
+
+**Severity:** high test-isolation defect; no production runtime change.
+
+The first final ordinary workspace run reproduced three hidden-builder pointer
+failures and one constructor-inventory failure under parallel execution. The
+constructor failure was straightforward audit drift: WHNFHR-003 had added two
+rooted fixture helpers without adding their exact dispositions to the
+recursive-cell regional-constructor manifest.
+
+The pointer failures shared one cause. `EvalContext::standalone()` uses the
+process-wide `test_value_factory`, while the repaired whole-state builder
+fixture deliberately called `collect_managed_for_test` at three publication
+boundaries. In parallel, that collector could reclaim raw values held by other
+builder fixtures in the same shared heap. The two apparently unrelated raw
+builder failures were victims of this collector, not independent semantic
+defects.
+
+The collecting fixture now constructs an isolated `CoreValueFactory` and
+runtime domain. The helper manifest classifies `run_rooted_builder_at` as an
+exact containing-root fixture and `rooted_claimed_core_call_in` as an explicit
+family-root fixture. The exact ordinary/aggressive builder test, the 16-test
+builder filter, the constructor inventory, and the complete ordinary workspace
+all pass. The causal proof is heap isolation at the collection boundary; the
+passing full run is confirmation, not repeated-schedule evidence.

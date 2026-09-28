@@ -1715,7 +1715,15 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
 
 #[test]
 fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
-    let context = EvalContext::standalone();
+    // This fixture deliberately collects between every published handoff.
+    // Most builder tests share `test_value_factory`; collecting that shared
+    // heap would reclaim raw values which other parallel fixtures still hold
+    // in their active access regions. Use a private value domain so the forced
+    // schedule proves only this fixture's publication boundaries.
+    let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        crate::runtime::RuntimeIds::new(),
+    ));
     let prompt = Value::binary_from_text("prompt");
     let (state, capture) = with_access(&context, |access| {
         let state = encode_builder_state(

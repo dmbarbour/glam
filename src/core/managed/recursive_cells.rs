@@ -1863,6 +1863,7 @@ mod tests {
                     "src/api/assembly.rs::Assembler::promise",
                     "src/api/assembly.rs::ReflectionEnvironmentBuilder::promise",
                     "src/core.rs::PromisedValue::fixpoint",
+                    "src/eval/net/tests/nc5.rs::rooted_claimed_core_call_in",
                 ],
             ),
             (
@@ -1870,6 +1871,7 @@ mod tests {
                 "roots the managed value inside the same test access region before carrying it across later observations",
                 &[
                     "src/api/tests.rs::public_semantic_thunk",
+                    "src/eval/builtins/net/tests/mod.rs::run_rooted_builder_at",
                     "src/eval/net/tests/nc5.rs::block_task_promise",
                     "src/eval/tests/w7b.rs::application_chain_root_with_depth",
                     "src/eval/tests/w7b.rs::fixpoint_chain_root",

@@ -1846,6 +1846,16 @@ shape and remains part of 002F's broader schedule audit. WHNFHR-004 also
 updated one blocked-client fixture to advance foreground work through its
 exact client driver rather than expecting the background-only runtime pump to
 claim it. These focused repairs reduce E.4/F worklists but do not close them.
+The first 2026-09-28 full parallel run still observed the repaired whole-state
+builder fixture even though its exact and focused filters passed. A subsequent
+ordinary full run reproduced the failure constructively enough to identify the
+cause: the fixture forced collection through the process-wide test value
+factory while unrelated parallel fixtures retained raw values in that shared
+heap. The collecting fixture now uses a private value domain; its exact
+ordinary/aggressive checks, the complete builder filter, and the complete
+ordinary workspace pass. The two new rooted fixture helpers are also present
+in the exact regional-constructor inventory. This closes that named witness
+without weakening 002F's broader schedule audit.
 
 1. Build a source-backed inventory of self-opening `#[cfg(test)]` constructors
    reachable from a production `EvaluationRuntime` under aggressive mode.
@@ -1898,6 +1908,15 @@ production code.
 4. Run admission-wait, Finalizing, request-coalescing, passive-finalization,
    and RAII probe tests in both modes. Prove both sides of each ordering with
    the existing probe/barrier rather than a sleep or repeated run.
+5. Inventory fixtures which pass exactly or under a focused filter but fail in
+   the full parallel aggressive suite. Reproduce each shared interference
+   class with an injected admission/collector barrier before changing code;
+   do not use repeated parallel runs as evidence. Determine whether the
+   interfering state is a global verification hook, shared runtime resource,
+   one-shot probe, or an unrooted publication exposed only by the forced
+   ordering, then assign the repair to 002E or this phase accordingly. The
+   whole-state builder witness discovered during the WHNF holistic review is
+   closed by private-domain isolation and remains the reference example.
 
 Exit: aggressive collection cannot steal a test's one-shot probe, and every
 schedule claim remains constructively ordered.
