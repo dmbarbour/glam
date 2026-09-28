@@ -1797,6 +1797,14 @@ this result.
 
 ### GCI11R-002E — Test Fixture Regional Migration
 
+Two narrow evaluator fixtures were pulled forward by WHNFHR-001 because they
+blocked the focused holistic WHNF aggressive gate. The forwarding-chain
+fixture now constructs and publishes its graph in one access region, and the
+abandoned-producer fixture retains its rooted promise/lazy owners. Their
+ordinary/aggressive filters pass. This evidence reduces the eventual E.4
+worklist but does not replace the source-backed inventory or close any other
+002E item.
+
 1. Build a source-backed inventory of self-opening `#[cfg(test)]` constructors
    reachable from a production `EvaluationRuntime` under aggressive mode.
 2. Add narrow fixture builders which allocate and install the actual fixture

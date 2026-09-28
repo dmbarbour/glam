@@ -1,10 +1,9 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W8 and their mandatory reviews are complete by 2026-09-27. W9A-B
-completed the classification baseline and forced-ordering matrix on
-2026-09-28; W9C.0 completed the coordinator mutation census on 2026-09-28;
-W9C.1-E remain planned. This
-is the focused implementation plan selected by
+Status: W0-W9 and their mandatory phase reviews are complete by 2026-09-28.
+The final holistic review required by completion criterion 10 is active in
+[`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md).
+This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 Client demand, lazy and promise following, external-source owners, and
@@ -117,7 +116,6 @@ The dependency alone is never treated as a sufficient resumption record.
 
 An outer machine owns the `WhnfComputation`. Polling temporarily projects its
 durable state beneath one access region, performs bounded callback-free work,
-then either completes or publishes a replacement durable checkpoint before
 that access ends. Scheduler admission, waits, callbacks, reflection
 activation, and claim release occur only after the access region has closed.
 
@@ -1878,7 +1876,8 @@ ordered after those migrations, subject to the W4E reconciliation gate.
 
 **Priority:** blocking before W5.
 
-**Status:** pending.
+**Status:** complete on 2026-09-14. See
+[`ResumableWhnfW4E_2026-09-14.md`](../reviews/ResumableWhnfW4E_2026-09-14.md).
 
 The source-shaped duplicate-symbol executable fixture completed in about 8.1
 to 8.5 seconds at every sampled revision from the pre-W0 baseline through

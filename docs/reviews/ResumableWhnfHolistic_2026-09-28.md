@@ -177,6 +177,155 @@ semantic and aggressive evidence required by HR1-HR8. No full aggressive
 workspace run has yet been performed for this holistic review; the known W8
 result still contains D.2d-D.2g, fixture, schedule, and settlement failures.
 
+## HR1 — Original-intention accounting
+
+HR1 is complete. It found no semantic defect in the resumable WHNF protocol.
+The selected architecture was refined materially, but each refinement preserves
+the original contract: one canonical state replaced isomorphic copies, one
+aggregate managed root replaced fine-grained durable roots, and semantic lazy
+owners now retain their own partial work. WHNFHR-001 repaired two test
+publication gaps before aggressive evidence was accepted. WHNFHR-002 records
+and resolves the stale plan-level status discovered by HR0.
+
+### Evidence legend
+
+The tables split one contract matrix by source section for readability. Every
+row uses the same six columns required by the review plan.
+
+Static evidence abbreviations:
+
+- **S1** — `eval/whnf.rs`: canonical `WhnfState`, role wrappers,
+  continuations, bounded regional driver, `WhnfComputation`, and poll algebra.
+- **S2** — `eval/whnf/managed_state.rs` and `eval/lazy_checkpoint.rs`: aggregate
+  managed state, traced lazy-owned checkpoints, mutex/edge-transition gateway,
+  and specialized source machines.
+- **S3** — `evaluation/access.rs`, `evaluation/whnf.rs`, and
+  `evaluation/session.rs`: higher-ranked regional access, mutator-free poll
+  context, dependency translation, and client-demand facade.
+- **S4** — `evaluation/coordinator/`, `evaluation/pump.rs`, and
+  `eval/value.rs`: result owners, exact producer sharing, cycles, claims,
+  release, and role-specific pumping.
+- **S5** — `reflection/machine.rs`, `eval/net.rs`, `core_net.rs`, and
+  `eval/builtins/net/`: hosted request decoding, callable checkpoints, traced
+  core-net payloads, and pure net construction.
+- **S6** — WHNF/access/owner/raw-value/persistent-edge source inventories. In
+  particular, D.2c is empty and the W7 recursive-call census names no
+  unclassified user-sized production recursion.
+
+Fresh dynamic evidence:
+
+- **T1** — complete focused WHNF filters: 85 ordinary and 86 aggressive tests
+  pass after WHNFHR-001.
+- **T2** — complete W7 filters: 21 ordinary and 21 aggressive tests pass,
+  including the small-stack and budget families.
+- **T3** — all five W7C budget/scheduling tests pass in the current tree.
+- **T4** — every named `scripts/check-interaction-net-profiling.sh` fixture
+  passes in the current tree.
+- **T5** — phase-local forced fixtures named below remain source-owned tests;
+  their current existence is also latched by S6. HR3 and HR4 will inspect
+  semantic and ordering sufficiency rather than merely count them.
+
+### Purpose and selected architecture
+
+| Contract | Current representation/path | Static evidence | Dynamic evidence | Drift | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| Purpose 1: resume after the completed prefix | One canonical focus/frame/followed/source state is retained in `WhnfComputation`, beneath a lazy, or beneath a callable checkpoint. | S1-S5 | T1 plus exact-prefix fixtures in application, builtin, object, access, reflection, and net tests | Refined from an unspecified trampoline into shared canonical state. | Satisfied; HR3 audits each suspension family. |
+| Purpose 2: explicit work budget without semantic Rust-stack depth | `EvaluationStepBudget` is borrowed through regional WHNF and specialized machines; yields retain exact state. | S1, S3, S6 | T2-T3 | Scope grew to list/net/effect work and role-specific requeue. | Satisfied. |
+| Architecture 1: one reusable WHNF submachine | `WhnfComputation` owns `Seed` or one `ManagedWhnfRoot`; `WhnfState` is reused by regional and net wrappers. | S1-S2 | T1 | Aggregate managed state replaced fine-grained rooted fields. | Accepted refinement; stronger ownership boundary. |
+| Architecture 2: pure progress distinct from orchestration | Regional reducers return ready/boundary/failure/yield; dependency translation and scheduling occur after access closes. | S1, S3-S4 | T1, access-scope callback probes | `Continue` became in-place mutation/delegation rather than a public regional variant. | Accepted refinement. |
+| Architecture 3: `LazySource` remains recipe | Source is immutable until cache publication; partial progress is a separate traced checkpoint beneath the lazy. | S2, S4 | lazy route-loss, source-retirement, and cycle fixtures in T1 | Progress moved from machine-local expectation to semantic lazy ownership. | Accepted refinement; matches collection goal. |
+| Architecture 4: root only at real durable boundaries | Regional state uses raw edges under access; ordinary durable work uses one root; lazy/net owners trace their checkpoints. | S1-S3, S6 | aggregate-root counters, cross-thread collection fixtures, T1 | One aggregate cell replaces one root per live field. | Satisfied. |
+| Architecture 5: result destination outside reducer | Client, lazy, promise, spark, reflection, and net owners alone publish or consume terminal results. | S3-S5 | owner-specific completion fixtures in T1/T3 | More explicit outer adapters than initially listed. | Satisfied. |
+| Architecture 6: reflection hosts the submachine | Reflection records retain a `WhnfComputation` and purpose/phase; activation and request dispatch remain reflection-machine work. | S4-S5 | forced request-resumption and once-only activation fixtures | Pure net construction moved out of reflection into its own effect machine; reflection itself remains hosted. | Satisfied; intended scope growth. |
+| Architecture 7: budgeting is contractual | Every poll receives a mutable shared budget; exhaustion yields without fabricating a dependency. | S1, S3-S5 | T2-T3 | Budget vocabulary now covers scheduler, WHNF, and net units separately. | Satisfied. |
+
+### Semantic and safety invariants
+
+| Contract | Current representation/path | Static evidence | Dynamic evidence | Drift | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| I1 exact state after every prefix | Canonical state is mutated in place and retained on pending/yield. | S1-S2 | exact-prefix fixtures, T1 | None semantically. | Satisfied. |
+| I2 same identities and positions on resume | Focus, frame cursor, operands, `followed`, source owner, and promise breadcrumb are fields of the retained state. | S1 | application/access/object/list fixtures | Net/regional wrappers now move the same state zero-walk. | Satisfied. |
+| I3 dependencies are not failures | `WhnfDependency`, deferred requests, and permanent failure remain disjoint poll cases. | S1, S3-S4 | promise/lazy/cycle fixtures | None. | Satisfied. |
+| I4 delegation has no semantic identity | Delegation replaces focus; it creates no value, route, or cache entry. | S1 | 4,096-delegation small-stack fixture and root counters | None. | Satisfied. |
+| I5 immutable source, separate progress | Lazy cell retains immutable source or checkpoint/cache according to phase. | S2, S4 | route-loss/source-retirement fixtures | Checkpoint is now lazy-owned, not merely machine-local. | Satisfied. |
+| I6 only destination owner publishes | Reducer cannot publish arbitrary lazy/task results; outer owner paths are distinct. | S3-S5 | cache/publication/terminal fixtures | None. | Satisfied. |
+| I7 no access/raw edge survives region without owner | Higher-ranked access cannot escape; durable state is rooted or traced. | S1-S3, S6 | T1 aggressive, cross-worker checkpoint tests | Current raw-value facade remains a parent-plan violation outside D.2c. | Satisfied for D.2c/WHNF; HR2 scopes the larger claim. |
+| I8 exact durable ownership | Seed root, managed root, lazy edge, core-net trace, or coordinator-owned rooted machine covers every boundary. | S1-S6 | T1 aggressive and owner inventories | Specialized lazy checkpoints broadened the owner set explicitly. | Satisfied for inventoried WHNF owners. |
+| I9 no ordinary-delegation overhead | Focus replacement stays regional; no root/admission/semantic allocation is performed. | S1 | W6G/W7 counters and T2 | One initial seed promotion remains intentional. | Satisfied. |
+| I10 no waits/callbacks/coordinator work under access | Poll context opens bounded access only around callback-free work; boundary handling follows closure. | S3-S5 | callback lock/access probes and T1 | Cursor contention remains separate. | Satisfied. |
+| I11 canonical sharing | Lazy producer, promise follower, and exact route all converge on canonical producer/checkpoint state. | S2, S4 | multi-observer/route-loss fixtures | Exact-route zipper is optimization only. | Satisfied. |
+| I12 lazy cache rejects deferred shell | Lazy cache stores `EvaluatedValue`; promises may retain raw deferred assignment which WHNF follows. | S4 | forwarding/promise fixtures including repaired WHNFHR-001 | None. | Satisfied. |
+| I13 cycle policy remains coordinator-owned | `followed` supplies local shell evidence; coordinator graph poisons pure lazy cycles and leaves promise-inclusive cycles retryable. | S1, S4 | pure/mixed cycle fixtures | Scheduler graph became more exact, not duplicated. | Satisfied. |
+| I14 reflection activation once-only | Reservation/permit/activation live in coordinator records, not checkpoint replay. | S4-S5 | forced reflection activation/request counters | Reflection checkpoint remains outside value graph. | Satisfied. |
+| I15 failure-context order | Continuation/specialized machines retain pending context and append at the same semantic boundary. | S1, specialized machines | assertion/provenance/context suspension fixtures | None. | Satisfied; HR3 rechecks equality oracles. |
+| I16 raw net already WHNF | Reducer returns `Value::Net`; explicit net sources/calls own net work. | S1, S5 | raw-net and callable-checkpoint fixtures, T4 | None. | Satisfied. |
+| I17 cursor wait is narrow exception | Net access holds only the proven bracketed same-net contention claim; it does not authorize general waits. | S5 | forced cursor contention tests | Future concurrent GC interaction remains documented. | Satisfied for current STW design. |
+| I18 user-sized semantic recursion closed or named | W7 source/call-graph inventory names the bounded exceptions and rejects regressions. | S6 | T2 small-stack families | Balanced persistent-container recursion remains justified bounded work. | Satisfied. |
+| I19 deterministic budget yield | Shared mutable budget records spend; yield preserves checkpoint and carries no dependency. | S1, S3-S5 | T2-T3 | More budget types were retained where units differ. | Satisfied. |
+| I20 forced concurrency evidence | Ordering claims use barriers, channels, probes, and collector tests; stress repetition is not cited as proof. | S4-S6 | completion/subscription/release/route fixtures | W9 added exact guarded probes. | Satisfied as an evidence policy; HR4 audits each claim. |
+
+### Non-goals and review triggers
+
+| Contract | Current representation/path | Static evidence | Dynamic evidence | Drift | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| Non-goal: replace reflection effect machine or semantics | Reflection retains `.alt`, `.cut`, transaction, task, and effect continuation ownership. | S5 | reflection regression suite | Pure net construction moved to a dedicated machine without replacing reflection. | Preserved. |
+| Non-goal: expose progress as Glam/public API | All progress wrappers and constructors are crate-private except the opaque trait-required net payload type. | S1-S2 | source inventory | A future resumable public `Evaluation` is a separate plan. | Preserved. |
+| Non-goal: mutable/observable `LazySource` | Partial work is in managed checkpoint variants, not source mutation or reflection. | S2, S4 | lazy source/checkpoint fixtures | None. | Preserved. |
+| Non-goal: infer freshness from refcounts | Ownership uses explicit roots/access and coordinator records. | S1-S6 | aggressive tests | None. | Preserved. |
+| Non-goal: semantic lazy/promise as control state | Managed checkpoint cells are internal traced structures, not semantic values. | S1-S2 | owner inventories | None. | Preserved. |
+| Non-goal: introduce root frame/moving/concurrent GC/new barrier | Current work uses existing STW roots and edge-transition gateway. | S2 | T1 aggressive | Managed-cell mutex creates a future concurrent-GC review point, already outside this plan. | Preserved. |
+| Non-goal: premature frame/JIT tuning | State uses ordinary vectors/boxes and measured route optimization only. | S1-S5 | W9 Callgrind record | Exact-route/hasher work was evidence-driven. | Preserved. |
+| Non-goal: control unrelated parser/renderer recursion | W7 census is scoped to semantic WHNF. | S6 | T2 | None. | Preserved. |
+| Non-goal: replace net worklists with evaluator stack | Net driver and pure-construction machines retain topology/program worklists; only callable WHNF uses canonical evaluator state. | S5 | callable/netlist fixtures, T4 | Pure net construction replaced a reflection-hosted implementation with a dedicated worklist. | Preserved. |
+| Trigger: repeated source-specific child protocols | Shared continuation/specialized-machine protocol was adopted. | S1-S2 | T1 | Trigger fired and was resolved during W3-W6. | Resolved. |
+| Trigger: general stack roots every step | Aggregate regional/durable split avoids it. | S1-S3 | root counters, T2 | Trigger informed W6G.3. | Resolved. |
+| Trigger: active state cloned for `.alt` | Branching stays in reflection/list-effect machines; active WHNF state is moved/owned. | S1, S5 | effect fixtures | None. | Did not fire. |
+| Trigger: lazy progress outside lazy owner | Partial lazy work moved beneath lazy; coordinator stores only route/scheduling state. | S2, S4 | cycle/reclamation tests | Trigger fired during W6G.1 design and was resolved. | Resolved. |
+| Trigger: opaque production semantic callback can suspend | `SemanticComputation`/`SemanticThunk` are test-only; production host/reflection boundaries are explicit machines. | S2, S5-S6 | callback fixtures | Test callbacks remain constrained fixture seams. | Resolved. |
+| Trigger: wait/callback retains access | Higher-ranked access and explicit boundary polls forbid it. | S3-S6 | access/callback probes | Cursor wait remains separately proved. | Did not fire in current code. |
+| Trigger: root registration scales with depth | One aggregate root covers arbitrary frame depth. | S1-S2 | W6G root counters, T2 | Trigger motivated W6G.3. | Resolved. |
+| Trigger: source fixture exceeds work budget | Replay was classified and repaired; W9 then reduced rediscovery without altering semantics. | S4-S5 | exact source counters and T4 | Performance work grew substantially. | Resolved. |
+| Trigger: W9 needs unsafe global-generation proof | Exact guarded route plus authoritative fallback was retained. | S4 | forced route matrix, T4 | Poll-local generations are hints, not authority. | Did not fire. |
+| Trigger: unrelated balanced structures required for stack closure | W7 documented logarithmic/persistent-container bounds instead. | S6 | T2 | None. | Did not fire. |
+
+### Verification matrix and completion criteria
+
+| Contract | Current representation/path | Static evidence | Dynamic evidence | Drift | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| V1 reflection replay | Hosted request WHNF retains application result and purpose. | S4-S5 | forced one-dispatch/same-lazy fixtures | None. | Satisfied. |
+| V2 lazy ownership | Lazy cell traces partial checkpoint; route is scheduling-only. | S2, S4, S6 | reachable/unreachable cycle and route-loss fixtures; T1 aggressive | None. | Satisfied. |
+| V3 promise following | Promise roots/followers distinguish assignment, producer, abandonment, and cycle roles. | S1, S4 | promise matrix plus T1/T2 | Scope broadened to cross-session ownership. | Satisfied. |
+| V4 exact resumption | Canonical cursors/frames survive boundary and yield. | S1-S2 | no-replay counters across machine families | None. | Satisfied; HR3 performs family accounting. |
+| V5 delegation | Focus replacement stays in one regional state. | S1 | 4,096-depth fixture and no-root counter | None. | Satisfied. |
+| V6 budget yield | Mutable budget yields/requeues same record without subscription. | S1, S3-S5 | T2-T3 | None. | Satisfied. |
+| V7 failure contexts | Failure frames are retained by continuations/machines. | S1 and specialized machines | paired uninterrupted/suspended oracles | None. | Satisfied. |
+| V8 callbacks | External/host/reflection boundaries publish checkpoint before invocation. | S2-S5 | exactly-once and lock-free callback probes | None. | Satisfied. |
+| V9 GC safety | All durable WHNF state is rooted or traced. | S1-S2, S6 | T1 aggressive after WHNFHR-001 | Fixture gap repaired. | Satisfied for WHNF partition. |
+| V10 work sharing | Canonical lazy/checkpoint and exact producer route are shared. | S2, S4 | two-observer/contested-producer fixtures | None. | Satisfied. |
+| V11 cycle behavior | Pure lazy and promise-inclusive cases take distinct coordinator paths. | S4 | forced cycle tests | None. | Satisfied. |
+| V12 effects | Effect state remains specialized and owns branch/transaction semantics. | S5 | `.alt`/`.cut`/retry/reset/shift/task/exit fixtures | Pure net construction became explicit rather than reflection-driven. | Satisfied. |
+| V13 nets | Raw net is WHNF; callable/pure-construction checkpoints are topology/owner traced. | S1-S2, S5 | NC and PNC suites, T4 | Callable checkpoint added as necessary topology. | Satisfied. |
+| V14 stack control | User-sized semantic paths are iterative. | S1, S6 | T2 | None. | Satisfied. |
+| V15 bounded whole-program work | Source fixture has deterministic semantic/reduction/driver signature. | S4-S5 | W4E/W6G/W9 counters, T4 | Exact-route performance repair followed semantic closure. | Satisfied. |
+| V16 exact-route accounting | Zipper is caller-local hint with guarded validation and full fallback. | S4 | forced release/poll matrix, T4 | Added after initial plan scope. | Satisfied. |
+| V17 parked-thread precision | Waiter classes and notifications are explicit; useless wakes measured. | S4 | forced admission/completion/shutdown tests and W9 profiles | One shared condition variable retained by measured decision. | Satisfied. |
+| V18 closure | Source inventories reject unclassified recursive/suspendable entry. | S6 | inventory suite and T2 | D.2d-D.2g remain outside the zero D.2c partition. | Satisfied for focused scope. |
+| C1 every suspension/yield retains exact state | Canonical managed/lazy/net state. | S1-S2 | V1-V6 evidence | None. | Satisfied. |
+| C2 reflection consumes same intermediate lazy | Hosted reflection WHNF purpose. | S4-S5 | V1 | None. | Satisfied. |
+| C3 iterative budgeted driver covers semantic depth | Regional driver plus specialized machines and W7 closure. | S1-S6 | T2-T3 | None. | Satisfied. |
+| C4 no managed authority crosses boundary | Higher-ranked access and rooted/traced handoffs. | S2-S3, S6 | T1 aggressive, callback probes | Parent raw-value violations remain outside D.2c. | Satisfied for WHNF scope. |
+| C5 uninterrupted delegation has no per-step roots | Direct focus replacement. | S1 | delegation/root counters | One initial root is intentional. | Satisfied. |
+| C6 only outer owners publish | Distinct client/lazy/promise/reflection/spark/net paths. | S3-S5 | owner fixtures | None. | Satisfied. |
+| C7 retryable halt callers are stateful or bounded | W7 disposition and call-graph gates classify every current caller. | S6 | T2 | Test-only compatibility facade remains parent-owned, not a new recursive evaluator. | Satisfied. |
+| C8 deterministic suspension/cycle/callback/collection/small-stack tests | Focused ordinary/aggressive and forced suites. | S6 | T1-T4 | WHNFHR-001 repaired fixture publication first. | Satisfied. |
+| C9 source assembly has bounded no-replay evidence | Exact source fixture and static profile counters. | S4-S5 | T4 and W9 record | None. | Satisfied. |
+| C10 final review accounts for drift | This HR0-HR8 review is the owner. | This document | Pending later review checkpoints | The implementation is done but holistic review is not. | In progress; blocks declaring the focused plan wholly closed. |
+| C11 W9 resolves or measures route fallback | W9 exact guarded route implementation and review. | S4 | T4 and W9 Callgrind/counters | Precise path implemented; authoritative fallback retained. | Satisfied. |
+
+HR1 therefore closes every implementation contract except completion criterion
+10, which is intentionally this review. It does not infer Gate G3 closure from
+the focused results.
+
 ## Preliminary reconciliation questions
 
 These are questions for the later passes, not findings yet:
@@ -203,7 +352,7 @@ These are questions for the later passes, not findings yet:
 
 ## Findings
 
-### WHNFHR-001 — Open: two WHNF fixtures publish unrooted managed identities
+### WHNFHR-001 — Resolved: two WHNF fixtures published unrooted managed identities
 
 **Severity:** medium verification-boundary defect; no current evidence of a
 production WHNF ownership defect.
@@ -246,6 +395,25 @@ This is a deliberate early pull-forward of two narrow GCI11R-002E fixtures,
 not closure of that parent checkpoint. The general test-fixture inventory and
 migration remain in 002E.
 
-The confirmed stale status/count statements above remain evidence until their
-underlying completion and ownership claims are audited; they are not yet
-assigned severity or resolution.
+**Resolution:** WHNFHR-001A now constructs the forwarding function and all
+three lazy cells inside one access region, publishes one outer runtime root,
+and evaluates that root. WHNFHR-001B now retains the existing rooted promise
+and lazy fixture owners while testing route abandonment and checkpoint
+resumption. Both tests pass individually in ordinary and aggressive modes;
+the complete focused filters pass 85 ordinary and 86 aggressive tests.
+
+### WHNFHR-002 — Resolved: the focused plan status predated W9 closure
+
+**Severity:** low documentation drift.
+
+The file-level status still described W9C.1-E as planned even though the W9
+section, dated review, current code, and profiling suite all record W9 as
+complete. The W4E section likewise retained its original `pending` label below
+a W4 review paragraph which records its later completion. HR1 also found one
+duplicated sentence in the original architecture prose. The status now records
+W0-W9 as implemented, W4E points to its dated closing review, and the plan
+identifies this holistic review as the one remaining completion-criterion-10
+obligation; the duplicate was removed. No semantic statement changed.
+
+The stale parent-plan inventory counts above remain evidence until HR6-HR7
+audit their ownership claims; they are not yet assigned severity or resolution.
