@@ -131,38 +131,25 @@ impl CoordinatorMutationCounts {
     }
 }
 
-/// Release dispositions attached to attributed exact-route poll windows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ExactRouteDispositionCounts {
-    pub runnable: u64,
-    pub busy: u64,
-    pub blocked_with_producer: u64,
-    pub blocked_without_producer: u64,
-    pub parked: u64,
-    pub terminal: u64,
-}
-
-/// Fixed-cost W9 exact-route reconciliation and moved-window attribution.
-///
-/// `mutation_set_histogram` is materialized only when a snapshot is requested.
-/// Each key is a bitset in the declaration order of
-/// [`CoordinatorMutationCounts`]; the runtime retains only aggregate counters,
-/// never an event history or work identity.
+/// Fixed-cost W9 exact-route reconciliation accounting.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExactRouteMutationProfileSnapshot {
+    pub complete_searches: u64,
+    pub records_visited: u64,
+    pub maximum_depth: u64,
+    pub fast_handoffs: u64,
+    pub cold_fallbacks: u64,
+    pub missing_release_fallbacks: u64,
+    pub current_work_mismatch_fallbacks: u64,
+    pub guarded_release_mutation_fallbacks: u64,
+    pub changed_dependency_fallbacks: u64,
+    pub retired_work_fallbacks: u64,
+    pub branched_work_fallbacks: u64,
     pub moved_poll_windows: u64,
     pub o1_accepted_releases: u64,
     pub hazard_validations: u64,
     pub successful_hazard_validations: u64,
     pub failed_hazard_validations: u64,
-    pub mutation_occurrences: CoordinatorMutationCounts,
-    pub synchronous_mutation_occurrences: CoordinatorMutationCounts,
-    pub external_mutation_occurrences: CoordinatorMutationCounts,
-    pub windows_containing: CoordinatorMutationCounts,
-    pub mutation_set_histogram: Vec<(u32, u64)>,
-    pub total_route_depth: u64,
-    pub maximum_route_depth: u64,
-    pub dispositions: ExactRouteDispositionCounts,
 }
 
 /// Calls made through the coordinator's shared work condition variable.

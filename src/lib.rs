@@ -34,8 +34,8 @@ pub use api::{
 pub use api::{
     CoordinatorMutationCounts, CoordinatorNotificationCallCounts,
     CoordinatorNotificationProfileSnapshot, CoordinatorWaiterOutcomeCounts,
-    ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
-    NetDriverCounts, NetReductionCounts,
+    ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot, NetDriverCounts,
+    NetReductionCounts,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

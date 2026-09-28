@@ -8636,7 +8636,7 @@ or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 
-**Status:** W9A-B and W9C complete on 2026-09-28; W9D-E planned. This
+**Status:** complete on 2026-09-28. This
 phase owns W6G4R-003 in full. It is a measured post-W6G performance repair,
 not unfinished W6G semantics.
 
@@ -9279,11 +9279,12 @@ Completion record: the obsolete poll-generation fallback class was removed;
 broad scheduler movement is no longer an invalidation reason. Coordinator and
 route comments now distinguish scheduler readiness from hazard validation,
 and the public static profile calls the historical samples "moved poll
-windows" rather than invalidated windows. The factual publisher census,
-poll-origin counters, per-kind window attribution, and notification counters
-remain temporarily because W9E explicitly requires the same before/after
-measurement. They retain bounded aggregate counts only and are to be disposed
-after W9E rather than being mistaken for semantic history.
+windows" rather than invalidated windows. The factual publisher census and
+stable notification/route counters remain as cheap statically compiled
+profiling guards. Poll-origin scopes, per-kind window snapshots,
+route-depth/disposition attribution, and their public snapshot fields were
+removed after W9E used them. Those decision-only counters were never semantic
+history.
 
 ##### W9D.4 — Apply the bounded notification disposition
 
@@ -9312,7 +9313,7 @@ existing mixed worker/client admission, exact completion, and four-class
 shutdown fixtures continue to cover the retained broadcasts. No channel split
 was introduced.
 
-#### W9E — Measurement, verification, and disposition
+#### W9E — Measurement, verification, and disposition — Complete (2026-09-28)
 
 Re-run the source-shaped duplicate-symbol fixture with the same static route
 profile, Callgrind method, native debug/release timing, and exact
@@ -9347,6 +9348,41 @@ their measured mutation kinds must map to O(1) acceptance, slow validation, or
 a concrete invalidation reason. Close W9 with a dated review which accounts
 for any drift introduced by W7-W8 and updates the W6G.4 review with the final
 disposition.
+
+Completion record: the exact source fixture now performs 28,855 fast handoffs,
+18 complete searches visiting 18 records, and zero cold fallbacks. All 9,356
+formerly invalidated moved poll windows are neutral scheduler movement and are
+accepted in O(1); the fixture needs no hazard validation. Forced latched tests
+separately prove successful validation of an unchanged route after hazard
+movement and concrete invalidation after ancestor cancellation, retirement,
+observation wake, dependency replacement, guarded-release interference, and
+the other named route hazards.
+
+The bounded notification disposition reduces source-fixture broadcasts from
+88,579 to 58,798, a reduction of 29,781 (33.62%). The reduction is exactly the
+16 demand-session registrations, 45 task-promise admissions, and 29,720 work
+claims which cannot satisfy a parked predicate in this fixture; the retained
+publication classes are unchanged. The zero-worker source fixture parks no
+host waiter, so forced mixed-class and suppressed-publication fixtures remain
+the correctness evidence rather than timing or repetition.
+
+Callgrind measured 2,562,993,262 instructions against the 3,339,481,894
+W6G4R-002 baseline: 776,488,632 fewer instructions, or 23.25%. Three native
+debug runs measured 12.93–12.98 seconds and three release runs measured
+0.93–0.94 seconds, corroborating but not proving the deterministic count. The
+interaction-net reduction and driver signatures are bit-for-bit unchanged,
+as is the structured duplicate-symbol diagnostic with assembly-result,
+definition, and binary-extraction contexts. Retained route representation is
+unchanged except for one private `u64` hazard observation; its prior maximum
+depth of roughly 573 therefore remains roughly 42 KiB at the pathological
+peak.
+
+The repair is retained. Decision-only poll-attribution scaffolding was removed
+after measurement; stable exact-route and notification counters remain behind
+`interaction-net-profiling`. The dated
+[`ResumableWhnfW9_2026-09-28.md`](../reviews/ResumableWhnfW9_2026-09-28.md)
+review records the method, forced verification, drift accounting, and final
+disposition. W6G4R-003 is resolved rather than merely transferred.
 
 ## Verification Matrix
 

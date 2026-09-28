@@ -6363,18 +6363,6 @@ fn exact_route_accepts_poll_owned_admission_without_route_validation() {
     assert_eq!(mutation_profile.moved_poll_windows, 1);
     assert_eq!(mutation_profile.o1_accepted_releases, 2);
     assert_eq!(mutation_profile.hazard_validations, 0);
-    assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
-    assert_eq!(
-        mutation_profile.synchronous_mutation_occurrences, mutation_profile.mutation_occurrences,
-        "both admission publications must be attributed to the claimed poll"
-    );
-    assert_eq!(mutation_profile.external_mutation_occurrences.total(), 0);
-    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
-    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
-    assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
-    assert_eq!(mutation_profile.total_route_depth, 1);
-    assert_eq!(mutation_profile.maximum_route_depth, 1);
-    assert_eq!(mutation_profile.dispositions.runnable, 1);
 }
 
 #[test]
@@ -6428,15 +6416,6 @@ fn exact_route_accepts_latched_unrelated_neutral_poll_mutation() {
         .exact_route_mutation_profile();
     assert_eq!(mutation_profile.moved_poll_windows, 1);
     assert_eq!(mutation_profile.o1_accepted_releases, 2);
-    assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
-    assert_eq!(
-        mutation_profile.external_mutation_occurrences, mutation_profile.mutation_occurrences,
-        "the latched admission must be attributed outside the claimed poll"
-    );
-    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
-    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
-    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
-    assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
 }
 
 #[test]
@@ -6493,7 +6472,7 @@ fn exact_route_validates_frames_after_an_unrelated_hazard() {
 }
 
 #[test]
-fn exact_route_attributes_mixed_poll_owned_and_external_mutations_once() {
+fn exact_route_accepts_mixed_poll_owned_and_external_neutral_mutations() {
     let fixture = SameRuntimeFixture::new();
     let source = fixture.context();
     let poll_owned_target = fixture.context();
@@ -6539,25 +6518,12 @@ fn exact_route_attributes_mixed_poll_owned_and_external_mutations_once() {
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
     assert_eq!(mutation_profile.moved_poll_windows, 1);
-    assert_eq!(mutation_profile.mutation_occurrences.total(), 4);
-    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 2);
-    assert_eq!(mutation_profile.external_mutation_occurrences.total(), 2);
-    assert_eq!(
-        mutation_profile.mutation_occurrences.fresh_work_admission,
-        2
-    );
-    assert_eq!(mutation_profile.mutation_occurrences.work_activation, 2);
-    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
-    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
-    assert_eq!(
-        mutation_profile.mutation_set_histogram,
-        [(12, 1)],
-        "one mixed window must remain one histogram observation"
-    );
+    assert_eq!(mutation_profile.o1_accepted_releases, 2);
+    assert_eq!(mutation_profile.hazard_validations, 0);
 }
 
 #[test]
-fn exact_route_attributes_latched_ancestor_cancellation_and_retirement() {
+fn exact_route_rejects_latched_ancestor_cancellation_and_retirement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let (started_sender, started_receiver) = mpsc::channel();
@@ -6610,26 +6576,12 @@ fn exact_route_attributes_latched_ancestor_cancellation_and_retirement() {
     assert_eq!(mutation_profile.hazard_validations, 1);
     assert_eq!(mutation_profile.successful_hazard_validations, 0);
     assert_eq!(mutation_profile.failed_hazard_validations, 1);
-    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
-    assert_eq!(mutation_profile.windows_containing.cancellation, 1);
-    assert_eq!(mutation_profile.windows_containing.work_retirement, 1);
-    assert_eq!(
-        mutation_profile.external_mutation_occurrences.cancellation,
-        1
-    );
-    assert_eq!(
-        mutation_profile
-            .external_mutation_occurrences
-            .work_retirement,
-        1
-    );
-    assert_eq!(mutation_profile.total_route_depth, 2);
 
     assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
 }
 
 #[test]
-fn exact_route_attributes_latched_observation_wake_of_an_ancestor() {
+fn exact_route_rejects_latched_observation_wake_of_an_ancestor() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let observed = context.current_observation_epoch();
@@ -6687,16 +6639,6 @@ fn exact_route_attributes_latched_observation_wake_of_an_ancestor() {
     assert_eq!(mutation_profile.hazard_validations, 1);
     assert_eq!(mutation_profile.successful_hazard_validations, 0);
     assert_eq!(mutation_profile.failed_hazard_validations, 1);
-    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
-    assert_eq!(mutation_profile.mutation_occurrences.total(), 1);
-    assert_eq!(mutation_profile.windows_containing.observation_wake, 1);
-    assert_eq!(
-        mutation_profile
-            .external_mutation_occurrences
-            .observation_wake,
-        1
-    );
-    assert_eq!(mutation_profile.total_route_depth, 2);
 
     assert_eq!(parent.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);

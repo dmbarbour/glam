@@ -15,8 +15,8 @@ mod value;
 pub use crate::interaction_net::profiling::{
     CoordinatorMutationCounts, CoordinatorNotificationCallCounts,
     CoordinatorNotificationProfileSnapshot, CoordinatorWaiterOutcomeCounts,
-    ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
-    NetDriverCounts, NetReductionCounts,
+    ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot, NetDriverCounts,
+    NetReductionCounts,
 };
 pub(crate) use assembly::CompilationExecution;
 pub use assembly::{

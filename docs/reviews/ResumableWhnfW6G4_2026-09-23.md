@@ -8,9 +8,9 @@ Status: closed on 2026-09-23. W6G4R-001A-G and W6G4R-002 are complete.
 Foreground exact demand retains a local validated route across common work
 transitions; the complete guarded traversal remains the authoritative cold
 and invalidation fallback. A narrowly scoped deterministic hasher removes
-another measured portion of the residual. W6G4R-003's investigation,
-implementation gate, and verification are transferred explicitly to Phase W9
-of the resumable-WHNF plan rather than remaining an open review obligation.
+another measured portion of the residual. W6G4R-003 was subsequently resolved
+by Phase W9 on 2026-09-28; its final disposition is recorded below and in the
+dated W9 review.
 
 ## Scope
 
@@ -703,7 +703,7 @@ still the higher-value remaining route-accounting question.
 
 **Severity:** medium performance
 
-**Resolution:** transferred to planned Phase W9 on 2026-09-23
+**Resolution:** resolved by Phase W9 on 2026-09-28
 
 All 9,356 route invalidations are currently classified as `Contention`; every
 other fallback reason is zero. The fixture requests zero evaluator workers,
@@ -723,11 +723,15 @@ local accounting boundary.
 
 Phase W9 in
 [`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
-now owns the complete follow-up: classification-only instrumentation, the
-forced ordering matrix, an explicit reconciliation design gate, implementation
-of the selected proof boundary, before/after measurement, and removal of
-temporary accounting. The review is therefore closed by concrete plan
-ownership, not by treating the observed over-invalidation as fixed.
+implemented the complete follow-up. On the same exact fixture it converts all
+9,356 moved poll windows to O(1) acceptance, performs 18 complete searches
+visiting 18 records, and records zero cold fallbacks. Callgrind falls from
+3,339,481,894 to 2,562,993,262 instructions (-23.25%) while the interaction-net
+reduction/driver signature and structured diagnostic remain bit-for-bit
+unchanged. Forced hazard orderings cover the guarded slow validation and
+concrete invalidation paths which the source fixture does not exercise. See
+[`ResumableWhnfW9_2026-09-28.md`](ResumableWhnfW9_2026-09-28.md) for the full
+measurement and verification record.
 
 ## Verification required by the repair
 
