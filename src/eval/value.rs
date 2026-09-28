@@ -262,7 +262,9 @@ impl LazyTaskMachine {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -274,7 +276,8 @@ impl LazyTaskMachine {
     ) -> EvaluationMachinePoll {
         self.complete(
             context,
-            EvaluatedValue::try_from(context.project_root(value))
+            context
+                .project_root(value, |_, value| EvaluatedValue::try_from(value))
                 .expect("WHNF owner completion must eliminate the outer deferred variant"),
         )
     }
@@ -282,7 +285,9 @@ impl LazyTaskMachine {
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
         match result.expect("a released lazy source must have a terminal cache") {
-            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -1010,7 +1015,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             {
                 return match result {
                     Ok(value) => {
-                        EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
+                        EvaluationMachinePoll::Complete(
+                            context.root_value(|_| value.into_value()),
+                        )
                     }
                     Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
                 };
@@ -1400,7 +1407,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             };
                             // Test callbacks run outside managed access. Retain their result
                             // only across the handoff, not in a durable producer route.
-                            let result = context.root_value(value);
+                            let result = context.root_value(|_| value);
                             let installed = context.with_value_access(|access| {
                                 let focus = access.clone_root(&result);
                                 let work = super::whnf::RegionalWhnfWork::from_focus(&access, focus);
@@ -1487,7 +1494,9 @@ impl LazyTaskMachine {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
+            Ok(value) => {
+                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
+            }
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }

@@ -133,6 +133,10 @@ impl<'scope> EvaluationValueAccess<'scope> {
     pub(crate) fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
         root.clone_core_with(&self.values)
     }
+
+    pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
+        self.values.root_runtime_value(value)
+    }
 }
 
 impl EvaluatorStepContext<'_> {
@@ -152,10 +156,14 @@ impl EvaluatorStepContext<'_> {
     /// Compatibility root publication for a currently bare evaluator result.
     /// I4F.2 replaces the wrapper with a collector root without changing this
     /// step-owned boundary.
-    pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
-        self.context
-            .values()
-            .construct_runtime_value_root(|_| value)
+    pub(crate) fn root_value(
+        &self,
+        construct: impl for<'scope> FnOnce(&EvaluationValueAccess<'scope>) -> Value,
+    ) -> RuntimeValueRoot {
+        self.with_value_access(|access| {
+            let value = construct(&access);
+            access.root_value(value)
+        })
     }
 
     /// Compatibility failure publication for one bounded evaluator result.
@@ -199,24 +207,6 @@ impl EvaluatorStepContext<'_> {
         value
     }
 
-    pub(crate) fn construct_lazy_value(
-        &self,
-        construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Value,
-    ) -> Value {
-        let (value, root) = self.with_value_access(|access| {
-            let value = construct(access.values());
-            let root = match &value {
-                Value::Lazy(lazy) => lazy.root_in(access.values()),
-                _ => panic!("an evaluator lazy-value constructor must return a lazy value"),
-            };
-            (value, root)
-        });
-        self.pending_managed_publications
-            .borrow_mut()
-            .push(PendingManagedPublication::Lazy(root));
-        value
-    }
-
     #[cfg(test)]
     pub(crate) fn construct_core_net(
         &self,
@@ -241,13 +231,20 @@ impl EvaluatorStepContext<'_> {
     /// Wait and task observers outside evaluation retain the root. The bare
     /// semantic value exists only inside this explicitly bounded managed
     /// access region.
-    pub(crate) fn project_root(&self, root: &RuntimeValueRoot) -> Value {
+    pub(crate) fn project_root<R>(
+        &self,
+        root: &RuntimeValueRoot,
+        operation: impl for<'scope> FnOnce(&EvaluationValueAccess<'scope>, Value) -> R,
+    ) -> R {
         assert_eq!(
             root.runtime_id(),
             self.context.values().runtime_id(),
             "wait completion and evaluator context must share one value domain"
         );
-        self.with_value_access(|access| access.clone_root(root))
+        self.with_value_access(|access| {
+            let value = access.clone_root(root);
+            operation(&access, value)
+        })
     }
 
     pub(crate) fn defer_reflection_activation(&self, task: ReflectionTaskReservation) {
@@ -519,11 +516,13 @@ mod tests {
                 "no fresh evaluator result may die before its containing owner is published"
             );
 
-            evaluator.root_value(Value::List(crate::core::List::from_values(vec![
-                Value::Lazy(lazy),
-                Value::Promised(promise),
-                Value::Net(crate::core::NetValue::new(net)),
-            ])))
+            evaluator.root_value(|_| {
+                Value::List(crate::core::List::from_values(vec![
+                    Value::Lazy(lazy),
+                    Value::Promised(promise),
+                    Value::Net(crate::core::NetValue::new(net)),
+                ]))
+            })
         });
 
         let retained = values

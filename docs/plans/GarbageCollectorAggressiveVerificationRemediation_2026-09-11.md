@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2c complete; GCI11R-002D.2d-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2d complete; GCI11R-002D.2e-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -1708,8 +1708,11 @@ and the inventories hand only D.2d-D.2g dependencies forward.
 
 ##### GCI11R-002D.2d — Evaluation Orchestration and Runtime Records
 
-The current executable inventory assigns exactly 11 violations to this phase.
-Migrate them in the following low-risk checkpoints:
+The executable inventory originally assigned exactly 11 violations to this
+phase. Ten have now migrated to access-qualified or rooted orchestration; the
+one deliberately retained compatibility bridge remains assigned here until
+D.2e and D.2g retire its production callers. The migration used the following
+low-risk checkpoints:
 
 1. **D.2d.0 — exact manifest and bridge topology.** **Complete
    (2026-09-28, holistic review HR6).** Freeze the eleven
@@ -1728,18 +1731,22 @@ Migrate them in the following low-risk checkpoints:
    `ReflectionTaskLauncher::build` and `EvalContext::reserve_reflection_task`.
    Their effects cross admission as roots or exact traced owners; no mutator
    spans task construction or host integration.
-4. **D.2d.3 — bounded evaluation projections.** Migrate
+4. **D.2d.3 — bounded evaluation projections.** **Complete (2026-09-28).** Migrate
    `EvaluatorStepContext::{project_root,root_value}` and
    `EvalContext::{clone_root,compose_builtin,evaluate_builtin_whnf}`. Prefer
    the root already held by orchestration and one callback-free access island;
-   do not project and re-register an equivalent value.
-5. **D.2d.4 — compatibility-bridge handoff.** Keep
+   do not project and re-register an equivalent value. `clone_root` and the
+   obsolete lazy-construction helper were removed; construction and projection
+   callbacks now consume their raw values inside the caller's one bounded
+   access island, and evaluated builtins return the already-owned result root.
+5. **D.2d.4 — compatibility-bridge handoff.** **Complete (2026-09-28).** Keep
    `evaluate_compatibility_whnf` as one exact, source-latched violation while
    D.2e and D.2g still have production callers. Those phases replace their
    calls with rooted input and access-scoped result consumption. D.2h then
    removes the production facade or narrows it to explicit test support before
    requiring zero production violations. D.2d must not duplicate that
-   orchestration separately in each caller family.
+   orchestration separately in each caller family. The active source latch now
+   accepts exactly this declaration and rejects any second D.2d violation.
 
 Audit task, client-demand, spark, wait, failure, event/output,
 interaction-net, and yielded/blocked machine records while migrating these
@@ -1753,6 +1760,23 @@ D.2e/D.2g retire its production callers, and aggressive tests which force
 collection on both sides of every repaired handoff. Resolve every D.2b.2e
 entry assigned to D.2d; orchestration which already owns a root must transport
 it rather than project and register a replacement.
+
+Completion record: the raw-value inventory now assigns one violation to D.2d,
+the intentional facade above, versus eleven at entry. Its repository totals
+are 581 raw operations, 308 access-qualified regional operations, and 233
+remaining violations. The ordinary exact inventory, 172 reflection-machine
+tests, and 48 diagnostic tests pass. Aggressive verification passes the
+production reflection-launcher, type-erased effect-task, and diagnostic
+partitions. Running the entire reflection-machine fixture module aggressively
+also exposed deterministic test-only constructors which retain raw values
+across their first verified access; those witnesses belong to
+GCI11R-002E's fixture migration rather than reopening this production
+orchestration phase. The first complete ordinary gate also exposed a regional
+key conversion being polled again after terminal completion under forced
+compiler-cache concurrency. A deterministic terminal-replay regression now
+latches that mismatch, and the regional conversion caches and replays its
+terminal key just as its managed wrapper already did. The complete ordinary
+workspace gate passes after the repair.
 
 ##### GCI11R-002D.2e — Built-in Front End and Compiler Values
 
@@ -1772,7 +1796,7 @@ and macro boundaries.
 
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
-Migrate the 25 reflection violations in the current executable inventory.
+Migrate the 19 reflection violations in the current executable inventory.
 Reflection-machine decoding and pure
 semantic substeps may use bounded access, while transaction state, query
 responses, blocked branches, task effects, and store journals retain roots or

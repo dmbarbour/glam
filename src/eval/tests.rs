@@ -6420,10 +6420,12 @@ fn run_metadata_transform(
 ) -> Result<Vec<Value>, EvaluationHalt> {
     let annotation =
         Value::Dict(Dict::new_sync().insert(Key::atom_from_text(annotation_name), function));
-    let result = context.evaluate_builtin_whnf(
-        Builtin::Anno,
-        vec![annotation, Value::List(List::from_values(carriers))],
-    )?;
+    let result = context.evaluate_builtin_whnf(Builtin::Anno, |_| {
+        vec![annotation, Value::List(List::from_values(carriers))]
+    })?;
+    let result = context
+        .values()
+        .with_runtime_value_access(|access| result.clone_core_with(&access));
     let Value::List(result) = result else {
         panic!("metadata update should return a list");
     };
@@ -8035,7 +8037,10 @@ fn evaluate_strategy(
     first: Value,
     target: Value,
 ) -> Result<Value, EvaluationHalt> {
-    context.evaluate_builtin_whnf(builtin, vec![first, target])
+    let value = context.evaluate_builtin_whnf(builtin, |_| vec![first, target])?;
+    Ok(context
+        .values()
+        .with_runtime_value_access(|access| value.clone_core_with(&access)))
 }
 
 #[test]

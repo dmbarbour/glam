@@ -342,10 +342,11 @@ pub(crate) fn apply_updates(
     updates: Value,
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, vec![updates]);
-    let extension_defs =
-        values.with_runtime_value_access(|access| extension_defs.clone_core_with(&access));
-    context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, vec![message, extension_defs])
+    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, |_| vec![updates]);
+    let result = context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, |access| {
+        vec![message, extension_defs.clone_core_with(access)]
+    })?;
+    Ok(values.with_runtime_value_access(|access| result.clone_core_with(&access)))
 }
 
 /// Turns a diagnostic emission into an object when needed, then applies an
@@ -455,7 +456,8 @@ fn diagnostic_object(
     let message = if has_defined_spec {
         message
     } else {
-        context.evaluate_builtin_whnf(Builtin::ObjectFromDict, vec![message])?
+        let message = context.evaluate_builtin_whnf(Builtin::ObjectFromDict, |_| vec![message])?;
+        values.with_runtime_value_access(|access| message.clone_core_with(&access))
     };
     Ok(message)
 }

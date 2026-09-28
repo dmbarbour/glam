@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{
-    Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot, Value,
+    Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
+    RuntimeValueAccess, Value,
 };
 #[cfg(test)]
 use crate::core::{LazyValue, PromisedValue};
@@ -740,23 +741,6 @@ impl EvalContext {
         &self.session.values
     }
 
-    /// Projects one compatibility root for a callback which must run after
-    /// managed access has ended.
-    #[allow(
-        dead_code,
-        reason = "D.2d.3 removes this superseded compatibility projection"
-    )]
-    fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
-        self.values().with_runtime_value_access(|access| {
-            assert_eq!(
-                root.runtime_id(),
-                self.values().runtime_id(),
-                "runtime root and evaluation context must share one value domain"
-            );
-            root.clone_core_with(&access)
-        })
-    }
-
     fn coordinator_for_admission(&self) -> Result<Arc<EvaluationWorkCoordinator>, Arc<str>> {
         if self.session.is_closed() {
             return Err(Arc::from("evaluation demand session is closed"));
@@ -936,7 +920,9 @@ impl EvalContext {
             .construct_runtime_value_root(|access| access.duplicate_value(value));
         let value = self.evaluate_root_whnf(input)?;
         let poll = EvaluationPollContext::for_context(self);
-        Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
+        Ok(poll.evaluate(self, |evaluator| {
+            evaluator.project_root(&value, |_, value| value)
+        }))
     }
 
     /// Runs one explicitly bounded evaluator quantum for a regional test.
@@ -985,9 +971,10 @@ impl EvalContext {
     pub(crate) fn compose_builtin(
         &self,
         builtin: Builtin,
-        arguments: Vec<Value>,
+        arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
     ) -> RuntimeValueRoot {
         self.values().construct_runtime_value_root(|access| {
+            let arguments = arguments(access);
             Value::builtin_call_in(access, builtin, arguments)
         })
     }
@@ -997,17 +984,14 @@ impl EvalContext {
     pub(crate) fn evaluate_builtin_whnf(
         &self,
         builtin: Builtin,
-        arguments: Vec<Value>,
-    ) -> Result<Value, crate::core::EvaluationHalt> {
+        arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
         let value = self.compose_builtin(builtin, arguments);
         let handle = self
             .demand_whnf(value)
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         match self.drive_client_demand(handle)? {
-            ClientDemandResult::Complete(value) => {
-                let poll = EvaluationPollContext::for_context(self);
-                Ok(poll.evaluate(self, |evaluator| evaluator.project_root(&value)))
-            }
+            ClientDemandResult::Complete(value) => Ok(value),
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),

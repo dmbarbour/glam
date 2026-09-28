@@ -169,10 +169,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/access.rs",
         0,
-        2,
-        0,
+        1,
+        1,
         "poll/evaluator-step completion rooting and scoped projection",
-        "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch"
+        "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch; GCI11R-002D.2d.3 access-qualified result publication"
     ),
     entry!(
         "src/evaluation/coordinator/spark.rs",
@@ -185,10 +185,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/coordinator/task.rs",
         0,
-        1,
         0,
+        1,
         "promise terminal projection into one durable wait result",
-        "GCI11R-002D.2b.2 scoped task-promise terminal publication"
+        "GCI11R-002D.2d.1 caller-access-qualified task-promise terminal publication"
     ),
     entry!(
         "src/evaluation/pump.rs",
@@ -201,10 +201,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/session.rs",
         1,
-        3,
+        2,
         0,
         "session demand, effect entry, and patient completion; reflection completion activation now roots through explicit access publication",
-        "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes"
+        "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes; GCI11R-002D.2d.2 rooted reflection admission"
     ),
     entry!(
         "src/evaluation/whnf.rs",
@@ -249,10 +249,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/machine.rs",
         0,
-        9,
+        10,
         2,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
-        "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement"
+        "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement; GCI11R-002D.2d.2 rooted effect-task construction"
     ),
     entry!(
         "src/reflection/protocol.rs",
@@ -261,6 +261,14 @@ const INVENTORY: &[InventoryEntry] = &[
         0,
         "reflection protocol structured-failure fixtures",
         "GCI11R-002D.2b.2 scoped halt payload construction"
+    ),
+    entry!(
+        "src/reflection/requests.rs",
+        0,
+        2,
+        0,
+        "task-new request effects rooted before reflection-task admission",
+        "GCI11R-002D.2d.2 rooted reflection-task admission"
     ),
     entry!(
         "src/reflection/store.rs",
@@ -378,16 +386,7 @@ impl RootPublicationOccurrence {
             );
         };
 
-        let disposition = if self.declaration == "src/reflection/machine.rs::impl Branch < S >::new"
-            && self.ordinal == 1
-        {
-            // The effect arrives from reflection activation as a registered
-            // root today, but the launcher interface projects it to a raw
-            // value before Branch registers a replacement. D.2f owns the
-            // rooted transport cutover. The second occurrence is the freshly
-            // constructed initial state and remains a regional publication.
-            RootPublicationDisposition::RootedTransportMigration
-        } else {
+        let disposition = {
             match self.declaration.as_str() {
                 "src/core.rs::impl CoreValueFactory::construct_runtime_value_root"
                 | "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root" => {
@@ -397,10 +396,10 @@ impl RootPublicationOccurrence {
                 | "src/evaluation/coordinator/task.rs::promise_assignment_terminal"
                 | "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf"
                 | "src/evaluation/session.rs::impl EvalContext::reserve_reflection_activation"
-                | "src/evaluation/session.rs::impl EvalContext::reserve_reflection_task"
-                | "src/reflection/machine.rs::impl Branch < S >::set_state"
                 | "src/reflection/machine.rs::impl Branch < S >::root_value"
-                | "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new" => {
+                | "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new"
+                | "src/reflection/machine.rs::impl EffectTask < S >::new_in_context_with_capabilities"
+                | "src/reflection/requests.rs::create_task" => {
                     RootPublicationDisposition::RootedTransportMigration
                 }
                 "src/api/assembly.rs::impl Assembler::load_local_binary"
@@ -429,13 +428,14 @@ impl RootPublicationOccurrence {
                 | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::regional_status_poll"
-                | "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value"
+                | "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value"
                 | "src/evaluation/pump.rs::poison_lazy_cycle"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
                 | "src/g_syntax.rs::impl Diagnostic::with_emission"
                 | "src/g_syntax/compiler_values.rs::root_value"
                 | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration"
                 | "src/reflection/machine.rs::impl Branch < S >::new"
+                | "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities"
                 | "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation"
                 | "src/reflection/machine.rs::impl EffectTask < S >::interpret_decoded_drive"
                 | "src/reflection/machine.rs::impl EffectTask < S >::store_path_step"
@@ -741,9 +741,9 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/whnf/tests/w6g3e.rs::managed_checkpoint_resumes_on_another_worker_after_collection#1|surface=scoped-factory|scope=test",
     "src/eval/whnf/tests/w6g3e.rs::one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition#1|surface=scoped-factory|scope=test",
     "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
-    "src/evaluation/access.rs::impl EvaluatorStepContext < '_ >::root_value#1|surface=scoped-factory|scope=production",
+    "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value#1|surface=access-publication|scope=production",
     "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=test",
-    "src/evaluation/coordinator/task.rs::promise_assignment_terminal#1|surface=scoped-factory|scope=production",
+    "src/evaluation/coordinator/task.rs::promise_assignment_terminal#1|surface=access-publication|scope=production",
     "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#1|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#2|surface=compatibility-new|scope=test",
     "src/evaluation/coordinator/tests.rs::deferred_insertion_is_immediately_dormant_and_promotable#1|surface=compatibility-new|scope=test",
@@ -761,11 +761,11 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
     "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
     "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=production",
-    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_task#1|surface=scoped-factory|scope=production",
     "src/evaluation/tests.rs::abandoning_one_client_demand_preserves_another_exact_consumer#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::all_poll_routes_use_scheduler_context#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::bounded_background_pump_excludes_foreground_clients_and_sparks#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::cancelled_effect_child_never_publishes_a_launch_parent#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::client_demand_can_follow_a_lazy_producer_owned_by_another_session#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::client_demand_completes_whnf_into_its_result_cell#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::client_demand_exactly_restarts_after_promise_assignment#1|surface=compatibility-new|scope=test",
@@ -780,6 +780,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#4|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::client_failure_root_survives_work_and_owner_session_retirement#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::client_lazy_root#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::direct_effect_child_launch_publishes_causal_parent_only_on_commit#1|surface=scoped-factory|scope=test",
+    "src/evaluation/tests.rs::direct_effect_child_launch_publishes_causal_parent_only_on_commit#2|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::exit_readiness_snapshot_root_survives_after_settlement_report_drop#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::exit_wait_does_not_publish_task_status_or_failure#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::forced_deadlock_settlement_preserves_exits_and_kills_other_participants#1|surface=compatibility-new|scope=test",
@@ -790,6 +792,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::parked_client_is_external_activity_while_task_deadlocks_remain_typed#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#2|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",
@@ -800,6 +803,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::rooted_promise_value#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=access-publication|scope=test",
     "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
+    "src/evaluation/tests.rs::scheduled_effect_children_keep_causal_parent_without_implicit_join#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::terminal_wait_dispositions_retain_only_their_documented_runtime_roots#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests/w7c.rs::assigned_promise_chain_root#1|surface=compatibility-new|scope=test",
@@ -819,12 +823,13 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/tests.rs::reflection_test_module#1|surface=scoped-factory|scope=test",
     "src/reflection/machine.rs::alternative_returns_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=production",
-    "src/reflection/machine.rs::impl Branch < S >::new#2|surface=access-publication|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=test",
+    "src/reflection/machine.rs::impl Branch < S >::new#2|surface=access-publication|scope=test",
     "src/reflection/machine.rs::impl Branch < S >::root_value#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl Branch < S >::set_state#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::new_in_context_with_capabilities#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::lazy_value_path_root#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",
@@ -836,6 +841,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#2|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#3|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_the_promise#1|surface=scoped-factory|scope=test",
+    "src/reflection/machine/tests.rs::evaluation_session_pumps_a_type_erased_effect_task#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
     "src/reflection/machine/tests.rs::fixpoint_frames_retain_the_shared_function_root_until_retirement#1|surface=compatibility-new|scope=test",
     "src/reflection/machine/tests.rs::fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked#1|surface=scoped-factory|scope=test",
@@ -844,6 +850,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#2|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#3|surface=scoped-factory|scope=test",
+    "src/reflection/machine/tests.rs::reflection_task_launcher_requires_unit_when_requested#1|surface=scoped-factory|scope=test",
+    "src/reflection/machine/tests.rs::reflection_task_launcher_returns_arbitrary_effect_result_when_requested#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::request_decode_resumes_the_exact_lazy_list_chunk_without_replay#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::request_decode_resumes_the_exact_lazy_payload_without_replay#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::reset_stack_decoder_checks_every_fixed_frame_arity#1|surface=scoped-factory|scope=test",
@@ -860,6 +868,8 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#4|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::resume_request_decodes_lazy_ids_once_in_source_order#1|surface=scoped-factory|scope=test",
     "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect#1|surface=scoped-factory|scope=production",
+    "src/reflection/requests.rs::create_task#1|surface=scoped-factory|scope=production",
+    "src/reflection/requests.rs::create_task#2|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::apply_edit#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::apply_value_at_path#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation#1|surface=scoped-factory|scope=production",

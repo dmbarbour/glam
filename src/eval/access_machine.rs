@@ -105,6 +105,7 @@ pub(in crate::eval) struct RegionalKeyConversion {
     focus: Option<RegionalKeyConversionState>,
     parents: Vec<RegionalKeyConversionParent>,
     source_owner: Option<LazyId>,
+    terminal: Option<Option<Key>>,
 }
 
 enum RegionalKeyConversionState {
@@ -582,6 +583,7 @@ impl RegionalKeyConversion {
             ))),
             parents: Vec::new(),
             source_owner,
+            terminal: None,
         }
     }
 
@@ -590,6 +592,7 @@ impl RegionalKeyConversion {
             focus: Some(RegionalKeyConversionState::List(Box::new(state))),
             parents: Vec::new(),
             source_owner,
+            terminal: None,
         }
     }
 
@@ -614,10 +617,13 @@ impl RegionalKeyConversion {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalConversionPoll<Option<Key>> {
+        if let Some(result) = &self.terminal {
+            return RegionalConversionPoll::Ready(result.clone());
+        }
         let focus = self
             .focus
             .take()
-            .expect("key conversion cannot be polled after terminal completion");
+            .expect("nonterminal key conversion must retain a focus");
         match focus {
             RegionalKeyConversionState::Demand(mut computation) => {
                 let value = match poll_regional_whnf(&mut computation, access, step_budget) {
@@ -782,9 +788,11 @@ impl RegionalKeyConversion {
     fn finish(&mut self, result: Option<Key>) -> RegionalConversionPoll<Option<Key>> {
         let Some(key) = result else {
             self.parents.clear();
+            self.terminal = Some(None);
             return RegionalConversionPoll::Ready(None);
         };
         let Some(parent) = self.parents.pop() else {
+            self.terminal = Some(Some(key.clone()));
             return RegionalConversionPoll::Ready(Some(key));
         };
         match parent {
@@ -1190,6 +1198,34 @@ mod tests {
                 ),
                 "a second observer must replay the cached terminal conversion"
             );
+        });
+    }
+
+    #[test]
+    fn regional_key_conversion_replays_its_terminal_result() {
+        let context = context();
+        let poll = EvaluationPollContext::for_context(&context);
+        poll.with_value_access(&context, |access| {
+            let expected = Key::binary_from_text("shared");
+            let mut conversion =
+                RegionalKeyConversion::new(&access, Value::binary_from_text("shared"), None);
+            let first = loop {
+                match conversion.poll_optional_in(&access, &mut EvaluationStepBudget::new(8)) {
+                    RegionalConversionPoll::Ready(key) => break key,
+                    RegionalConversionPoll::Yielded => {}
+                    RegionalConversionPoll::Boundary(_) => {
+                        panic!("strict regional key conversion must not reach a boundary")
+                    }
+                    RegionalConversionPoll::Failed(failure) => {
+                        panic!("strict regional key conversion failed: {failure:?}")
+                    }
+                }
+            };
+            assert_eq!(first, Some(expected.clone()));
+            assert!(matches!(
+                conversion.poll_optional_in(&access, &mut EvaluationStepBudget::new(1)),
+                RegionalConversionPoll::Ready(Some(key)) if key == expected
+            ));
         });
     }
 

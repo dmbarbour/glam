@@ -24,8 +24,8 @@ use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationWaitPoll, EvaluatorStepContext, ExactDemandRoute, ExitIntent,
-    WhnfOwnerPoll, WorkDependency, poll_whnf_computation,
+    EvaluationTaskMachine, EvaluationValueAccess, EvaluationWaitPoll, EvaluatorStepContext,
+    ExactDemandRoute, ExitIntent, WhnfOwnerPoll, WorkDependency, poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -1105,14 +1105,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             ScalarDemandPurpose::RequireUnit => {
                 let checked = context.evaluate(&self.eval_context, |evaluator| {
-                    let value = evaluator.project_root(&value);
-                    if value != self.eval_context.values().unit() {
-                        return Err(TaskHalt::new(format!(
-                            "effect task returned {}; expected unit",
-                            value.diagnostic_kind_name()
-                        )));
-                    }
-                    Ok(())
+                    evaluator.project_root(&value, |_, value| {
+                        if value != self.eval_context.values().unit() {
+                            return Err(TaskHalt::new(format!(
+                                "effect task returned {}; expected unit",
+                                value.diagnostic_kind_name()
+                            )));
+                        }
+                        Ok(())
+                    })
                 });
                 if let Err(error) = checked {
                     return ScalarDemandStep::Failed(
@@ -1134,13 +1135,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             ScalarDemandPurpose::RestoreScopedValue { scoped_value } => {
                 let checked = context.evaluate(&self.eval_context, |evaluator| {
-                    let value = evaluator.project_root(&value);
-                    if value != self.eval_context.values().unit() {
-                        return Err(TaskHalt::new(format!(
-                            "scoped effect close must return unit, got {value:?}"
-                        )));
-                    }
-                    Ok(())
+                    evaluator.project_root(&value, |_, value| {
+                        if value != self.eval_context.values().unit() {
+                            return Err(TaskHalt::new(format!(
+                                "scoped effect close must return unit, got {value:?}"
+                            )));
+                        }
+                        Ok(())
+                    })
                 });
                 if let Err(error) = checked {
                     return ScalarDemandStep::Failed(
@@ -1257,15 +1259,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 order,
                             });
                             let state = context.evaluate(&self.eval_context, |evaluator| {
-                                let state = evaluator.project_root(&branch.state);
-                                encode_reset_frames_in_state(
-                                    evaluator,
-                                    state,
-                                    &self.tags.continuation_state,
-                                    &frames,
-                                )
+                                evaluator.project_root(&branch.state, |access, state| {
+                                    encode_reset_frames_in_state(
+                                        access,
+                                        state,
+                                        &self.tags.continuation_state,
+                                        &frames,
+                                    )
+                                })
                             });
-                            branch.set_state(self.eval_context.values(), state);
+                            branch.state = state;
                             branch.set_effect_root(operation);
                             ControlStep::Complete(MachineWork::Drive {
                                 branch,
@@ -1305,15 +1308,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                     }
                                 };
                             let state = context.evaluate(&self.eval_context, |evaluator| {
-                                let state = evaluator.project_root(&branch.state);
-                                encode_reset_frames_in_state(
-                                    evaluator,
-                                    state,
-                                    &self.tags.continuation_state,
-                                    &frames,
-                                )
+                                evaluator.project_root(&branch.state, |access, state| {
+                                    encode_reset_frames_in_state(
+                                        access,
+                                        state,
+                                        &self.tags.continuation_state,
+                                        &frames,
+                                    )
+                                })
                             });
-                            branch.set_state(self.eval_context.values(), state);
+                            branch.state = state;
                             branch
                                 .control
                                 .sequence
@@ -1422,16 +1426,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         order: resume_order,
                     });
                     let state = context.evaluate(&self.eval_context, |evaluator| {
-                        let state = evaluator.project_root(&branch.state);
-                        encode_reset_frames_in_state(
-                            evaluator,
-                            state,
-                            &self.tags.continuation_state,
-                            &frames,
-                        )
+                        evaluator.project_root(&branch.state, |access, state| {
+                            encode_reset_frames_in_state(
+                                access,
+                                state,
+                                &self.tags.continuation_state,
+                                &frames,
+                            )
+                        })
                     });
                     self.next_control_order = next_order;
-                    branch.set_state(self.eval_context.values(), state);
+                    branch.state = state;
                     branch.control.delimiters.extend(delimiters);
                     branch.control.sequence = captured.sequence;
                     ControlStep::Complete(MachineWork::deliver_root(
@@ -1485,13 +1490,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     } = decoded;
                     let mut branch = controlling.branch;
                     let state = context.evaluate(&self.eval_context, |evaluator| {
-                        let state = evaluator.project_root(&branch.state);
-                        encode_reset_frames_in_state(
-                            evaluator,
-                            state,
-                            &self.tags.continuation_state,
-                            &[],
-                        )
+                        evaluator.project_root(&branch.state, |access, state| {
+                            encode_reset_frames_in_state(
+                                access,
+                                state,
+                                &self.tags.continuation_state,
+                                &[],
+                            )
+                        })
                     });
                     let order = match self.allocate_control_order() {
                         Ok(order) => order,
@@ -1517,7 +1523,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let marker = branch
                         .root_value(self.eval_context.values(), Value::Promised(handle.clone()));
                     let outer_control = std::mem::take(&mut branch.control);
-                    branch.set_state(self.eval_context.values(), state);
+                    branch.state = state;
                     let handle = self
                         .eval_context
                         .values()
@@ -1594,15 +1600,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         if reset_order > delimiter_order {
                             let frame = resets.pop().expect("reset order came from a frame");
                             let state = context.evaluate(&self.eval_context, |evaluator| {
-                                let state = evaluator.project_root(&branch.state);
-                                encode_reset_frames_in_state(
-                                    evaluator,
-                                    state,
-                                    &self.tags.continuation_state,
-                                    &resets,
-                                )
+                                evaluator.project_root(&branch.state, |access, state| {
+                                    encode_reset_frames_in_state(
+                                        access,
+                                        state,
+                                        &self.tags.continuation_state,
+                                        &resets,
+                                    )
+                                })
                             });
-                            branch.set_state(self.eval_context.values(), state);
+                            branch.state = state;
                             return ControlStep::Complete(MachineWork::apply_roots(
                                 frame.continuation,
                                 vec![value],
@@ -1667,15 +1674,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ResetStackPoll::Ready(decoded) => {
                     let mut branch = controlling.branch;
                     let state = context.evaluate(&self.eval_context, |evaluator| {
-                        let Value::Dict(state) = evaluator.project_root(&branch.state) else {
-                            return Err(TaskHalt::new(
-                                "reflection user state must be a dictionary",
-                            ));
-                        };
-                        Ok(evaluator.root_value(Value::Dict(state.insert(
-                            self.tags.continuation_state.clone(),
-                            evaluator.project_root(&decoded.serialized),
-                        ))))
+                        evaluator.with_value_access(|access| {
+                            let Value::Dict(state) = access.clone_root(&branch.state) else {
+                                return Err(TaskHalt::new(
+                                    "reflection user state must be a dictionary",
+                                ));
+                            };
+                            let serialized = access.clone_root(&decoded.serialized);
+                            Ok(access.root_value(Value::Dict(
+                                state.insert(self.tags.continuation_state.clone(), serialized),
+                            )))
+                        })
                     });
                     let state = match state {
                         Ok(state) => state,
@@ -1810,7 +1819,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             {
                 WhnfOwnerPoll::Ready(base) => {
                     let is_dict = context.evaluate(&self.eval_context, |evaluator| {
-                        matches!(evaluator.project_root(&base), Value::Dict(_))
+                        evaluator.project_root(&base, |_, base| matches!(base, Value::Dict(_)))
                     });
                     if !is_dict {
                         return StatePathStep::Failed(
@@ -1828,21 +1837,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         ));
                     }
                     let update = context.evaluate(&self.eval_context, |evaluator| {
-                        let path = Value::List(List::from_values(
-                            path.iter()
-                                .map(|key| key.to_value_with(self.eval_context.values()))
-                                .collect(),
-                        ));
-                        let value = evaluator.project_root(value);
-                        let base = evaluator.project_root(&base);
-                        let update = evaluator.construct_lazy_value(|access| {
-                            Value::builtin_call_in(
-                                access,
+                        evaluator.with_value_access(|access| {
+                            let path = Value::List(List::from_values(
+                                path.iter()
+                                    .map(|key| key.to_value_with(self.eval_context.values()))
+                                    .collect(),
+                            ));
+                            let value = access.clone_root(value);
+                            let base = access.clone_root(&base);
+                            let update = Value::builtin_call_in(
+                                access.values(),
                                 Builtin::DictUpdate,
                                 vec![path, value, base],
-                            )
-                        });
-                        evaluator.root_value(update)
+                            );
+                            access.root_value(update)
+                        })
                     });
                     pathing.operation =
                         StatePathOperation::SetUpdate(WhnfComputation::from_root(update));
@@ -2109,17 +2118,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match purpose {
             EffectDecodePurpose::EffectObject => {
                 let function = context.evaluate(&self.eval_context, |evaluator| {
-                    let effect = evaluator.project_root(&value);
-                    let Value::Dict(effect) = effect else {
-                        return Err(TaskHalt::new(format!(
-                            "reflection task requires an effect object, got {effect:?}"
-                        )));
-                    };
-                    effect
-                        .get(&*keys::EFF)
-                        .cloned()
-                        .map(|function| evaluator.root_value(function))
-                        .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))
+                    evaluator.project_root(&value, |access, effect| {
+                        let Value::Dict(effect) = effect else {
+                            return Err(TaskHalt::new(format!(
+                                "reflection task requires an effect object, got {effect:?}"
+                            )));
+                        };
+                        effect
+                            .get(&*keys::EFF)
+                            .cloned()
+                            .map(|function| access.root_value(function))
+                            .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))
+                    })
                 });
                 match function {
                     Ok(function) => EffectDecodeStep::Continue(EffectDecodeWork::from_root(
@@ -2626,16 +2636,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ))),
                 Continuation::AssertUnit(diagnostic_context) => {
                     let assertion = context.evaluate(&self.eval_context, |evaluator| {
-                        let diagnostic_context = evaluator.project_root(&diagnostic_context);
-                        let value = evaluator.project_root(&value);
-                        let assertion = evaluator.construct_lazy_value(|access| {
-                            Value::builtin_call_in(
-                                access,
+                        evaluator.with_value_access(|access| {
+                            let diagnostic_context = access.clone_root(&diagnostic_context);
+                            let value = access.clone_root(&value);
+                            let assertion = Value::builtin_call_in(
+                                access.values(),
                                 Builtin::AssertUnit,
                                 vec![diagnostic_context, value, self.eval_context.values().unit()],
-                            )
-                        });
-                        evaluator.root_value(assertion)
+                            );
+                            access.root_value(assertion)
+                        })
                     });
                     Ok(MachineStep::Demand(ScalarDemandWork::new(
                         assertion,
@@ -2656,15 +2666,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     if active.next_choice != active.choices.len() {
                         return Err(TaskHalt::new("reflection fixpoint choice replay diverged"));
                     }
-                    let assignment = context.evaluate(&self.eval_context, |evaluator| {
-                        evaluator.project_root(&value)
+                    let published = context.evaluate(&self.eval_context, |evaluator| {
+                        evaluator.with_value_access(|access| {
+                            let assignment = access.clone_root(&value);
+                            handle.publish(access.values(), Ok(assignment))
+                        })
                     });
-                    let published =
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                handle.publish(&access, Ok(assignment))
-                            });
                     let published = published
                         .map_err(|_| TaskHalt::new("reflection fixpoint initialized twice"))?;
                     published.notify();
@@ -3500,9 +3507,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
         match poll_value_effect_task(&mut self.task, context, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
                 let failure = context.evaluate(&self.task.eval_context, |evaluator| {
-                    error
-                        .as_failure()
-                        .with_context(evaluator.project_root(&self.context))
+                    evaluator.project_root(&self.context, |_, context| {
+                        error.as_failure().with_context(context)
+                    })
                 });
                 EvaluationMachinePoll::Failed(context.root_failure(Arc::new(failure)))
             }
@@ -3580,11 +3587,12 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Complete(value) => {
                 let value = value.into_runtime_root();
                 let (is_unit, kind) = context.evaluate(&self.0.eval_context, |evaluator| {
-                    let value = evaluator.project_root(&value);
-                    (
-                        value == self.0.eval_context.values().unit(),
-                        value.diagnostic_kind_name(),
-                    )
+                    evaluator.project_root(&value, |_, value| {
+                        (
+                            value == self.0.eval_context.values().unit(),
+                            value.diagnostic_kind_name(),
+                        )
+                    })
                 });
                 if is_unit {
                     EvaluationMachinePoll::Complete(value)
@@ -3653,11 +3661,6 @@ impl<S: TaskSpecialization> Branch<S> {
     fn set_effect_root(&mut self, effect: RuntimeValueRoot) {
         debug_assert_eq!(effect.runtime_id(), self.effect.runtime_id());
         self.effect = effect;
-    }
-
-    fn set_state(&mut self, values: &CoreValueFactory, state: Value) {
-        debug_assert_eq!(values.runtime_id(), self.state.runtime_id());
-        self.state = values.construct_runtime_value_root(|_| state);
     }
 
     fn root_value(&self, values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
@@ -4329,15 +4332,16 @@ impl ValuePathMachine {
         };
         let key = &self.path[self.next];
         let selected = poll_context.evaluate(context, |evaluator| {
-            let current = evaluator.project_root(&current);
-            let Value::Dict(dict) = current else {
-                return Err(TaskHalt::new("state path traverses a non-dictionary value"));
-            };
-            Ok(evaluator.root_value(
-                dict.get(key)
-                    .cloned()
-                    .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
-            ))
+            evaluator.project_root(&current, |access, current| {
+                let Value::Dict(dict) = current else {
+                    return Err(TaskHalt::new("state path traverses a non-dictionary value"));
+                };
+                Ok(access.root_value(
+                    dict.get(key)
+                        .cloned()
+                        .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+                ))
+            })
         });
         match selected {
             Ok(selected) => {
@@ -4994,12 +4998,9 @@ impl<R: Clone> RequestDecodeWork<R> {
         match &mut self.state {
             RequestDecodeState::Select(request) => {
                 let selected = poll_context.evaluate(context, |evaluator| {
-                    select_request_from_whnf(
-                        evaluator,
-                        evaluator.project_root(request),
-                        tags,
-                        specialized,
-                    )
+                    evaluator.project_root(request, |access, request| {
+                        select_request_from_whnf(access, request, tags, specialized)
+                    })
                 });
                 match selected {
                     Ok((selection, payload)) => {
@@ -5034,7 +5035,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     }
                 };
                 let is_list = poll_context.evaluate(context, |evaluator| {
-                    matches!(evaluator.project_root(&payload), Value::List(_))
+                    evaluator.project_root(&payload, |_, payload| matches!(payload, Value::List(_)))
                 });
                 if !is_list {
                     return RequestDecodePoll::Failed(TaskHalt::new(
@@ -5177,24 +5178,26 @@ fn poll_request_id(
         }
     };
     poll_context.evaluate(context, |evaluator| {
-        let Value::Number(value) = evaluator.project_root(&value) else {
-            return RequestIdPoll::Failed(TaskHalt::new(format!(
-                "resume request has an invalid {kind} ID"
-            )));
-        };
-        value.to_u64_if_integer().map_or_else(
-            || {
-                RequestIdPoll::Failed(TaskHalt::new(format!(
+        evaluator.project_root(&value, |_, value| {
+            let Value::Number(value) = value else {
+                return RequestIdPoll::Failed(TaskHalt::new(format!(
                     "resume request has an invalid {kind} ID"
-                )))
-            },
-            RequestIdPoll::Ready,
-        )
+                )));
+            };
+            value.to_u64_if_integer().map_or_else(
+                || {
+                    RequestIdPoll::Failed(TaskHalt::new(format!(
+                        "resume request has an invalid {kind} ID"
+                    )))
+                },
+                RequestIdPoll::Ready,
+            )
+        })
     })
 }
 
 fn select_request_from_whnf<R: Clone>(
-    context: &EvaluatorStepContext<'_>,
+    access: &EvaluationValueAccess<'_>,
     value: Value,
     tags: &Tags,
     specialized: &[SpecializedRequest<R>],
@@ -5202,8 +5205,7 @@ fn select_request_from_whnf<R: Clone>(
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
     };
-    let selected =
-        |selection, payload: &Value| Ok((selection, context.root_value(payload.clone())));
+    let selected = |selection, payload: &Value| Ok((selection, access.root_value(payload.clone())));
     macro_rules! select {
         ($tag:expr, $selection:expr) => {
             if let Some(payload) = dict.get($tag) {
@@ -5591,25 +5593,27 @@ fn reset_stack_root_in(
     state: &RuntimeValueRoot,
     continuation_state: &Key,
 ) -> Result<RuntimeValueRoot, TaskHalt> {
-    let Value::Dict(state) = context.project_root(state) else {
-        return Err(TaskHalt::new("reflection user state must be a dictionary"));
-    };
-    Ok(context.root_value(
-        state
-            .get(continuation_state)
-            .cloned()
-            .unwrap_or_else(|| Value::List(List::empty())),
-    ))
+    context.project_root(state, |access, state| {
+        let Value::Dict(state) = state else {
+            return Err(TaskHalt::new("reflection user state must be a dictionary"));
+        };
+        Ok(access.root_value(
+            state
+                .get(continuation_state)
+                .cloned()
+                .unwrap_or_else(|| Value::List(List::empty())),
+        ))
+    })
 }
 
-fn encode_reset_frames(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame]) -> Value {
+fn encode_reset_frames(access: &EvaluationValueAccess<'_>, frames: &[ResetFrame]) -> Value {
     Value::List(List::from_values(
         frames
             .iter()
             .map(|frame| {
                 Value::List(List::from_values(vec![
-                    frame.key.to_value_with(context.context().values()),
-                    context.project_root(&frame.continuation),
+                    frame.key.to_value_with(access.values().values()),
+                    access.clone_root(&frame.continuation),
                     Value::Number(Number::from_usize(frame.scope_depth)),
                     Value::Number(Number::from_usize(frame.order)),
                 ]))
@@ -5619,23 +5623,21 @@ fn encode_reset_frames(context: &EvaluatorStepContext<'_>, frames: &[ResetFrame]
 }
 
 fn encode_reset_frames_in_state(
-    context: &EvaluatorStepContext<'_>,
+    access: &EvaluationValueAccess<'_>,
     state: Value,
     continuation_state: &Key,
     frames: &[ResetFrame],
-) -> Value {
+) -> RuntimeValueRoot {
     let Value::Dict(state) = state else {
-        return context.construct_lazy_value(|access| {
-            Value::Lazy(LazyValue::error_in(
-                access,
-                "reflection user state must remain a dictionary",
-            ))
-        });
+        return access.root_value(Value::Lazy(LazyValue::error_in(
+            access.values(),
+            "reflection user state must remain a dictionary",
+        )));
     };
-    Value::Dict(state.insert(
+    access.root_value(Value::Dict(state.insert(
         continuation_state.clone(),
-        encode_reset_frames(context, frames),
-    ))
+        encode_reset_frames(access, frames),
+    )))
 }
 
 #[cfg(test)]

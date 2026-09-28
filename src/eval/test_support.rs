@@ -28,7 +28,9 @@ impl ResumableTestValueDemand {
             unreachable!("terminal client failure is returned as an evaluation halt")
         };
         let poll = crate::evaluation::EvaluationPollContext::for_context(context);
-        Ok(poll.evaluate(context, |evaluator| evaluator.project_root(&value)))
+        Ok(poll.evaluate(context, |evaluator| {
+            evaluator.project_root(&value, |_, value| value)
+        }))
     }
 }
 

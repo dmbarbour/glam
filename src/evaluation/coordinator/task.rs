@@ -893,7 +893,7 @@ fn promise_assignment_terminal(
     assignment: &PromiseAssignment,
 ) -> EvaluationWaitTerminal {
     assert!(
-        access.admits(&wait.value_observer()),
+        access.admits(wait.value_observer()),
         "promise assignment and terminal wait must share one value domain"
     );
     match assignment {

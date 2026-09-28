@@ -194,13 +194,11 @@ impl AdmissionOccurrence {
                 | "src/api/value.rs::impl Values::clone_runtime_root"
                 | "src/compiler.rs::impl CompileContext::clone_root"
                 | "src/core.rs::impl CoreValueFactory::clone_cached_root"
-                | "src/evaluation/session.rs::impl EvalContext::clone_root"
                 | "src/g_syntax.rs::impl Diagnostic::into_emission"
                 | "src/g_syntax/compiler_values.rs::project_value"
                 | "src/g_syntax/diagnostic_formatter.rs::value"
                 | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::definitions"
-                | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::finish"
-                | "src/reflection/machine.rs::impl Branch < S >::new" => {
+                | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::finish" => {
                     AdmissionDisposition::PendingRootedTransport
                 }
                 _ => AdmissionDisposition::OuterAdmission,
@@ -591,6 +589,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::diagnostic_object#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/eval/application.rs::apply_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/builtins/net/tests/mod.rs::with_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -704,12 +703,13 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/coordinator/task.rs::impl LocalPromiseOwner::fail_all#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/executor.rs::tests::worker_termination_releases_inactive_collector_caches#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/session.rs::impl EvalContext::reserve_reflection_completion_activation#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::evaluate_strategy#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::run_metadata_transform#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::patient_deferred_demand_retries_when_disturbance_races_no_progress::impl CompleteAfterObservation::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::impl AssignPromiseAfterRelease::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -734,9 +734,8 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_template#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/net_lowering.rs::lower_resolved_expr#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/lifecycle.rs::combine_composed_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/machine.rs::impl EffectTask < S >::control_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::deliver_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/machine/tests.rs::reset_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/machine/tests.rs::shift_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -879,7 +878,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // access authority as topology inspection. P2C adds one explicit
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(17, 0)),
-        ("src/diagnostic.rs", GatewayCounts::new(1, 0)),
+        ("src/diagnostic.rs", GatewayCounts::new(2, 0)),
         // W6F.4d.3 gives test application construction the same short,
         // callback-free value region used by production lazy application.
         ("src/eval/application.rs", GatewayCounts::new(1, 0)),
@@ -925,7 +924,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // bounded test region before forcing both session-close orders.
         // WHNFHR-001A publishes the complete forwarding chain through one
         // additional bounded test-only access region.
-        ("src/eval/tests.rs", GatewayCounts::new(18, 0)),
+        ("src/eval/tests.rs", GatewayCounts::new(20, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
         // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a
@@ -978,7 +977,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/evaluation/pump.rs", GatewayCounts::new(1, 0)),
         // GCI5R-003D roots lazy and promise producers before coordinator
         // admission instead of letting either semantic façade reopen access.
-        ("src/evaluation/session.rs", GatewayCounts::new(4, 0)),
+        ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
         // Production-shaped task fixtures retain lazy/promise roots and use
         // explicit matching-domain access rather than facade mutation.
         // D.2b.2's production-shaped promise publishers install assignments
@@ -1013,7 +1012,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // D.2c.1a projects a composed child failure through one short
         // diagnostic region after child settlement has completed.
         ("src/reflection/lifecycle.rs", GatewayCounts::new(1, 0)),
-        ("src/reflection/machine.rs", GatewayCounts::new(3, 0)),
+        ("src/reflection/machine.rs", GatewayCounts::new(2, 0)),
         // W5C.4's control fixtures construct request effects and retain exact
         // reset-stack roots within three bounded test-only regions.
         ("src/reflection/machine/tests.rs", GatewayCounts::new(3, 0)),
@@ -1163,7 +1162,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),
-        11
+        9
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRegionalReuse),

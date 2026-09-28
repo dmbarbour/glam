@@ -1572,7 +1572,10 @@ fn request_decode_resumes_the_exact_lazy_payload_without_replay() {
         panic!("fixture should decode a return request")
     };
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(evaluator.project_root(&value), Value::Number(41.into()));
+        assert_eq!(
+            evaluator.project_root(&value, |_, value| value),
+            Value::Number(41.into())
+        );
     });
     assert_eq!(
         evaluations.load(Ordering::Acquire),
@@ -1607,7 +1610,10 @@ fn request_decode_resumes_the_exact_lazy_list_chunk_without_replay() {
         panic!("fixture should decode a return request")
     };
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(evaluator.project_root(&value), Value::Number(42.into()));
+        assert_eq!(
+            evaluator.project_root(&value, |_, value| value),
+            Value::Number(42.into())
+        );
     });
     assert_eq!(
         evaluations.load(Ordering::Acquire),
@@ -1653,7 +1659,10 @@ fn resume_request_decodes_lazy_ids_once_in_source_order() {
     assert_eq!(task.get(), 7);
     assert_eq!(continuation, 8);
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(evaluator.project_root(&value), Value::Number(99.into()));
+        assert_eq!(
+            evaluator.project_root(&value, |_, value| value),
+            Value::Number(99.into())
+        );
     });
     assert_eq!(task_evaluations.load(Ordering::Acquire), 1);
     assert_eq!(continuation_evaluations.load(Ordering::Acquire), 1);
@@ -1996,8 +2005,8 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     assert_eq!(decoded.serialized.runtime_id(), serialized.runtime_id());
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
         assert_eq!(
-            evaluator.project_root(&decoded.serialized),
-            evaluator.project_root(&serialized)
+            evaluator.project_root(&decoded.serialized, |_, value| value),
+            evaluator.project_root(&serialized, |_, value| value)
         );
     });
     assert_eq!(decoded.frames.len(), 2);
@@ -2009,11 +2018,11 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     assert_eq!(decoded.frames[1].order, 4);
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
         assert_eq!(
-            evaluator.project_root(&decoded.frames[0].continuation),
+            evaluator.project_root(&decoded.frames[0].continuation, |_, value| value),
             Value::Number(11.into())
         );
         assert_eq!(
-            evaluator.project_root(&decoded.frames[1].continuation),
+            evaluator.project_root(&decoded.frames[1].continuation, |_, value| value),
             Value::Number(22.into())
         );
     });
@@ -2457,7 +2466,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
     EvaluationPollContext::for_context(&task.eval_context).evaluate(
         &task.eval_context,
         |evaluator| {
-            let Value::Dict(state) = evaluator.project_root(&branch.state) else {
+            let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
                 panic!("reset branch state must remain a dictionary")
             };
             assert!(state.get(&tags.continuation_state).is_none());
@@ -2932,7 +2941,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     EvaluationPollContext::for_context(&task.eval_context).evaluate(
         &task.eval_context,
         |evaluator| {
-            let Value::Dict(state) = evaluator.project_root(&branch.state) else {
+            let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
                 panic!("restored state must remain a dictionary")
             };
             assert!(matches!(

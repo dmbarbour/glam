@@ -1847,7 +1847,10 @@ mod tests {
                     "src/compiler.rs::CompileContext::new",
                     "src/evaluation/session.rs::EvalContext::compose_builtin",
                     "src/g_syntax/compiler_values.rs::run_pure_match_resolved",
+                    "src/reflection/machine.rs::EffectTask::deliver_step",
+                    "src/reflection/machine.rs::EffectTask::state_path_step",
                     "src/reflection/machine.rs::EffectTask::store_path_step",
+                    "src/reflection/machine.rs::encode_reset_frames_in_state",
                     "src/reflection/machine.rs::lazy_value_path_root",
                     "src/reflection/store.rs::apply_edit",
                 ],
@@ -1855,11 +1858,7 @@ mod tests {
             (
                 RegionalConstructionDisposition::EvaluatorNursery,
                 "the evaluator step acquires an exact family root before the small access region ends",
-                &[
-                    "src/reflection/machine.rs::EffectTask::deliver_step",
-                    "src/reflection/machine.rs::encode_reset_frames_in_state",
-                    "src/reflection/machine.rs::EffectTask::state_path_step",
-                ],
+                &[],
             ),
             (
                 RegionalConstructionDisposition::ExplicitFamilyRoot,

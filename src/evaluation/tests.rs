@@ -2514,7 +2514,7 @@ impl EvaluationTaskMachine for AwaitPromise {
                     observed_epoch: None,
                     error: None,
                 }),
-                Some(Ok(value)) => EvaluationMachinePoll::Complete(context.root_value(value)),
+                Some(Ok(value)) => EvaluationMachinePoll::Complete(context.root_value(|_| value)),
                 Some(Err(error)) => EvaluationMachinePoll::Failed(context.root_failure(error)),
             }
         })
@@ -3453,7 +3453,7 @@ fn wait_completion_projection_requires_scoped_access() {
     let poll = EvaluationPollContext::for_context(&context);
     let evaluator = poll.evaluator(&context);
     assert_eq!(
-        evaluator.project_root(&root),
+        evaluator.project_root(&root, |_, value| value),
         crate::core::keys::unit_value()
     );
     context

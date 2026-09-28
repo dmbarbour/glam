@@ -1297,7 +1297,7 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 const EXPECTED_OCCURRENCES: usize = 139;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 8_820_319_160_638_934_767;
+const EXPECTED_FINGERPRINT: u64 = 10_646_175_208_961_668_511;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::RetryableWait, 4),
     (Signal::UnassignedPromise, 1),
@@ -1318,7 +1318,7 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::OrchestrationHandoff, 43),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 10_818_898_040_122_239_742;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 17_951_364_132_856_715_980;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
     (W7Disposition::ExplicitIteration, 91),
     (W7Disposition::Orchestration, 48),
@@ -1330,8 +1330,8 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // explicit. Those non-recursive status probes add one resolved orchestration
 // edge after the existing wait boundary; the cyclic-function ledger below
 // remains empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_141;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_379_121_006_608_945_673;
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_139;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 3_510_536_925_544_053_384;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

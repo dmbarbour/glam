@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        885,
+        884,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -964,7 +964,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // keeping the complete forwarding chain under one published outer root.
     assert_eq!(
         occurrence_fingerprint(actual),
-        10_946_289_399_681_311_400,
+        7_633_687_913_568_420_939,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1009,7 +1009,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 200),
+            ((SourceScope::Production, EdgeSurface::Typed), 199),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
             ((SourceScope::Test, EdgeSurface::Typed), 635),
             ((SourceScope::Test, EdgeSurface::Erased), 14),

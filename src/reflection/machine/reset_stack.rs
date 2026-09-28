@@ -104,7 +104,8 @@ impl ResetStackMachine {
                 match poll_whnf_computation(&mut demand, poll_context, context, step_budget) {
                     WhnfOwnerPoll::Ready(stack) => {
                         let is_list = poll_context.evaluate(context, |evaluator| {
-                            matches!(evaluator.project_root(&stack), Value::List(_))
+                            evaluator
+                                .project_root(&stack, |_, stack| matches!(stack, Value::List(_)))
                         });
                         if !is_list {
                             self.state = ResetStackState::StackWhnf(demand);
@@ -221,7 +222,8 @@ impl ResetFrameMachine {
                 match poll_whnf_computation(&mut demand, poll_context, context, step_budget) {
                     WhnfOwnerPoll::Ready(frame) => {
                         let is_list = poll_context.evaluate(context, |evaluator| {
-                            matches!(evaluator.project_root(&frame), Value::List(_))
+                            evaluator
+                                .project_root(&frame, |_, frame| matches!(frame, Value::List(_)))
                         });
                         if !is_list {
                             self.state = ResetFrameState::FrameWhnf(demand);
@@ -477,19 +479,21 @@ fn poll_usize(
         }
     };
     poll_context.evaluate(context, |evaluator| {
-        let Value::Number(number) = evaluator.project_root(&value) else {
-            return UsizePoll::Failed(TaskHalt::new(format!(
-                "reflection continuation frame has an invalid {field}"
-            )));
-        };
-        number.to_usize_if_integer().map_or_else(
-            || {
-                UsizePoll::Failed(TaskHalt::new(format!(
+        evaluator.project_root(&value, |_, value| {
+            let Value::Number(number) = value else {
+                return UsizePoll::Failed(TaskHalt::new(format!(
                     "reflection continuation frame has an invalid {field}"
-                )))
-            },
-            UsizePoll::Ready,
-        )
+                )));
+            };
+            number.to_usize_if_integer().map_or_else(
+                || {
+                    UsizePoll::Failed(TaskHalt::new(format!(
+                        "reflection continuation frame has an invalid {field}"
+                    )))
+                },
+                UsizePoll::Ready,
+            )
+        })
     })
 }
 
