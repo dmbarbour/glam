@@ -8636,7 +8636,7 @@ or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 
-**Status:** W9A-B and W9C.0 complete on 2026-09-28; W9C.1-E planned. This
+**Status:** W9A-B and W9C.0-C.3 complete on 2026-09-28; W9C.4-E planned. This
 phase owns W6G4R-003 in full. It is a measured post-W6G performance repair,
 not unfinished W6G semantics.
 
@@ -8911,7 +8911,7 @@ is blocked with a producer. Route depth totals 1,409,621 and peaks at 572.
 The temporary process-output probe used to take this snapshot was removed;
 the static profiling snapshot and forced unit assertions remain.
 
-##### W9C.2 — Forced relevance and workload attribution
+##### W9C.2 — Forced relevance and workload attribution — Complete (2026-09-28)
 
 Extend the W9B fixtures so the factual mutation kinds most likely to occur in
 a poll window have one forced representative. At minimum distinguish:
@@ -8937,7 +8937,27 @@ possible ancestor hazards, or mixtures. Do not select the production fast
 path from the zero-worker assumption: logger/reflection concurrency remains
 possible, and the forced external-interference cases are authoritative.
 
-##### W9C.3 — Select the validation boundary
+Completion record: the forced matrix now distinguishes factual kind, origin,
+and route position rather than treating generation movement as one event:
+
+| Required case | Forced evidence and current disposition |
+| --- | --- |
+| poll-owned fresh causal admission | `exact_route_classifies_poll_owned_admission_as_generation_movement`; synchronous fresh admission and activation, conservative fallback |
+| poll-owned route-independent publication | the same fixture's activation publication; it is separately counted despite sharing the admission call |
+| unrelated claim/admission | `exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement`; identical factual kinds are wholly external |
+| overlapping poll-owned and external movement | `exact_route_attributes_mixed_poll_owned_and_external_mutations_once`; one histogram window contains two synchronous and two external occurrences |
+| claimed-tip completion and parent wake | `foreground_route_returns_to_its_parent_after_child_completion`; the guarded release accounts for the terminal disposition and returns directly to the immediate parent |
+| retained-ancestor observation wake | `exact_route_attributes_latched_observation_wake_of_an_ancestor`; an externally published observation forces one ancestor wake while the child poll is latched |
+| ancestor cancellation/closure/retirement/reblock | `exact_route_attributes_latched_ancestor_cancellation_and_retirement`, the existing owner-closure fixture, and the forced observation/reblock fixtures; cancellation plus retirement are externally attributed in one depth-two window |
+| root or wait projection retirement | the latched cancellation/retirement fixture, owner-session closure, early-child completion, and task-owned-promise route fixtures preserve the conservative rebuild cases |
+
+All concurrent cases use channels around the claimed poll. The source-shaped
+profile recorded under W9C.1 contains no external or possible-ancestor
+mutation: its 9,356 windows are entirely poll-owned fresh publications. That
+frequency result selects the optimization target, while the forced external
+fixtures remain authoritative for correctness under workers and logger work.
+
+##### W9C.3 — Select the validation boundary — Complete (2026-09-28)
 
 The provisional target, subject to W9C.0-W9C.2 evidence, is two revisions with
 different responsibilities:
@@ -8980,6 +9000,56 @@ back-pointers from every work record to client-local routes, or special
 scheduler authority for the caller-owned zipper. If the factual census cannot
 support the narrower revision safely, keep the conservative fallback for that
 class and record the measured residual.
+
+Decision record: adopt the two-revision design for W9D. `work_generation`
+remains the broad scheduling/readiness revision. A private route-hazard
+revision advances for ancestor, lifecycle, projection, or externally owned
+release changes. The guarded release tracker accounts hazard publications
+made while releasing its own exclusively claimed tip, just as it accounts the
+broad revision today. It does not exempt the same factual mutation when it is
+published by another owner.
+
+| Factual kind | Selected treatment | Reason |
+| --- | --- | --- |
+| `DemandSessionRegistry` | O(1) acceptance | Registry membership does not alter work, route frames, or projections. |
+| `ExecutorAvailability` | O(1) acceptance | Worker capacity does not alter an exact task route. |
+| `FreshWorkAdmission` | O(1) acceptance | A fresh identity cannot replace any retained identity or projection. |
+| `WorkActivation` | O(1) acceptance | Activation changes availability of the same saved identity, which the next probe rereads. |
+| `ClientDemandAdmission` | O(1) acceptance | Client-demand records are outside the task producer zipper. |
+| `TaskPromiseIndexAdmission` | O(1) acceptance | Admission installs a fresh unique projection; if poll-owned, the tip's final disposition exposes the resulting dependency. |
+| `TaskPromiseIndexRetirement` | guarded validation | Retirement removes a producer projection captured by a route. |
+| `WorkClaim` | O(1) acceptance | A claim changes only availability; identity and dependency facts remain stable. |
+| `WorkRequeue` | O(1) acceptance | Requeue changes only availability of an existing identity. |
+| `WorkRelease` | own-tip release accounted; otherwise guarded validation | The local tracker knows the released tip and final disposition; another owner may change a saved tip or ancestor. |
+| `ClientDemandRelease` | O(1) acceptance | The foreground registry is not a task-route frame. |
+| `DependencyPromotion` | O(1) acceptance | Promotion exposes an existing producer without changing the remembered dependency or projection. |
+| `DependencyWake` | own-tip release accounted; otherwise guarded validation | Local one-shot completion exposes only the immediate parent; another owner may complete the caller's saved busy tip. |
+| `ObservationWake` | guarded validation | Observation can independently queue any retained observing ancestor. |
+| `Cancellation` | guarded validation | Cancellation can terminalize the tip, root, or an ancestor. |
+| `SessionClosure` | guarded validation | Closure can cancel or retire several captured records and projections. |
+| `TerminalSettlement` | guarded validation | Terminal publication can change the source observed by a captured wait. |
+| `WorkRetirement` | guarded validation, usually conservative fallback | Retirement removes a captured identity; successful validation is still possible when the existing parent-pop rule applies. |
+| `FailureLedger` | O(1) acceptance | Reporting ownership does not alter work topology or availability. |
+| `StageSettlement` | guarded validation | Batched lifecycle settlement may affect any captured record. |
+
+The dependency-completion proof is structural. Each blocked frame carries one
+subscription epoch and one dependency key. A one-shot source queues only
+registrations which still match that exact pair. On a retained linear route,
+completion of the exclusively claimed tip can therefore expose only the
+immediate parent and is completely described by the release disposition.
+Completion by another owner can affect the route only when it owns a saved
+tip or the source named by a retained frame; that publication advances the
+hazard revision and invokes guarded validation. No descendant index or route
+back-pointer is required.
+
+When the hazard revision changed, reuse the existing guarded frame validator:
+check target-to-root projection, every parent identity/state/subscription
+epoch/dependency key, each wait-to-producer projection, and the current tip.
+Refresh both revisions only after that succeeds. A concrete mismatch, missing
+release, current-tip mismatch, or unaccounted mutation during guarded release
+retains the named conservative fallback. This makes the 9,356 source-shaped
+windows eligible for O(1) reconciliation while preserving the forced
+observation, cancellation, closure, reblock, and retirement outcomes.
 
 ##### W9C.4 — Notification and parked-thread churn investigation
 

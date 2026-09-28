@@ -2419,6 +2419,12 @@ struct Await {
     dependency: EvaluationWaitToken,
 }
 
+struct AwaitWithObservation {
+    context: EvalContext,
+    dependency: EvaluationWaitToken,
+    observed: RuntimeObservationEpoch,
+}
+
 impl EvaluationTaskMachine for Await {
     fn poll(
         &mut self,
@@ -2439,6 +2445,35 @@ impl EvaluationTaskMachine for Await {
                 .lazy_failure_for_wait(&self.dependency)
                 .map(|error| EvaluationMachinePoll::Failed(poll_context.root_failure(error)))
                 .unwrap_or(EvaluationMachinePoll::Failed(error)),
+            EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
+            EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
+                poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
+            ),
+            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
+                poll_context
+                    .root_failure(evaluation_failure("waited-on task exited without a result")),
+            ),
+            EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
+        }
+    }
+}
+
+impl EvaluationTaskMachine for AwaitWithObservation {
+    fn poll(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        match self.context.poll_wait(&self.dependency) {
+            EvaluationWaitPoll::Pending(wait) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Wait(wait)),
+                    observed_epoch: Some(self.observed),
+                    error: None,
+                })
+            }
+            EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(*value),
+            EvaluationWaitPoll::Failed(error) => EvaluationMachinePoll::Failed(error),
             EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
@@ -2843,6 +2878,12 @@ struct SpawnThenYield {
     signal: Option<mpsc::Sender<()>>,
 }
 
+struct SpawnThenYieldAfterRelease {
+    target: EvalContext,
+    started: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+}
+
 impl EvaluationTaskMachine for SpawnThenYield {
     fn poll(
         &mut self,
@@ -2857,6 +2898,30 @@ impl EvaluationTaskMachine for SpawnThenYield {
         self.target
             .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
             .expect("poll-owned test work should be admitted");
+        EvaluationMachinePoll::Yielded
+    }
+}
+
+impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        let Some(started) = self.started.take() else {
+            return EvaluationMachinePoll::Complete(
+                context.root_value(crate::core::keys::unit_value()),
+            );
+        };
+        self.target
+            .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+            .expect("poll-owned mixed-attribution work should be admitted");
+        started
+            .send(())
+            .expect("mixed-attribution observer should remain live");
+        self.release
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mixed-attribution poll should be released");
         EvaluationMachinePoll::Yielded
     }
 }
@@ -6362,6 +6427,210 @@ fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement
     assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
     assert_eq!(mutation_profile.windows_containing.work_activation, 1);
     assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
+}
+
+#[test]
+fn exact_route_attributes_mixed_poll_owned_and_external_mutations_once() {
+    let fixture = SameRuntimeFixture::new();
+    let source = fixture.context();
+    let poll_owned_target = fixture.context();
+    let unrelated = fixture.context();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let poll_owned_target = EvalContext::clone(&poll_owned_target);
+    let task = source
+        .schedule_task(move |_| {
+            Ok(Box::new(SpawnThenYieldAfterRelease {
+                target: poll_owned_target,
+                started: Some(started_sender),
+                release: release_receiver,
+            }))
+        })
+        .expect("mixed-attribution fixture should schedule");
+    let task_wait = task.wait().clone();
+    let pump_source = EvalContext::clone(&source);
+    let pump = thread::spawn(move || {
+        let mut route = ExactDemandRoute::default();
+        let outcome = pump_source.pump_wait_on_route(&task_wait, 1, &mut route);
+        (pump_source, route, outcome)
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("poll-owned admission must precede the external admission");
+    let _unrelated_task = unrelated
+        .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+        .expect("external mixed-attribution work should be admitted");
+    release_sender
+        .send(())
+        .expect("mixed-attribution poll should remain live");
+    let (pump_source, mut route, outcome) = pump.join().expect("latched pump should finish");
+    assert_eq!(outcome, EvaluationPumpOutcome::BudgetExhausted);
+    assert_eq!(
+        pump_source.pump_wait_on_route(task.wait(), 1, &mut route),
+        EvaluationPumpOutcome::TargetReady
+    );
+
+    let mutation_profile = source
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_route_mutation_profile();
+    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.mutation_occurrences.total(), 4);
+    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 2);
+    assert_eq!(mutation_profile.external_mutation_occurrences.total(), 2);
+    assert_eq!(
+        mutation_profile.mutation_occurrences.fresh_work_admission,
+        2
+    );
+    assert_eq!(mutation_profile.mutation_occurrences.work_activation, 2);
+    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
+    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
+    assert_eq!(
+        mutation_profile.mutation_set_histogram,
+        [(12, 1)],
+        "one mixed window must remain one histogram observation"
+    );
+}
+
+#[test]
+fn exact_route_attributes_latched_ancestor_cancellation_and_retirement() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let child = context
+        .schedule_task(move |_| {
+            Ok(Box::new(YieldAfterRelease {
+                started: Some(started_sender),
+                release: release_receiver,
+            }))
+        })
+        .expect("latched child should schedule");
+    let child_wait = child.wait().clone();
+    let parent = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(Await {
+                context: task_context,
+                dependency: child_wait,
+            }))
+        })
+        .expect("ancestor should schedule");
+    let mut route = ExactDemandRoute::default();
+    assert_eq!(
+        context.pump_wait_on_route(parent.wait(), 1, &mut route),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the first quantum should retain the parent-to-child route"
+    );
+
+    let parent_wait = parent.wait().clone();
+    let pump_context = EvalContext::clone(&context);
+    let pump = thread::spawn(move || {
+        let outcome = pump_context.pump_wait_on_route(&parent_wait, 1, &mut route);
+        (route, outcome)
+    });
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the child must enter its poll before ancestor cancellation");
+    assert_eq!(parent.cancel(), EvaluationTaskCancellation::Requested);
+    release_sender
+        .send(())
+        .expect("the claimed child should remain live");
+    let (_route, outcome) = pump.join().expect("latched child pump should finish");
+    assert_eq!(outcome, EvaluationPumpOutcome::TargetReady);
+
+    let mutation_profile = context
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_route_mutation_profile();
+    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
+    assert_eq!(mutation_profile.windows_containing.cancellation, 1);
+    assert_eq!(mutation_profile.windows_containing.work_retirement, 1);
+    assert_eq!(
+        mutation_profile.external_mutation_occurrences.cancellation,
+        1
+    );
+    assert_eq!(
+        mutation_profile
+            .external_mutation_occurrences
+            .work_retirement,
+        1
+    );
+    assert_eq!(mutation_profile.total_route_depth, 2);
+
+    assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
+}
+
+#[test]
+fn exact_route_attributes_latched_observation_wake_of_an_ancestor() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let observed = context.current_observation_epoch();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let child = context
+        .schedule_task(move |_| {
+            Ok(Box::new(YieldAfterRelease {
+                started: Some(started_sender),
+                release: release_receiver,
+            }))
+        })
+        .expect("latched child should schedule");
+    let child_wait = child.wait().clone();
+    let parent = context
+        .schedule_task(move |task_context| {
+            Ok(Box::new(AwaitWithObservation {
+                context: task_context,
+                dependency: child_wait,
+                observed,
+            }))
+        })
+        .expect("observing ancestor should schedule");
+    let mut route = ExactDemandRoute::default();
+    assert_eq!(
+        context.pump_wait_on_route(parent.wait(), 1, &mut route),
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the first quantum should retain the observing parent-to-child route"
+    );
+
+    let parent_wait = parent.wait().clone();
+    let pump_context = EvalContext::clone(&context);
+    let pump = thread::spawn(move || {
+        let outcome = pump_context.pump_wait_on_route(&parent_wait, 1, &mut route);
+        (route, outcome)
+    });
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the child must enter its poll before observation publication");
+    context
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .publish_runtime_observation();
+    release_sender
+        .send(())
+        .expect("the claimed child should remain live");
+    let (_route, outcome) = pump.join().expect("latched child pump should finish");
+    assert_eq!(outcome, EvaluationPumpOutcome::BudgetExhausted);
+
+    let mutation_profile = context
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_route_mutation_profile();
+    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
+    assert_eq!(mutation_profile.mutation_occurrences.total(), 1);
+    assert_eq!(mutation_profile.windows_containing.observation_wake, 1);
+    assert_eq!(
+        mutation_profile
+            .external_mutation_occurrences
+            .observation_wake,
+        1
+    );
+    assert_eq!(mutation_profile.total_route_depth, 2);
+
+    assert_eq!(parent.cancel(), EvaluationTaskCancellation::Requested);
+    assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
 }
 
 #[test]
