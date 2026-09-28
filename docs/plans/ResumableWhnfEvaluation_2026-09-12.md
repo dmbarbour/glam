@@ -8740,47 +8740,220 @@ still invalidates and cold-rebuilds authoritatively on the next probe.
 
 #### W9C — Reconciliation design gate
 
-Use W9A-B evidence to select the smallest safe proof boundary. Evaluate at
-least these choices:
+W9A established *when* the generation moves, but not *what changed*. All
+9,356 invalidations occur between exact claim and guarded release start. A
+global-generation mismatch is therefore too coarse to choose the repair: the
+next checkpoint must classify the coordinator mutations inside those poll
+windows before enabling a less conservative route decision.
 
-- reconcile the caller-local route under the release's existing mutation
-  admission and coordinator-state lock, after the work disposition is known;
-- retain the local disposition but require an exact frame/dependency
-  validation on the next claim; or
-- keep cold rebuilding for a class whose relevant interference cannot be
-  distinguished cheaply.
+The design should exploit the coordinator's actual functional producer graph
+rather than introduce a generalized "recheck everything" list:
 
-Prefer guarded local reconciliation when the remembered parent frames,
-subscription epochs, dependency keys, current work identity, and final
-disposition jointly prove that the exact path is unchanged. Unrelated global
-generation movement alone is not a reason to rebuild once that local proof is
-available. A parent wake/reblock, route-tip mismatch, retired work, branched
-dependency, or unexplained guarded-release mutation must still validate or
-fall back authoritatively.
+- an exact route is a linear zipper of blocked work records, and every parent
+  frame already records its `subscription_epoch` and exact dependency key;
+- publishing another block increments that work record's subscription epoch,
+  so an unchanged epoch proves that the recorded dependency and observation
+  block were not replaced;
+- the route tip is exclusively claimed while its machine polls. Its final
+  state and next dependency are described by the guarded release disposition;
+- each retained parent is blocked on the next route member. Ordinary progress
+  below the claimed tip therefore cannot independently rewrite an ancestor;
+- wait and promise completion sources are one-shot. Wait-to-work indexes are
+  unique while registered and their IDs are not reused, so a captured
+  projection can retire but cannot silently name a replacement;
+- resolver-owned promises terminate traversal because they have no
+  coordinator producer;
+- task-owned promises project to their producer task, while deterministic
+  lazy production has one canonical coordinator producer. Neither creates an
+  alternate hidden branch which must be searched merely because unrelated
+  work was admitted; and
+- observation wakes and lifecycle operations are the important exceptions:
+  they can queue, retire, cancel, or reblock a remembered ancestor without the
+  claimed descendant completing first.
 
-Do not solve this with a global descendant index, a lock spanning poll, a
-durable claim on the net or task, or special scheduler authority for the
-caller-owned route. If safe reconciliation would require one of those, retain
-the conservative fallback and record the measured residual instead.
+This does not mean every generation advance is harmless. In particular, an
+observation wake, owner/session closure, cancellation, settlement/kill,
+retirement of a captured root or wait-index projection, or other mutation of
+an already-retained record may redirect the useful route. The proof obligation
+is to distinguish those events from fresh admission, unrelated claims,
+reporting-ledger edits, and other changes that cannot alter any frame in the
+retained zipper.
+
+##### W9C.0 — Coordinator mutation census and proof table
+
+Inventory every production `work_generation` advance and assign it one
+factual, closed mutation kind. Start with distinctions at least as precise as:
+
+- fresh work or wait-index admission;
+- claim/reservation and ordinary availability transitions;
+- block/dependency publication by the currently released work;
+- dependency-completion wake;
+- runtime-observation wake;
+- yield/requeue/park and guarded release bookkeeping;
+- terminal settlement, retirement, cancellation, session closure, and kill;
+  and
+- reporting/failure-ledger-only mutation.
+
+Do not initially label these kinds `safe` or `unsafe`. For each kind, record
+which existing fields can change, whether an already-retained route frame can
+name the affected record or index, and whether the exact release disposition
+already accounts for the change. Produce a proof table with these columns:
+
+| Mutation kind | Can touch claimed tip? | Can touch retained ancestor? | Can change wait-to-work projection? | Accounted by exact release? | Candidate route effect |
+| --- | --- | --- | --- | --- | --- |
+
+The candidate route effects are `neutral`, `current-release-accounted`, and
+`possible-ancestor-hazard`. A kind is admitted to `neutral` only from a
+structural coordinator invariant, not because it happened to preserve one
+fixture. If one call site within a factual kind has different consequences,
+split the kind rather than weakening the proof.
+
+Centralize generation publication behind one private helper which requires
+the factual kind. Add a source-backed test which rejects direct production
+increments outside that helper, so later coordinator work cannot silently
+escape the census. `work_generation` itself retains its current scheduling,
+wait-for-change, readiness, and settlement roles; W9 must not narrow its
+meaning merely to optimize exact routes.
+
+##### W9C.1 — Poll-window mutation metrics
+
+Under `cfg(test)` or the existing static interaction-net profiling feature,
+maintain monotonic counters per factual mutation kind. Capture a counter
+snapshot at exact claim and another at guarded release start. For every
+poll-generation invalidation, report:
+
+- total mutation occurrences by kind within the poll window;
+- the number of invalidated windows containing each kind;
+- a histogram of distinct kind sets, so overlapping causes are not mistaken
+  for non-overlapping invalidations;
+- whether a mutation ran synchronously inside the claimed machine's poll or
+  came from another thread/host path; and
+- the route depth and release disposition for the affected poll.
+
+A profiling-only scoped poll-origin marker is acceptable for attribution. It
+must not become scheduler authority, durable work metadata, or release
+semantics. The metric implementation should use fixed counters/bitsets rather
+than retain event histories. Its sums must reconcile with the 9,356 W9A
+poll-generation invalidations, while continuing to report missing release,
+tip mismatch, and guarded-release interference separately.
+
+The mutation kind must be compiled away, or reduce to the ordinary generation
+increment, outside instrumented builds. Measure or inspect the optimized code
+if centralizing the increment leaves any doubt; production scheduling must not
+pay for this diagnostic census.
+
+##### W9C.2 — Forced relevance and workload attribution
+
+Extend the W9B fixtures so the factual mutation kinds most likely to occur in
+a poll window have one forced representative. At minimum distinguish:
+
+1. poll-owned admission of a fresh causal child;
+2. poll-owned reporting or other route-independent publication;
+3. an unrelated claim/admission on another route;
+4. completion of the claimed tip followed by its immediate-parent wake;
+5. an observation wake of a retained ancestor;
+6. ancestor cancellation, owner closure, retirement, or reblock; and
+7. target/root or wait-to-work projection retirement.
+
+Each test first proves current classification and conservative fallback. The
+later W9D version of the same test must prove either O(1) retention, guarded
+frame validation, or authoritative rebuild according to the proof table.
+Force the disputed ordering with channels or barriers; repeated scheduling is
+not evidence.
+
+Then run the exact source-shaped duplicate-symbol fixture with the W9C.1
+profile and record the complete attribution table. In particular, determine
+whether its 9,356 windows are poll-owned fresh admissions/publications,
+possible ancestor hazards, or mixtures. Do not select the production fast
+path from the zero-worker assumption: logger/reflection concurrency remains
+possible, and the forced external-interference cases are authoritative.
+
+##### W9C.3 — Select the validation boundary
+
+The provisional target, subject to W9C.0-W9C.2 evidence, is two revisions with
+different responsibilities:
+
+- `work_generation` continues to describe any scheduler-visible coordinator
+  movement; and
+- a narrower exact-route hazard revision advances only for mutations which
+  can change a retained ancestor, target projection, or other unaccounted
+  route fact.
+
+An unchanged hazard revision plus matching claimed-tip identity lets guarded
+release apply its final disposition in O(1), even when `work_generation`
+moved. A changed hazard revision does **not** immediately discard the route:
+under the existing mutation admission and coordinator-state lock, validate
+the remembered root, parent subscription epochs/dependency keys, producer
+projections, and current tip. Retain and refresh the route if that validation
+succeeds. Only a failed validation cold-rebuilds from the original wait.
+
+This gives the intended cost shape:
+
+```text
+ordinary poll-owned or unrelated neutral movement -> O(1) release handoff
+possible ancestor hazard, route still valid        -> O(route depth) validate
+actual route change                                -> O(route depth) rebuild
+```
+
+Before accepting this design, prove that ordinary dependency completion needs
+no broader hazard. The expected specialized rule is that completion can wake
+only subscribers to that one-shot source: on this retained linear route, a
+completion by the claimed tip can expose only its immediate parent, while a
+completion elsewhere cannot change a retained ancestor's recorded dependency.
+If current completion delivery cannot carry or reconstruct that proof cheaply,
+classify it as a possible hazard and measure the resulting validation cost
+rather than invent a global descendant index.
+
+Evaluate guarded local reconciliation, next-claim validation, or retained
+cold rebuilding for any class which does not fit the two-revision proof. Do
+not solve this with a lock spanning poll, a durable claim on the net or task,
+back-pointers from every work record to client-local routes, or special
+scheduler authority for the caller-owned zipper. If the factual census cannot
+support the narrower revision safely, keep the conservative fallback for that
+class and record the measured residual.
+
+Do not begin W9D until W9C has produced all four artifacts: the exhaustive
+generation-publisher census, the mutation-kind proof table, a poll-window
+profile reconciling with the exact workload baseline, and a decision record
+mapping every factual kind to O(1) acceptance, guarded validation, or retained
+conservative fallback.
 
 #### W9D — Implement the selected proof boundary
 
 ##### W9D.1 — Claim/release representation
 
-Separate claim generation, guarded-release start/end generations, current
+Implement the selected W9C.3 revision boundary. Separate scheduler generation,
+exact-route hazard revision, guarded-release start/end observations, current
 work identity, accounted release mutations, and final disposition in the
-internal exact-release representation. Delete ambiguous `Contention`
-classification where a more precise cause is available. Keep the
-representation private and bounded; it must not become public task status or
-semantic state.
+private exact-release representation. Route frames continue to carry only the
+per-record facts needed by slow validation; do not copy coordinator machines,
+values, or whole work records into the client-local zipper.
+
+Delete ambiguous `Contention` classification where a more precise cause is
+available. Keep both revisions private and bounded; neither may become public
+task status or semantic state. Add overflow behavior consistent with the
+existing wrapping `work_generation` comparison, and force the wrap boundary
+in a focused test if correctness depends on equality rather than mere change
+detection.
 
 ##### W9D.2 — Guarded reconciliation
 
 Implement the W9C choice consistently for reflection, deferred, and lazy-route
-release. Any path accepted without a cold rebuild must either reconcile while
-the coordinator state is protected or deliberately remain pending validation
-before its next claim. It must never stamp an unvalidated caller route with the
-latest global generation.
+release:
+
+1. match the release to the exclusively claimed route tip;
+2. take the O(1) path only when the hazard revision and guarded-release
+   accounting prove no ancestor-sensitive interference;
+3. otherwise validate the retained frames under the existing guard;
+4. refresh both route revisions after successful validation; and
+5. invalidate and cold-rebuild only after a concrete root, epoch, dependency,
+   projection, state, or identity mismatch.
+
+Any path accepted without a cold rebuild must reconcile while coordinator
+state is protected or deliberately remain pending validation before its next
+claim. It must never stamp an unvalidated caller route with the latest
+scheduler or hazard revision. Preserve a named conservative fallback for any
+mutation class which W9C could not prove neutral.
 
 Preserve notification and destruction boundaries: callbacks, wake delivery,
 machine destruction, and other user-observable work remain outside runtime
@@ -8792,8 +8965,12 @@ across the three work families when one shared helper can express the proof.
 Remove temporary probes and classification scaffolding which no longer serves
 tests or ongoing profiling. Retain named fallback counters only when they
 describe stable implementation distinctions useful for future diagnosis.
-Update coordinator comments so the generations are described as validation
-inputs rather than route authority.
+Keep the factual generation-publisher helper and its closed source census if
+they remain a low-cost guard against uncategorized mutations; remove
+poll-origin attribution and per-kind counter snapshots unless they justify an
+ongoing profiling role. Update coordinator comments so `work_generation` is
+described as the scheduler/readiness revision and the narrower revision as an
+exact-route validation input, not route authority.
 
 #### W9E — Measurement, verification, and disposition
 
@@ -8802,6 +8979,10 @@ profile, Callgrind method, native debug/release timing, and exact
 interaction-net profile used by W6G4R-001G and W6G4R-002. Report:
 
 - handoffs and fallbacks by the new non-overlapping reasons;
+- O(1) accepted poll windows, hazard-triggered frame validations, successful
+  validations, and validation failures;
+- factual poll-window mutation counts retained from W9C long enough to explain
+  the before/after result;
 - complete searches, visited records, maximum route depth, and retained route
   storage;
 - Callgrind instructions against the 3,339,481,894 W6G4R-002 baseline;
@@ -8817,10 +8998,13 @@ to do so.
 
 Keep the repair only if it preserves every forced ordering and materially
 reduces cold rediscovery or deterministic instruction work. Otherwise revert
-the optimization, keep the precise classification if it remains cheap and
-useful, and record the justified residual. Close W9 with a dated review which
-accounts for any drift introduced by W7-W8 and updates the W6G.4 review with
-the final disposition.
+the optimization, keep the precise classification or factual mutation census
+only if it remains cheap and useful, and record the justified residual. A
+successful repair should explain—not merely reduce—the former 9,356 windows:
+their measured mutation kinds must map to O(1) acceptance, slow validation, or
+a concrete invalidation reason. Close W9 with a dated review which accounts
+for any drift introduced by W7-W8 and updates the W6G.4 review with the final
+disposition.
 
 ## Verification Matrix
 
