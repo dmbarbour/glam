@@ -256,10 +256,10 @@ fn interaction_net_profiles_are_runtime_local() {
             .calls
             .notify_all
             .demand_session_registry,
-        1,
-        "runtime construction registers only its background demand"
+        0,
+        "background demand registration publishes no enabling host wake"
     );
-    assert_eq!(first.coordinator_notifications.calls.notify_all.total(), 1);
+    assert_eq!(first.coordinator_notifications.calls.notify_all.total(), 0);
     assert_eq!(first.coordinator_notifications.calls.notify_one.total(), 0);
 }
 

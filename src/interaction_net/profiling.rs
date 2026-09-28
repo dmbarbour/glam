@@ -142,7 +142,7 @@ pub struct ExactRouteDispositionCounts {
     pub terminal: u64,
 }
 
-/// Fixed-cost W9C attribution for poll-generation invalidations.
+/// Fixed-cost W9 exact-route reconciliation and moved-window attribution.
 ///
 /// `mutation_set_histogram` is materialized only when a snapshot is requested.
 /// Each key is a bitset in the declaration order of
@@ -150,7 +150,11 @@ pub struct ExactRouteDispositionCounts {
 /// never an event history or work identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExactRouteMutationProfileSnapshot {
-    pub invalidated_windows: u64,
+    pub moved_poll_windows: u64,
+    pub o1_accepted_releases: u64,
+    pub hazard_validations: u64,
+    pub successful_hazard_validations: u64,
+    pub failed_hazard_validations: u64,
     pub mutation_occurrences: CoordinatorMutationCounts,
     pub synchronous_mutation_occurrences: CoordinatorMutationCounts,
     pub external_mutation_occurrences: CoordinatorMutationCounts,

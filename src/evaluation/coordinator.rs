@@ -635,7 +635,11 @@ struct WorkCoordinatorState {
     observation_waiters: HashMap<EvaluationWorkId, ObservationRegistration>,
     spark_workers: usize,
     prefer_spark: bool,
+    /// Broad scheduler/readiness revision observed by host wait loops.
     work_generation: u64,
+    /// Narrow revision for mutations which can invalidate a retained exact
+    /// producer route. This is not semantic state and is never exposed.
+    exact_route_hazard_revision: u64,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
     mutation_counters: CoordinatorMutationCounterState,
 }
@@ -672,6 +676,40 @@ enum CoordinatorMutationKind {
     WorkPark,
     #[cfg(test)]
     TestTransition,
+}
+
+impl CoordinatorMutationKind {
+    /// Whether this transition can change the target-to-tip projection of a
+    /// retained exact route.
+    const fn affects_exact_route(self) -> bool {
+        match self {
+            Self::TaskPromiseIndexRetirement
+            | Self::WorkRelease
+            | Self::DependencyWake
+            | Self::ObservationWake
+            | Self::Cancellation
+            | Self::SessionClosure
+            | Self::TerminalSettlement
+            | Self::WorkRetirement
+            | Self::StageSettlement => true,
+            #[cfg(test)]
+            Self::WorkPark | Self::TestTransition => true,
+            _ => false,
+        }
+    }
+
+    /// Whether publication can satisfy at least one predicate parked on the
+    /// coordinator's shared condition variable.
+    const fn notifies_waiters(self) -> bool {
+        !matches!(
+            self,
+            Self::DemandSessionRegistry
+                | Self::TaskPromiseIndexAdmission
+                | Self::TaskPromiseIndexRetirement
+                | Self::WorkClaim
+                | Self::FailureLedger
+        )
+    }
 }
 
 #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -749,6 +787,9 @@ impl WorkCoordinatorState {
         #[cfg(not(any(test, feature = "interaction-net-profiling")))]
         let _ = kind;
         self.work_generation = self.work_generation.wrapping_add(1);
+        if kind.affects_exact_route() {
+            self.exact_route_hazard_revision = self.exact_route_hazard_revision.wrapping_add(1);
+        }
     }
 
     #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -808,11 +849,14 @@ pub(super) struct ExactDemandRouteProfile {
     pub(super) edges_visited: usize,
     pub(super) maximum_depth: usize,
     pub(super) fast_handoffs: usize,
+    pub(super) o1_accepted_releases: usize,
+    pub(super) hazard_validations: usize,
+    pub(super) successful_hazard_validations: usize,
+    pub(super) failed_hazard_validations: usize,
     pub(super) checkpoint_invalidations: usize,
     pub(super) cold_fallbacks: usize,
     pub(super) missing_release_fallbacks: usize,
     pub(super) current_work_mismatch_fallbacks: usize,
-    pub(super) poll_generation_movement_fallbacks: usize,
     pub(super) guarded_release_mutation_fallbacks: usize,
     pub(super) changed_dependency_fallbacks: usize,
     pub(super) retired_work_fallbacks: usize,
@@ -822,7 +866,11 @@ pub(super) struct ExactDemandRouteProfile {
 #[cfg(any(test, feature = "interaction-net-profiling"))]
 #[derive(Debug, Default)]
 struct ExactRouteMutationProfile {
-    invalidated_windows: u64,
+    moved_poll_windows: u64,
+    o1_accepted_releases: u64,
+    hazard_validations: u64,
+    successful_hazard_validations: u64,
+    failed_hazard_validations: u64,
     mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
     synchronous_mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
     external_mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
@@ -898,7 +946,11 @@ impl ExactRouteMutationProfile {
         use crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot;
 
         ExactRouteMutationProfileSnapshot {
-            invalidated_windows: self.invalidated_windows,
+            moved_poll_windows: self.moved_poll_windows,
+            o1_accepted_releases: self.o1_accepted_releases,
+            hazard_validations: self.hazard_validations,
+            successful_hazard_validations: self.successful_hazard_validations,
+            failed_hazard_validations: self.failed_hazard_validations,
             mutation_occurrences: mutation_counts_from_array(&self.mutation_occurrences),
             synchronous_mutation_occurrences: mutation_counts_from_array(
                 &self.synchronous_mutation_occurrences,
@@ -973,16 +1025,20 @@ pub(super) enum ExactTargetSelection {
 /// Non-authoritative position on one foreground exact-demand route.
 ///
 /// The original wait remains owned by the driver. These scheduler identities
-/// merely avoid rediscovering a route whose coordinator generation is still
-/// known. Any unaccounted mutation discards the checkpoint and rebuilds it
-/// from that original wait.
+/// merely avoid rediscovering a route whose hazard revision is still known.
+/// Hazard movement triggers guarded frame validation; only a concrete route
+/// mismatch discards the checkpoint and rebuilds it from that original wait.
 #[derive(Debug, Default)]
 pub(crate) struct ExactDemandRoute {
     target: Option<(EvaluationRuntimeId, u64)>,
     current: Option<EvaluationWorkId>,
     parents: Vec<ExactDemandRouteFrame>,
     members: TrustedWorkIdSet,
+    /// Last scheduler revision observed while the route was reconciled.
     generation: Option<u64>,
+    /// Last exact-route hazard revision proved by fast acceptance or guarded
+    /// frame validation.
+    hazard_revision: Option<u64>,
     invalidation: Option<ExactRouteFallbackReason>,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
     poll_start: Option<ExactRoutePollStart>,
@@ -1011,6 +1067,7 @@ impl ExactDemandRoute {
             self.parents.clear();
             self.members.clear();
             self.generation = None;
+            self.hazard_revision = None;
             self.invalidation = None;
             #[cfg(any(test, feature = "interaction-net-profiling"))]
             {
@@ -1025,6 +1082,7 @@ impl ExactDemandRoute {
         self.parents.clear();
         self.members.clear();
         self.generation = None;
+        self.hazard_revision = None;
         self.invalidation = None;
         #[cfg(any(test, feature = "interaction-net-profiling"))]
         {
@@ -1034,6 +1092,7 @@ impl ExactDemandRoute {
 
     pub(crate) fn invalidate(&mut self, reason: ExactRouteFallbackReason) {
         self.generation = None;
+        self.hazard_revision = None;
         self.invalidation = Some(reason);
         #[cfg(any(test, feature = "interaction-net-profiling"))]
         {
@@ -1045,20 +1104,7 @@ impl ExactDemandRoute {
         self.invalidate(ExactRouteFallbackReason::MissingRelease);
     }
 
-    pub(super) fn apply_release(&mut self, release: ExactRouteRelease) -> bool {
-        let invalidation = if self.current != Some(release.work) {
-            Some(ExactRouteFallbackReason::CurrentWorkMismatch)
-        } else if self.generation != Some(release.start_generation) {
-            Some(ExactRouteFallbackReason::PollGenerationMovement)
-        } else if !release.uninterrupted {
-            Some(ExactRouteFallbackReason::GuardedReleaseMutation)
-        } else {
-            None
-        };
-        if let Some(reason) = invalidation {
-            self.invalidate(reason);
-            return false;
-        }
+    fn apply_validated_release(&mut self, release: ExactRouteRelease) {
         #[cfg(any(test, feature = "interaction-net-profiling"))]
         {
             self.poll_start = None;
@@ -1072,7 +1118,8 @@ impl ExactDemandRoute {
             } => {
                 if !self.members.insert(producer) {
                     self.generation = Some(release.end_generation);
-                    return true;
+                    self.hazard_revision = Some(release.end_hazard_revision);
+                    return;
                 }
                 self.parents.push(ExactDemandRouteFrame {
                     work: release.work,
@@ -1091,30 +1138,7 @@ impl ExactDemandRoute {
             }
         }
         self.generation = Some(release.end_generation);
-        true
-    }
-
-    pub(super) fn apply_profiled_release(
-        &mut self,
-        coordinator: &EvaluationWorkCoordinator,
-        release: ExactRouteRelease,
-    ) -> bool {
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
-        let attribution = if self.current == Some(release.work)
-            && self.generation != Some(release.start_generation)
-        {
-            self.poll_start
-        } else {
-            None
-        };
-        let applied = self.apply_release(release);
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
-        if let Some(start) = attribution {
-            coordinator.record_exact_route_poll_invalidation(start, &release);
-        }
-        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
-        let _ = coordinator;
-        applied
+        self.hazard_revision = Some(release.end_hazard_revision);
     }
 }
 
@@ -1122,7 +1146,6 @@ impl ExactDemandRoute {
 pub(crate) enum ExactRouteFallbackReason {
     MissingRelease,
     CurrentWorkMismatch,
-    PollGenerationMovement,
     GuardedReleaseMutation,
     ChangedDependency,
     RetiredWork,
@@ -1134,6 +1157,8 @@ pub(super) struct ExactRouteRelease {
     work: EvaluationWorkId,
     start_generation: u64,
     end_generation: u64,
+    start_hazard_revision: u64,
+    end_hazard_revision: u64,
     uninterrupted: bool,
     disposition: ExactRouteDisposition,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -1157,6 +1182,7 @@ pub(super) struct ExactRouteReleaseTracker {
     work: EvaluationWorkId,
     start_generation: u64,
     expected_generation: u64,
+    start_hazard_revision: u64,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
     poll_end_mutations: CoordinatorMutationSnapshot,
 }
@@ -1167,6 +1193,7 @@ impl ExactRouteReleaseTracker {
             work,
             start_generation: state.work_generation,
             expected_generation: state.work_generation,
+            start_hazard_revision: state.exact_route_hazard_revision,
             #[cfg(any(test, feature = "interaction-net-profiling"))]
             poll_end_mutations: state.mutation_snapshot(),
         }
@@ -1184,6 +1211,8 @@ impl ExactRouteReleaseTracker {
             work: self.work,
             start_generation: self.start_generation,
             end_generation: state.work_generation,
+            start_hazard_revision: self.start_hazard_revision,
+            end_hazard_revision: state.exact_route_hazard_revision,
             uninterrupted: state.work_generation == self.expected_generation,
             disposition,
             #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -1386,9 +1415,6 @@ impl EvaluationWorkCoordinator {
             ExactRouteFallbackReason::CurrentWorkMismatch => {
                 profile.current_work_mismatch_fallbacks += 1;
             }
-            ExactRouteFallbackReason::PollGenerationMovement => {
-                profile.poll_generation_movement_fallbacks += 1;
-            }
             ExactRouteFallbackReason::GuardedReleaseMutation => {
                 profile.guarded_release_mutation_fallbacks += 1;
             }
@@ -1409,7 +1435,7 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(any(test, feature = "interaction-net-profiling"))]
-    fn record_exact_route_poll_invalidation(
+    fn record_exact_route_poll_window(
         &self,
         start: ExactRoutePollStart,
         release: &ExactRouteRelease,
@@ -1418,7 +1444,7 @@ impl EvaluationWorkCoordinator {
             .exact_route_mutation_profile
             .lock()
             .expect("exact route mutation profile was poisoned");
-        profile.invalidated_windows = profile.invalidated_windows.wrapping_add(1);
+        profile.moved_poll_windows = profile.moved_poll_windows.wrapping_add(1);
         profile.total_route_depth = profile
             .total_route_depth
             .wrapping_add(start.route_depth as u64);
@@ -1462,6 +1488,55 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(any(test, feature = "interaction-net-profiling"))]
+    fn record_exact_route_reconciliation(
+        &self,
+        validation: Option<Result<usize, ExactRouteFallbackReason>>,
+        accepted: bool,
+    ) {
+        {
+            let mut profile = self
+                .exact_route_mutation_profile
+                .lock()
+                .expect("exact route mutation profile was poisoned");
+            match validation {
+                None if accepted => {
+                    profile.o1_accepted_releases = profile.o1_accepted_releases.wrapping_add(1);
+                }
+                Some(result) => {
+                    profile.hazard_validations = profile.hazard_validations.wrapping_add(1);
+                    if result.is_ok() {
+                        profile.successful_hazard_validations =
+                            profile.successful_hazard_validations.wrapping_add(1);
+                    } else {
+                        profile.failed_hazard_validations =
+                            profile.failed_hazard_validations.wrapping_add(1);
+                    }
+                }
+                None => {}
+            }
+        }
+        #[cfg(test)]
+        {
+            let mut route = self
+                .exact_route_profile
+                .lock()
+                .expect("exact demand route profile was poisoned");
+            match validation {
+                None if accepted => route.o1_accepted_releases += 1,
+                Some(result) => {
+                    route.hazard_validations += 1;
+                    if result.is_ok() {
+                        route.successful_hazard_validations += 1;
+                    } else {
+                        route.failed_hazard_validations += 1;
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
     pub(crate) fn exact_route_mutation_profile(
         &self,
     ) -> crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot {
@@ -1482,6 +1557,9 @@ impl EvaluationWorkCoordinator {
     }
 
     fn notify_all(&self, kind: CoordinatorMutationKind) {
+        if !kind.notifies_waiters() {
+            return;
+        }
         #[cfg(any(test, feature = "interaction-net-profiling"))]
         {
             let mut profile = self
@@ -2170,10 +2248,10 @@ impl EvaluationWorkCoordinator {
 
     /// Claims the next runnable record through a retained exact-demand route.
     ///
-    /// A matching coordinator generation makes the local zipper a sufficient
-    /// proof for the next descent or return. Any other mutation rebuilds the
-    /// complete route under the same lock before claiming, preserving the cold
-    /// selector as the sole source of authority.
+    /// A matching hazard revision makes the local zipper a sufficient proof
+    /// for the next descent or return. Hazard movement validates its compact
+    /// frames under the coordinator lock before claiming; a concrete mismatch
+    /// alone rebuilds from the authoritative target.
     pub(super) fn claim_exact_target_on_route(
         &self,
         target: &EvaluationWaitToken,
@@ -2205,6 +2283,7 @@ impl EvaluationWorkCoordinator {
                             state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
                             route.current = Some(id);
                             route.generation = Some(state.work_generation);
+                            route.hazard_revision = Some(state.exact_route_hazard_revision);
                             #[cfg(any(test, feature = "interaction-net-profiling"))]
                             {
                                 route.poll_start = Some(ExactRoutePollStart {
@@ -2223,10 +2302,12 @@ impl EvaluationWorkCoordinator {
                 CausalBackgroundProbe::Busy(id) => {
                     route.current = Some(id);
                     route.generation = Some(state.work_generation);
+                    route.hazard_revision = Some(state.exact_route_hazard_revision);
                     ExactTargetSelection::Busy
                 }
                 CausalBackgroundProbe::None => {
                     route.generation = Some(state.work_generation);
+                    route.hazard_revision = Some(state.exact_route_hazard_revision);
                     ExactTargetSelection::None
                 }
             };
@@ -2298,6 +2379,7 @@ impl EvaluationWorkCoordinator {
                 CausalBackgroundProbe::None => ExactTargetStatus::None,
             };
             route.generation = Some(state.work_generation);
+            route.hazard_revision = Some(state.exact_route_hazard_revision);
             (status, probe.depth, handoffs, fallback)
         };
         #[cfg(test)]
@@ -2311,6 +2393,62 @@ impl EvaluationWorkCoordinator {
             }
         }
         status
+    }
+
+    /// Reconciles one exactly claimed poll with its caller-local route.
+    ///
+    /// Neutral scheduler movement is accepted in O(1). A narrower hazard
+    /// movement validates the retained route frames under the coordinator
+    /// mutex; only a concrete mismatch discards the zipper.
+    pub(super) fn reconcile_exact_route_release(
+        &self,
+        target: &EvaluationWaitToken,
+        route: &mut ExactDemandRoute,
+        release: ExactRouteRelease,
+    ) -> bool {
+        debug_assert_eq!(target.runtime_id(), self.runtime);
+        let _scheduler_revision_at_poll_end = release.start_generation;
+        let (validation, reason) = {
+            let state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            if route.current != Some(release.work) {
+                (None, Some(ExactRouteFallbackReason::CurrentWorkMismatch))
+            } else if !release.uninterrupted {
+                (None, Some(ExactRouteFallbackReason::GuardedReleaseMutation))
+            } else if route.hazard_revision == Some(release.start_hazard_revision) {
+                (None, None)
+            } else {
+                let validation = validate_exact_route_locked(&state, target, route, false);
+                (Some(validation), validation.err())
+            }
+        };
+
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        if route.generation != Some(release.start_generation)
+            && let Some(start) = route.poll_start
+        {
+            self.record_exact_route_poll_window(start, &release);
+        }
+
+        if let Some(reason) = reason {
+            route.invalidate(reason);
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            self.record_exact_route_reconciliation(validation, false);
+            return false;
+        }
+
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        self.record_exact_route_reconciliation(validation, true);
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        let _ = validation;
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            route.poll_start = None;
+        }
+        route.apply_validated_release(release);
+        true
     }
 
     /// Claims a launched child (or its exact producer) reachable from the
@@ -3155,16 +3293,18 @@ fn exact_route_probe_locked(
     target: &EvaluationWaitToken,
     route: &mut ExactDemandRoute,
 ) -> (ExactProducerProbe, usize, Option<ExactRouteFallbackReason>) {
-    let route_generation = route.generation;
-    let current_generation = state.work_generation;
-    if route_generation == Some(current_generation) && route.current.is_some() {
+    let route_hazard_revision = route.hazard_revision;
+    let current_hazard_revision = state.exact_route_hazard_revision;
+    if route_hazard_revision == Some(current_hazard_revision) && route.current.is_some() {
+        route.generation = Some(state.work_generation);
         let (probe, handoffs) = continue_exact_route_locked(state, route);
         return (probe, handoffs, None);
     }
-    if route_generation.is_some() {
-        return match validate_exact_route_locked(state, target, route) {
+    if route_hazard_revision.is_some() {
+        return match validate_exact_route_locked(state, target, route, true) {
             Ok(validation_handoffs) => {
-                route.generation = Some(current_generation);
+                route.generation = Some(state.work_generation);
+                route.hazard_revision = Some(current_hazard_revision);
                 let (probe, handoffs) = continue_exact_route_locked(state, route);
                 (probe, validation_handoffs + handoffs, None)
             }
@@ -3181,11 +3321,10 @@ fn exact_route_probe_locked(
 
     let fallback = route.invalidation.take();
     route.reset_to_target(target);
-    (
-        rebuild_exact_route_locked(state, target, route),
-        0,
-        fallback,
-    )
+    let probe = rebuild_exact_route_locked(state, target, route);
+    route.generation = Some(state.work_generation);
+    route.hazard_revision = Some(current_hazard_revision);
+    (probe, 0, fallback)
 }
 
 fn rebuild_exact_route_locked(
@@ -3281,12 +3420,13 @@ fn validate_exact_route_locked(
     state: &WorkCoordinatorState,
     target: &EvaluationWaitToken,
     route: &mut ExactDemandRoute,
+    recover_missing_tip: bool,
 ) -> Result<usize, ExactRouteFallbackReason> {
     let Some(current) = route.current else {
         return Err(ExactRouteFallbackReason::RetiredWork);
     };
     if !state.work.contains_key(&current) {
-        if route.parents.len() == 1 {
+        if recover_missing_tip && route.parents.len() == 1 {
             let root = route.parents[0].work;
             if work_for_wait_locked(state, target) == Some(root) && state.work.contains_key(&root) {
                 route.members.remove(&current);

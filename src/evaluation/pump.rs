@@ -519,7 +519,7 @@ pub(super) fn pump_demand_on_route(
         let (_, _, released, route_release) = claimed.release(poll);
         if exact_claim {
             if let Some(release) = route_release {
-                let _handed_off = route.apply_profiled_release(coordinator, release);
+                let _handed_off = coordinator.reconcile_exact_route_release(target, route, release);
                 #[cfg(test)]
                 if _handed_off {
                     coordinator.record_exact_route_handoffs(1);

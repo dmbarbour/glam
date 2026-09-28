@@ -6285,6 +6285,7 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
             edges_visited: 1,
             maximum_depth: 1,
             fast_handoffs: 4,
+            o1_accepted_releases: 4,
             ..ExactDemandRouteProfile::default()
         },
         "two block handoffs and two leaf yields should avoid root rediscovery"
@@ -6306,6 +6307,7 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
             edges_visited: 4,
             maximum_depth: 3,
             fast_handoffs: 5,
+            o1_accepted_releases: 5,
             ..ExactDemandRouteProfile::default()
         },
         "discarding orchestration state should cause one cold rebuild, not alter semantics"
@@ -6313,7 +6315,7 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
 }
 
 #[test]
-fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
+fn exact_route_accepts_poll_owned_admission_without_route_validation() {
     let fixture = SameRuntimeFixture::new();
     let source = fixture.context();
     let target = fixture.context();
@@ -6346,13 +6348,11 @@ fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
             .expect("fixture coordinator should remain live")
             .exact_demand_route_profile(),
         ExactDemandRouteProfile {
-            complete_searches: 2,
-            edges_visited: 2,
+            complete_searches: 1,
+            edges_visited: 1,
             maximum_depth: 1,
-            fast_handoffs: 1,
-            checkpoint_invalidations: 1,
-            cold_fallbacks: 1,
-            poll_generation_movement_fallbacks: 1,
+            fast_handoffs: 2,
+            o1_accepted_releases: 2,
             ..ExactDemandRouteProfile::default()
         }
     );
@@ -6360,7 +6360,9 @@ fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
-    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.moved_poll_windows, 1);
+    assert_eq!(mutation_profile.o1_accepted_releases, 2);
+    assert_eq!(mutation_profile.hazard_validations, 0);
     assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
     assert_eq!(
         mutation_profile.synchronous_mutation_occurrences, mutation_profile.mutation_occurrences,
@@ -6376,7 +6378,7 @@ fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
 }
 
 #[test]
-fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement() {
+fn exact_route_accepts_latched_unrelated_neutral_poll_mutation() {
     let fixture = SameRuntimeFixture::new();
     let source = fixture.context();
     let unrelated = fixture.context();
@@ -6417,14 +6419,15 @@ fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_demand_route_profile();
-    assert_eq!(profile.checkpoint_invalidations, 1);
-    assert_eq!(profile.poll_generation_movement_fallbacks, 1);
+    assert_eq!(profile.checkpoint_invalidations, 0);
+    assert_eq!(profile.o1_accepted_releases, 2);
     assert_eq!(profile.guarded_release_mutation_fallbacks, 0);
     let mutation_profile = source
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
-    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.moved_poll_windows, 1);
+    assert_eq!(mutation_profile.o1_accepted_releases, 2);
     assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
     assert_eq!(
         mutation_profile.external_mutation_occurrences, mutation_profile.mutation_occurrences,
@@ -6434,6 +6437,59 @@ fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement
     assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
     assert_eq!(mutation_profile.windows_containing.work_activation, 1);
     assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
+}
+
+#[test]
+fn exact_route_validates_frames_after_an_unrelated_hazard() {
+    let fixture = SameRuntimeFixture::new();
+    let source = fixture.context();
+    let unrelated = fixture.context();
+    let unrelated_task = unrelated
+        .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+        .expect("the unrelated cancellable task should schedule");
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let task = source
+        .schedule_task(move |_| {
+            Ok(Box::new(YieldAfterRelease {
+                started: Some(started_sender),
+                release: release_receiver,
+            }))
+        })
+        .expect("the exact task should schedule");
+    let task_wait = task.wait().clone();
+    let pump_source = EvalContext::clone(&source);
+    let pump = thread::spawn(move || {
+        let mut route = ExactDemandRoute::default();
+        let first = pump_source.pump_wait_on_route(&task_wait, 1, &mut route);
+        (pump_source, route, first)
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the exact task must enter its poll before cancellation");
+    assert_eq!(
+        unrelated_task.cancel(),
+        EvaluationTaskCancellation::Requested
+    );
+    release_sender
+        .send(())
+        .expect("the exact task should remain parked in its poll");
+    let (pump_source, mut route, first) = pump.join().expect("latched pump should finish");
+    assert_eq!(first, EvaluationPumpOutcome::BudgetExhausted);
+    assert_eq!(
+        pump_source.pump_wait_on_route(task.wait(), 1, &mut route),
+        EvaluationPumpOutcome::TargetReady
+    );
+
+    let profile = source
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_demand_route_profile();
+    assert_eq!(profile.hazard_validations, 1);
+    assert_eq!(profile.successful_hazard_validations, 1);
+    assert_eq!(profile.failed_hazard_validations, 0);
+    assert_eq!(profile.checkpoint_invalidations, 0);
 }
 
 #[test]
@@ -6482,7 +6538,7 @@ fn exact_route_attributes_mixed_poll_owned_and_external_mutations_once() {
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
-    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.moved_poll_windows, 1);
     assert_eq!(mutation_profile.mutation_occurrences.total(), 4);
     assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 2);
     assert_eq!(mutation_profile.external_mutation_occurrences.total(), 2);
@@ -6550,7 +6606,10 @@ fn exact_route_attributes_latched_ancestor_cancellation_and_retirement() {
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
-    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.moved_poll_windows, 1);
+    assert_eq!(mutation_profile.hazard_validations, 1);
+    assert_eq!(mutation_profile.successful_hazard_validations, 0);
+    assert_eq!(mutation_profile.failed_hazard_validations, 1);
     assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
     assert_eq!(mutation_profile.windows_containing.cancellation, 1);
     assert_eq!(mutation_profile.windows_containing.work_retirement, 1);
@@ -6624,7 +6683,10 @@ fn exact_route_attributes_latched_observation_wake_of_an_ancestor() {
         .coordinator()
         .expect("fixture coordinator should remain live")
         .exact_route_mutation_profile();
-    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.moved_poll_windows, 1);
+    assert_eq!(mutation_profile.hazard_validations, 1);
+    assert_eq!(mutation_profile.successful_hazard_validations, 0);
+    assert_eq!(mutation_profile.failed_hazard_validations, 1);
     assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
     assert_eq!(mutation_profile.mutation_occurrences.total(), 1);
     assert_eq!(mutation_profile.windows_containing.observation_wake, 1);

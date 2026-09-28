@@ -9209,6 +9209,16 @@ existing wrapping `work_generation` comparison, and force the wrap boundary
 in a focused test if correctness depends on equality rather than mere change
 detection.
 
+Completion record: `WorkCoordinatorState` now publishes two private wrapping
+revisions from the single factual mutation boundary. `work_generation`
+continues to cover every scheduler/readiness transition, while
+`exact_route_hazard_revision` advances only for the W9C.3 hazard classes.
+`ExactDemandRoute` retains both observations, and `ExactRouteRelease` separates
+poll-end scheduler/hazard observations, guarded-release end observations, the
+claimed work identity, accounted release movement, and final disposition. The
+focused wrap test crosses `u64::MAX` independently for a neutral admission and
+a route hazard. No revision is exposed as semantic or public task state.
+
 ##### W9D.2 — Guarded reconciliation
 
 Implement the W9C choice consistently for reflection, deferred, and lazy-route
@@ -9233,6 +9243,26 @@ machine destruction, and other user-observable work remain outside runtime
 locks and mutation admission. Do not duplicate release policy independently
 across the three work families when one shared helper can express the proof.
 
+Completion record: all reflection, deferred, and lazy-route releases use
+`reconcile_exact_route_release`. A matching tip and hazard revision accepts the
+poll in O(1), independent of broad scheduler movement. Hazard movement invokes
+the pre-existing compact-frame validator while coordinator state is locked;
+successful validation preserves the zipper, while concrete target, epoch,
+dependency, producer, state, retirement, or branch mismatches retain their
+named cold fallback. Unaccounted movement during the guarded release remains
+the deliberately conservative `GuardedReleaseMutation` fallback. The release
+snapshot is never upgraded to a later coordinator revision, so a mutation
+between release publication and reconciliation remains visible to the next
+locked route probe.
+
+Forced tests cover neutral poll-owned and external admissions, successful
+validation after an unrelated cancellation hazard, failed validation after
+ancestor cancellation/retirement and observation wake, all three work
+families, terminal return, changed dependencies, independent retirement, and
+an interleaved guarded-release mutation. The profile now distinguishes O(1)
+accepted releases, attempted hazard validations, successful validations, and
+failed validations.
+
 ##### W9D.3 — Transitional accounting cleanup
 
 Remove temporary probes and classification scaffolding which no longer serves
@@ -9244,6 +9274,16 @@ poll-origin attribution and per-kind counter snapshots unless they justify an
 ongoing profiling role. Update coordinator comments so `work_generation` is
 described as the scheduler/readiness revision and the narrower revision as an
 exact-route validation input, not route authority.
+
+Completion record: the obsolete poll-generation fallback class was removed;
+broad scheduler movement is no longer an invalidation reason. Coordinator and
+route comments now distinguish scheduler readiness from hazard validation,
+and the public static profile calls the historical samples "moved poll
+windows" rather than invalidated windows. The factual publisher census,
+poll-origin counters, per-kind window attribution, and notification counters
+remain temporarily because W9E explicitly requires the same before/after
+measurement. They retain bounded aggregate counts only and are to be disposed
+after W9E rather than being mistaken for semantic history.
 
 ##### W9D.4 — Apply the bounded notification disposition
 
@@ -9259,6 +9299,18 @@ larger worker/client condition-variable split in its own plan instead of
 silently expanding W9. Remove notification metrics which have served the
 decision unless they are cheap enough to remain useful under the static
 profiling feature.
+
+Completion record: the shared notification boundary now suppresses host wakes
+for `DemandSessionRegistry`, `TaskPromiseIndexAdmission`,
+`TaskPromiseIndexRetirement`, `WorkClaim`, and `FailureLedger` while preserving
+their broad generation publication. Every enabling, completion, observation,
+release, and lifecycle class retains its broadcast because waiter classes
+still share one condition variable. A table-driven forced test parks an exact
+client before each suppressed publication, proves the notification call is
+absent, then publishes an enabling transition and joins the waiter. The
+existing mixed worker/client admission, exact completion, and four-class
+shutdown fixtures continue to cover the retained broadcasts. No channel split
+was introduced.
 
 #### W9E — Measurement, verification, and disposition
 

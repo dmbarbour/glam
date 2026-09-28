@@ -68,7 +68,6 @@ fn trusted_work_id_set_is_deterministic_and_identity_exact() {
 #[test]
 fn exact_release_classification_is_non_overlapping() {
     let work = EvaluationWorkId(NonZeroU64::new(1).expect("one is nonzero"));
-    let other = EvaluationWorkId(NonZeroU64::new(2).expect("two is nonzero"));
     let route = |current, generation| {
         let mut members = TrustedWorkIdSet::default();
         members.insert(current);
@@ -76,6 +75,7 @@ fn exact_release_classification_is_non_overlapping() {
             current: Some(current),
             members,
             generation: Some(generation),
+            hazard_revision: Some(generation),
             ..ExactDemandRoute::default()
         }
     };
@@ -83,35 +83,16 @@ fn exact_release_classification_is_non_overlapping() {
         work: released_work,
         start_generation,
         end_generation: start_generation.wrapping_add(1),
+        start_hazard_revision: start_generation,
+        end_hazard_revision: start_generation.wrapping_add(1),
         uninterrupted,
         disposition: ExactRouteDisposition::Runnable,
         poll_end_mutations: CoordinatorMutationSnapshot::default(),
     };
 
     let mut valid = route(work, 7);
-    assert!(valid.apply_release(release(work, 7, true)));
+    valid.apply_validated_release(release(work, 7, true));
     assert_eq!(valid.invalidation, None);
-
-    let mut mismatched_work = route(other, 7);
-    assert!(!mismatched_work.apply_release(release(work, 8, false)));
-    assert_eq!(
-        mismatched_work.invalidation,
-        Some(ExactRouteFallbackReason::CurrentWorkMismatch)
-    );
-
-    let mut poll_movement = route(work, 7);
-    assert!(!poll_movement.apply_release(release(work, 8, false)));
-    assert_eq!(
-        poll_movement.invalidation,
-        Some(ExactRouteFallbackReason::PollGenerationMovement)
-    );
-
-    let mut guarded_mutation = route(work, 7);
-    assert!(!guarded_mutation.apply_release(release(work, 7, false)));
-    assert_eq!(
-        guarded_mutation.invalidation,
-        Some(ExactRouteFallbackReason::GuardedReleaseMutation)
-    );
 
     let mut missing = route(work, 7);
     missing.invalidate_missing_release();
@@ -119,6 +100,23 @@ fn exact_release_classification_is_non_overlapping() {
         missing.invalidation,
         Some(ExactRouteFallbackReason::MissingRelease)
     );
+}
+
+#[test]
+fn scheduler_and_exact_route_revisions_wrap_independently() {
+    let mut state = WorkCoordinatorState {
+        work_generation: u64::MAX,
+        exact_route_hazard_revision: u64::MAX,
+        ..WorkCoordinatorState::default()
+    };
+
+    state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
+    assert_eq!(state.work_generation, 0);
+    assert_eq!(state.exact_route_hazard_revision, u64::MAX);
+
+    state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
+    assert_eq!(state.work_generation, 1);
+    assert_eq!(state.exact_route_hazard_revision, 0);
 }
 
 #[test]
@@ -926,7 +924,9 @@ fn foreground_route_descends_from_a_published_block_without_rediscovery() {
         }),
     );
     assert!(
-        route.apply_release(
+        coordinator.reconcile_exact_route_release(
+            &parent_wait,
+            &mut route,
             release
                 .route
                 .take()
@@ -948,6 +948,7 @@ fn foreground_route_descends_from_a_published_block_without_rediscovery() {
             complete_searches: 1,
             edges_visited: 1,
             maximum_depth: 1,
+            o1_accepted_releases: 1,
             ..ExactDemandRouteProfile::default()
         },
         "the child handoff should not search again from the parent wait"
@@ -971,7 +972,9 @@ fn exact_claimed_work_families_publish_release_observations() {
     let mut reflection_release =
         coordinator.release_reflection(reflection, ReflectionWorkPoll::Yielded);
     assert!(
-        reflection_route.apply_release(
+        coordinator.reconcile_exact_route_release(
+            &reflection_wait,
+            &mut reflection_route,
             reflection_release
                 .route
                 .take()
@@ -989,7 +992,9 @@ fn exact_claimed_work_families_publish_release_observations() {
     };
     let mut deferred_release = coordinator.release_deferred(deferred, DeferredWorkPoll::Yielded);
     assert!(
-        deferred_route.apply_release(
+        coordinator.reconcile_exact_route_release(
+            &deferred_wait,
+            &mut deferred_route,
             deferred_release
                 .route
                 .take()
@@ -1015,7 +1020,9 @@ fn exact_claimed_work_families_publish_release_observations() {
     };
     let mut lazy_release = coordinator.release_lazy_route(lazy_claim, DeferredWorkPoll::Yielded);
     assert!(
-        lazy_route.apply_release(
+        coordinator.reconcile_exact_route_release(
+            &lazy_wait,
+            &mut lazy_route,
             lazy_release
                 .route
                 .take()
@@ -1094,7 +1101,7 @@ fn foreground_route_returns_to_its_parent_after_child_completion() {
         Arc::new(EvaluationFailure::message("test terminal route child")),
     );
     assert!(
-        route.apply_release(route_release),
+        coordinator.reconcile_exact_route_release(&parent_wait, &mut route, route_release),
         "the uninterrupted terminal release should pop to its parent"
     );
     drop(
@@ -1379,7 +1386,9 @@ fn foreground_route_falls_back_after_an_interleaved_release_mutation() {
         .expect("release thread should remain live");
     let mut release = release_thread.join().expect("release thread should finish");
     assert!(
-        !route.apply_release(
+        !coordinator.reconcile_exact_route_release(
+            &parent_wait,
+            &mut route,
             release
                 .route
                 .take()
@@ -2913,7 +2922,7 @@ fn shared_notification_broadcast_releases_worker_beside_parked_client() {
 }
 
 #[test]
-fn work_claim_notification_is_attributed_as_unrelated_client_churn() {
+fn work_claim_publication_does_not_wake_an_exact_client() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
@@ -2924,12 +2933,16 @@ fn work_claim_notification_is_attributed_as_unrelated_client_churn() {
     let (parked_sender, parked_receiver) = mpsc::channel();
     coordinator.set_work_wait_probe(parked_sender);
     let waiting = coordinator.clone();
+    let (finished_sender, finished_receiver) = mpsc::channel();
     let waiter = thread::spawn(move || {
         assert!(waiting.wait_for_change_for(observed, None, CoordinatorWaiterClass::ExactClient,));
         waiting.record_waiter_outcome(
             CoordinatorWaiterClass::ExactClient,
             CoordinatorWaiterOutcome::Unrelated,
         );
+        finished_sender
+            .send(())
+            .expect("waiter completion observer must remain live");
     });
     parked_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -2938,19 +2951,77 @@ fn work_claim_notification_is_attributed_as_unrelated_client_churn() {
     let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the test spark should remain claimable")
     };
-    waiter
-        .join()
-        .expect("claim notification must release the waiter");
     let after_claim = coordinator.coordinator_notification_profile();
     assert_eq!(
         after_claim.calls.notify_all.work_claim,
-        before.calls.notify_all.work_claim + 1,
+        before.calls.notify_all.work_claim,
     );
     assert_eq!(
         after_claim.exact_clients.unrelated,
-        before.exact_clients.unrelated + 1,
+        before.exact_clients.unrelated,
     );
     coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+    finished_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the enabling release must wake the parked client");
+    waiter.join().expect("client waiter should finish");
+}
+
+#[test]
+fn every_suppressed_publication_preserves_the_shared_wait_protocol() {
+    for kind in [
+        CoordinatorMutationKind::DemandSessionRegistry,
+        CoordinatorMutationKind::TaskPromiseIndexAdmission,
+        CoordinatorMutationKind::TaskPromiseIndexRetirement,
+        CoordinatorMutationKind::WorkClaim,
+        CoordinatorMutationKind::FailureLedger,
+    ] {
+        let (coordinator, _executor) = super::super::test_execution_resources(0)
+            .expect("test execution resources should build");
+        coordinator.executor_started(1);
+        let before = coordinator.coordinator_notification_profile();
+        let observed = coordinator.work_generation();
+        let (parked_sender, parked_receiver) = mpsc::channel();
+        coordinator.set_work_wait_probe(parked_sender);
+        let waiting = coordinator.clone();
+        let waiter = thread::spawn(move || {
+            assert!(waiting.wait_for_change_for(
+                observed,
+                None,
+                CoordinatorWaiterClass::ExactClient,
+            ));
+        });
+        parked_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the exact client must park before publication");
+
+        {
+            let mut state = coordinator
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.advance_work_generation(kind);
+        }
+        coordinator.notify_all(kind);
+        let after_suppressed = coordinator.coordinator_notification_profile();
+        assert_eq!(
+            after_suppressed.calls.notify_all.total(),
+            before.calls.notify_all.total(),
+            "{kind:?} must publish its revision without a host wake"
+        );
+
+        {
+            let mut state = coordinator
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
+        }
+        coordinator.notify_all(CoordinatorMutationKind::TestTransition);
+        waiter
+            .join()
+            .expect("a later enabling publication must release the waiter");
+    }
 }
 
 #[test]
