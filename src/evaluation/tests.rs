@@ -3,6 +3,7 @@
 use super::*;
 use glam_gc::CollectionError;
 use std::sync::{Barrier, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::{
@@ -2837,6 +2838,29 @@ struct SpawnSignal {
     signal: Option<mpsc::Sender<()>>,
 }
 
+struct SpawnThenYield {
+    target: EvalContext,
+    signal: Option<mpsc::Sender<()>>,
+}
+
+impl EvaluationTaskMachine for SpawnThenYield {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        let Some(signal) = self.signal.take() else {
+            return EvaluationMachinePoll::Complete(
+                context.root_value(crate::core::keys::unit_value()),
+            );
+        };
+        self.target
+            .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
+            .expect("poll-owned test work should be admitted");
+        EvaluationMachinePoll::Yielded
+    }
+}
+
 impl EvaluationTaskMachine for SpawnSignal {
     fn poll(
         &mut self,
@@ -2857,6 +2881,32 @@ impl EvaluationTaskMachine for SpawnSignal {
 struct CompleteAfterRelease {
     started: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
+}
+
+struct YieldAfterRelease {
+    started: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+}
+
+impl EvaluationTaskMachine for YieldAfterRelease {
+    fn poll(
+        &mut self,
+        context: &crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        let Some(started) = self.started.take() else {
+            return EvaluationMachinePoll::Complete(
+                context.root_value(crate::core::keys::unit_value()),
+            );
+        };
+        started
+            .send(())
+            .expect("test start receiver should remain live");
+        self.release
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test should release the yielding task");
+        EvaluationMachinePoll::Yielded
+    }
 }
 
 struct BlockOnceOnWait(Option<EvaluationWaitToken>);
@@ -6058,6 +6108,15 @@ fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
             context.poll_reflection_task(&task),
             EvaluationWaitPoll::Failed(_)
         ));
+        assert_eq!(
+            context
+                .coordinator()
+                .expect("cycle fixture coordinator should remain live")
+                .exact_demand_route_profile()
+                .missing_release_fallbacks,
+            0,
+            "cycle settlement must retain a release observation for both exact work families"
+        );
     }
 }
 
@@ -6179,6 +6238,99 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
         },
         "discarding orchestration state should cause one cold rebuild, not alter semantics"
     );
+}
+
+#[test]
+fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
+    let fixture = SameRuntimeFixture::new();
+    let source = fixture.context();
+    let target = fixture.context();
+    let (signal, observed) = mpsc::channel();
+    let task = source
+        .schedule_task({
+            let target = EvalContext::clone(&target);
+            move |_| {
+                Ok(Box::new(SpawnThenYield {
+                    target,
+                    signal: Some(signal),
+                }))
+            }
+        })
+        .expect("poll-owned admission fixture should schedule");
+    let mut route = ExactDemandRoute::default();
+
+    assert_eq!(
+        source.pump_wait_on_route(task.wait(), 1, &mut route),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+    assert!(observed.try_recv().is_err());
+    assert_eq!(
+        source.pump_wait_on_route(task.wait(), 1, &mut route),
+        EvaluationPumpOutcome::TargetReady
+    );
+    assert_eq!(
+        source
+            .coordinator()
+            .expect("fixture coordinator should remain live")
+            .exact_demand_route_profile(),
+        ExactDemandRouteProfile {
+            complete_searches: 2,
+            edges_visited: 2,
+            maximum_depth: 1,
+            fast_handoffs: 1,
+            checkpoint_invalidations: 1,
+            cold_fallbacks: 1,
+            poll_generation_movement_fallbacks: 1,
+            ..ExactDemandRouteProfile::default()
+        }
+    );
+}
+
+#[test]
+fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement() {
+    let fixture = SameRuntimeFixture::new();
+    let source = fixture.context();
+    let unrelated = fixture.context();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let task = source
+        .schedule_task(move |_| {
+            Ok(Box::new(YieldAfterRelease {
+                started: Some(started_sender),
+                release: release_receiver,
+            }))
+        })
+        .expect("latched poll fixture should schedule");
+    let task_wait = task.wait().clone();
+    let pump_source = EvalContext::clone(&source);
+    let pump = thread::spawn(move || {
+        let mut route = ExactDemandRoute::default();
+        let first = pump_source.pump_wait_on_route(&task_wait, 1, &mut route);
+        (pump_source, route, first)
+    });
+
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the exact task must enter its poll before unrelated admission");
+    let _unrelated_task = unrelated
+        .schedule_task(|_| Ok(Box::new(AlwaysYields)))
+        .expect("the unrelated participant should mutate coordinator state");
+    release_sender
+        .send(())
+        .expect("the exact task should remain parked in its poll");
+    let (pump_source, mut route, first) = pump.join().expect("latched pump should finish");
+    assert_eq!(first, EvaluationPumpOutcome::BudgetExhausted);
+    assert_eq!(
+        pump_source.pump_wait_on_route(task.wait(), 1, &mut route),
+        EvaluationPumpOutcome::TargetReady
+    );
+    let profile = source
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_demand_route_profile();
+    assert_eq!(profile.checkpoint_invalidations, 1);
+    assert_eq!(profile.poll_generation_movement_fallbacks, 1);
+    assert_eq!(profile.guarded_release_mutation_fallbacks, 0);
 }
 
 #[test]

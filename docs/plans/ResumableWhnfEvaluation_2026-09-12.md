@@ -1,7 +1,8 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W8 and their mandatory reviews are complete by 2026-09-27,
-followed by the planned explicit W6G4R-003 performance follow-up in W9. This
+Status: W0-W8 and their mandatory reviews are complete by 2026-09-27. W9A-B
+completed the classification baseline and forced-ordering matrix on
+2026-09-28; W9C-E remain planned. This
 is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -8634,8 +8635,9 @@ or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 
-**Status:** planned. This phase owns W6G4R-003 in full. It is a measured
-post-W6G performance repair, not unfinished W6G semantics.
+**Status:** W9A-B complete on 2026-09-28; W9C-E planned. This phase owns
+W6G4R-003 in full. It is a measured post-W6G performance repair, not
+unfinished W6G semantics.
 
 The W6G4R-002 baseline is 3,339,481,894 Callgrind instructions for the exact
 source-shaped duplicate-symbol fixture. It records 19,499 fast route handoffs,
@@ -8659,7 +8661,7 @@ coordinator lock or mutation guard across machine polling, or accept a global
 generation mismatch without proving that the remembered exact path remains
 valid. The guarded cold traversal remains the final fallback.
 
-#### W9A — Classification-only baseline
+#### W9A — Classification-only baseline — Complete (2026-09-28)
 
 Split the current broad profile reason without changing route decisions:
 
@@ -8676,7 +8678,24 @@ record non-overlapping counts whose sum reconciles with the 9,356 baseline
 invalidations. If the baseline no longer reproduces after W7-W8, stop and
 re-profile before designing a repair.
 
-#### W9B — Forced ordering and relevance matrix
+Completion record: the former `Contention` class is now split into missing
+release, current-work mismatch, poll-time generation movement, and
+guarded-release mutation. Existing changed-dependency, retired-work, and
+branched-work validation reasons remain separate. Classification observes
+only the route's existing current work/generation plus release start/end
+generations and the tracker's accounted mutations; it adds no work-record or
+scheduler metadata.
+
+Temporary output under the existing `interaction-net-profiling` feature
+re-ran the exact source-shaped duplicate-symbol fixture. Its primary runtime
+reproduced 19,499 fast handoffs and 9,356 invalidations exactly. All 9,356 are
+poll-time generation movement; missing release, current-work mismatch,
+guarded-release mutation, changed dependency, retired work, and branched work
+are all zero. The structured duplicate-symbol diagnostic is unchanged. The
+temporary process-output hook was removed after measurement; the retained
+counters remain test-only.
+
+#### W9B — Forced ordering and relevance matrix — Complete (2026-09-28)
 
 Latch each ordering with barriers rather than repeated runs:
 
@@ -8697,6 +8716,27 @@ Latch each ordering with barriers rather than repeated runs:
 The tests must prove both classification and current fallback behavior before
 implementation changes. Preserve the existing queued-parent, busy-leaf,
 cross-session, owner-closure, child-completion, and interleaved-release tests.
+
+Completion record: the following deterministic matrix now protects the
+classification and unchanged fallback behavior:
+
+| Ordering or disposition | Forced evidence |
+| --- | --- |
+| unchanged claimed work | `bounded_pump_retains_exact_route_across_budget_returns` and `exact_claimed_work_families_publish_release_observations` |
+| poll-owned coordinator admission | `exact_route_classifies_poll_owned_admission_as_generation_movement` |
+| unrelated mutation while poll is active | `exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement` |
+| parent wake and reblock | `foreground_route_falls_back_when_an_observation_wakes_its_parent` and `foreground_route_falls_back_after_its_parent_reblocks_at_a_new_epoch` |
+| retired or replaced route work | `foreground_route_does_not_retain_a_closed_demand_session`, `foreground_route_recovers_its_root_when_the_child_completes_first`, and the classification precedence fixture |
+| mutation during guarded release | `foreground_route_falls_back_after_an_interleaved_release_mutation` |
+| yield, block, terminal return, cycles, and missing release | the three-family release-observation fixture, existing block/terminal route fixtures, `task_owned_promise_lazy_cycle_fails_in_both_publication_orders`, and `exact_release_classification_is_non_overlapping` |
+
+The two disputed concurrent orderings use channels at the poll or guarded
+release boundary; no claim relies on repeated scheduling luck. Reflection,
+task-owned deferred work, and runtime-owned lazy routes all publish an exact
+release observation after an exactly claimed yield. Existing busy-leaf,
+queued-parent, cross-session, owner-closure, child-completion, and cycle tests
+remain intact. No route decision has changed yet: every classified mismatch
+still invalidates and cold-rebuilds authoritatively on the next probe.
 
 #### W9C — Reconciliation design gate
 

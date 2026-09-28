@@ -678,7 +678,10 @@ pub(super) struct ExactDemandRouteProfile {
     pub(super) fast_handoffs: usize,
     pub(super) checkpoint_invalidations: usize,
     pub(super) cold_fallbacks: usize,
-    pub(super) contention_fallbacks: usize,
+    pub(super) missing_release_fallbacks: usize,
+    pub(super) current_work_mismatch_fallbacks: usize,
+    pub(super) poll_generation_movement_fallbacks: usize,
+    pub(super) guarded_release_mutation_fallbacks: usize,
     pub(super) changed_dependency_fallbacks: usize,
     pub(super) retired_work_fallbacks: usize,
     pub(super) branched_work_fallbacks: usize,
@@ -752,12 +755,22 @@ impl ExactDemandRoute {
         self.invalidation = Some(reason);
     }
 
+    pub(crate) fn invalidate_missing_release(&mut self) {
+        self.invalidate(ExactRouteFallbackReason::MissingRelease);
+    }
+
     pub(super) fn apply_release(&mut self, release: ExactRouteRelease) -> bool {
-        if self.current != Some(release.work)
-            || self.generation != Some(release.start_generation)
-            || !release.uninterrupted
-        {
-            self.invalidate(ExactRouteFallbackReason::Contention);
+        let invalidation = if self.current != Some(release.work) {
+            Some(ExactRouteFallbackReason::CurrentWorkMismatch)
+        } else if self.generation != Some(release.start_generation) {
+            Some(ExactRouteFallbackReason::PollGenerationMovement)
+        } else if !release.uninterrupted {
+            Some(ExactRouteFallbackReason::GuardedReleaseMutation)
+        } else {
+            None
+        };
+        if let Some(reason) = invalidation {
+            self.invalidate(reason);
             return false;
         }
         match release.disposition {
@@ -794,7 +807,10 @@ impl ExactDemandRoute {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactRouteFallbackReason {
-    Contention,
+    MissingRelease,
+    CurrentWorkMismatch,
+    PollGenerationMovement,
+    GuardedReleaseMutation,
     ChangedDependency,
     RetiredWork,
     BranchedWork,
@@ -1039,7 +1055,16 @@ impl EvaluationWorkCoordinator {
         profile.checkpoint_invalidations += 1;
         profile.cold_fallbacks += 1;
         match reason {
-            ExactRouteFallbackReason::Contention => profile.contention_fallbacks += 1,
+            ExactRouteFallbackReason::MissingRelease => profile.missing_release_fallbacks += 1,
+            ExactRouteFallbackReason::CurrentWorkMismatch => {
+                profile.current_work_mismatch_fallbacks += 1;
+            }
+            ExactRouteFallbackReason::PollGenerationMovement => {
+                profile.poll_generation_movement_fallbacks += 1;
+            }
+            ExactRouteFallbackReason::GuardedReleaseMutation => {
+                profile.guarded_release_mutation_fallbacks += 1;
+            }
             ExactRouteFallbackReason::ChangedDependency => {
                 profile.changed_dependency_fallbacks += 1;
             }
@@ -1731,7 +1756,7 @@ impl EvaluationWorkCoordinator {
                             ExactTargetSelection::Claimed(claimed)
                         }
                         None => {
-                            route.invalidate(ExactRouteFallbackReason::Contention);
+                            route.invalidate(ExactRouteFallbackReason::CurrentWorkMismatch);
                             ExactTargetSelection::None
                         }
                     }

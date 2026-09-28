@@ -817,11 +817,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        883,
+        884,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
-    // W7C adds one test-only managed lazy root whose allocation identity is
+    // W9B adds one test-only managed lazy root projection while exercising
+    // exact release observations across all claimable work families. W7C
+    // adds one test-only managed lazy root whose allocation identity is
     // observed while verifying retained-checkpoint cost. W6G.1f.1 adds one
     // traced typed edge from a managed lazy to its
     // evaluator-owned checkpoint. W6G.1f.3a.1 adds the concrete host-call arm,
@@ -959,7 +961,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // while two explicitly ordered small-stack pollers exchange ownership.
     assert_eq!(
         occurrence_fingerprint(actual),
-        9_490_166_597_721_190_462,
+        12_938_170_938_525_358_585,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1006,7 +1008,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 200),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 633),
+            ((SourceScope::Test, EdgeSurface::Typed), 634),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

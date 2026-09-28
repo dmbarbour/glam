@@ -8,8 +8,8 @@ use super::coordinator::{
     ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
     EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExactDemandRoute, ExactRouteFallbackReason, ExactRouteRelease,
-    ExactTargetSelection, ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
+    EvaluationWorkId, ExactDemandRoute, ExactRouteRelease, ExactTargetSelection,
+    ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -503,7 +503,7 @@ pub(super) fn pump_demand_on_route(
                     coordinator.record_exact_route_handoffs(1);
                 }
             } else {
-                route.invalidate(ExactRouteFallbackReason::Contention);
+                route.invalidate_missing_release();
             }
         }
         if let Some(machine) = released {

@@ -66,6 +66,61 @@ fn trusted_work_id_set_is_deterministic_and_identity_exact() {
 }
 
 #[test]
+fn exact_release_classification_is_non_overlapping() {
+    let work = EvaluationWorkId(NonZeroU64::new(1).expect("one is nonzero"));
+    let other = EvaluationWorkId(NonZeroU64::new(2).expect("two is nonzero"));
+    let route = |current, generation| {
+        let mut members = TrustedWorkIdSet::default();
+        members.insert(current);
+        ExactDemandRoute {
+            current: Some(current),
+            members,
+            generation: Some(generation),
+            ..ExactDemandRoute::default()
+        }
+    };
+    let release = |released_work, start_generation, uninterrupted| ExactRouteRelease {
+        work: released_work,
+        start_generation,
+        end_generation: start_generation.wrapping_add(1),
+        uninterrupted,
+        disposition: ExactRouteDisposition::Runnable,
+    };
+
+    let mut valid = route(work, 7);
+    assert!(valid.apply_release(release(work, 7, true)));
+    assert_eq!(valid.invalidation, None);
+
+    let mut mismatched_work = route(other, 7);
+    assert!(!mismatched_work.apply_release(release(work, 8, false)));
+    assert_eq!(
+        mismatched_work.invalidation,
+        Some(ExactRouteFallbackReason::CurrentWorkMismatch)
+    );
+
+    let mut poll_movement = route(work, 7);
+    assert!(!poll_movement.apply_release(release(work, 8, false)));
+    assert_eq!(
+        poll_movement.invalidation,
+        Some(ExactRouteFallbackReason::PollGenerationMovement)
+    );
+
+    let mut guarded_mutation = route(work, 7);
+    assert!(!guarded_mutation.apply_release(release(work, 7, false)));
+    assert_eq!(
+        guarded_mutation.invalidation,
+        Some(ExactRouteFallbackReason::GuardedReleaseMutation)
+    );
+
+    let mut missing = route(work, 7);
+    missing.invalidate_missing_release();
+    assert_eq!(
+        missing.invalidation,
+        Some(ExactRouteFallbackReason::MissingRelease)
+    );
+}
+
+#[test]
 fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
     let values = CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
@@ -899,6 +954,84 @@ fn foreground_route_descends_from_a_published_block_without_rediscovery() {
 }
 
 #[test]
+fn exact_claimed_work_families_publish_release_observations() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+
+    let (_, reflection_work) = reserve_ready_test_reflection(&coordinator, &session);
+    let reflection_wait = wait_for_test_work(&coordinator, reflection_work);
+    let mut reflection_route = ExactDemandRoute::default();
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::Reflection(reflection)) =
+        coordinator.claim_exact_target_on_route(&reflection_wait, &mut reflection_route)
+    else {
+        panic!("the exact reflection route should be claimable")
+    };
+    let mut reflection_release =
+        coordinator.release_reflection(reflection, ReflectionWorkPoll::Yielded);
+    assert!(
+        reflection_route.apply_release(
+            reflection_release
+                .route
+                .take()
+                .expect("reflection yield must publish a route observation")
+        )
+    );
+
+    let (_, deferred_wait, _) =
+        reserve_test_deferred(&coordinator, &session, "route release deferred");
+    let mut deferred_route = ExactDemandRoute::default();
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::Deferred(deferred)) =
+        coordinator.claim_exact_target_on_route(&deferred_wait, &mut deferred_route)
+    else {
+        panic!("the exact deferred route should be claimable")
+    };
+    let mut deferred_release = coordinator.release_deferred(deferred, DeferredWorkPoll::Yielded);
+    assert!(
+        deferred_route.apply_release(
+            deferred_release
+                .route
+                .take()
+                .expect("deferred yield must publish a route observation")
+        )
+    );
+
+    let lazy_task = super::super::allocate_task_id(&session.demand.values)
+        .expect("lazy route task identity should allocate");
+    let lazy_wait = super::super::allocate_wait_token(&session.demand, lazy_task)
+        .expect("lazy route wait identity should allocate");
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, "route release lazy", |_| {
+        panic!("coordinator route test never evaluates its synthetic lazy")
+    });
+    let lazy_wait = coordinator
+        .reserve_lazy_route(lazy.root(&session.demand.values), lazy_wait)
+        .expect("the lazy route should reserve");
+    let mut lazy_route = ExactDemandRoute::default();
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::LazyRoute(lazy_claim)) =
+        coordinator.claim_exact_target_on_route(&lazy_wait, &mut lazy_route)
+    else {
+        panic!("the exact lazy route should be claimable")
+    };
+    let mut lazy_release = coordinator.release_lazy_route(lazy_claim, DeferredWorkPoll::Yielded);
+    assert!(
+        lazy_route.apply_release(
+            lazy_release
+                .route
+                .take()
+                .expect("lazy-route yield must publish a route observation")
+        )
+    );
+
+    assert_eq!(
+        coordinator
+            .exact_demand_route_profile()
+            .missing_release_fallbacks,
+        0,
+        "every exactly claimed work family must publish its release observation"
+    );
+}
+
+#[test]
 fn foreground_route_retains_a_busy_candidate_across_its_release() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
@@ -1269,7 +1402,7 @@ fn foreground_route_falls_back_after_an_interleaved_release_mutation() {
             maximum_depth: 1,
             checkpoint_invalidations: 1,
             cold_fallbacks: 1,
-            contention_fallbacks: 1,
+            guarded_release_mutation_fallbacks: 1,
             ..ExactDemandRouteProfile::default()
         }
     );
