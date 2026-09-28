@@ -2,7 +2,8 @@
 
 Status: W0-W8 and their mandatory reviews are complete by 2026-09-27. W9A-B
 completed the classification baseline and forced-ordering matrix on
-2026-09-28; W9C-E remain planned. This
+2026-09-28; W9C.0 completed the coordinator mutation census on 2026-09-28;
+W9C.1-E remain planned. This
 is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -8635,9 +8636,9 @@ or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 
-**Status:** W9A-B complete on 2026-09-28; W9C-E planned. This phase owns
-W6G4R-003 in full. It is a measured post-W6G performance repair, not
-unfinished W6G semantics.
+**Status:** W9A-B and W9C.0 complete on 2026-09-28; W9C.1-E planned. This
+phase owns W6G4R-003 in full. It is a measured post-W6G performance repair,
+not unfinished W6G semantics.
 
 The W6G4R-002 baseline is 3,339,481,894 Callgrind instructions for the exact
 source-shaped duplicate-symbol fixture. It records 19,499 fast route handoffs,
@@ -8814,6 +8815,50 @@ increments outside that helper, so later coordinator work cannot silently
 escape the census. `work_generation` itself retains its current scheduling,
 wait-for-change, readiness, and settlement roles; W9 must not narrow its
 meaning merely to optimize exact routes.
+
+Completion record, 2026-09-28: `WorkCoordinatorState::advance_work_generation`
+is now the only direct production generation increment. Every coordinator
+publisher supplies one of twenty production mutation kinds; `WorkPark` and
+`TestTransition` are explicitly test-only. The source-backed
+`generation_inventory` scans the coordinator facade and every lifecycle child,
+rejects another direct assignment, and latches the closed enum vocabulary.
+The helper retains the exact prior wrapping increment and records no counters
+yet, so this checkpoint changes neither scheduling nor notification behavior.
+
+The code census produced this provisional proof table. “Saved tip” means the
+record may be the current identity in a caller-local route, but cannot be the
+exclusively claimed poll tip undergoing another transition. Candidate effects
+are inputs to W9C.1-W9C.3, not final policy.
+
+| Mutation kind | Can touch claimed tip? | Can touch retained ancestor? | Can change wait-to-work projection? | Accounted by exact release? | Candidate route effect |
+| --- | --- | --- | --- | --- | --- |
+| `DemandSessionRegistry` | No | No | No | Not needed | `neutral` |
+| `ExecutorAvailability` | Spark-only lifecycle | No exact-route ancestor | No | Not needed | `neutral` |
+| `FreshWorkAdmission` | Fresh identity only | No | Installs a fresh unique projection only | Not needed | `neutral` |
+| `WorkActivation` | Saved tip only | No | No | Not needed | `neutral` |
+| `ClientDemandAdmission` | Separate foreground registry | No | No | Not needed | `neutral` |
+| `TaskPromiseIndexAdmission` | May extend the polling producer's obligations | No | Installs a fresh unique projection | Poll-owned publication is visible to the final disposition | `current-release-accounted` |
+| `TaskPromiseIndexRetirement` | Possibly during terminal settlement | Possibly through a captured producer | Removes a projection | No | `possible-ancestor-hazard` |
+| `WorkClaim` | Establishes the selected tip | A blocked ancestor cannot be claimed | No | The claim records the route tip and revision | `neutral` |
+| `WorkRequeue` | Saved tip only | No | No | Not needed; availability is reread | `neutral` |
+| `WorkRelease` | Yes | A retained ancestor remains blocked | May publish the tip's next dependency, not replace an old projection | Yes | `current-release-accounted` |
+| `ClientDemandRelease` | Separate foreground registry | No | No | Not needed | `neutral` |
+| `DependencyPromotion` | Saved tip or newly exposed producer | No | No | Guarded release tracks an inline promotion; later probes reread availability | `neutral` |
+| `DependencyWake` | May expose the immediate parent | Yes | No; it changes blocked/queued state | Not generally | `possible-ancestor-hazard` |
+| `ObservationWake` | Possibly | Yes, independently of descendant completion | No | No | `possible-ancestor-hazard` |
+| `Cancellation` | Yes | Yes | May lead to later retirement | Only partially through close reason | `possible-ancestor-hazard` |
+| `SessionClosure` | Yes | Yes | May retire captured records and indexes | Only a running tip defers to release | `possible-ancestor-hazard` |
+| `TerminalSettlement` | Possibly | Possibly | May begin terminal publication | No | `possible-ancestor-hazard` |
+| `WorkRetirement` | A formerly claimed or saved tip | Yes | Removes record and producer indexes | No | `possible-ancestor-hazard` |
+| `FailureLedger` | No | No | No | Not needed | `neutral` |
+| `StageSettlement` | Yes, across a selected set | Yes | May retire records and terminal obligations | No | `possible-ancestor-hazard` |
+
+The table intentionally keeps `DependencyWake` conservative. W9C.3 must still
+prove whether one-shot completion of the claimed tip can be narrowed to its
+immediate parent without a general ancestor scan. Likewise, profiling may
+split a factual kind if two call sites have materially different retained-
+route consequences; it must not relabel the whole kind from workload frequency
+alone.
 
 ##### W9C.1 — Poll-window mutation metrics
 

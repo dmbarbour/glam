@@ -8,10 +8,10 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAut
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 use super::deferred::terminalize_lazy_cycle;
 use super::{
-    ClaimedDemandSession, EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker, ExitIntent,
-    ObservationRegistration, ProducerSettlementObligation, RuntimeFailureLedger,
+    ClaimedDemandSession, CoordinatorMutationKind, EvaluationExitBlock, EvaluationSessionId,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken,
+    EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
+    ExitIntent, ObservationRegistration, ProducerSettlementObligation, RuntimeFailureLedger,
     SettlementObligations, TaskFailureLedger, TaskStatusPublisher, WakeRegistration,
     WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord, WorkState,
     demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
@@ -95,7 +95,7 @@ impl EvaluationWorkCoordinator {
             changed |= remove_task_failure(&mut state.failures, owner, task);
             remove_task_failure(&mut state.pending_failure_reports, owner, task);
             if changed {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::FailureLedger);
             }
             changed
         };
@@ -216,7 +216,7 @@ impl EvaluationWorkCoordinator {
                 .entry(session.id)
                 .or_default()
                 .insert(id);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
         }
         drop(mutation);
         self.work_available.notify_all();
@@ -322,7 +322,7 @@ impl EvaluationWorkCoordinator {
             }
             register_background_root(&mut state, id);
             queue_reflection(&mut state, id);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkActivation);
             true
         }
     }
@@ -363,7 +363,7 @@ impl EvaluationWorkCoordinator {
                     detach_reflection(&mut state, id, false).is_none(),
                     "an uncommitted reflection reservation cannot own a machine"
                 );
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
                 true
             }
         };
@@ -402,7 +402,7 @@ impl EvaluationWorkCoordinator {
             record.state = WorkState::Terminalizing;
             state.observation_waiters.remove(&id);
             remove_ready_reflection(&mut state, id);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::TerminalSettlement);
             true
         };
         drop(mutation);
@@ -453,7 +453,7 @@ impl EvaluationWorkCoordinator {
                 WorkState::Terminalizing => ReflectionCancellation::Late,
             };
             if !matches!(outcome, ReflectionCancellation::Late) {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::Cancellation);
             }
             outcome
         };
@@ -575,7 +575,7 @@ impl EvaluationWorkCoordinator {
             } else {
                 (Vec::new(), None)
             };
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkRelease);
             route_tracker.changed(true);
             (
                 ReflectionWorkRelease {
@@ -690,7 +690,7 @@ impl EvaluationWorkCoordinator {
                 .expect("terminal reflection work must remain registered");
             assert!(matches!(record.state, WorkState::Terminalizing));
             let machine = detach_reflection(&mut state, id, true);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
             machine
         };
         drop(mutation);

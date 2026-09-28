@@ -383,7 +383,7 @@ impl EvaluationWorkCoordinator {
                 },
             )
             .expect("the synthetic task block should retain its dependency");
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
             exact
         };
         assert!(dependency.same_source(&source.dependency()));
@@ -461,7 +461,7 @@ impl EvaluationWorkCoordinator {
                 work: claimed.id,
                 subscription_epoch: record.subscription_epoch,
             };
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
             (registration, obsolete_dependency)
         };
 

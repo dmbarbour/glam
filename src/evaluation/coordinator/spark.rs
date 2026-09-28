@@ -9,9 +9,9 @@ use crate::runtime::RuntimeValueRoot;
 
 use super::super::EvaluationDemandState;
 use super::{
-    ClaimedDemandSession, EvaluationWorkCoordinator, EvaluationWorkId, SettlementObligations,
-    WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord,
-    WorkState, demand_session_is_closed, prune_closed_session_registration,
+    ClaimedDemandSession, CoordinatorMutationKind, EvaluationWorkCoordinator, EvaluationWorkId,
+    SettlementObligations, WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency,
+    WorkKind, WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
     register_background_root, unregister_background_root,
 };
 
@@ -151,7 +151,7 @@ impl EvaluationWorkCoordinator {
                     .or_default()
                     .insert(id);
                 register_background_root(&mut state, id);
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
                 true
             }
         };
@@ -182,7 +182,7 @@ impl EvaluationWorkCoordinator {
                 .filter_map(|id| detach_spark(&mut state, id))
                 .collect::<Vec<_>>();
             if !retired.is_empty() {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
             }
             retired
         };
@@ -324,7 +324,7 @@ impl EvaluationWorkCoordinator {
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             };
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkRelease);
             (retired, obsolete_dependency, exact_subscription)
         };
 

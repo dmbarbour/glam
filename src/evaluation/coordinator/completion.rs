@@ -7,7 +7,8 @@ use crate::core::PromiseId;
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 
 use super::{
-    EvaluationWorkCoordinator, EvaluationWorkId, WorkDependency, queue_current_registration,
+    CoordinatorMutationKind, EvaluationWorkCoordinator, EvaluationWorkId, WorkDependency,
+    queue_current_registration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -302,7 +303,7 @@ impl EvaluationWorkCoordinator {
             changed |= queue_current_registration(&mut state, registration, Some(batch.source));
         }
         if changed {
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::DependencyWake);
         }
         changed
     }

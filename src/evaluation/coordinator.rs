@@ -29,6 +29,8 @@ use super::{EvaluationDemandState, RuntimeObservationEpoch, RuntimeObservationSt
 mod client_demand;
 mod completion;
 mod deferred;
+#[cfg(test)]
+mod generation_inventory;
 mod reflection;
 #[cfg(test)]
 mod registry_inventory;
@@ -632,6 +634,51 @@ struct WorkCoordinatorState {
     work_generation: u64,
 }
 
+/// Factual source of one broad coordinator revision publication.
+///
+/// These labels deliberately describe the state transition rather than its
+/// eventual exact-route policy. W9C.1 profiles them before W9C.3 decides which
+/// classes can affect a retained route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinatorMutationKind {
+    DemandSessionRegistry,
+    ExecutorAvailability,
+    FreshWorkAdmission,
+    WorkActivation,
+    ClientDemandAdmission,
+    TaskPromiseIndexAdmission,
+    TaskPromiseIndexRetirement,
+    WorkClaim,
+    WorkRequeue,
+    WorkRelease,
+    ClientDemandRelease,
+    DependencyPromotion,
+    DependencyWake,
+    ObservationWake,
+    #[cfg(test)]
+    WorkPark,
+    Cancellation,
+    SessionClosure,
+    TerminalSettlement,
+    WorkRetirement,
+    FailureLedger,
+    StageSettlement,
+    #[cfg(test)]
+    TestTransition,
+}
+
+impl WorkCoordinatorState {
+    /// Publishes one scheduler-visible mutation.
+    ///
+    /// Keep every production revision advance behind this boundary so the
+    /// W9C mutation census remains compile-exhaustive as coordinator paths are
+    /// added or reorganized.
+    fn advance_work_generation(&mut self, kind: CoordinatorMutationKind) {
+        let _ = kind;
+        self.work_generation = self.work_generation.wrapping_add(1);
+    }
+}
+
 /// Runtime-owned scheduling state shared by serial and worker execution.
 ///
 /// Spark payloads and reflection/deferred lifecycle records, including their
@@ -1198,7 +1245,7 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn register_demand(&self, demand: &Arc<EvaluationDemandState>) {
         debug_assert_eq!(demand.values.runtime_id(), self.runtime);
-        self.publish_transition(|state| {
+        self.publish_transition(CoordinatorMutationKind::DemandSessionRegistry, |state| {
             let replaced = state
                 .demand_sessions
                 .insert(demand.id, Arc::downgrade(demand));
@@ -1337,7 +1384,7 @@ impl EvaluationWorkCoordinator {
             }
             changed |= prune_closed_session_registration(&mut state, session);
             if changed {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::SessionClosure);
             }
             (
                 reflection,
@@ -1360,7 +1407,7 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn executor_started(&self, worker_count: usize) {
-        self.publish_transition(|state| {
+        self.publish_transition(CoordinatorMutationKind::ExecutorAvailability, |state| {
             state.spark_workers = worker_count;
         });
     }
@@ -1402,7 +1449,7 @@ impl EvaluationWorkCoordinator {
                     retired.push(record);
                 }
             }
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::ExecutorAvailability);
             retired
         };
         drop(mutation);
@@ -1462,7 +1509,7 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let selection = claim_causal_background(&mut state, self.runtime, true);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             (selection, state.work_generation != initial_generation)
         };
@@ -1488,7 +1535,7 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let selection = claim_causal_background(&mut state, self.runtime, false);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             (selection, state.work_generation != initial_generation)
         };
@@ -1560,7 +1607,7 @@ impl EvaluationWorkCoordinator {
                 }
             };
             queue_task(&mut state, id);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkRequeue);
         }
         drop(mutation);
         self.work_available.notify_all();
@@ -1582,7 +1629,7 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let selection = claim_causal_session_background(&mut state, self.runtime, session);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             match selection {
                 CoordinatorSelection::Task(claimed) => Some(claimed),
@@ -1616,7 +1663,7 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_task(&mut state, self.runtime, Some(session));
             if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             claimed
         };
@@ -1641,7 +1688,7 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_task(&mut state, self.runtime, None);
             if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             claimed
         };
@@ -1676,7 +1723,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::LazyRoute(_) => None,
                 WorkKind::Spark(_) => None,
             }?;
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             Some(work)
         };
         drop(mutation);
@@ -1694,7 +1741,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let work = claim_task_work_locked(&mut state, self.runtime, id, false)?;
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             Some(work)
         };
         drop(mutation);
@@ -1750,7 +1797,7 @@ impl EvaluationWorkCoordinator {
                     }
                     match claim_task_work_locked(&mut state, self.runtime, id, false) {
                         Some(claimed) => {
-                            state.work_generation = state.work_generation.wrapping_add(1);
+                            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
                             route.current = Some(id);
                             route.generation = Some(state.work_generation);
                             ExactTargetSelection::Claimed(claimed)
@@ -1874,7 +1921,7 @@ impl EvaluationWorkCoordinator {
                     CausalChildProbe::Ready(id) => {
                         let claimed = claim_task_work_locked(&mut state, self.runtime, id, false);
                         if let Some(claimed) = claimed {
-                            state.work_generation = state.work_generation.wrapping_add(1);
+                            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
                             break CausalChildSelection::Claimed(claimed);
                         } else {
                             // A demand session can close independently of this
@@ -2017,7 +2064,7 @@ impl EvaluationWorkCoordinator {
                 state.promise_by_wait.insert(wait, work).is_none(),
                 "evaluation wait tokens must be unique"
             );
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::TaskPromiseIndexAdmission);
             producer
         };
         drop(mutation);
@@ -2049,7 +2096,7 @@ impl EvaluationWorkCoordinator {
             .expect("promise wait index must agree with its producer obligation");
         debug_assert_eq!(obligation.promise, promise);
         assert_eq!(state.promise_by_wait.remove(wait), Some(work));
-        state.work_generation = state.work_generation.wrapping_add(1);
+        state.advance_work_generation(CoordinatorMutationKind::TaskPromiseIndexRetirement);
         drop(state);
         Some(obligation.root)
     }
@@ -2104,7 +2151,7 @@ impl EvaluationWorkCoordinator {
             if let Some((owner, task, failure)) = failure {
                 insert_task_failure(&mut state.failures, owner, task, failure.clone());
                 insert_task_failure(&mut state.pending_failure_reports, owner, task, failure);
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::FailureLedger);
             }
             (producer, status_update, promises)
         };
@@ -2382,7 +2429,7 @@ impl EvaluationWorkCoordinator {
             changed |= queue_current_observation(&mut state, registration, epoch);
         }
         if changed {
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
         }
         changed
     }
@@ -2408,12 +2455,16 @@ impl EvaluationWorkCoordinator {
         };
         let changed = queue_current_observation(&mut state, registration, current_epoch);
         if changed {
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
         }
         changed
     }
 
-    fn publish_transition(&self, transition: impl FnOnce(&mut WorkCoordinatorState)) {
+    fn publish_transition(
+        &self,
+        kind: CoordinatorMutationKind,
+        transition: impl FnOnce(&mut WorkCoordinatorState),
+    ) {
         let mutation = self.admission.mutation_guard();
         {
             let mut state = self
@@ -2421,7 +2472,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             transition(&mut state);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(kind);
         }
         drop(mutation);
         self.work_available.notify_all();

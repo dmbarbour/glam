@@ -9,11 +9,11 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::super::EvaluationDemandState;
 use super::{
-    CausalChildProbe, ClaimedDemandSession, EvaluationTaskId, EvaluationWorkCoordinator,
-    EvaluationWorkId, WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState,
-    WorkDependency, WorkState, causal_child_probe_locked, demand_session_is_closed,
-    dependency_has_causal_progress_locked, prune_closed_session_registration,
-    queue_current_registration,
+    CausalChildProbe, ClaimedDemandSession, CoordinatorMutationKind, EvaluationTaskId,
+    EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration, WorkCloseReason, WorkControl,
+    WorkCoordinatorState, WorkDependency, WorkState, causal_child_probe_locked,
+    demand_session_is_closed, dependency_has_causal_progress_locked,
+    prune_closed_session_registration, queue_current_registration,
 };
 
 /// One sealed pure operation retained by runtime-owned client demand.
@@ -377,7 +377,7 @@ impl EvaluationWorkCoordinator {
                 .or_default()
                 .insert(id);
             queue_client_demand(&mut state, id);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::ClientDemandAdmission);
         }
         drop(mutation);
         self.work_available.notify_one();
@@ -396,7 +396,7 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_client_demand(&mut state, self.runtime, id);
             if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             claimed
         };
@@ -425,7 +425,7 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_client_demand(&mut state, self.runtime);
             if claimed.is_some() {
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
             }
             claimed
         };
@@ -581,7 +581,7 @@ impl EvaluationWorkCoordinator {
                     }
                 }
             };
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::ClientDemandRelease);
             (retirement, obsolete_subscription, exact_subscription)
         };
         if let Some(subscription) = obsolete_subscription {
@@ -622,12 +622,12 @@ impl EvaluationWorkCoordinator {
                     .control
                     .close_reason
                     .get_or_insert(WorkCloseReason::ClientDemandAbandoned);
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::Cancellation);
                 (true, None)
             } else {
                 let retirement =
                     detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
-                state.work_generation = state.work_generation.wrapping_add(1);
+                state.advance_work_generation(CoordinatorMutationKind::Cancellation);
                 (true, Some(retirement))
             }
         };
@@ -675,7 +675,7 @@ impl EvaluationWorkCoordinator {
                 let queued =
                     queue_current_registration(&mut state, registration, Some(dependency.key()));
                 if queued {
-                    state.work_generation = state.work_generation.wrapping_add(1);
+                    state.advance_work_generation(CoordinatorMutationKind::DependencyWake);
                 }
                 queued
             };
@@ -723,7 +723,7 @@ impl EvaluationWorkCoordinator {
             }
             let retirement =
                 detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::Cancellation);
             (dependency, retirement)
         };
         drop(mutation);
@@ -760,7 +760,7 @@ impl EvaluationWorkCoordinator {
                     failure,
                 )),
             );
-            state.work_generation = state.work_generation.wrapping_add(1);
+            state.advance_work_generation(CoordinatorMutationKind::Cancellation);
             retirement
         };
         drop(mutation);
