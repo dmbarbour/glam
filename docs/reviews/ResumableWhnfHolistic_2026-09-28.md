@@ -3,9 +3,9 @@
 Implementation baseline: `8c611ae0`, after W9E closure.
 
 Status: in progress. HR0 baseline/artifact mapping, HR1 contract accounting,
-and HR2 ownership/GC-safety review are complete. HR2 repaired two
+HR2 ownership/GC-safety review, and HR3 resumption-equivalence review are complete. HR2 repaired two
 test-fixture publication gaps and one stale foreground-pump expectation before
-accepting its forced checkpoint evidence. HR3-HR8 remain
+accepting its forced checkpoint evidence. HR4-HR8 remain
 governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -441,6 +441,70 @@ cell mutex; `try_lock` therefore treats `WouldBlock` as an invariant failure.
 That proof must not be carried into concurrent marking. WHNFHR-005 records the
 already concrete CG0/CG1 replacement gate. Subject to that future boundary,
 HR2 finds the present ownership and tracing model sound.
+
+## HR3 — Resumption and semantic equivalence
+
+HR3 is complete. No state family rebuilds its completed semantic prefix merely
+because a dependency, budget boundary, host call, or scheduler handoff is
+encountered. A transaction may deliberately restart an attempt after a
+previously observed location is disturbed; that is optimistic-transaction
+semantics, not WHNF replay.
+
+### Suspension-family matrix
+
+| Family | Retained semantic position | Forced evidence | Disposition |
+| --- | --- | --- | --- |
+| budget yield | focus, exact continuation stack/cursors, specialized-machine phase, and mutable remaining budget | one-unit client/reflection/spark tests; deep application/fixpoint/lazy/promise small-stack cases; borrowed multi-frame yield | Exact state is requeued without a dependency or subscription. |
+| lazy demand | lazy-owned checkpoint or rooted outer WHNF state plus exact lazy ID/source owner | route-loss, last-subscriber, forwarding-chain, cross-worker, and unreachable-cycle fixtures | One canonical producer continues; only the lazy owner installs cache. |
+| unassigned/assigned promise | promise breadcrumb, follower computation, and immutable assignment root | exact promise resumption, deep aliases, resolver completion, task terminal matrix | Unassigned promise remains retryable; assignment resumes rather than caches absence/error. |
+| reflection gate | hosted request phase, application checkpoint, reservation/activation permit, and completion promise | exact net function/call/operator fixtures, one-dispatch counters, cancellation/failure cases | Activation is not repeated; only reflection owner publishes completion. |
+| metadata reflection | carrier/update phase and shared reflection task | inert-until-demand, shared-task resumption, cancellation/failure, seq/spark demand | Update task is launched once and resumed through the same managed carrier. |
+| host/import callback | `Invoking` producer captures or `After` result/failure checkpoint | yield on both sides, interruption/route loss, failure publication, lazy result; compiler root-only suspension and import provenance fixtures | Callback is never reinvoked after result publication. Import loaders use this same host-call boundary. |
+| callable/net computation | `NetWhnfState`, exact pair/generation, driver worklist/frontier | callable checkpoint no-replay, promise/cycle/terminal matrix, cursor deferral, worker contention, profiling signature | Raw `Net` is already WHNF; explicit callable/net work owns all subsequent progress. |
+| application/dictionary application | supplied arguments, next index, effect payload/list cursor, optional member | promised callable/member, partial builtin, nested undefined, effect payload fixtures | Completed arguments and tag recognition are not repeated. |
+| key/path/dictionary access | base/current value, path/key conversion submachine, precise member/chunk cursor | deferred middle path, recursive key, dictionary take/emptiness/union/merge fixtures | Prefix access and completed members remain installed. |
+| list observation/transformation | front/back walk, completed chunks/items, callable/source phase | list-at, unsnoc/split-end, text-lines, map, concat, comparison, lazy-tail fixtures | Strict spine progress is retained; unrelated list side is not forced. |
+| object/fixpoint/composition | linearization/mix/definition stacks and child demand phase | mixin-once counters, nested specs, composed defs, override/from-dict/with-defs cases | Completed mix/definition stages are not reconstructed. |
+| annotation/assertion/failure context | selected annotation phase, payload/message/context child state | binary/assert-unit/provenance and suspended-request failure fixtures | Interrupted and uninterrupted failures retain the same ordered semantic contexts. |
+| `.alt`/`.cut` and transactional retry | effect-machine branch/cut frames, whole-cut observation journal, retry checkpoint | lazy cut choice, prior-commit counter, transactional path suspension and revalidation cases | A live attempt retains prior branch reads. A disturbed failed attempt intentionally restarts under transaction policy. |
+| reset/shift | hidden reset stack in user state plus decoder/control phase | lazy reset/shift keys, captured cut, decoder structural layers, whole-state restore fixture | Capture/publish happens only after the key/stack is ready; restore resumes the serialized checkpoint. |
+| task/exit/fixpoint effects | reflection effect task phase, task handle/root records, exit-message child WHNF, fixpoint promise | task state path, cancellation/abandonment/failure, exit message, initial fixpoint/reset-stack cases | Monadic task machine retains control; nested WHNF child does not replace task semantics. |
+| pure net construction | fixed-arity builder state, compact reverse program, hidden reset/sequence state | builder operand promises, copy/wire/path/state checkpoints, route-loss and compact replay counters | Effect program is processed once; only the selected strict netlist is replayed into topology. |
+
+### Counter and equivalence quality
+
+The no-replay evidence is not inferred from a stable whole-suite total. Tests
+which claim exactly-once behavior inject a counted lazy/host/reflection
+boundary, force the dependency or route loss, and assert the counter at the
+semantic boundary. Tests for list/object/path work likewise place the counter
+in the completed prefix rather than only in the final result. Callable-net and
+pure-construction cases additionally assert exact checkpoint/reduction/driver
+events. Failure-context tests inspect ordered structured contexts or compare
+the suspended result with the uninterrupted oracle.
+
+Fresh ordinary evidence includes:
+
+```text
+cargo test -q --lib resumes                 # 81 passed
+cargo test -q --lib without_replay          # 41 passed
+cargo test -q --lib route_loss              # 21 passed
+cargo test -q --lib host_call               # 11 passed
+cargo test -q --lib reflection_gate         # 11 passed
+cargo test -q --lib metadata_reflection     # 5 passed
+```
+
+Additional exact probes passed for compiler/import suspension, failure
+contexts, transaction revalidation, reset-stack decoding, lazy cut choice,
+reset/shift key suspension, exit-message resumption, task-state paths, and
+list-effect sequence/cut/fix boundaries. HR2's 86-test aggressive WHNF and
+62-test aggressive checkpoint filters cover the managed lifetime dimension;
+the known repository-wide aggressive fixture/schedule gaps remain assigned to
+the parent plan rather than being mislabeled as semantic replay failures.
+
+The only bounded/non-suspending exceptions are immediate scalar/tag/key
+operations and raw-net WHNF recognition. They neither call a host nor open a
+child computation. HR3 therefore accounts for every suspendable family named
+by the review plan without finding a new remediation item.
 
 ## Preliminary reconciliation questions
 
