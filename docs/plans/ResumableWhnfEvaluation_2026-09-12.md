@@ -8912,11 +8912,85 @@ scheduler authority for the caller-owned zipper. If the factual census cannot
 support the narrower revision safely, keep the conservative fallback for that
 class and record the measured residual.
 
-Do not begin W9D until W9C has produced all four artifacts: the exhaustive
+##### W9C.4 — Notification and parked-thread churn investigation
+
+Keep revision publication distinct from wake delivery. `work_generation`
+records broad coordinator movement, but the current shared
+`work_available` condition variable also wakes worker threads, foreground
+clients, session drains, and generic task observers for many of those
+movements. Preserving the revision for lost-wakeup prevention, readiness, and
+settlement does not require every generation advance to notify every waiter.
+
+Extend the W9C mutation census with a notification inventory. Every
+`notify_one` or `notify_all` site should record:
+
+- its factual mutation kind and whether runnable work or terminal progress was
+  actually published;
+- the intended waiter classes: executor worker, exact-demand/client driver,
+  session drain, or generic task observer;
+- whether one waiter or several distinct waiters can use the publication; and
+- why a notification is needed in addition to the exact dependency,
+  observation, client-demand, or task-terminal mechanism already present.
+
+Add static profiling counters for notification calls, released waiters, and
+the first bounded result after wake. Classify that result by waiter class:
+
+- **productive:** a worker claims eligible work, or a client/session observes
+  its target terminal or claims useful causal work;
+- **relevant but not immediately productive:** the waiter's predicate changed
+  and a required retry or lifecycle decision was made; or
+- **unrelated:** selection returns none, the exact target remains busy on the
+  same route, or the waiter immediately parks on an equivalent predicate.
+
+Count `notify_one` and `notify_all` separately and report fan-out where it is
+cheap to observe. Metrics must not retain waiter identities or become a
+semantic scheduler log. Use forced barriers for the correctness cases and the
+source-shaped workload only for frequency/cost attribution.
+
+Force at least these notification orderings:
+
+1. with a worker and a client-class waiter both parked, admitting one
+   worker-only item cannot strand that item by waking the wrong class; a
+   `notify_one` result is acceptable only if waiter selection is guaranteed,
+   every selectable waiter can make the required progress, or the channels
+   have first been separated;
+2. a claim, reporting-ledger edit, or other non-enabling mutation does not
+   needlessly release parked workers or unrelated foreground clients;
+3. exact producer completion wakes the dependent client and any registered
+   semantic subscriber without relying on a broad lost-wakeup race;
+4. an unrelated route mutation does not need to wake a client whose exact
+   target and busy producer are unchanged; and
+5. shutdown, session closure, batched readiness, and other genuinely broad
+   lifecycle transitions wake every class which must reconsider its state.
+
+Select the least invasive sufficient repair from the evidence:
+
+1. suppress notifications for mutation kinds which cannot enable work or
+   satisfy a waiting predicate;
+2. replace broadcasts with `notify_one` where exactly one newly eligible work
+   item can be consumed and the shared condition variable cannot choose an
+   ineligible waiter class;
+3. retain a broad notification where multiple waiter classes can legitimately
+   progress; or
+4. if cross-class unrelated wakes remain material, separate worker-runnable
+   and client/general-progress revisions or condition variables. Specify the
+   lost-wakeup predicate, publication lock, shutdown behavior, and waiter
+   ownership for each channel before implementing that split.
+
+Do not add per-route back-pointers or a permanent waiter registry merely to
+avoid a cheap condvar wake. Exact completion subscriptions may be reused for
+semantic work scheduling, but host-thread parking needs its own explicit
+proof. If separate condition variables are architecturally larger than W9's
+route-accounting repair, write a follow-up plan with the measured churn and
+retain only the safe suppression/`notify_one` changes here.
+
+Do not begin W9D until W9C has produced all five artifacts: the exhaustive
 generation-publisher census, the mutation-kind proof table, a poll-window
-profile reconciling with the exact workload baseline, and a decision record
+profile reconciling with the exact workload baseline, a decision record
 mapping every factual kind to O(1) acceptance, guarded validation, or retained
-conservative fallback.
+conservative fallback, and a notification-churn disposition stating which
+wakes are suppressed, narrowed, retained, or transferred to a dedicated
+condition-variable refinement plan.
 
 #### W9D — Implement the selected proof boundary
 
@@ -8972,6 +9046,21 @@ ongoing profiling role. Update coordinator comments so `work_generation` is
 described as the scheduler/readiness revision and the narrower revision as an
 exact-route validation input, not route authority.
 
+##### W9D.4 — Apply the bounded notification disposition
+
+Apply only the W9C.4 changes whose wait predicate and publication ordering are
+fully proved within the existing coordinator architecture. Keep broad
+`work_generation` publication even when its accompanying notification is
+suppressed or narrowed. A condition-variable wait must recheck the same
+revision under the coordinator-state mutex used by publication, as the current
+lost-wakeup protocol does; never trade thread churn for a lost wake.
+
+Latch both sides of every changed publication/wait ordering. Record any
+larger worker/client condition-variable split in its own plan instead of
+silently expanding W9. Remove notification metrics which have served the
+decision unless they are cheap enough to remain useful under the static
+profiling feature.
+
 #### W9E — Measurement, verification, and disposition
 
 Re-run the source-shaped duplicate-symbol fixture with the same static route
@@ -8983,6 +9072,8 @@ interaction-net profile used by W6G4R-001G and W6G4R-002. Report:
   validations, and validation failures;
 - factual poll-window mutation counts retained from W9C long enough to explain
   the before/after result;
+- notifications by mutation kind and waiter class, productive/relevant/
+  unrelated wake outcomes, and any retained broad-wake justification;
 - complete searches, visited records, maximum route depth, and retained route
   storage;
 - Callgrind instructions against the 3,339,481,894 W6G4R-002 baseline;
@@ -9026,6 +9117,7 @@ disposition.
 | stack control | User-controlled semantic depth completes on a deliberately small stack. |
 | bounded whole-program work | Source-shaped direct assembly completes within deterministic scheduler/net budgets; semantic selections and terminal caches are not replayed. |
 | exact-route accounting | Forced poll/release orderings classify relevant interference precisely; any retained handoff has a guarded local proof or falls back to authoritative traversal. |
+| parked-thread precision | Forced admission, completion, unrelated mutation, and shutdown orders prove every narrowed notification remains lossless; profiling distinguishes useful wakes from immediate re-parks by waiter class. |
 | closure | Source-backed manifests show no unclassified recursive/suspendable WHNF entry. |
 
 ## Risks and Review Triggers
