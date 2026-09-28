@@ -1,6 +1,6 @@
 # Resumable WHNF Holistic Review Plan — 2026-09-28
 
-Status: active. HR0-HR7 are complete; HR8 remains. This plan governs the final implementation review of
+Status: complete. HR0-HR8 closed on 2026-09-28. This plan governed the final implementation review of
 [`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
 and its reconciliation with the two parent workstreams which remain open:
 
@@ -315,6 +315,10 @@ stale historical instructions, and gives an exact readiness condition for P4.
 
 ## HR8 — Verification audit and forward-path synthesis
 
+Status: complete on 2026-09-28. The ordinary routine suite and profiling gate
+pass; the bounded full aggressive run records the remaining 49-failure,
+non-settling Gate G3 boundary; every review finding has a named disposition.
+
 Build one verification ledger separating:
 
 - ordinary semantic tests;
@@ -337,11 +341,13 @@ Synthesize the forward path in dependency order. The default hypothesis to
 test—not assume—is:
 
 1. correct holistic/documentation findings from this review;
-2. resume GCI11R-002D.2d orchestration and remove the last compatibility WHNF
-   facade;
+2. resume GCI11R-002D.2d from its exact eleven-entry manifest, migrating
+   promise publication, reflection admission, and bounded projections while
+   retaining one measured compatibility bridge;
 3. proceed through D.2e-D.2g using the established bounded-access/rooted
-   handoff pattern;
-4. close production ownership in D.2h;
+   handoff pattern and retire every production caller of that bridge;
+4. close production ownership in D.2h and remove or make the facade explicitly
+   test-only;
 5. migrate fixture and schedule gaps in 002E-F, then close clusters and certify
    in 002G-H;
 6. rerun persistent-edge P3 after each parent partition, perform P4 only at a
@@ -366,10 +372,10 @@ counts, or compatibility assumptions.
 - [x] HR5 retained complexity and performance evidence accounted for.
 - [x] HR6 aggressive-remediation parent reconciled.
 - [x] HR7 persistent-edge P3-P5 reconciled.
-- [ ] HR8 verification ledger and forward path complete.
-- [ ] Every finding is resolved, accepted with rationale, or owned by a named
+- [x] HR8 verification ledger and forward path complete.
+- [x] Every finding is resolved, accepted with rationale, or owned by a named
       future checkpoint with an exit condition.
-- [ ] Current architecture and agent-context docs match the reviewed result.
-- [ ] The three plan statuses and cross-links agree.
-- [ ] Documentation links and `git diff --check` pass.
-- [ ] Required focused and routine verification is recorded in the review.
+- [x] Current architecture and agent-context docs match the reviewed result.
+- [x] The three plan statuses and cross-links agree.
+- [x] Documentation links and `git diff --check` pass.
+- [x] Required focused and routine verification is recorded in the review.

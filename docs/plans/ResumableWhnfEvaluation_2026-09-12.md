@@ -1,7 +1,7 @@
 # Resumable WHNF Evaluation Plan — 2026-09-12
 
-Status: W0-W9 and their mandatory phase reviews are complete by 2026-09-28.
-The final holistic review required by completion criterion 10 is active in
+Status: complete. W0-W9, their mandatory phase reviews, and the final holistic
+review required by completion criterion 10 closed by 2026-09-28 in
 [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md).
 This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in

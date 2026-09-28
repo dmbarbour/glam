@@ -2,15 +2,12 @@
 
 Implementation baseline: `8c611ae0`, after W9E closure.
 
-Status: in progress. HR0 baseline/artifact mapping, HR1 contract accounting,
-HR2 ownership/GC-safety review, HR3 resumption-equivalence review, HR4
-stack/budget/scheduling/concurrency review, and HR5 complexity/performance
-accounting are complete. HR2 repaired two
-test-fixture publication gaps and one stale foreground-pump expectation before
-accepting its forced checkpoint evidence. HR6-HR8 remain
-governed by
-[`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
-No finding is closed merely by this initial inventory.
+Status: complete. HR0-HR8 account for the focused implementation, repair five
+fixture/audit defects, accept two measured/bootstrap costs, and assign the one
+remaining repository-wide aggressive blocker to named parent checkpoints.
+The reviewed forward path is D.2d-D.2h, 002E-H, persistent-edge P4-P5, then
+Gate G3/concurrent-collector reconsideration. Focused WHNF completion does not
+claim that those parent GC gates are complete.
 
 ## Scope
 
@@ -323,7 +320,7 @@ Fresh dynamic evidence:
 | C7 retryable halt callers are stateful or bounded | W7 disposition and call-graph gates classify every current caller. | S6 | T2 | Test-only compatibility facade remains parent-owned, not a new recursive evaluator. | Satisfied. |
 | C8 deterministic suspension/cycle/callback/collection/small-stack tests | Focused ordinary/aggressive and forced suites. | S6 | T1-T4 | WHNFHR-001 repaired fixture publication first. | Satisfied. |
 | C9 source assembly has bounded no-replay evidence | Exact source fixture and static profile counters. | S4-S5 | T4 and W9 record | None. | Satisfied. |
-| C10 final review accounts for drift | This HR0-HR8 review is the owner. | This document | Pending later review checkpoints | The implementation is done but holistic review is not. | In progress; blocks declaring the focused plan wholly closed. |
+| C10 final review accounts for drift | This HR0-HR8 review is the owner. | This document | Findings WHNFHR-001 through WHNFHR-010, reconciled parent plans, and final verification ledger | Every finding is resolved, accepted with rationale, or assigned to a named future gate. | Satisfied. |
 | C11 W9 resolves or measures route fallback | W9 exact guarded route implementation and review. | S4 | T4 and W9 Callgrind/counters | Precise path implemented; authoritative fallback retained. | Satisfied. |
 
 HR1 therefore closes every implementation contract except completion criterion
@@ -828,10 +825,10 @@ justify starting P4 early or interrupting HR8 for an implementation repair.
 | ordinary semantic/resumption | 85-test `whnf`, 60-test `checkpoint`, 81-test `resumes`, 41-test `without_replay`, and focused host/reflection/metadata/net filters pass | focused semantics green |
 | focused aggressive GC | 86-test `whnf`, 62-test `checkpoint`, 21-test W7, D.2c, and persistent-edge filters pass | focused WHNF ownership green after WHNFHR-001/003/004 fixture repairs |
 | complete ordinary workspace | 1,876 library tests pass with two ignored, followed by every integration group | green after WHNFHR-010 isolated the collecting builder fixture |
-| complete aggressive workspace | initial 240-second deliberate run reached 1,651/1,881 library tests, reported 54 failures, and timed out with long-running tests still active | known Gate G3 blocker; a post-WHNFHR-010 rerun remains below |
+| complete aggressive workspace | post-WHNFHR-010 240-second run reached 1,651/1,881 library tests, reported 49 failures, and timed out with long-running tests still active | known Gate G3 blocker; owned by D.2d-H and GCI11R-002E-H, not a green WHNF gate |
 | forced concurrency order | route claim/release, route loss, guarded-release interference, mixed waiter classes, lazy producer contention, publication-before/after-subscription, abandonment/cancellation, and two-worker linear checkpoint fixtures use channels, barriers, or explicit probes | authoritative; repetition is not cited |
 | small stack and budgets | 7 `small_stack`, 13 `budget`, and 21 W7 tests pass; depth and zero/one/many quantum fixtures remain source-latched | green |
-| interaction-net profile | exact reduction/driver signature, route counters, diagnostic, and named script retained | script pending final routine run |
+| interaction-net profile | exact reduction/driver signature, route counters, diagnostic, and all 21 named script fixtures pass | green |
 | inventories/negative gates | 119 ordinary and 119 aggressive inventory filters, exact 252 raw-value owner map, zero D.2c, exact 11-entry D.2d manifest, 885-entry persistent-edge manifest | green for reviewed scope |
 | Miri/Loom | the underlying `glam-gc` collector has its separate Gate G1 Miri/Loom record; this WHNF transition added no unsafe collector primitive and did not add a WHNF-specific Loom model | not used as semantic/concurrency evidence here; safe synchronization is covered by forced schedules, while concurrent marking remains blocked by WHNFHR-005 |
 | unverified/future assumptions | concurrent marker interaction with checkpoint mutexes, root-frame replacement, zero parent raw-value violations, zero persistent trait interlocks, and full aggressive settlement | named future gates, not claimed complete |
@@ -844,7 +841,7 @@ reflection tests, two cursor-driver tests, and six normalization-batch tests.
 ### Repository-wide aggressive boundary
 
 The deliberate command was time-bounded rather than allowed to retain the
-review indefinitely:
+review indefinitely. The post-WHNFHR-010 result is:
 
 ```text
 timeout --signal=TERM --kill-after=10s 240s \
@@ -852,7 +849,7 @@ timeout --signal=TERM --kill-after=10s 240s \
 
 status: 124
 progress: 1651 / 1881 library tests
-failures observed before cutoff: 54
+failures observed before cutoff: 49
 ```
 
 The observed failures clustered as follows:
@@ -862,9 +859,7 @@ The observed failures clustered as follows:
 | evaluation/coordinator lifecycle | 33 | D.2d production owners plus 002E fixture migration and 002F ordering |
 | public API | 8 | D.2g and 002E |
 | macro expansion | 7 | D.2e and 002E/002F |
-| hidden net builder | 4 | 002E fixture publication and 002F full-parallel interference |
 | reflection machine | 1 | D.2f and 002E |
-| recursive-cell source inventory | 1 | 002F interference/certification audit; the focused inventory gate passes |
 
 At cutoff, `external_request_during_finalization_is_coalesced`, one nested
 source-macro fixture, and one reflection-state `try` fixture had each exceeded
@@ -878,7 +873,9 @@ collection through the process-wide test value factory while parallel tests
 held raw values in that heap. WHNFHR-010 moves the collector fixture to a
 private value domain and classifies its two new rooted helpers. The complete
 ordinary suite then passes. This is constructive evidence; repeated passing
-runs are not used as the repair proof.
+runs are not used as the repair proof. The post-fix aggressive run removes
+exactly those four builder failures and the constructor-inventory failure; no
+new failure appears.
 
 No failure in this bounded run overturns the focused WHNF state/trace result,
 but neither does focused success certify the repository. WHNFHR-009 assigns
@@ -909,6 +906,32 @@ This order avoids both identified forms of redundant work: D.2e/D.2g share
 the existing compatibility orchestration while migrating rather than cloning
 it, and P4 does not repair traits which later parent representation work would
 remove differently.
+
+### Closure record
+
+The final ordinary gate passes:
+
+- `cargo fmt --check`;
+- `cargo clippy --all-targets --all-features -- -D warnings`;
+- `cargo test -q`: 1,876 library tests passed with two ignored, followed by
+  integration groups of 78, 49, 1, 5, 1, 2, 5, 46, 5, and 2 passing tests;
+- all 21 fixtures in `scripts/check-interaction-net-profiling.sh`; and
+- `git diff --check` plus direct validation of the review's parent-plan link
+  targets.
+
+The current evaluation/reflection architecture, evaluation agent context, and
+source README already describe the canonical managed checkpoint, role-owned
+scheduling, rooted handoffs, shared budget, and current STW-only trace
+assumption. No current-state architecture edit was required. The historical
+details and measured counts remain in plans/reviews rather than being copied
+into those current-state documents.
+
+Findings WHNFHR-001 through WHNFHR-005, WHNFHR-007, WHNFHR-008, and
+WHNFHR-010 are resolved. WHNFHR-006 is accepted with a profiling/concurrent-GC
+reopen condition. WHNFHR-009 is owned by D.2d-D.2h, 002E-H, P5, and Gate G3
+with explicit exit conditions. Completion criterion 10 is therefore satisfied
+for the focused resumable-WHNF plan while the parent GC integration remains
+open.
 
 ## Reconciliation answers
 
@@ -1208,18 +1231,18 @@ them.
 **Severity:** high release/gate blocker; not newly introduced by the focused
 WHNF review.
 
-A deliberate 240-second full aggressive run reported 54 failures across API,
-builder, coordinator/evaluation, macro, reflection, and source-inventory
-clusters, then timed out after 1,651 of 1,881 library tests. Three tests had
-already exceeded 60 seconds. This is consistent with the declared Gate G3
-blocker, but the exact-versus-full discrepancy for the repaired whole-state
-builder fixture shows why focused passing filters cannot substitute for
-repository certification.
+A post-WHNFHR-010 240-second full aggressive run reported 49 failures across
+API, coordinator/evaluation, macro, and reflection clusters, then timed out
+after 1,651 of 1,881 library tests. Three tests had already exceeded 60
+seconds. This is consistent with the declared Gate G3 blocker. The initial run
+also found four builder failures and one constructor-inventory failure; their
+exact removal in the post-fix run confirms WHNFHR-010 without certifying the
+remaining repository.
 
 Production raw-value ownership is assigned to D.2d-D.2h. General fixture
-publication is assigned to GCI11R-002E; schedule/probe interference and the
-builder discrepancy are assigned to 002F with a new forced-barrier
-requirement; 002G closes clusters and 002H reruns repository certification.
+publication is assigned to GCI11R-002E; schedule/probe interference is assigned
+to 002F with a forced-barrier requirement; 002G closes clusters and 002H reruns
+repository certification.
 P5 and Gate G3 consume that result. Until then, the complete aggressive suite
 is explicitly red and non-settling. No remediation inside the already closed
 D.2c WHNF partition is justified merely by this broad run.
