@@ -2,10 +2,11 @@
 
 Implementation baseline: `8c611ae0`, after W9E closure.
 
-Status: in progress. HR0 baseline and artifact mapping are complete. HR1 found
-one focused aggressive-verification fixture gap before completing its contract
-matrix. The narrow WHNFHR-001 remediation precedes the rest of HR1-HR8, which
-remain governed by
+Status: in progress. HR0 baseline and artifact mapping and HR1 contract
+accounting are complete. HR2 found one additional test-fixture publication gap
+while forcing the checkpoint ownership matrix. The narrow WHNFHR-003
+remediation precedes acceptance of HR2 evidence; the rest of HR2-HR8 remain
+governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
 
@@ -425,3 +426,44 @@ obligation; the duplicate was removed. No semantic statement changed.
 
 The stale parent-plan inventory counts above remain evidence until HR6-HR7
 audit their ownership claims; they are not yet assigned severity or resolution.
+
+### WHNFHR-003 — Open: hidden builder checkpoint fixture crosses three raw-value boundaries
+
+**Severity:** medium verification-boundary defect; no production ownership
+conclusion yet.
+
+The first complete ordinary `--lib checkpoint` filter run failed in
+`hidden_builder_whole_state_checkpoint_restores_reset_scope` while attempting
+to access a managed pointer already pending finalization. The fixture currently
+crosses three value-access boundaries with raw recursive values:
+
+1. the initial builder state and reset operation leave `with_access` unrooted;
+2. `run_builder_at` returns a decoded checkpoint and state as raw values after
+   the compatibility evaluator has projected its result root; and
+3. the restore operation embeds that raw checkpoint, then again crosses an
+   access/evaluation boundary unrooted.
+
+An isolated run can pass because it does not necessarily collect at one of
+those gaps. That is not concurrency evidence and cannot justify accepting the
+fixture. The failure occurs at collector root/access validation, not during
+checkpoint trace or restoration, so the first hypothesis is the existing
+GCI11R-002E test-publication class rather than a production checkpoint defect.
+
+**Remediation checkpoints:**
+
+1. `WHNFHR-003A` replaces the helper path for this fixture with rooted input
+   and result handoffs. Construction, list selection, result decoding, and
+   restore construction must each happen while matching access is held; only
+   `RuntimeValueRoot` values may cross between those regions.
+2. The repaired fixture explicitly collects after initial publication and
+   after the first checkpoint result is published, forcing both former gaps.
+3. Run the exact fixture ordinarily and aggressively, then the complete
+   ordinary/aggressive checkpoint filters. Only those forced runs may become
+   HR2 ownership evidence.
+4. `WHNFHR-003B` updates the access/root-publication inventories and reruns the
+   complete ordinary/aggressive inventory gates if the new helper changes
+   their source-backed ledgers.
+
+If the rooted fixture still reaches pending finalization or trace failure, stop
+HR2 and reclassify this as a production owner/transition defect. The broader
+fixture migration remains GCI11R-002E work.
