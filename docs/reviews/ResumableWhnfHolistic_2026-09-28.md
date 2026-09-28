@@ -3,10 +3,11 @@
 Implementation baseline: `8c611ae0`, after W9E closure.
 
 Status: in progress. HR0 baseline/artifact mapping, HR1 contract accounting,
-HR2 ownership/GC-safety review, HR3 resumption-equivalence review, and HR4
-stack/budget/scheduling/concurrency review are complete. HR2 repaired two
+HR2 ownership/GC-safety review, HR3 resumption-equivalence review, HR4
+stack/budget/scheduling/concurrency review, and HR5 complexity/performance
+accounting are complete. HR2 repaired two
 test-fixture publication gaps and one stale foreground-pump expectation before
-accepting its forced checkpoint evidence. HR5-HR8 remain
+accepting its forced checkpoint evidence. HR6-HR8 remain
 governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -604,6 +605,84 @@ one condition variable because exact subscriptions and claim validation make
 the wake harmless. HR5 assesses its cost. HR4 finds no current correctness
 claim resting on uncontrolled scheduling.
 
+## HR5 — Complexity and performance accounting
+
+HR5 is complete. Every retained WHNF-specific cost has a current semantic,
+ownership, or measurement role. The audit found no decision-only instrument or
+obsolete compatibility wrapper which should be removed before parent GC work.
+WHNFHR-006 records the two accepted bootstrap costs which remain material.
+
+### Representation and access costs
+
+| Cost | Current behavior | Evidence and disposition |
+| --- | --- | --- |
+| seed promotion | one input `RuntimeValueRoot` becomes one aggregate managed checkpoint root | small and 32-frame fixtures both retain exactly one steady-state root. |
+| ordinary delegation | focus is replaced in regional state | 4,096-step and root-counter fixtures show no per-step root or managed allocation. |
+| multi-frame yield | existing vectors/arrays are retained in place | container-identity and no-projection/root fixtures pass. |
+| structured application | arguments are batched into one continuation | application fixture rejects an intermediate root per supplied argument. |
+| one-unit polling | first real step allocates at most the one required checkpoint; later steps reuse it | zero/one/many budget fixture compares root-registration and managed-slot counters. |
+| nested access | current D.2c gateways accept caller-supplied `EvaluationValueAccess` and use higher-ranked regions | source-backed access inventory reports no unclassified nested D.2c introduction. |
+| compatibility facade | `evaluate_compatibility_whnf` projects raw input to a root and terminal root back to raw | deliberately expensive transitional parent-plan violation; D.2d-D.2g own its call sites and removal. It is not used to simplify canonical WHNF internals. |
+| checkpoint transition | one mutex acquisition and complete before/after edge walk per bounded published quantum | exact SATB/reference-collector correctness boundary; CG0 must compare it with `RootFrame`, not silently add parallel roots. |
+| callable checkpoint | boxed `NetWhnfState` occupies one pointer in the runtime node | x86-64 layout latch records `Value` 64 B, continuation 160 B, state 128 B; boxing avoids enlarging every runtime node. |
+| specialized checkpoint | allocation occurs only when its lazy source actually crosses a resumable boundary | terminal/immediate paths install result/cache directly; source inventories latch every allocator/observer. |
+
+The focused cost probes all pass in the current tree:
+
+```text
+small_and_large_seed_promotions_use_one_managed_root
+borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots
+exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn
+function_application_batches_arguments_without_intermediate_roots
+regional_whnf_and_callable_checkpoint_layout_baseline
+```
+
+### Scheduler and source-shaped work
+
+W6G.4 localized the post-W4 regression to repeated exact-producer-chain
+rediscovery. Its W6G4R-002 baseline performed 9,374 complete searches, visited
+1,418,995 records, and cold-fell back 9,356 times. W9 retained a guarded
+caller-local route and split broad scheduler movement from exact-route hazards.
+On the identical duplicate-symbol source fixture it now performs 28,855 fast
+handoffs, 18 complete one-record searches, 18 record visits, and zero cold
+fallbacks. The pathologically retained route still reaches depth about 573
+and roughly 42 KiB, but common reconciliation is O(1) and full traversal is
+authoritative only after an actual mismatch/hazard.
+
+W9 also reduced `notify_all` calls from 88,579 to 58,798 (33.62%) by
+suppressing broadcasts for publications which no parked host class can use.
+One broad condition variable remains. A worker-enabled profile could justify a
+future split; the current zero-worker fixture cannot, and forced mixed-waiter
+tests prove correctness meanwhile.
+
+Callgrind fell from the W6G4R-002 3,339,481,894 instructions to
+2,562,993,262 (-23.25%). Warm native release time improved from 1.11-1.14 s to
+0.93-0.94 s and debug from 14.18-14.34 s to 12.93-12.98 s. Native time is only
+corroboration. More importantly, the exact interaction-net signature and
+duplicate-symbol diagnostic are unchanged, so the reduction is scheduler work
+rather than omitted semantics.
+
+### Retained profiling and deferred optimization
+
+Temporary histograms, per-kind decision snapshots, poll-origin scopes, and
+DHAT/Callgrind instrumentation were removed after their decisions. The code
+retains only:
+
+- the exhaustive coordinator mutation-class boundary, because it prevents a
+  future transition from bypassing route-hazard accounting;
+- exact route/handoff/fallback/notification counters under tests or the
+  static `interaction-net-profiling` feature; and
+- interaction-net reduction/driver counters under the same static feature.
+
+Ordinary builds have no profiling observer. The named profiling script is a
+small regression suite rather than a second full test run.
+
+Pure standard-effect access fusion remains deliberately extracted to
+`PureEffectAccessFusion_2026-09-23.md`, after value-representation refinement.
+List-spine representation, JIT/normalization annotations, moving/concurrent GC,
+and public resumable `Evaluation` ergonomics likewise remain separate plans.
+None is required to make the current WHNF boundary correct.
+
 ## Preliminary reconciliation questions
 
 These are questions for the later passes, not findings yet:
@@ -829,3 +908,30 @@ introducing a parallel root/frame now would risk retaining lazy-owner cycles.
 Exit is the CG0 inventory and representation decision plus CG1's forced
 handshake matrix; this finding does not block D.2d, P4 accounting, or current
 STW operation, but it blocks concurrent marking.
+
+### WHNFHR-006 — Accepted: aggregate edge walks and exact-route depth remain bootstrap costs
+
+**Severity:** medium measured performance, none for current correctness.
+
+The aggregate managed checkpoint deliberately walks its complete edge set
+before and after each published bounded quantum, and the client-local exact
+route retains O(depth) work IDs/observations. The former is the simple exact
+barrier for the reference collector; the latter is a validated hint whose
+common handoff is O(1) after W9 and whose cold traversal remains authoritative.
+Removing either without its replacement proof would weaken ownership or
+scheduling correctness.
+
+The current dispositions are:
+
+- CG0 measures one aggregate leaving-edge walk per WHNF quantum against a
+  trace-immediate `RootFrame` or coherent managed snapshot before concurrent
+  marking changes the boundary;
+- value-representation and pure-effect-fusion work may later reduce state size
+  and route depth, but must preserve the canonical owner and exact fallback;
+  and
+- a route-storage change requires a source-shaped memory/profile result, not
+  only an aesthetic preference for a smaller record.
+
+This accepted cost does not block D.2d, P4 accounting, or Gate G3 under the
+reference collector. Reopen it if edge-walk or retained-route memory dominates
+a post-representation profile, or before concurrent marking adopts a barrier.

@@ -1,6 +1,6 @@
 # Resumable WHNF Holistic Review Plan — 2026-09-28
 
-Status: active. HR0-HR4 are complete; HR5-HR8 remain. This plan governs the final implementation review of
+Status: active. HR0-HR5 are complete; HR6-HR8 remain. This plan governs the final implementation review of
 [`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
 and its reconciliation with the two parent workstreams which remain open:
 
@@ -355,7 +355,7 @@ counts, or compatibility assumptions.
 - [x] HR2 ownership and aggressive-GC boundary accounted for.
 - [x] HR3 all suspension families accounted for.
 - [x] HR4 stack/budget/scheduler/concurrency claims accounted for.
-- [ ] HR5 retained complexity and performance evidence accounted for.
+- [x] HR5 retained complexity and performance evidence accounted for.
 - [ ] HR6 aggressive-remediation parent reconciled.
 - [ ] HR7 persistent-edge P3-P5 reconciled.
 - [ ] HR8 verification ledger and forward path complete.
