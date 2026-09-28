@@ -3,9 +3,10 @@
 Implementation baseline: `8c611ae0`, after W9E closure.
 
 Status: in progress. HR0 baseline and artifact mapping and HR1 contract
-accounting are complete. HR2 found one additional test-fixture publication gap
-while forcing the checkpoint ownership matrix. The narrow WHNFHR-003
-remediation precedes acceptance of HR2 evidence; the rest of HR2-HR8 remain
+accounting are complete. HR2 found two test-fixture publication gaps and one
+stale foreground-pump expectation while forcing the checkpoint ownership
+matrix. The narrow WHNFHR-003/004 remediations precede acceptance of HR2
+evidence; the rest of HR2-HR8 remain
 governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -427,7 +428,7 @@ obligation; the duplicate was removed. No semantic statement changed.
 The stale parent-plan inventory counts above remain evidence until HR6-HR7
 audit their ownership claims; they are not yet assigned severity or resolution.
 
-### WHNFHR-003 — Open: hidden builder checkpoint fixture crosses three raw-value boundaries
+### WHNFHR-003 — Open: two checkpoint fixtures retain unrooted recursive owners
 
 **Severity:** medium verification-boundary defect; no production ownership
 conclusion yet.
@@ -449,21 +450,54 @@ fixture. The failure occurs at collector root/access validation, not during
 checkpoint trace or restoration, so the first hypothesis is the existing
 GCI11R-002E test-publication class rather than a production checkpoint defect.
 
+After repairing and forcing that case, the aggressive checkpoint filter also
+failed deterministically in
+`two_workers_contend_for_one_linear_checkpoint_payload`. Its setup constructs
+a managed core net through the test-only non-rooting
+`instantiate_core_net`, leaves the allocation region, and opens a second
+region to discover and claim the active pair. Aggressive collection therefore
+retires the net before either worker or the callable checkpoint can own it;
+the backtrace fails in `CoreRuntimeNet::access` during setup. The worker
+interlock itself is not reached.
+
 **Remediation checkpoints:**
 
-1. `WHNFHR-003A` replaces the helper path for this fixture with rooted input
+1. `WHNFHR-003A` replaces the helper path for the builder fixture with rooted input
    and result handoffs. Construction, list selection, result decoding, and
    restore construction must each happen while matching access is held; only
    `RuntimeValueRoot` values may cross between those regions.
 2. The repaired fixture explicitly collects after initial publication and
    after the first checkpoint result is published, forcing both former gaps.
-3. Run the exact fixture ordinarily and aggressively, then the complete
+3. `WHNFHR-003B` constructs the callable-checkpoint net and registered root in
+   one access region, retains that root for all worker/interlock observations,
+   and adds a forced collection before either worker claims the payload.
+4. Run both exact fixtures ordinarily and aggressively, then the complete
    ordinary/aggressive checkpoint filters. Only those forced runs may become
    HR2 ownership evidence.
-4. `WHNFHR-003B` updates the access/root-publication inventories and reruns the
+5. `WHNFHR-003C` updates the access/root-publication inventories and reruns the
    complete ordinary/aggressive inventory gates if the new helper changes
    their source-backed ledgers.
 
 If the rooted fixture still reaches pending finalization or trace failure, stop
 HR2 and reclassify this as a production owner/transition defect. The broader
 fixture migration remains GCI11R-002E work.
+
+### WHNFHR-004 — Open: blocked-client fixture asks the background pump to run foreground work
+
+**Severity:** low test-policy drift; no production scheduling defect.
+
+The aggressive checkpoint filter also fails in
+`blocked_client_checkpoint_survives_collection_until_promise_assignment` after
+the promise assignment. The fixture calls `EvaluationRuntime::pump_until_stable`
+and then expects a private client-demand handle to contain its result. Since
+W6G.1, that runtime API deliberately pumps background reflection/task/spark
+lifecycle work and never claims a foreground client demand. Reaching a stable
+background instant while the foreground handle remains ready is therefore the
+specified result, not evidence that collection lost its checkpoint.
+
+`WHNFHR-004A` must retain the forced collection and promise assignment, then
+advance the exact foreground client demand through the existing test driver
+until it publishes. The exact fixture and complete aggressive checkpoint
+filter must pass. Reintroducing foreground claims into
+`pump_until_stable` is explicitly out of scope because it would reverse the
+reviewed client/worker ownership model.
