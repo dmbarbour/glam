@@ -13,6 +13,7 @@ use crate::evaluation::{
     EvaluationWaitToken, ReflectionTaskLauncher, ReflectionTaskResultPolicy,
 };
 use crate::number::Number;
+use crate::runtime::RuntimeValueRoot;
 
 use super::*;
 
@@ -797,7 +798,7 @@ impl ReflectionTaskLauncher for GateFailureLauncher {
     fn build(
         &self,
         _context: EvalContext,
-        _effect: Value,
+        _effect: RuntimeValueRoot,
         _result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.builds.fetch_add(1, Ordering::SeqCst);
@@ -842,7 +843,7 @@ impl ReflectionTaskLauncher for ScopedReflectionLauncher {
     fn build(
         &self,
         _context: EvalContext,
-        _effect: Value,
+        _effect: RuntimeValueRoot,
         _result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.values
@@ -859,7 +860,7 @@ impl ReflectionTaskLauncher for FixtureTaskLauncher {
     fn build(
         &self,
         _context: EvalContext,
-        _effect: Value,
+        _effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.builds.fetch_add(1, Ordering::SeqCst);

@@ -8771,7 +8771,11 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
         .expect("the isolated activation fixture should collect before reservation");
 
     let pending = context
-        .reserve_reflection_task(Value::binary_from_text("pending task effect"))
+        .reserve_reflection_task(
+            context
+                .values()
+                .construct_runtime_value_root(|_| Value::binary_from_text("pending task effect")),
+        )
         .expect("a sealed session profile should permit task reservation");
     let pending_live = context
         .values()
@@ -8848,7 +8852,7 @@ impl ReflectionTaskLauncher for LaunchedChildFixture {
     fn build(
         &self,
         _context: EvalContext,
-        _effect: Value,
+        _effect: RuntimeValueRoot,
         _result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         Ok(match self.0 {
@@ -8876,7 +8880,11 @@ fn direct_effect_child_launch_publishes_causal_parent_only_on_commit() {
         .expect("direct effect has a task identity");
 
     let discarded = context
-        .reserve_reflection_task(Value::binary_from_text("discarded"))
+        .reserve_reflection_task(
+            context
+                .values()
+                .construct_runtime_value_root(|_| Value::binary_from_text("discarded")),
+        )
         .expect("child reservation should succeed");
     let discarded_id = discarded.handle().id();
     assert_eq!(
@@ -8887,7 +8895,11 @@ fn direct_effect_child_launch_publishes_causal_parent_only_on_commit() {
     assert_eq!(coordinator.reflection_launch_parent(discarded_id), None);
 
     let pending = context
-        .reserve_reflection_task(Value::binary_from_text("committed"))
+        .reserve_reflection_task(
+            context
+                .values()
+                .construct_runtime_value_root(|_| Value::binary_from_text("committed")),
+        )
         .expect("child reservation should succeed");
     let child = pending.handle().clone();
     assert_eq!(coordinator.reflection_launch_parent(child.id()), Some(None));
@@ -8930,8 +8942,10 @@ fn scheduled_effect_children_keep_causal_parent_without_implicit_join() {
         let launched = reserved.clone();
         let parent = context
             .schedule_task(move |parent_context| {
-                let pending =
-                    parent_context.reserve_reflection_task(Value::binary_from_text("child"))?;
+                let effect = parent_context
+                    .values()
+                    .construct_runtime_value_root(|_| Value::binary_from_text("child"));
+                let pending = parent_context.reserve_reflection_task(effect)?;
                 *launched
                     .lock()
                     .expect("child reservation lock was poisoned") = Some(pending);
@@ -9023,7 +9037,11 @@ fn cancelled_effect_child_never_publishes_a_launch_parent() {
     let context = EvalContext::with_task_profile(&session, profile);
     let coordinator = context.coordinator().expect("runtime has a coordinator");
     let pending = context
-        .reserve_reflection_task(Value::binary_from_text("cancelled"))
+        .reserve_reflection_task(
+            context
+                .values()
+                .construct_runtime_value_root(|_| Value::binary_from_text("cancelled")),
+        )
         .expect("child reservation should succeed");
     let child = pending.handle().clone();
     let mut policy = PendingTaskPolicy::default();

@@ -742,6 +742,10 @@ impl EvalContext {
 
     /// Projects one compatibility root for a callback which must run after
     /// managed access has ended.
+    #[allow(
+        dead_code,
+        reason = "D.2d.3 removes this superseded compatibility projection"
+    )]
     fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
         self.values().with_runtime_value_access(|access| {
             assert_eq!(
@@ -1781,9 +1785,6 @@ impl EvalContext {
         {
             return;
         }
-        // Clone under matching managed access, then release that access before
-        // the launcher invokes reflection-owned construction callbacks.
-        let effect = self.clone_root(effect);
         let result = task_profile
             .launcher()
             .ok_or_else(|| {
@@ -1794,7 +1795,7 @@ impl EvalContext {
             .and_then(|launcher| {
                 launcher.build(
                     Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),
-                    effect,
+                    effect.clone(),
                     result_policy,
                 )
             });
@@ -1876,7 +1877,7 @@ impl EvalContext {
 
     pub(crate) fn reserve_reflection_task(
         &self,
-        effect: Value,
+        effect: RuntimeValueRoot,
     ) -> Result<PendingReflectionTask, Arc<str>> {
         self.coordinator_for_admission()?;
         if !self.task_profile.is_sealed() {
@@ -1890,7 +1891,7 @@ impl EvalContext {
                 context: self.clone(),
                 handle: self.reserve_task()?,
                 launch_parent,
-                effect: self.values().construct_runtime_value_root(|_| effect),
+                effect,
                 activated: AtomicBool::new(false),
             }),
         })

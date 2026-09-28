@@ -736,6 +736,9 @@ where
             .store()
             .reserve_query_with(launched.clone())
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let effect = eval_context
+            .values()
+            .construct_runtime_value_root(|_| effect);
         let pending = eval_context
             .reserve_reflection_task(effect)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -761,6 +764,9 @@ where
         let result = store
             .reserve_query_with(launched)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        let effect = eval_context
+            .values()
+            .construct_runtime_value_root(|_| effect);
         let pending = eval_context
             .reserve_reflection_task(effect)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;

@@ -268,6 +268,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
         retain_all: bool,
         exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
+        let effect = eval_context
+            .values()
+            .construct_runtime_value_root(|_| effect);
+        Self::new_rooted_in_context_with_capabilities(
+            effect,
+            specialization,
+            host,
+            eval_context,
+            retain_all,
+            exposes_exit,
+        )
+    }
+
+    pub(super) fn new_rooted_in_context_with_capabilities(
+        effect: RuntimeValueRoot,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+        retain_all: bool,
+        exposes_exit: bool,
+    ) -> Result<Self, TaskHalt> {
         let eval_context = eval_context.for_effect_task();
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
@@ -280,8 +301,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let id = eval_context
             .task_id()
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let initial_state = Value::Dict(Dict::new_sync());
-        let root = Branch::new(eval_context.values(), effect, initial_state);
+        let initial_state = eval_context
+            .values()
+            .construct_runtime_value_root(|_| Value::Dict(Dict::new_sync()));
+        let root = Branch::new_rooted(effect, initial_state);
         let (search, branch) = if retain_all {
             let mut branch = root.clone();
             branch.transaction = Some(Transaction::new(host.snapshot()));
@@ -3597,6 +3620,7 @@ struct Branch<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> Branch<S> {
+    #[cfg(test)]
     fn new(values: &CoreValueFactory, effect: Value, state: Value) -> Self {
         let (effect, state) = values.with_runtime_value_access(|access| {
             (
@@ -3604,6 +3628,11 @@ impl<S: TaskSpecialization> Branch<S> {
                 access.root_runtime_value(state),
             )
         });
+        Self::new_rooted(effect, state)
+    }
+
+    fn new_rooted(effect: RuntimeValueRoot, state: RuntimeValueRoot) -> Self {
+        debug_assert_eq!(effect.runtime_id(), state.runtime_id());
         Self {
             effect,
             control: Control::default(),

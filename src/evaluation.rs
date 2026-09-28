@@ -15,7 +15,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
-use crate::core::{CoreValueFactory, EvaluationFailure, Value};
+#[cfg(test)]
+use crate::core::Value;
+use crate::core::{CoreValueFactory, EvaluationFailure};
+use crate::runtime::RuntimeValueRoot;
 
 mod access;
 #[cfg(test)]
@@ -181,7 +184,7 @@ pub(crate) trait ReflectionTaskLauncher: Send + Sync {
     fn build(
         &self,
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>>;
 }

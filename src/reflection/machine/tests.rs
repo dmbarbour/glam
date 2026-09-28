@@ -93,7 +93,7 @@ impl ReflectionTaskLauncher for SnapshotOrderingLauncher {
     fn build(
         &self,
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         let index = self.next.fetch_add(1, Ordering::AcqRel);
@@ -110,7 +110,7 @@ impl ReflectionTaskLauncher for CountingLauncher {
     fn build(
         &self,
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.builds.fetch_add(1, Ordering::AcqRel);
@@ -126,11 +126,16 @@ impl ReflectionTaskLauncher for ExitCapableLauncher {
     fn build(
         &self,
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        let task = EffectTask::new_exit_in_context(effect, TestEffects, self.host.clone(), context)
-            .map_err(TaskHalt::into_failure)?;
+        let task = EffectTask::new_exit_in_context(
+            effect.clone_core_for_test(),
+            TestEffects,
+            self.host.clone(),
+            context,
+        )
+        .map_err(TaskHalt::into_failure)?;
         Ok(match result_policy {
             ReflectionTaskResultPolicy::RequireUnit => Box::new(UnitEffectTask(
                 task.asserting_unit_result(Arc::from("reflection annotation result")),
@@ -5071,10 +5076,13 @@ fn evaluation_session_pumps_a_type_erased_effect_task() {
     let launcher = task_launcher(TestEffects, host.clone());
     let task = context
         .schedule_task(|task_context| {
+            let effect = task_context
+                .values()
+                .construct_runtime_value_root(|_| effect.clone_core_for_test());
             launcher
                 .build(
                     task_context,
-                    effect.clone_core_for_test(),
+                    effect,
                     ReflectionTaskResultPolicy::RequireUnit,
                 )
                 .map_err(|error| Arc::from(error.to_string()))
@@ -5110,10 +5118,13 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
     );
     let task = context
         .schedule_task(|task_context| {
+            let effect = task_context
+                .values()
+                .construct_runtime_value_root(|_| effect.clone_core_for_test());
             launcher
                 .build(
                     task_context,
-                    effect.clone_core_for_test(),
+                    effect,
                     ReflectionTaskResultPolicy::ReturnValue,
                 )
                 .map_err(|error| Arc::from(error.to_string()))
@@ -5140,10 +5151,13 @@ fn reflection_task_launcher_requires_unit_when_requested() {
     );
     let task = context
         .schedule_task(|task_context| {
+            let effect = task_context
+                .values()
+                .construct_runtime_value_root(|_| effect.clone_core_for_test());
             launcher
                 .build(
                     task_context,
-                    effect.clone_core_for_test(),
+                    effect,
                     ReflectionTaskResultPolicy::RequireUnit,
                 )
                 .map_err(|error| Arc::from(error.to_string()))

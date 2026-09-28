@@ -1038,13 +1038,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        587,
+        583,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        6_184_126_909_186_489_796,
+        17_561_085_029_606_147_161,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1075,7 +1075,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // adds one ready key-list constructor within that same region.
         ((ApiKind::Function, ApiDisposition::RegionalAccess), 301),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 246),
+        ((ApiKind::Function, ApiDisposition::Violation), 242),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1151,7 +1151,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2dOrchestration,
                 ReplacementShape::RootedOrchestration,
             ),
-            8,
+            6,
         ),
         (
             (
@@ -1165,7 +1165,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2fReflection,
                 ReplacementShape::ReflectionRegionOrRoot,
             ),
-            25,
+            23,
         ),
         (
             (
@@ -1286,14 +1286,12 @@ fn d2d_orchestration_declarations_are_exact() {
         .map(|occurrence| occurrence.declaration)
         .collect::<BTreeSet<_>>();
     let expected = [
-        "src/evaluation.rs::trait ReflectionTaskLauncher::build",
         "src/evaluation/access.rs::EvaluatorStepContext::project_root",
         "src/evaluation/access.rs::EvaluatorStepContext::root_value",
         "src/evaluation/session.rs::EvalContext::clone_root",
         "src/evaluation/session.rs::EvalContext::compose_builtin",
         "src/evaluation/session.rs::EvalContext::evaluate_builtin_whnf",
         "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf",
-        "src/evaluation/session.rs::EvalContext::reserve_reflection_task",
     ]
     .into_iter()
     .map(str::to_owned)

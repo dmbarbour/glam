@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use super::machine::{ContextualValueEffectTask, EffectTask, UnitEffectTask, ValueEffectTask};
 use super::protocol::{StandardEffects, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization};
 use crate::api::{DiagnosticIngress, EvaluationRuntime, Value as PublicValue};
-use crate::core::{EvaluationFailure, Value};
+use crate::core::EvaluationFailure;
 use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationSession, EvaluationSessionRun, EvaluationTaskHandle,
@@ -11,7 +11,7 @@ use crate::evaluation::{
     ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
     TaskStatusWake,
 };
-use crate::runtime::RuntimeFailureRoot;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 /// Host-owned observation of one coordinator-managed composed effect root.
 ///
@@ -652,10 +652,10 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
     fn build(
         &self,
         context: EvalContext,
-        effect: Value,
+        effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        let task = EffectTask::new_in_context_with_capabilities(
+        let task = EffectTask::new_rooted_in_context_with_capabilities(
             effect,
             self.specialization.clone(),
             self.host.clone(),

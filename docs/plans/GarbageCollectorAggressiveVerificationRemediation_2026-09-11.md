@@ -1724,7 +1724,7 @@ Migrate them in the following low-risk checkpoints:
    `promise_assignment_terminal` as one terminal-publication family. Preserve
    exact producer-ledger ownership and force collection on both sides of
    publication.
-3. **D.2d.2 — reflection-task admission.** Migrate
+3. **D.2d.2 — reflection-task admission.** **Complete (2026-09-28).** Migrate
    `ReflectionTaskLauncher::build` and `EvalContext::reserve_reflection_task`.
    Their effects cross admission as roots or exact traced owners; no mutator
    spans task construction or host integration.
