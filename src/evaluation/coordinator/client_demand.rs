@@ -380,7 +380,10 @@ impl EvaluationWorkCoordinator {
             state.advance_work_generation(CoordinatorMutationKind::ClientDemandAdmission);
         }
         drop(mutation);
-        self.work_available.notify_one();
+        // Workers and foreground drivers share the coordinator condition
+        // variable. A single wake could select a worker which cannot consume
+        // client-owned demand, leaving the only eligible driver parked.
+        self.notify_all(CoordinatorMutationKind::ClientDemandAdmission);
         Ok(id)
     }
 
@@ -402,7 +405,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -431,7 +434,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -600,7 +603,7 @@ impl EvaluationWorkCoordinator {
         if let Some(retirement) = retirement {
             retirement.finish();
         }
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::ClientDemandRelease);
         self.notify_dependency_wake(woke);
     }
 
@@ -635,7 +638,7 @@ impl EvaluationWorkCoordinator {
         if let Some(retirement) = retirement {
             retirement.finish();
         }
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::Cancellation);
         accepted
     }
 
@@ -681,7 +684,7 @@ impl EvaluationWorkCoordinator {
             };
             drop(mutation);
             if queued {
-                self.work_available.notify_all();
+                self.notify_all(CoordinatorMutationKind::DependencyWake);
             }
             return None;
         }
@@ -728,7 +731,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         retirement.finish();
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::Cancellation);
         Some(dependency)
     }
 
@@ -765,7 +768,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         retirement.finish();
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::Cancellation);
         true
     }
 }

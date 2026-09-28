@@ -7,11 +7,12 @@ use std::sync::Arc;
 use super::coordinator::ExactRoutePollOriginGuard;
 use super::coordinator::{
     self, CausalChildSelection, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork,
-    ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
-    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExactDemandRoute, ExactRouteRelease, ExactTargetSelection,
-    ReflectionWorkPoll, ReflectionWorkState, WorkDependency,
+    ClaimedTaskWork, ClientDemandOperation, CoordinatorWaiterClass, CoordinatorWaiterOutcome,
+    DeferredLazyCycleMember, DeferredWorkPoll, EvaluationMachinePoll, EvaluationSessionId,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitTerminal,
+    EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ExactDemandRoute,
+    ExactRouteRelease, ExactTargetSelection, ReflectionWorkPoll, ReflectionWorkState,
+    WorkDependency,
 };
 use super::session::{
     EvalContext, EvaluationSessionReport, EvaluationSessionRun, EvaluationUnfinishedState,
@@ -287,7 +288,22 @@ impl EvaluationDemandState {
                 }
                 let generation = coordinator.work_generation();
                 if self.task_is_running(&coordinator) {
-                    coordinator.wait_for_change(generation);
+                    if coordinator.wait_for_change_for(
+                        generation,
+                        None,
+                        CoordinatorWaiterClass::SessionDrain,
+                    ) {
+                        coordinator.record_waiter_outcome(
+                            CoordinatorWaiterClass::SessionDrain,
+                            if coordinator.session_has_ready_task(self.id) {
+                                CoordinatorWaiterOutcome::Productive
+                            } else if !self.task_is_running(&coordinator) {
+                                CoordinatorWaiterOutcome::Relevant
+                            } else {
+                                CoordinatorWaiterOutcome::Unrelated
+                            },
+                        );
+                    }
                     continue;
                 }
                 if coordinator.work_generation() != generation

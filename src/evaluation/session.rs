@@ -21,13 +21,13 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::coordinator::{
     CausalChildSelection, ClientDemandHandle, ClientDemandOperation, ClientDemandResult,
-    ClientDemandSink, ClientDemandSnapshot, DeferredProducer, DeferredWorkReservation,
-    EvaluationSessionId, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    ExactDemandRoute, ExactTargetStatus, InitialTaskDisposition, LocalPromiseOwner,
-    PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation, ReflectionCancellation,
-    ReflectionTaskResultPolicy, TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher,
-    WorkDependency,
+    ClientDemandSink, ClientDemandSnapshot, CoordinatorWaiterClass, CoordinatorWaiterOutcome,
+    DeferredProducer, DeferredWorkReservation, EvaluationSessionId, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitTerminal,
+    EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute, ExactTargetStatus,
+    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
+    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
+    TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -1107,7 +1107,21 @@ impl EvalContext {
         if let Some(probe) = &self.claimed_task_wait_probe {
             let _ = probe.send(());
         }
-        coordinator.wait_for_change(generation);
+        if coordinator.wait_for_change_for(generation, None, CoordinatorWaiterClass::ExactClient) {
+            coordinator.record_waiter_outcome(
+                CoordinatorWaiterClass::ExactClient,
+                if handle.poll().is_some()
+                    || matches!(
+                        coordinator.client_demand_snapshot(handle.work),
+                        Some(ClientDemandSnapshot::Queued)
+                    )
+                {
+                    CoordinatorWaiterOutcome::Productive
+                } else {
+                    CoordinatorWaiterOutcome::Unrelated
+                },
+            );
+        }
     }
 
     #[cfg(test)]
@@ -1289,7 +1303,20 @@ impl EvalContext {
         if let Some(probe) = &self.claimed_task_wait_probe {
             let _ = probe.send(());
         }
-        coordinator.wait_for_change(generation);
+        if coordinator.wait_for_change_for(generation, None, CoordinatorWaiterClass::ExactClient) {
+            let status = coordinator.exact_target_status_on_route(target, route);
+            coordinator.record_waiter_outcome(
+                CoordinatorWaiterClass::ExactClient,
+                match status {
+                    ExactTargetStatus::Ready => CoordinatorWaiterOutcome::Productive,
+                    ExactTargetStatus::None if target.terminal_poll().is_some() => {
+                        CoordinatorWaiterOutcome::Productive
+                    }
+                    ExactTargetStatus::None => CoordinatorWaiterOutcome::Relevant,
+                    ExactTargetStatus::Busy => CoordinatorWaiterOutcome::Unrelated,
+                },
+            );
+        }
     }
 
     /// Retries when progress appeared after a caller's `NoProgress` sample, or
@@ -1314,8 +1341,25 @@ impl EvalContext {
         if !coordinator.dependency_observes_runtime(target) {
             return false;
         }
-        if coordinator.work_generation() == generation {
-            coordinator.wait_for_change(generation);
+        if coordinator.work_generation() == generation
+            && coordinator.wait_for_change_for(
+                generation,
+                None,
+                CoordinatorWaiterClass::ExactClient,
+            )
+        {
+            let status = coordinator.exact_target_status_on_route(target, route);
+            coordinator.record_waiter_outcome(
+                CoordinatorWaiterClass::ExactClient,
+                match status {
+                    ExactTargetStatus::Ready => CoordinatorWaiterOutcome::Productive,
+                    ExactTargetStatus::None if target.terminal_poll().is_some() => {
+                        CoordinatorWaiterOutcome::Productive
+                    }
+                    ExactTargetStatus::None => CoordinatorWaiterOutcome::Relevant,
+                    ExactTargetStatus::Busy => CoordinatorWaiterOutcome::Unrelated,
+                },
+            );
         }
         true
     }
@@ -1962,8 +2006,24 @@ impl EvalContext {
             EvaluationWaitPoll::Pending(_)
         ) && !coordinator.session_has_ready_task(self.session.id)
             && coordinator.work_generation() == generation
+            && coordinator.wait_for_change_for(
+                generation,
+                None,
+                CoordinatorWaiterClass::TaskObserver,
+            )
         {
-            coordinator.wait_for_change(generation);
+            coordinator.record_waiter_outcome(
+                CoordinatorWaiterClass::TaskObserver,
+                if !matches!(
+                    self.poll_reflection_task(task),
+                    EvaluationWaitPoll::Pending(_)
+                ) || coordinator.session_has_ready_task(self.session.id)
+                {
+                    CoordinatorWaiterOutcome::Productive
+                } else {
+                    CoordinatorWaiterOutcome::Unrelated
+                },
+            );
         }
     }
 

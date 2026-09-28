@@ -32,8 +32,10 @@ pub use api::{
 };
 #[cfg(feature = "interaction-net-profiling")]
 pub use api::{
-    CoordinatorMutationCounts, ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot,
-    InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts,
+    CoordinatorMutationCounts, CoordinatorNotificationCallCounts,
+    CoordinatorNotificationProfileSnapshot, CoordinatorWaiterOutcomeCounts,
+    ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
+    NetDriverCounts, NetReductionCounts,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

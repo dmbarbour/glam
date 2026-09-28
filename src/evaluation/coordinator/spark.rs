@@ -157,7 +157,10 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if admitted {
-            self.work_available.notify_one();
+            // The shared condition variable also parks client/session
+            // waiters, none of which may claim a spark. Broadcast until W9C's
+            // evidence justifies distinct waiter-class channels.
+            self.notify_all(CoordinatorMutationKind::FreshWorkAdmission);
         }
     }
 
@@ -189,7 +192,7 @@ impl EvaluationWorkCoordinator {
         let count = retired.len();
         drop(mutation);
         if count != 0 {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkRetirement);
         }
         for record in retired {
             record.abandon();
@@ -338,7 +341,7 @@ impl EvaluationWorkCoordinator {
             self.promote_deferred_wait_guarded(&mutation, &wait);
         }
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRelease);
         if let Some(dependency) = obsolete_dependency {
             dependency.abandon();
         }

@@ -73,6 +73,7 @@ pub struct InteractionNetProfileSnapshot {
     pub reductions: NetReductionCounts,
     pub driver: NetDriverCounts,
     pub exact_routes: ExactRouteMutationProfileSnapshot,
+    pub coordinator_notifications: CoordinatorNotificationProfileSnapshot,
 }
 
 /// Coordinator mutations observed between an exact-route claim and guarded
@@ -158,6 +159,40 @@ pub struct ExactRouteMutationProfileSnapshot {
     pub total_route_depth: u64,
     pub maximum_route_depth: u64,
     pub dispositions: ExactRouteDispositionCounts,
+}
+
+/// Calls made through the coordinator's shared work condition variable.
+///
+/// These counters describe notification policy, not semantic work. In
+/// particular, a mutation may advance `work_generation` without notifying a
+/// parked host thread when it cannot satisfy any parked predicate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoordinatorNotificationCallCounts {
+    pub notify_one: CoordinatorMutationCounts,
+    pub notify_all: CoordinatorMutationCounts,
+}
+
+/// The first bounded observation made by one waiter after it was released.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoordinatorWaiterOutcomeCounts {
+    pub released: u64,
+    pub productive: u64,
+    pub relevant: u64,
+    pub unrelated: u64,
+}
+
+/// Schedule-sensitive W9C accounting for the shared coordinator condition
+/// variable.
+///
+/// The runtime retains aggregate counts only. It does not retain thread,
+/// waiter, work, route, or notification identities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoordinatorNotificationProfileSnapshot {
+    pub calls: CoordinatorNotificationCallCounts,
+    pub workers: CoordinatorWaiterOutcomeCounts,
+    pub exact_clients: CoordinatorWaiterOutcomeCounts,
+    pub session_drains: CoordinatorWaiterOutcomeCounts,
+    pub task_observers: CoordinatorWaiterOutcomeCounts,
 }
 
 macro_rules! atomic_counts {
@@ -270,6 +305,7 @@ impl InteractionNetProfile {
             reductions: self.reductions.snapshot(),
             driver: self.driver.snapshot(),
             exact_routes: ExactRouteMutationProfileSnapshot::default(),
+            coordinator_notifications: CoordinatorNotificationProfileSnapshot::default(),
         }
     }
 

@@ -8636,7 +8636,7 @@ or synchronization code required a Miri/model-checking subset.
 
 ### Phase W9 — Exact-Route Poll and Release Accounting
 
-**Status:** W9A-B and W9C.0-C.3 complete on 2026-09-28; W9C.4-E planned. This
+**Status:** W9A-B and W9C complete on 2026-09-28; W9D-E planned. This
 phase owns W6G4R-003 in full. It is a measured post-W6G performance repair,
 not unfinished W6G semantics.
 
@@ -9051,7 +9051,7 @@ retains the named conservative fallback. This makes the 9,356 source-shaped
 windows eligible for O(1) reconciliation while preserving the forced
 observation, cancellation, closure, reblock, and retirement outcomes.
 
-##### W9C.4 — Notification and parked-thread churn investigation
+##### W9C.4 — Notification and parked-thread churn investigation — Complete (2026-09-28)
 
 Keep revision publication distinct from wake delivery. `work_generation`
 records broad coordinator movement, but the current shared
@@ -9122,6 +9122,66 @@ semantic work scheduling, but host-thread parking needs its own explicit
 proof. If separate condition variables are architecturally larger than W9's
 route-accounting repair, write a follow-up plan with the measured churn and
 retain only the safe suppression/`notify_one` changes here.
+
+Completion record: every shared `work_available` notification now passes
+through one factual-kind profiling boundary. A source-backed inventory rejects
+direct `Condvar` notification elsewhere in the coordinator family. Static
+profiling reports `notify_one` and `notify_all` calls by mutation kind plus
+released/productive/relevant/unrelated outcomes for worker, exact-client,
+session-drain, and generic task-observer waiters. Ordinary builds retain only
+the waiter-class call sites and the existing condition-variable operation;
+the counters and snapshot locks compile only for tests or the static
+interaction-net profiling feature.
+
+The inventory found one correctness issue before performance policy could be
+selected. Workers and foreground/session drivers share the condition variable,
+but spark admission and client-demand admission used `notify_one`. The standard
+condition variable cannot select a waiter class: a spark could wake only a
+client which cannot claim it, or a client demand could wake only a worker which
+must not poll it. Both admissions now broadcast. The forced
+`shared_notification_broadcast_releases_worker_beside_parked_client` fixture
+parks one worker and one exact-client waiter under the coordinator mutex,
+admits one worker-only spark, and proves the worker is released and claims it.
+It also records the client's wake as unrelated, making the safety/cost tradeoff
+explicit rather than relying on thread scheduling.
+
+The remaining forced matrix is:
+
+| Required ordering | Evidence | Result |
+| --- | --- | --- |
+| worker-only admission beside worker and client waiters | `shared_notification_broadcast_releases_worker_beside_parked_client` | broadcast prevents wrong-class stranding; worker is productive and client wake is unrelated |
+| non-enabling claim beside a client waiter | `work_claim_notification_is_attributed_as_unrelated_client_churn` | the present claim broadcast releases one client which cannot progress; suppress in W9D.4 |
+| exact producer completion | `synchronous_client_demand_waits_for_claimed_exact_lazy_producer` plus the subscribe/recheck completion fixtures | completion releases the exact client and produces its result; an optional earlier claim wake is classified separately as unrelated |
+| unrelated route movement | the mixed-class admission fixture and the W9C.2 latched unrelated-route fixtures | the broad generation remains correct, but shared-channel client wake can be unrelated |
+| broad lifecycle movement | `broad_lifecycle_notification_releases_every_parked_waiter_class` | executor shutdown releases worker, exact-client, session-drain, and task-observer classes |
+
+The exact duplicate-symbol source fixture produced 88,579 broadcasts and no
+parked waiter release in its zero-worker batch execution. The complete call
+profile was: 16 demand-session registrations, 9,659 fresh admissions, 50 work
+activations, 41 client-demand admissions, 45 task-promise-index admissions,
+29,720 claims, 29,661 releases, 59 client-demand releases, 9,654 dependency
+wakes, 14 session closures, 9,659 retirements, and one stage settlement. Every
+other factual kind and every `notify_one` count was zero. A temporary
+process-output probe used to capture this snapshot was removed. Thus the large
+call count is not evidence for splitting channels in W9: the source workload
+parks no host thread on this condition variable, while the forced mixed-class
+fixtures remain authoritative for correctness.
+
+W9D.4 therefore applies this bounded disposition:
+
+| Factual kind | Notification disposition |
+| --- | --- |
+| `DemandSessionRegistry`, `TaskPromiseIndexAdmission`, `TaskPromiseIndexRetirement`, `WorkClaim`, `FailureLedger` | suppress; these change accounting, ownership, or availability observations but cannot by themselves enable a parked consumer or publish terminal progress |
+| `FreshWorkAdmission`, `WorkActivation`, `ClientDemandAdmission`, `WorkRequeue`, `DependencyPromotion` | retain broadcast while waiter classes share one condition variable; these can enable a class-specific consumer, so `notify_one` is unsound |
+| `WorkRelease`, `ClientDemandRelease`, `DependencyWake`, `ObservationWake` | retain broadcast; they can expose a parent, exact client, session drain, or observation retry |
+| `ExecutorAvailability`, `Cancellation`, `SessionClosure`, `TerminalSettlement`, `WorkRetirement`, `StageSettlement` | retain broad lifecycle notification |
+
+No dedicated worker/client condition-variable plan is opened from W9C.4.
+W9E will retain the aggregate counters through the repair and reconsider a
+channel split only if a worker-enabled workload shows material unrelated
+releases after the safe suppressions. Revision publication remains independent:
+suppression in W9D.4 removes only the host wake, never the broad
+`work_generation` advance.
 
 Do not begin W9D until W9C has produced all five artifacts: the exhaustive
 generation-publisher census, the mutation-kind proof table, a poll-window

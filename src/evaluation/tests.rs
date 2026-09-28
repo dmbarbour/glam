@@ -1473,6 +1473,13 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
             if value.clone_core_for_test() == Value::Number(37.into())
     ));
     foreground.join().expect("foreground driver should finish");
+    let notifications = coordinator.coordinator_notification_profile();
+    assert_eq!(notifications.exact_clients.productive, 1);
+    assert!(matches!(notifications.exact_clients.released, 1 | 2));
+    assert_eq!(
+        notifications.exact_clients.released,
+        notifications.exact_clients.productive + notifications.exact_clients.unrelated,
+    );
 }
 
 #[test]

@@ -101,7 +101,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::FailureLedger);
         }
     }
 
@@ -219,7 +219,7 @@ impl EvaluationWorkCoordinator {
             state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
         }
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::FreshWorkAdmission);
         Ok(id)
     }
 
@@ -329,7 +329,7 @@ impl EvaluationWorkCoordinator {
 
     pub(in crate::evaluation) fn notify_reflection_activation(&self, activated: bool) {
         if activated {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkActivation);
         }
     }
 
@@ -369,7 +369,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if discarded {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkRetirement);
         }
         discarded
     }
@@ -407,7 +407,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if terminalizing {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::TerminalSettlement);
         }
         terminalizing
     }
@@ -459,7 +459,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if !matches!(outcome, ReflectionCancellation::Late) {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::Cancellation);
         }
         outcome
     }
@@ -666,7 +666,7 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRelease);
         for wake in status_wakes {
             wake.notify();
         }
@@ -694,7 +694,7 @@ impl EvaluationWorkCoordinator {
             machine
         };
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRetirement);
         machine
     }
 

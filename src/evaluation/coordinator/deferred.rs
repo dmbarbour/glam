@@ -134,7 +134,7 @@ impl EvaluationWorkCoordinator {
         if !release.terminal {
             self.retire_unsubscribed_lazy_route(claimed.id, false);
         }
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRelease);
         release
     }
 
@@ -151,7 +151,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         drop(retired);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRetirement);
     }
 
     pub(super) fn release_lazy_route_demand(&self, id: EvaluationWorkId) {
@@ -188,7 +188,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         drop(retired);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRetirement);
     }
 
     /// Admits one runtime-owned route for a lazy. The background demand is an
@@ -264,7 +264,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if new {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::FreshWorkAdmission);
         }
         Ok(if leased {
             canonical_wait.with_lazy_route_lease(LazyRouteDemandLease::new(self, id))
@@ -342,7 +342,7 @@ impl EvaluationWorkCoordinator {
         // after releasing coordinator state and mutation admission.
         drop(machine);
         if matches!(reservation, DeferredWorkReservation::New) {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkActivation);
         }
         Ok(reservation)
     }
@@ -397,7 +397,7 @@ impl EvaluationWorkCoordinator {
         let promoted = self.promote_deferred_wait_guarded(&mutation, wait);
         drop(mutation);
         if promoted {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::DependencyPromotion);
         }
         promoted
     }
@@ -568,7 +568,7 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRelease);
         release
     }
 
@@ -588,7 +588,7 @@ impl EvaluationWorkCoordinator {
             state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
         }
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRetirement);
     }
 
     pub(in crate::evaluation) fn abandon_deferred_wait(
@@ -614,7 +614,7 @@ impl EvaluationWorkCoordinator {
             abandoned
         };
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::Cancellation);
         Some(abandoned)
     }
 
@@ -692,7 +692,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if parked {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkPark);
         }
         parked
     }

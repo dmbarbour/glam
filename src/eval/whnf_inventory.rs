@@ -1326,8 +1326,12 @@ const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
 
 const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 17_165_432_442_858_401_497;
+// W9C.4 makes the first bounded observation after a coordinator wake
+// explicit. Those non-recursive status probes add one resolved orchestration
+// edge after the existing wait boundary; the cyclic-function ledger below
+// remains empty.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_141;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_379_121_006_608_945_673;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

@@ -484,7 +484,7 @@ impl EvaluationWorkCoordinator {
             false
         };
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::TestTransition);
         self.notify_dependency_wake(woke);
         obsolete_dependency
             .into_iter()
@@ -2825,6 +2825,197 @@ fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
     };
     coordinator.release_spark(spark, SparkWorkPoll::Complete);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
+}
+
+#[test]
+fn shared_notification_broadcast_releases_worker_beside_parked_client() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    coordinator.executor_started(1);
+    let before = coordinator.coordinator_notification_profile();
+    let observed = coordinator.work_generation();
+    let (parked_sender, parked_receiver) = mpsc::channel();
+    coordinator.set_work_wait_probe(parked_sender);
+    let (finished_sender, finished_receiver) = mpsc::channel();
+
+    let worker_coordinator = coordinator.clone();
+    let worker_finished = finished_sender.clone();
+    let worker = thread::spawn(move || {
+        assert!(worker_coordinator.wait_for_change_for(
+            observed,
+            None,
+            CoordinatorWaiterClass::Worker,
+        ));
+        let CoordinatorSelection::Spark(claimed) = worker_coordinator.select_worker() else {
+            panic!("the released worker must claim the worker-only spark")
+        };
+        worker_coordinator.record_waiter_outcome(
+            CoordinatorWaiterClass::Worker,
+            CoordinatorWaiterOutcome::Productive,
+        );
+        worker_coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+        worker_finished
+            .send(())
+            .expect("worker completion observer must remain live");
+    });
+
+    let client_coordinator = coordinator.clone();
+    let client_finished = finished_sender;
+    let client = thread::spawn(move || {
+        assert!(client_coordinator.wait_for_change_for(
+            observed,
+            None,
+            CoordinatorWaiterClass::ExactClient,
+        ));
+        client_coordinator.record_waiter_outcome(
+            CoordinatorWaiterClass::ExactClient,
+            CoordinatorWaiterOutcome::Unrelated,
+        );
+        client_finished
+            .send(())
+            .expect("client completion observer must remain live");
+    });
+
+    for _ in 0..2 {
+        parked_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("both waiter classes must enter the locked wait predicate");
+    }
+    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    for _ in 0..2 {
+        finished_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a worker-only admission must release both shared-condvar classes");
+    }
+    worker.join().expect("worker waiter should finish");
+    client.join().expect("client waiter should finish");
+
+    let after = coordinator.coordinator_notification_profile();
+    assert_eq!(
+        after.calls.notify_all.fresh_work_admission,
+        before.calls.notify_all.fresh_work_admission + 1,
+    );
+    assert_eq!(
+        after.calls.notify_one.total(),
+        before.calls.notify_one.total()
+    );
+    assert_eq!(after.workers.released, before.workers.released + 1);
+    assert_eq!(after.workers.productive, before.workers.productive + 1);
+    assert_eq!(
+        after.exact_clients.released,
+        before.exact_clients.released + 1
+    );
+    assert_eq!(
+        after.exact_clients.unrelated,
+        before.exact_clients.unrelated + 1
+    );
+}
+
+#[test]
+fn work_claim_notification_is_attributed_as_unrelated_client_churn() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    coordinator.executor_started(1);
+    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    let before = coordinator.coordinator_notification_profile();
+    let observed = coordinator.work_generation();
+    let (parked_sender, parked_receiver) = mpsc::channel();
+    coordinator.set_work_wait_probe(parked_sender);
+    let waiting = coordinator.clone();
+    let waiter = thread::spawn(move || {
+        assert!(waiting.wait_for_change_for(observed, None, CoordinatorWaiterClass::ExactClient,));
+        waiting.record_waiter_outcome(
+            CoordinatorWaiterClass::ExactClient,
+            CoordinatorWaiterOutcome::Unrelated,
+        );
+    });
+    parked_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the client-class waiter must park before the worker claim");
+
+    let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
+        panic!("the test spark should remain claimable")
+    };
+    waiter
+        .join()
+        .expect("claim notification must release the waiter");
+    let after_claim = coordinator.coordinator_notification_profile();
+    assert_eq!(
+        after_claim.calls.notify_all.work_claim,
+        before.calls.notify_all.work_claim + 1,
+    );
+    assert_eq!(
+        after_claim.exact_clients.unrelated,
+        before.exact_clients.unrelated + 1,
+    );
+    coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+}
+
+#[test]
+fn broad_lifecycle_notification_releases_every_parked_waiter_class() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    coordinator.executor_started(1);
+    let before = coordinator.coordinator_notification_profile();
+    let observed = coordinator.work_generation();
+    let (parked_sender, parked_receiver) = mpsc::channel();
+    coordinator.set_work_wait_probe(parked_sender);
+    let (finished_sender, finished_receiver) = mpsc::channel();
+
+    let mut waiters = Vec::new();
+    for class in [
+        CoordinatorWaiterClass::Worker,
+        CoordinatorWaiterClass::ExactClient,
+        CoordinatorWaiterClass::SessionDrain,
+        CoordinatorWaiterClass::TaskObserver,
+    ] {
+        let waiting = coordinator.clone();
+        let finished = finished_sender.clone();
+        waiters.push(thread::spawn(move || {
+            assert!(waiting.wait_for_change_for(observed, None, class));
+            waiting.record_waiter_outcome(class, CoordinatorWaiterOutcome::Relevant);
+            finished
+                .send(())
+                .expect("lifecycle waiter observer must remain live");
+        }));
+    }
+    drop(finished_sender);
+    for _ in 0..waiters.len() {
+        parked_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("every waiter class must enter the locked wait predicate");
+    }
+
+    coordinator.executor_stopped();
+    for _ in 0..waiters.len() {
+        finished_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("broad lifecycle publication must release every class");
+    }
+    for waiter in waiters {
+        waiter.join().expect("lifecycle waiter should finish");
+    }
+
+    let after = coordinator.coordinator_notification_profile();
+    assert_eq!(
+        after.calls.notify_all.executor_availability,
+        before.calls.notify_all.executor_availability + 1,
+    );
+    assert_eq!(after.workers.relevant, before.workers.relevant + 1);
+    assert_eq!(
+        after.exact_clients.relevant,
+        before.exact_clients.relevant + 1
+    );
+    assert_eq!(
+        after.session_drains.relevant,
+        before.session_drains.relevant + 1
+    );
+    assert_eq!(
+        after.task_observers.relevant,
+        before.task_observers.relevant + 1
+    );
 }
 
 #[test]

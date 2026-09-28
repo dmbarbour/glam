@@ -790,6 +790,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
     exact_route_mutation_profile: Mutex<ExactRouteMutationProfile>,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    notification_profile: Mutex<CoordinatorNotificationProfile>,
     #[cfg(test)]
     exact_selection_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -829,6 +831,65 @@ struct ExactRouteMutationProfile {
     total_route_depth: u64,
     maximum_route_depth: u64,
     dispositions: crate::interaction_net::profiling::ExactRouteDispositionCounts,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CoordinatorWaiterClass {
+    Worker,
+    ExactClient,
+    SessionDrain,
+    TaskObserver,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CoordinatorWaiterOutcome {
+    Productive,
+    Relevant,
+    Unrelated,
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[derive(Debug, Default)]
+struct CoordinatorNotificationProfile {
+    notify_one: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    notify_all: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    released: [u64; 4],
+    productive: [u64; 4],
+    relevant: [u64; 4],
+    unrelated: [u64; 4],
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+impl CoordinatorNotificationProfile {
+    fn snapshot(
+        &self,
+    ) -> crate::interaction_net::profiling::CoordinatorNotificationProfileSnapshot {
+        use crate::interaction_net::profiling::{
+            CoordinatorNotificationCallCounts, CoordinatorNotificationProfileSnapshot,
+            CoordinatorWaiterOutcomeCounts,
+        };
+
+        let waiter = |class: CoordinatorWaiterClass| {
+            let index = class as usize;
+            CoordinatorWaiterOutcomeCounts {
+                released: self.released[index],
+                productive: self.productive[index],
+                relevant: self.relevant[index],
+                unrelated: self.unrelated[index],
+            }
+        };
+        CoordinatorNotificationProfileSnapshot {
+            calls: CoordinatorNotificationCallCounts {
+                notify_one: mutation_counts_from_array(&self.notify_one),
+                notify_all: mutation_counts_from_array(&self.notify_all),
+            },
+            workers: waiter(CoordinatorWaiterClass::Worker),
+            exact_clients: waiter(CoordinatorWaiterClass::ExactClient),
+            session_drains: waiter(CoordinatorWaiterClass::SessionDrain),
+            task_observers: waiter(CoordinatorWaiterClass::TaskObserver),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -1185,6 +1246,8 @@ impl EvaluationWorkCoordinator {
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
             #[cfg(any(test, feature = "interaction-net-profiling"))]
             exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
             #[cfg(test)]
             exact_selection_probe: Mutex::new(None),
         })
@@ -1249,6 +1312,7 @@ impl EvaluationWorkCoordinator {
             reflection_release_status_probe: Mutex::new(None),
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
             exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
+            notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
             exact_selection_probe: Mutex::new(None),
         });
         values.attach_work_coordinator(&coordinator);
@@ -1405,6 +1469,68 @@ impl EvaluationWorkCoordinator {
             .lock()
             .expect("exact route mutation profile was poisoned")
             .snapshot()
+    }
+
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn coordinator_notification_profile(
+        &self,
+    ) -> crate::interaction_net::profiling::CoordinatorNotificationProfileSnapshot {
+        self.notification_profile
+            .lock()
+            .expect("coordinator notification profile was poisoned")
+            .snapshot()
+    }
+
+    fn notify_all(&self, kind: CoordinatorMutationKind) {
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            let mut profile = self
+                .notification_profile
+                .lock()
+                .expect("coordinator notification profile was poisoned");
+            let index = kind as usize;
+            profile.notify_all[index] = profile.notify_all[index].wrapping_add(1);
+        }
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        let _ = kind;
+        self.work_available.notify_all();
+    }
+
+    fn record_waiter_release(&self, class: CoordinatorWaiterClass) {
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            let mut profile = self
+                .notification_profile
+                .lock()
+                .expect("coordinator notification profile was poisoned");
+            let index = class as usize;
+            profile.released[index] = profile.released[index].wrapping_add(1);
+        }
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        let _ = class;
+    }
+
+    pub(super) fn record_waiter_outcome(
+        &self,
+        class: CoordinatorWaiterClass,
+        outcome: CoordinatorWaiterOutcome,
+    ) {
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            let mut profile = self
+                .notification_profile
+                .lock()
+                .expect("coordinator notification profile was poisoned");
+            let counts = match outcome {
+                CoordinatorWaiterOutcome::Productive => &mut profile.productive,
+                CoordinatorWaiterOutcome::Relevant => &mut profile.relevant,
+                CoordinatorWaiterOutcome::Unrelated => &mut profile.unrelated,
+            };
+            let index = class as usize;
+            counts[index] = counts[index].wrapping_add(1);
+        }
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        let _ = (class, outcome);
     }
 
     #[cfg(test)]
@@ -1675,7 +1801,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::SessionClosure);
         }
         SessionClosureWork {
             reflection,
@@ -1732,7 +1858,7 @@ impl EvaluationWorkCoordinator {
             retired
         };
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::ExecutorAvailability);
         for record in retired {
             record.abandon();
         }
@@ -1794,7 +1920,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         selection
     }
@@ -1820,7 +1946,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         selection
     }
@@ -1889,7 +2015,7 @@ impl EvaluationWorkCoordinator {
             state.advance_work_generation(CoordinatorMutationKind::WorkRequeue);
         }
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::WorkRequeue);
     }
 
     /// Claims one reflection root owned by this demand session, or the first
@@ -1920,7 +2046,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -1948,7 +2074,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -1973,7 +2099,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -2007,7 +2133,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -2025,7 +2151,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if claimed.is_some() {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         claimed
     }
@@ -2118,7 +2244,7 @@ impl EvaluationWorkCoordinator {
             }
         }
         if matches!(selection, ExactTargetSelection::Claimed(_)) {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         selection
     }
@@ -2222,7 +2348,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(mutation);
         if matches!(selection, CausalChildSelection::Claimed(_)) {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::WorkClaim);
         }
         selection
     }
@@ -2354,7 +2480,7 @@ impl EvaluationWorkCoordinator {
             producer
         };
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(CoordinatorMutationKind::TaskPromiseIndexAdmission);
         Ok(producer)
     }
 
@@ -2644,18 +2770,35 @@ impl EvaluationWorkCoordinator {
             .len()
     }
 
-    pub(super) fn wait_for_change(&self, observed_generation: u64) {
-        let _ = self.wait_for_change_with_timeout(observed_generation, None);
-    }
-
     /// Waits on the coordinator's observed generation, optionally bounded by
     /// an idle timeout. The predicate is checked under the same mutex as
     /// publication, so a change preceding this call cannot become a lost
     /// wake. The timeout never interrupts an active machine poll.
+    #[cfg(test)]
     pub(super) fn wait_for_change_with_timeout(
         &self,
         observed_generation: u64,
         timeout: Option<Duration>,
+    ) -> bool {
+        let changed = self.wait_for_change_for(
+            observed_generation,
+            timeout,
+            CoordinatorWaiterClass::TaskObserver,
+        );
+        if changed {
+            self.record_waiter_outcome(
+                CoordinatorWaiterClass::TaskObserver,
+                CoordinatorWaiterOutcome::Relevant,
+            );
+        }
+        changed
+    }
+
+    pub(super) fn wait_for_change_for(
+        &self,
+        observed_generation: u64,
+        timeout: Option<Duration>,
+        class: CoordinatorWaiterClass,
     ) -> bool {
         let mut state = self
             .state
@@ -2674,7 +2817,12 @@ impl EvaluationWorkCoordinator {
                     state.work_generation == observed_generation
                 })
                 .expect("evaluation work coordinator was poisoned");
-            return current.work_generation != observed_generation;
+            let changed = current.work_generation != observed_generation;
+            drop(current);
+            if changed {
+                self.record_waiter_release(class);
+            }
+            return changed;
         }
         while state.work_generation == observed_generation {
             state = self
@@ -2682,6 +2830,8 @@ impl EvaluationWorkCoordinator {
                 .wait(state)
                 .expect("evaluation work coordinator was poisoned");
         }
+        drop(state);
+        self.record_waiter_release(class);
         true
     }
 
@@ -2722,7 +2872,7 @@ impl EvaluationWorkCoordinator {
 
     pub(crate) fn notify_runtime_observation(&self, changed: bool) {
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::ObservationWake);
         }
     }
 
@@ -2761,7 +2911,7 @@ impl EvaluationWorkCoordinator {
             state.advance_work_generation(kind);
         }
         drop(mutation);
-        self.work_available.notify_all();
+        self.notify_all(kind);
     }
 
     pub(super) fn demand_session_is_open(&self, session: EvaluationSessionId) -> bool {

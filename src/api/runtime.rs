@@ -496,6 +496,7 @@ impl EvaluationRuntime {
             .snapshot();
         if let Some(work) = self.state.shared_resources.work.upgrade() {
             snapshot.exact_routes = work.exact_route_mutation_profile();
+            snapshot.coordinator_notifications = work.coordinator_notification_profile();
         }
         snapshot
     }

@@ -310,7 +310,7 @@ impl EvaluationWorkCoordinator {
 
     pub(super) fn notify_dependency_wake(&self, changed: bool) {
         if changed {
-            self.work_available.notify_all();
+            self.notify_all(CoordinatorMutationKind::DependencyWake);
         }
     }
 }

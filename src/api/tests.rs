@@ -244,8 +244,23 @@ fn interaction_net_profiles_are_runtime_local() {
     let first = EvaluationRuntime::new(0).expect("first runtime should build");
     let second = EvaluationRuntime::new(0).expect("second runtime should build");
 
-    assert_eq!(first.interaction_net_profile(), Default::default());
-    assert_eq!(second.interaction_net_profile(), Default::default());
+    let first = first.interaction_net_profile();
+    let second = second.interaction_net_profile();
+    assert_eq!(first, second);
+    assert_eq!(first.reductions, Default::default());
+    assert_eq!(first.driver, Default::default());
+    assert_eq!(first.exact_routes, Default::default());
+    assert_eq!(
+        first
+            .coordinator_notifications
+            .calls
+            .notify_all
+            .demand_session_registry,
+        1,
+        "runtime construction registers only its background demand"
+    );
+    assert_eq!(first.coordinator_notifications.calls.notify_all.total(), 1);
+    assert_eq!(first.coordinator_notifications.calls.notify_one.total(), 0);
 }
 
 #[test]

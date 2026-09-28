@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 use super::EvaluationWorkCoordinator;
-use super::coordinator::{CoordinatorSelection, SparkWorkPoll};
+use super::coordinator::{
+    CoordinatorSelection, CoordinatorWaiterClass, CoordinatorWaiterOutcome, SparkWorkPoll,
+};
 
 struct EvaluationExecutorInner {
     coordinator: Weak<EvaluationWorkCoordinator>,
@@ -130,6 +132,7 @@ impl Drop for EvaluationExecutor {
 
 fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
     let _thread_cache_retirement = WorkerThreadCacheRetirement;
+    let mut released_from_wait = false;
     loop {
         if inner.stopping.load(Ordering::Acquire) {
             return;
@@ -139,6 +142,17 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
         };
         let observed_generation = coordinator.work_generation();
         let work = coordinator.select_worker();
+        if released_from_wait {
+            coordinator.record_waiter_outcome(
+                CoordinatorWaiterClass::Worker,
+                if matches!(work, CoordinatorSelection::None) {
+                    CoordinatorWaiterOutcome::Unrelated
+                } else {
+                    CoordinatorWaiterOutcome::Productive
+                },
+            );
+            released_from_wait = false;
+        }
 
         match work {
             CoordinatorSelection::Task(work) => {
@@ -159,7 +173,11 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
                 if inner.stopping.load(Ordering::Acquire) {
                     return;
                 }
-                coordinator.wait_for_change(observed_generation);
+                released_from_wait = coordinator.wait_for_change_for(
+                    observed_generation,
+                    None,
+                    CoordinatorWaiterClass::Worker,
+                );
             }
         }
     }

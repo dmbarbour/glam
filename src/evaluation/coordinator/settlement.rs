@@ -684,7 +684,7 @@ impl RuntimeSettlementRelease {
         for wake in status_wakes {
             wake.notify();
         }
-        coordinator.work_available.notify_all();
+        coordinator.notify_all(CoordinatorMutationKind::StageSettlement);
         coordinator.admission.notify_settlement();
         drop(producers);
         drop(machines);

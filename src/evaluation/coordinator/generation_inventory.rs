@@ -85,3 +85,26 @@ fn coordinator_mutation_kind_vocabulary_is_exact() {
         ],
     );
 }
+
+#[test]
+fn shared_work_notifications_have_one_profiled_boundary() {
+    let direct = SOURCES
+        .iter()
+        .flat_map(|(name, source)| {
+            source.lines().enumerate().filter_map(move |(index, line)| {
+                (line.contains("work_available.notify_one()")
+                    || line.contains("work_available.notify_all()"))
+                .then_some((*name, index + 1, line.trim()))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        direct
+            .iter()
+            .map(|(name, _, line)| (*name, *line))
+            .collect::<Vec<_>>(),
+        [("coordinator.rs", "self.work_available.notify_all();")],
+        "shared coordinator notifications must pass through the factual W9C profiling boundary",
+    );
+}
