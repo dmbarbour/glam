@@ -183,6 +183,15 @@ impl EvaluationFailure {
         &self.contexts
     }
 
+    pub(crate) fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        if let EvaluationFailureKind::Emission(emission) = &self.kind {
+            trace_compatibility_value_managed_edges(emission, visitor);
+        }
+        for context in self.contexts.iter() {
+            trace_compatibility_value_managed_edges(context, visitor);
+        }
+    }
+
     /// Rebuilds this failure while one matching value-domain access protects
     /// every copied semantic edge.
     ///

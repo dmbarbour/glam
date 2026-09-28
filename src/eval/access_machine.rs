@@ -96,6 +96,9 @@ struct ManagedKeyConversionCell {
 enum ManagedKeyConversionState {
     Key(Box<RegionalKeyConversion>),
     List(Box<RegionalKeyList>),
+    CompleteKey(Option<Key>),
+    CompleteList(Vec<Key>),
+    CompleteFailure(Arc<EvaluationFailure>),
 }
 
 pub(in crate::eval) struct RegionalKeyConversion {
@@ -470,10 +473,26 @@ impl ManagedKeyConversionRoot {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> DurableConversionPoll<Option<Key>> {
         self.with_state_transition(access, |state| {
-            let ManagedKeyConversionState::Key(state) = state else {
-                panic!("key conversion wrapper retained list conversion state")
+            let result = match state {
+                ManagedKeyConversionState::Key(state) => {
+                    state.poll_optional_in(access, step_budget)
+                }
+                ManagedKeyConversionState::CompleteKey(key) => {
+                    return RegionalConversionPoll::Ready(key.clone());
+                }
+                ManagedKeyConversionState::CompleteFailure(failure) => {
+                    return RegionalConversionPoll::Failed(failure.clone());
+                }
+                ManagedKeyConversionState::List(_) | ManagedKeyConversionState::CompleteList(_) => {
+                    panic!("key conversion wrapper retained list conversion state")
+                }
             };
-            state.poll_optional_in(access, step_budget)
+            if let RegionalConversionPoll::Ready(key) = &result {
+                *state = ManagedKeyConversionState::CompleteKey(key.clone());
+            } else if let RegionalConversionPoll::Failed(failure) = &result {
+                *state = ManagedKeyConversionState::CompleteFailure(failure.clone());
+            }
+            result
         })
     }
 
@@ -483,10 +502,24 @@ impl ManagedKeyConversionRoot {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> DurableConversionPoll<Vec<Key>> {
         self.with_state_transition(access, |state| {
-            let ManagedKeyConversionState::List(state) = state else {
-                panic!("key-list wrapper retained scalar conversion state")
+            let result = match state {
+                ManagedKeyConversionState::List(state) => state.poll_in(access, step_budget),
+                ManagedKeyConversionState::CompleteList(keys) => {
+                    return RegionalConversionPoll::Ready(keys.clone());
+                }
+                ManagedKeyConversionState::CompleteFailure(failure) => {
+                    return RegionalConversionPoll::Failed(failure.clone());
+                }
+                ManagedKeyConversionState::Key(_) | ManagedKeyConversionState::CompleteKey(_) => {
+                    panic!("key-list wrapper retained scalar conversion state")
+                }
             };
-            state.poll_in(access, step_budget)
+            if let RegionalConversionPoll::Ready(keys) = &result {
+                *state = ManagedKeyConversionState::CompleteList(keys.clone());
+            } else if let RegionalConversionPoll::Failed(failure) = &result {
+                *state = ManagedKeyConversionState::CompleteFailure(failure.clone());
+            }
+            result
         })
     }
 
@@ -912,6 +945,8 @@ impl ManagedKeyConversionState {
         match self {
             Self::Key(state) => state.trace_managed_edges(visitor),
             Self::List(state) => state.trace_managed_edges(visitor),
+            Self::CompleteKey(_) | Self::CompleteList(_) => {}
+            Self::CompleteFailure(failure) => failure.trace_managed_edges(visitor),
         }
     }
 }
@@ -1119,6 +1154,43 @@ mod tests {
                 &mut EvaluationStepBudget::new(allowance),
             )
         })
+    }
+
+    #[test]
+    fn shared_managed_key_checkpoint_replays_its_terminal_result() {
+        let context = context();
+        let poll = EvaluationPollContext::for_context(&context);
+        poll.with_value_access(&context, |access| {
+            let root = ManagedKeyConversionRoot::new_in(
+                &access,
+                ManagedKeyConversionState::Key(Box::new(RegionalKeyConversion::new(
+                    &access,
+                    Value::binary_from_text("shared"),
+                    None,
+                ))),
+            );
+            let expected = Key::binary_from_text("shared");
+            let first = loop {
+                match root.poll_key_in(&access, &mut EvaluationStepBudget::new(8)) {
+                    DurableConversionPoll::Ready(key) => break key,
+                    DurableConversionPoll::Yielded => {}
+                    DurableConversionPoll::Boundary(_) => {
+                        panic!("strict key conversion must not reach a semantic boundary")
+                    }
+                    DurableConversionPoll::Failed(failure) => {
+                        panic!("strict key conversion failed: {failure:?}")
+                    }
+                }
+            };
+            assert_eq!(first, Some(expected.clone()));
+            assert!(
+                matches!(
+                    root.poll_key_in(&access, &mut EvaluationStepBudget::new(1)),
+                    DurableConversionPoll::Ready(Some(key)) if key == expected
+                ),
+                "a second observer must replay the cached terminal conversion"
+            );
+        });
     }
 
     #[test]
