@@ -964,7 +964,12 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
             let mutation = coordinator.mutation_guard();
             let published =
                 self.publish_guarded(&coordinator, &mutation, assignment, |assignment| {
-                    producer.publish_assignment_guarded(&coordinator, &mutation, assignment)
+                    producer.publish_assignment_guarded(
+                        self.authority,
+                        &coordinator,
+                        &mutation,
+                        assignment,
+                    )
                 });
             let (producer, completion) = published?;
             drop(mutation);
@@ -976,7 +981,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
 
         let producer = self.publish_detached(assignment, |assignment| {
             self.producer()
-                .map(|producer| producer.publish_assignment_detached(assignment))
+                .map(|producer| producer.publish_assignment_detached(self.authority, assignment))
         })?;
         Ok(ManagedPromisePublication {
             producer,

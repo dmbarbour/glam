@@ -262,8 +262,12 @@ impl TaskOwnedPromiseObligation {
                 .assignment(&access, terminal, unresolved_failure);
             self.root
                 .publish_guarded(&access, coordinator, mutation, assignment, |assignment| {
-                    self.producer
-                        .publish_assignment_guarded(coordinator, mutation, assignment)
+                    self.producer.publish_assignment_guarded(
+                        &access,
+                        coordinator,
+                        mutation,
+                        assignment,
+                    )
                 })
                 .unwrap_or_else(|_| {
                     panic!("a terminalizing task-owned promise must remain unresolved")

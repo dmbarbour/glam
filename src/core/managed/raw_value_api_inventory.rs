@@ -1044,7 +1044,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        8_393_209_287_279_200_399,
+        6_184_126_909_186_489_796,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,9 +1073,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 298),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 301),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 249),
+        ((ApiKind::Function, ApiDisposition::Violation), 246),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1151,7 +1151,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2dOrchestration,
                 ReplacementShape::RootedOrchestration,
             ),
-            11,
+            8,
         ),
         (
             (
@@ -1289,9 +1289,6 @@ fn d2d_orchestration_declarations_are_exact() {
         "src/evaluation.rs::trait ReflectionTaskLauncher::build",
         "src/evaluation/access.rs::EvaluatorStepContext::project_root",
         "src/evaluation/access.rs::EvaluatorStepContext::root_value",
-        "src/evaluation/coordinator/task.rs::PromiseProducerObligation::publish_assignment_detached",
-        "src/evaluation/coordinator/task.rs::PromiseProducerObligation::publish_assignment_guarded",
-        "src/evaluation/coordinator/task.rs::promise_assignment_terminal",
         "src/evaluation/session.rs::EvalContext::clone_root",
         "src/evaluation/session.rs::EvalContext::compose_builtin",
         "src/evaluation/session.rs::EvalContext::evaluate_builtin_whnf",

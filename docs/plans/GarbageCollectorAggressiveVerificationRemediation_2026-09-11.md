@@ -1711,13 +1711,15 @@ and the inventories hand only D.2d-D.2g dependencies forward.
 The current executable inventory assigns exactly 11 violations to this phase.
 Migrate them in the following low-risk checkpoints:
 
-1. **D.2d.0 — exact manifest and bridge topology.** Freeze the eleven
+1. **D.2d.0 — exact manifest and bridge topology.** **Complete
+   (2026-09-28, holistic review HR6).** Freeze the eleven
    declarations by name. Record every production caller of
    `evaluate_compatibility_whnf`: currently only D.2e macro/parser paths and
    D.2g diagnostics use it; the many evaluator/compiler/reflection occurrences
    are test-only. Recheck the root-registration and mutator-introduction
    ledgers before changing code.
-2. **D.2d.1 — promise terminal publication.** Migrate the two
+2. **D.2d.1 — promise terminal publication.** **Complete (2026-09-28).**
+   Migrate the two
    `PromiseProducerObligation::publish_assignment_*` operations and
    `promise_assignment_terminal` as one terminal-publication family. Preserve
    exact producer-ledger ownership and force collection on both sides of

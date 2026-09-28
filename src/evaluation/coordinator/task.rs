@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use crate::core::{EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId};
+use crate::core::{
+    EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId, RuntimeValueAccess,
+};
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority, RuntimeValueRoot,
 };
@@ -845,6 +847,7 @@ impl PromiseProducerObligation {
 
     pub(crate) fn publish_assignment_guarded(
         &self,
+        access: &RuntimeValueAccess<'_>,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
         assignment: &PromiseAssignment,
@@ -859,13 +862,14 @@ impl PromiseProducerObligation {
         let retired_root = coordinator
             .complete_task_promise_guarded(mutation, work, &wait, promise)
             .expect("a publishing task promise must retain its producer obligation");
-        let terminal = promise_assignment_terminal(&wait, assignment);
+        let terminal = promise_assignment_terminal(access, &wait, assignment);
         let (_, wake) = wait.publish_terminal_guarded(coordinator, mutation, terminal);
         PromiseProducerPublication::guarded(wake, retired_root)
     }
 
     pub(crate) fn publish_assignment_detached(
         &self,
+        access: &RuntimeValueAccess<'_>,
         assignment: &PromiseAssignment,
     ) -> PromiseProducerPublication {
         let wait = self
@@ -877,30 +881,26 @@ impl PromiseProducerObligation {
                 .and_then(|owner| owner.complete(*promise, &wait)),
             PromiseProducerSource::Coordinator { .. } => None,
         };
-        let terminal = promise_assignment_terminal(&wait, assignment);
+        let terminal = promise_assignment_terminal(access, &wait, assignment);
         wait.publish_terminal(terminal);
         PromiseProducerPublication::detached(wait, retired_root)
     }
 }
 
 fn promise_assignment_terminal(
+    access: &RuntimeValueAccess<'_>,
     wait: &EvaluationWaitToken,
     assignment: &PromiseAssignment,
 ) -> EvaluationWaitTerminal {
+    assert!(
+        access.admits(&wait.value_observer()),
+        "promise assignment and terminal wait must share one value domain"
+    );
     match assignment {
-        Ok(value) => {
-            let observer = wait.value_observer();
-            let values = observer
-                .upgrade()
-                .expect("promise completion requires its live value domain");
-            EvaluationWaitTerminal::Complete(
-                values.construct_runtime_value_root(|access| access.duplicate_value(value)),
-            )
-        }
-        Err(error) => EvaluationWaitTerminal::Failed(RuntimeFailureRoot::from_observer(
-            wait.value_observer(),
-            error.clone(),
-        )),
+        Ok(value) => EvaluationWaitTerminal::Complete(
+            access.root_runtime_value(access.duplicate_value(value)),
+        ),
+        Err(error) => EvaluationWaitTerminal::Failed(access.root_runtime_failure(error.clone())),
     }
 }
 
