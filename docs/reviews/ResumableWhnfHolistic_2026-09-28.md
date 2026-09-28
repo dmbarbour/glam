@@ -2,11 +2,10 @@
 
 Implementation baseline: `8c611ae0`, after W9E closure.
 
-Status: in progress. HR0 baseline and artifact mapping and HR1 contract
-accounting are complete. HR2 found two test-fixture publication gaps and one
-stale foreground-pump expectation while forcing the checkpoint ownership
-matrix. The narrow WHNFHR-003/004 remediations precede acceptance of HR2
-evidence; the rest of HR2-HR8 remain
+Status: in progress. HR0 baseline/artifact mapping, HR1 contract accounting,
+and HR2 ownership/GC-safety review are complete. HR2 repaired two
+test-fixture publication gaps and one stale foreground-pump expectation before
+accepting its forced checkpoint evidence. HR3-HR8 remain
 governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -329,6 +328,120 @@ HR1 therefore closes every implementation contract except completion criterion
 10, which is intentionally this review. It does not infer Gate G3 closure from
 the focused results.
 
+## HR2 — Representation, ownership, and GC safety
+
+HR2 is complete for the focused WHNF partition. The audit found no production
+owner or trace omission. It did find the two fixture-publication gaps recorded
+by WHNFHR-003 and the stale foreground-pump expectation in WHNFHR-004; all
+three were repaired before the dynamic ownership evidence was accepted.
+
+### Current ownership graph
+
+The durable graph has five distinct roots/owners rather than one universal
+machine container:
+
+| Boundary | Authoritative owner | Traced path | Deliberately non-owning state |
+| --- | --- | --- | --- |
+| newly admitted ordinary demand | input `RuntimeValueRoot`, then `WhnfComputation::Seed` | seed root is promoted inside matching access to one `ManagedWhnfRoot` | work ID, route, and epoch hints |
+| resumable ordinary/client/reflection/spark demand | coordinator record containing `WhnfComputation::Managed` | registered `Root<ManagedLazyCheckpointCell>` -> mutex-protected `WhnfState` | subscriber lists and exact-route zipper |
+| lazy-owned producer | managed lazy source/checkpoint phase | lazy -> `ManagedLazyCheckpointEdge` -> exact specialized checkpoint cell | coordinator route and lazy ID |
+| callable normalization in a net | rooted/traced managed core net | runtime-net payload -> `CallableCheckpoint` -> `NetWhnfState` | pair/generation observation handles |
+| immutable promise assignment/following | managed promise plus producer/follower record | promise assignment root/edge and retained WHNF computation | promise ID and wait token |
+
+Reflection work is intentionally not a value-graph checkpoint. Once launched,
+its coordinator machine owns the hosted `WhnfComputation` through completion;
+the managed reflection completion promise is the semantic edge exposed to the
+value graph. Likewise, task and client records are external runtime owners,
+not objects reachable from a managed lazy. This avoids manufacturing the root
+cycles which the collector exists to reclaim.
+
+### Canonical and specialized trace audit
+
+| Representation | Exact retained edges | Audit result |
+| --- | --- | --- |
+| `WhnfState` | focus; every generic/application/dictionary/undefined frame value; optional cycle-promise edge | `trace_managed_edges` is exhaustive over `WhnfContinuation`; scalar cursors, IDs, key arrays, and `followed` contain no managed edge. |
+| `ManagedLazyCheckpointCell` | the canonical `WhnfState` | one registered root or traced lazy edge owns it; the cell contains no registered root. |
+| `ManagedHostCallCheckpointCell` | invoking producer captures or published value/failure direct values | pre/post transition visitors cover both states; callback invocation occurs outside value access. |
+| `ManagedNetWhnfCheckpointCell` | request, driver worklist, frontier observations, and nested net edges | the net driver's compile-exhaustive visitor owns the state; no compatibility root is stored inside it. |
+| access/object/list-effect/builtin checkpoint cells | each specialized machine's raw arguments, child WHNF work, containers, and promise/net edges | enum matches and state visitors are compile-exhaustive; cells contain passive data and no roots. |
+| `NetWhnfState` | the same canonical `WhnfState` moved into a callable-checkpoint payload | its `Trace` delegates directly to the canonical visitor, so regional/net handoff neither copies nor translates the graph. |
+| managed core net | callable checkpoint and every other specialization payload | core-net durable-owner and payload visitors destructure the current runtime-net state and reach nested WHNF state. |
+
+Every managed checkpoint mutation holds the cell's sole state mutex and calls
+the collector-owned edge-transition gateway with the same complete visitor for
+the before and after states. A panic leaves the structurally installed state
+behind a poisoned mutex; collection recovers the state only to trace it, while
+subsequent evaluator access reports poison instead of silently resuming a
+possibly partial transition. Direct destruction is passive for every managed
+checkpoint family.
+
+### Lifecycle and boundary audit
+
+| Lifecycle boundary | Evidence and conclusion |
+| --- | --- |
+| seed promotion | Input root remains authoritative until one aggregate managed root is installed in the same access region. No raw edge crosses the promotion boundary. |
+| budget/dependency suspension | Canonical state is already beneath its durable root, lazy edge, or net payload before orchestration receives the boundary poll. |
+| scheduler handoff | Coordinator records carry roots or managed owner records; route state contains only scalar identities and revision observations. |
+| callback/host boundary | Host-call state is published as `Invoking` before access closes; result/failure is installed through an exact edge transition after callback return. |
+| cancellation and abandonment | Producer/follower/client records terminalize or release their external owner; lazy-owned partial work remains reachable from the lazy rather than being discarded with the last route. |
+| terminal publication | Only the outer client/lazy/promise/reflection/spark/net owner publishes; retirement occurs after the terminal root/cache/assignment is installed. |
+| unwind | Managed state remains structurally installed and traceable; callable claims restore the exact predecessor unless a successor was already published. |
+| collection between polls/workers | Focused ordinary/aggressive WHNF and checkpoint matrices cover managed, lazy-owned, and net-owned states, including route loss and worker handoff. |
+| unreachable cycles | Lazy/checkpoint/source and construction cycles are reclaimed once external roots drop; scalar diagnostic IDs do not retain them. |
+
+Fresh accepted evidence is now:
+
+```text
+cargo test -q --lib whnf
+    85 passed
+cargo test -q --features aggressive-gc-verification --lib whnf
+    86 passed
+cargo test -q --lib checkpoint
+    60 passed
+cargo test -q --features aggressive-gc-verification --lib checkpoint
+    62 passed
+cargo test -q --lib inventory
+    119 passed
+cargo test -q --features aggressive-gc-verification --lib inventory
+    119 passed
+```
+
+The checkpoint matrix includes forced collection after builder handoffs and
+after callable-checkpoint installation, route loss, cross-worker resumption,
+poison/unwind, cancellation/abandonment, and lazy/source cycle reclamation.
+The two-worker linear-payload test uses an explicit barrier. Passing repeated
+parallel runs is not cited as evidence.
+
+### What the inventories prove—and do not prove
+
+The checkpoint, access, root-publication, active-owner, durable-owner,
+recursive-identity, containment, core-net-owner, and persistent-edge ledgers
+are source-backed drift alarms. Compile-exhaustive destructuring functions and
+enum visitor matches additionally force a compiler error when a represented
+owner/state variant changes. Together with aggressive collection fixtures,
+they make the focused proof materially stronger than source counting alone.
+
+They are not a type-level theorem that every future raw value is owned. In
+particular:
+
+- `trace_compatibility_value_managed_edges` remains the transitional visitor
+  for recursive raw `Value` fields until the parent representation migration;
+- D.2c proves that the evaluator/WHNF partition has no raw-value API violation,
+  but D.2d-D.2g still own 249 violation functions and three derived-trait
+  violations elsewhere;
+- GCI11R-002E/F still own the general test-fixture and verification-schedule
+  migrations; the four pulled-forward fixture repairs do not close those
+  inventories; and
+- P3 still reports persistent trait dependencies in parent compatibility
+  carriers, so HR2 does not authorize P4.
+
+The current collector is stop-the-world. Its mutator gate proves that
+`Managed*CheckpointCell::Trace` cannot encounter a live evaluator holding the
+cell mutex; `try_lock` therefore treats `WouldBlock` as an invariant failure.
+That proof must not be carried into concurrent marking. WHNFHR-005 records the
+already concrete CG0/CG1 replacement gate. Subject to that future boundary,
+HR2 finds the present ownership and tracing model sound.
+
 ## Preliminary reconciliation questions
 
 These are questions for the later passes, not findings yet:
@@ -521,3 +634,36 @@ reviewed client/worker ownership model.
 after assigning the promise. It retains the forced collection and verifies the
 same terminal value. The exact aggressive fixture and complete aggressive
 checkpoint filter pass. No scheduler or public runtime behavior changed.
+
+### WHNFHR-005 — Resolved by CG0/CG1: checkpoint tracing assumes stop-the-world quiescence
+
+**Severity:** medium future collector interlock; no defect under the selected
+reference collector.
+
+Every lock-bearing managed checkpoint visitor uses `try_lock` and treats an
+unpoisoned busy mutex as an invariant failure. That is correct today because a
+collection holds exclusive heap admission after all mutators leave; evaluator
+mutation can only occur under a mutator. Poison recovery is observational and
+retains the structurally installed edges. A concurrent marker, however, could
+otherwise contend with or wait behind a participant holding the cell guard,
+and cannot inherit this proof.
+
+This obligation is resolved by named future checkpoints in
+[`ConcurrentGarbageCollection_2026-08-28.md`](../plans/ConcurrentGarbageCollection_2026-08-28.md):
+
+- CG0 inventories every managed trace implementation which locks or assumes
+  heap-wide quiescence, classifies WHNF ownership as external versus
+  lazy-owned, and chooses either a trace-immediate `RootFrame` or a reviewed
+  collector-coherent snapshot for each family;
+- CG1 integrates frame admission/retirement with epoch initiation and forces
+  initiation immediately before, during, and after a bounded WHNF quantum;
+  and
+- the hard gate forbids concurrent marking while any managed family still
+  relies on the reference collector's quiescence assumption.
+
+The selected baseline remains one callback-free, budget-bounded quantum under
+the managed-cell mutex. No current code change is warranted before CG0 because
+introducing a parallel root/frame now would risk retaining lazy-owner cycles.
+Exit is the CG0 inventory and representation decision plus CG1's forced
+handshake matrix; this finding does not block D.2d, P4 accounting, or current
+STW operation, but it blocks concurrent marking.
