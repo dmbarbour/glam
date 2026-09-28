@@ -678,6 +678,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
     "src/eval/test_support.rs::impl ResumableTestValueDemand::new#1|surface=scoped-factory|scope=test",
     "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands#1|surface=compatibility-new|scope=test",
+    "src/eval/tests.rs::demanded_forwarding_chain_caches_whnf_in_every_lazy_member#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=access-publication|scope=test",
     "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",

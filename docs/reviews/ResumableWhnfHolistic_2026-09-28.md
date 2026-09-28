@@ -143,8 +143,9 @@ cargo test -q --lib persistent_edge
     9 passed
 ```
 
-It now contains 884 occurrences: 200 production typed, 36 production erased,
-634 test typed, and 14 test erased. Seventy-seven remain classified as defects:
+After WHNFHR-001C it contains 885 occurrences: 200 production typed, 36
+production erased, 635 test typed, and 14 test erased. Seventy-seven remain
+classified as defects:
 
 | Cutover owner | Count |
 | --- | ---: |
@@ -390,6 +391,10 @@ aggressive matrix and HR2 ownership proof unnecessarily conditional.
 3. Rerun both tests individually in ordinary and aggressive modes, then rerun
    the complete ordinary/aggressive `--lib whnf` filters. Only after all four
    gates pass may HR1 treat focused aggressive WHNF behavior as evidence.
+4. `WHNFHR-001C` assigns the new bounded-access, root-publication, and
+   mutator-local core-net duplication sites to the executable access and
+   persistent-edge inventories. The full ordinary/aggressive inventory filter
+   must reject any unclassified delta and then pass.
 
 This is a deliberate early pull-forward of two narrow GCI11R-002E fixtures,
 not closure of that parent checkpoint. The general test-fixture inventory and
@@ -399,8 +404,11 @@ migration remain in 002E.
 three lazy cells inside one access region, publishes one outer runtime root,
 and evaluates that root. WHNFHR-001B now retains the existing rooted promise
 and lazy fixture owners while testing route abandonment and checkpoint
-resumption. Both tests pass individually in ordinary and aggressive modes;
-the complete focused filters pass 85 ordinary and 86 aggressive tests.
+resumption. WHNFHR-001C classifies the two new access entries, one runtime-root
+publication, and one test-only mutator-local core-net duplicate. Both tests
+pass individually in ordinary and aggressive modes; the complete focused
+filters pass 85 ordinary and 86 aggressive tests. The ordinary/aggressive
+inventory gates each pass 119 tests.
 
 ### WHNFHR-002 — Resolved: the focused plan status predated W9 closure
 

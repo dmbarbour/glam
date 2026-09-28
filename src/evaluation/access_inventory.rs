@@ -620,10 +620,12 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_usage_distinguishes_production_from_frame_fixture#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/test_support.rs::closed_function_value_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/tests.rs::demanded_forwarding_chain_caches_whnf_in_every_lazy_member#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -904,7 +906,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // between construction and its terminal-state observation.
         ("src/eval/net/tests/nc5.rs", GatewayCounts::new(4, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
-        ("src/eval/test_support.rs", GatewayCounts::new(1, 0)),
+        // WHNFHR-001A constructs a complete closed-function/forwarding-lazy
+        // fixture below one additional bounded test-only access region.
+        ("src/eval/test_support.rs", GatewayCounts::new(2, 0)),
         // Reflection evaluator fixtures construct their managed wrapper under
         // one bounded access region. P2B's two shared-function-stage checks
         // compare managed-net identity under matching access.
@@ -918,7 +922,9 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // carrier across independently evaluated observations.
         // W6G.1f.4d constructs and roots a reflection completion in one
         // bounded test region before forcing both session-close orders.
-        ("src/eval/tests.rs", GatewayCounts::new(17, 0)),
+        // WHNFHR-001A publishes the complete forwarding chain through one
+        // additional bounded test-only access region.
+        ("src/eval/tests.rs", GatewayCounts::new(18, 0)),
         // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
         // explicit same-runtime test regions, including forced route loss.
         // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        884,
+        885,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -959,9 +959,12 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // Production managed edges remain unchanged.
     // W7B adds one exact lazy-family root to keep the route-owner fixture live
     // while two explicitly ordered small-stack pollers exchange ownership.
+    // WHNFHR-001A moves closed-function construction beneath its caller's
+    // access, adding one test-only mutator-local core-net duplicate while
+    // keeping the complete forwarding chain under one published outer root.
     assert_eq!(
         occurrence_fingerprint(actual),
-        12_938_170_938_525_358_585,
+        10_946_289_399_681_311_400,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1008,7 +1011,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 200),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 634),
+            ((SourceScope::Test, EdgeSurface::Typed), 635),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
