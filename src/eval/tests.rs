@@ -2641,29 +2641,29 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
 #[test]
 fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
     let context = test_context();
-    let identity = closed_function_value(1, TestExpr::Local(0));
-    let leaf = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "forwarding leaf",
-        |_| Ok(n(42)),
-    );
-    let middle = LazyValue::from_application(
-        &crate::core::test_value_factory(),
-        identity.clone(),
-        Arc::from([Value::Lazy(leaf.clone())]),
-    );
-    let root = LazyValue::from_application(
-        &crate::core::test_value_factory(),
-        identity,
-        Arc::from([Value::Lazy(middle.clone())]),
-    );
+    let values = crate::core::test_value_factory();
+    let (leaf, middle, root, root_owner) = values.with_runtime_value_access(|access| {
+        let identity = closed_function_value_with_access(&access, 1, TestExpr::Local(0));
+        let leaf = LazyValue::semantic_thunk_in(&access, "forwarding leaf", |_| Ok(n(42)));
+        let middle = LazyValue::from_application_in(
+            &access,
+            access.duplicate_value(&identity),
+            Arc::from([Value::Lazy(leaf.clone())]),
+        );
+        let root = LazyValue::from_application_in(
+            &access,
+            identity,
+            Arc::from([Value::Lazy(middle.clone())]),
+        );
+        let root_owner = access.root_runtime_value(Value::Lazy(root.clone()));
+        (leaf, middle, root, root_owner)
+    });
 
     assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &context,
-            &Value::Lazy(root.clone())
-        )
-        .unwrap(),
+        context
+            .evaluate_root_whnf(root_owner)
+            .unwrap()
+            .clone_core_for_test(),
         n(42)
     );
     assert_eq!(cached_value(&leaf), n(42));

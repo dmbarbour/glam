@@ -124,10 +124,19 @@ pub(super) fn closed_function_value_in(
     arity: usize,
     body: TestExpr,
 ) -> Value {
-    let code = lower_test_function_code_in(values, arity, body);
+    values
+        .with_runtime_value_access(|access| closed_function_value_with_access(&access, arity, body))
+}
+
+pub(super) fn closed_function_value_with_access(
+    access: &RuntimeValueAccess<'_>,
+    arity: usize,
+    body: TestExpr,
+) -> Value {
+    let code = lower_test_function_code_with_access(access, arity, body);
     assert_eq!(code.capture_count(), 0, "test function must be closed");
     Value::Function(FunctionValue::new(
-        NetValue::new(code.runtime().duplicate_for_test(values)),
+        NetValue::new(code.runtime().duplicate_in(access)),
         arity,
     ))
 }
