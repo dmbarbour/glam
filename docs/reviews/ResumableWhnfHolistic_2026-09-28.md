@@ -119,19 +119,19 @@ The current raw-value API inventory contains 587 declarations/operations:
 | regional-representation alias | 7 |
 | violation derived trait | 3 |
 
-The D.2c owner partition is exactly zero. The remaining 249 violations are
-currently assigned as follows:
+The D.2c owner partition is exactly zero. The 249 violating functions plus
+three violating derived traits are currently assigned as follows:
 
 | Parent owner | Count |
 | --- | ---: |
-| D.2b core compatibility | 34 |
+| D.2b core compatibility | 34 (31 functions, 3 derives) |
 | D.2d orchestration | 11 |
 | D.2e front end/compiler values | 137 |
 | D.2f reflection | 25 |
 | D.2g public/compiler/diagnostics | 45 |
 
-This differs from some prose counts in the parent plan and will be reconciled
-in HR6. The temporary raw-value facade
+This differs from some prose counts in the parent plan and is reconciled in
+HR6. The temporary raw-value facade
 `EvalContext::evaluate_compatibility_whnf` remains deliberately classified as
 a violation. Its implementation performs a project-to-root, runtime-owned
 client demand, and root-to-raw projection. Current call sites include tests and
@@ -429,8 +429,8 @@ particular:
 - `trace_compatibility_value_managed_edges` remains the transitional visitor
   for recursive raw `Value` fields until the parent representation migration;
 - D.2c proves that the evaluator/WHNF partition has no raw-value API violation,
-  but D.2d-D.2g still own 249 violation functions and three derived-trait
-  violations elsewhere;
+  but D.2d-D.2g still own 218 violation functions; D.2b owns the remaining 31
+  functions and three derived-trait violations;
 - GCI11R-002E/F still own the general test-fixture and verification-schedule
   migrations; the four pulled-forward fixture repairs do not close those
   inventories; and
@@ -683,6 +683,86 @@ List-spine representation, JIT/normalization annotations, moving/concurrent GC,
 and public resumable `Evaluation` ergonomics likewise remain separate plans.
 None is required to make the current WHNF boundary correct.
 
+## HR6 — Parent aggressive-GC reconciliation
+
+HR6 is complete. The focused D.2c evaluator partition remains closed after
+W9, while the current production raw-value inventory gives the next parent
+work an exact 252-occurrence baseline rather than the parent plan's historical
+counts. No WHNF implementation defect requires remediation before continuing
+the review.
+
+### Current owner partition
+
+The syntax-backed inventory reports 249 violating functions and three
+violating derives. Its exact owner sum is:
+
+| Owner | Functions | Derives | Total |
+| --- | ---: | ---: | ---: |
+| D.2b core compatibility | 31 | 3 | 34 |
+| D.2c evaluator | 0 | 0 | 0 |
+| D.2d orchestration | 11 | 0 | 11 |
+| D.2e front end/compiler values | 137 | 0 | 137 |
+| D.2f reflection | 25 | 0 | 25 |
+| D.2g public/compiler/diagnostics | 45 | 0 | 45 |
+| **Total** | **249** | **3** | **252** |
+
+The three derives are `Value::{Clone,Eq,PartialEq}` and are correctly part of
+D.2b's compatibility cutover. This resolves the earlier apparent mismatch
+between a 249-function disposition table and a 252-occurrence owner table.
+The D.2b exact manifest is now 34 rather than its historical 40 because D.2c
+removed six evaluator-only compatibility requirements. Parent prose now uses
+the current 34/11/137/25/45 partition.
+
+An added exact D.2d source gate freezes these eleven declarations:
+
+- three promise-terminal publication operations;
+- two reflection-task construction/admission operations;
+- five bounded root/builtin projection operations; and
+- the one compatibility WHNF facade.
+
+The ordinary and aggressive focused D.2c gates still pass, and the root and
+access inventory filters pass in both modes. The five fixture roots and one
+fixture access added by WHNFHR-003 remain explicitly test-only; they do not
+reopen the production D.2c partition or alter the parent production owner
+counts.
+
+### Compatibility-facade topology
+
+`EvalContext::evaluate_compatibility_whnf` is a D.2d declaration but not a
+D.2d-only migration. Its current production callers are:
+
+- macro execution and macro lookup in `g_syntax`, owned by D.2e;
+- parser macro lookup in `g_syntax`, also owned by D.2e; and
+- diagnostic enrichment and conventional-summary projection, owned by D.2g.
+
+Compiler, reflection-machine, and evaluator occurrences found by a plain text
+search are test-only. Consequently D.2d cannot remove the facade before D.2e
+and D.2g migrate their callers, and those later phases should not each invent
+a private copy of its client-demand orchestration. The parent plan now
+partitions D.2d into an exact-manifest checkpoint, promise publication,
+reflection admission, bounded projections, and one explicit bridge handoff.
+D.2e/D.2g remove production calls; D.2h then removes the facade or narrows it
+to explicit test support before enforcing zero production violations.
+
+### Forward checkpoint
+
+D.2d remains the lowest-risk next production checkpoint, but it is no longer
+one fourteen-operation bundle. The current order is:
+
+1. latch the eleven names and compatibility call topology (the name latch is
+   already in place from this review);
+2. migrate the three promise terminal-publication operations;
+3. migrate the two reflection admission/build operations;
+4. migrate the five bounded projections; and
+5. retain exactly one measured facade bridge until D.2e/D.2g retire its
+   production callers.
+
+Each code checkpoint must force collection on both sides of repaired handoffs
+and reconcile root registration/admission. Existing roots are transported;
+they are not projected and re-registered. This is a plan/accounting repair,
+recorded as WHNFHR-007, rather than a reason to interrupt the holistic review
+with the D.2d implementation.
+
 ## Preliminary reconciliation questions
 
 These are questions for the later passes, not findings yet:
@@ -690,9 +770,9 @@ These are questions for the later passes, not findings yet:
 1. Does the current aggregate managed checkpoint fully satisfy the original
    “exact state after every completed prefix” rule across every specialized
    machine, or do any phase owners still recreate child WHNF work?
-2. Are all `evaluate_compatibility_whnf` production callers correctly owned by
-   D.2d/D.2g, and can D.2d remove the facade without forcing D.2e-D.2g to
-   duplicate orchestration?
+2. Resolved by HR6: the declaration is D.2d, its production callers are D.2e
+   and D.2g, and D.2h owns final production removal after those caller
+   migrations.
 3. Which eight persistent-edge defects were added after the 51-entry P3
    milestone, and are their traits inherent to current net/WHNF representations
    or transitional conveniences?
@@ -703,9 +783,8 @@ These are questions for the later passes, not findings yet:
    collector while leaving a clear path to concurrent marking/root frames?
 6. Which known aggressive-workspace failures are production boundaries versus
    test-fixture lifetime errors or schedule interference?
-7. Is D.2d still the lowest-risk next implementation checkpoint, or did the
-   WHNF transition expose a smaller compatibility-facade removal slice that
-   should precede the rest of orchestration?
+7. Resolved by HR6: D.2d remains next, split into four implementation families
+   plus an explicit downstream facade handoff rather than premature removal.
 
 ## Findings
 
@@ -935,3 +1014,22 @@ The current dispositions are:
 This accepted cost does not block D.2d, P4 accounting, or Gate G3 under the
 reference collector. Reopen it if edge-walk or retained-route memory dominates
 a post-representation profile, or before concurrent marking adopts a barrier.
+
+### WHNFHR-007 — Resolved: parent raw-value counts and facade ownership had drifted
+
+**Severity:** medium planning drift; executable inventories remained sound.
+
+The aggressive-remediation prose still described 40 D.2b declarations, 14
+D.2d violations, and 26 D.2f violations. The current executable manifests
+contain 34, 11, and 25 respectively. The apparently inconsistent totals also
+mixed 249 violating functions with three violating `Value` derives. Finally,
+the parent plan assigned compatibility-facade removal wholly to D.2d even
+though all current production callers are owned by D.2e or D.2g.
+
+The parent plan now records the exact 252-occurrence owner partition, explains
+the 31-function/three-derive D.2b split, and gives D.2d five bounded
+checkpoints. A new source-backed test freezes all eleven D.2d declarations.
+The facade remains one measured bridge until D.2e and D.2g remove their
+production calls; D.2h owns production removal or test-only narrowing. This
+preserves one orchestration implementation without pretending D.2d can close
+later call sites on its own.

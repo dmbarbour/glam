@@ -1190,31 +1190,28 @@ dependencies are owned by those downstream checkpoints and hands the final
 zero-dependency condition to nested P4.
 
 Exit: the managed-cell and runtime-root portions of D.2b's original 40/6/3
-violation partition are zero; the 40 core declarations retained solely for
+violation partition are zero; the core declarations retained solely for
 downstream compatibility have an exact source-backed manifest and an
 access-qualified replacement family; no structural declaration regains an
 unreviewed authority-free operation; and nested P3 names only the carrier
-traits retained until D.2c-D.2g and P4 close. Requiring all 40 compatibility
-declarations to disappear here would contradict this checkpoint's additive
+traits retained until D.2c-D.2g and P4 close. Requiring every compatibility
+declaration to disappear here would contradict this checkpoint's additive
 staging and collapse the downstream phases into D.2b.
 
 Completion record: the raw-value inventory contains no violation assigned to
-the former six managed-cell operations or three runtime-root projections. Its
-40 remaining core declarations are now latched by exact declaration name in
-addition to the existing normalized-signature fingerprint. They comprise ten
-canonical-value factory projections, two evaluated-value shell operations,
-five failure-shell operations, two host-call boundary operations, two key
-conversions, two lazy-application projections, two metadata-carrier
-operations, four reflection-computation operations, one semantic-computation
-operation, eight raw-`Value` operations/traits, and two structural helpers.
-Changing that set now fails the D.2b-specific manifest rather than merely
-changing a repository-wide count.
+the former six managed-cell operations or three runtime-root projections. At
+D.2b closure it latched 40 core declarations by exact name. D.2c subsequently
+removed six evaluator-only compatibility requirements; the current manifest
+contains 34 occurrences: 31 functions plus the three `Value` derives for
+`Clone`, `Eq`, and `PartialEq`. Changing that set now fails the D.2b-specific
+manifest rather than merely changing a repository-wide count.
 
-The persistent-edge owner vocabulary now describes its 51 carrier traits as
+The persistent-edge owner vocabulary originally described 51 carrier traits as
 the parent raw-value compatibility cutover, rather than incorrectly implying
-that D.2b can remove them before their callers migrate. The exact 51-entry
-manifest remains unchanged. D.2c-D.2g must update both inventories as they
-remove callers; P4 removes the last traits once the manifest reaches zero.
+that D.2b can remove them before their callers migrate. The current 59-entry
+manifest includes eight later WHNF/net-driver carrier requirements reconciled
+by the 2026-09-28 holistic review. D.2d-D.2g must update both inventories as
+they remove callers; P4 removes the last traits once the manifest reaches zero.
 
 ##### GCI11R-002D.2c — Evaluator Operations and Builtins
 
@@ -1226,8 +1223,11 @@ path owns managed or rooted continuation state and reopens bounded access only
 for a regional transition. W8 retired the direct evaluator gate and
 whole-value wrappers, converted all whole-value fixtures to client demand, and
 put the exact source and raw-value inventories into closure mode. The remaining
-`EvalContext::evaluate_compatibility_whnf` facade belongs to D.2d orchestration,
-not this evaluator partition.
+`EvalContext::evaluate_compatibility_whnf` declaration is owned by D.2d
+orchestration, not this evaluator partition. Its production callers are
+presently in D.2e front-end/macro code and D.2g diagnostics. D.2d therefore
+narrows and inventories the bridge; D.2e and D.2g remove their callers before
+D.2h makes it test-only or removes it.
 
 Migrate the original 201 evaluator-operation and builtin violations as
 call-tree families beneath `EvaluationValueAccess`. A callback-free evaluator
@@ -1708,19 +1708,49 @@ and the inventories hand only D.2d-D.2g dependencies forward.
 
 ##### GCI11R-002D.2d — Evaluation Orchestration and Runtime Records
 
-Migrate the 14 remaining evaluation-orchestration violations and audit task,
-client-demand, spark, wait, failure, event/output, interaction-net, and
-yielded/blocked machine records. Orchestration remains mutator-free while it
-pumps, waits, or invokes integration: it transports roots or exact traced
-owners, then opens bounded access only inside one callback-free poll or
-projection step. Remove `evaluate_compatibility_whnf` once its final caller has
-moved to a rooted input plus access-scoped result consumption.
+The current executable inventory assigns exactly 11 violations to this phase.
+Migrate them in the following low-risk checkpoints:
+
+1. **D.2d.0 — exact manifest and bridge topology.** Freeze the eleven
+   declarations by name. Record every production caller of
+   `evaluate_compatibility_whnf`: currently only D.2e macro/parser paths and
+   D.2g diagnostics use it; the many evaluator/compiler/reflection occurrences
+   are test-only. Recheck the root-registration and mutator-introduction
+   ledgers before changing code.
+2. **D.2d.1 — promise terminal publication.** Migrate the two
+   `PromiseProducerObligation::publish_assignment_*` operations and
+   `promise_assignment_terminal` as one terminal-publication family. Preserve
+   exact producer-ledger ownership and force collection on both sides of
+   publication.
+3. **D.2d.2 — reflection-task admission.** Migrate
+   `ReflectionTaskLauncher::build` and `EvalContext::reserve_reflection_task`.
+   Their effects cross admission as roots or exact traced owners; no mutator
+   spans task construction or host integration.
+4. **D.2d.3 — bounded evaluation projections.** Migrate
+   `EvaluatorStepContext::{project_root,root_value}` and
+   `EvalContext::{clone_root,compose_builtin,evaluate_builtin_whnf}`. Prefer
+   the root already held by orchestration and one callback-free access island;
+   do not project and re-register an equivalent value.
+5. **D.2d.4 — compatibility-bridge handoff.** Keep
+   `evaluate_compatibility_whnf` as one exact, source-latched violation while
+   D.2e and D.2g still have production callers. Those phases replace their
+   calls with rooted input and access-scoped result consumption. D.2h then
+   removes the production facade or narrows it to explicit test support before
+   requiring zero production violations. D.2d must not duplicate that
+   orchestration separately in each caller family.
+
+Audit task, client-demand, spark, wait, failure, event/output,
+interaction-net, and yielded/blocked machine records while migrating these
+families. Orchestration remains mutator-free while it pumps, waits, or invokes
+integration: it transports roots or exact traced owners, then opens bounded
+access only inside one callback-free poll or projection step.
 
 Verification: exact owner-retirement and cross-poll tests, the existing
-machine-state inventories, no raw orchestration facade, and aggressive tests
-which force collection on both sides of every repaired handoff. Resolve every
-D.2b.2e entry assigned to D.2d; orchestration which already owns a root must
-transport it rather than project and register a replacement.
+machine-state inventories, one explicitly counted compatibility bridge until
+D.2e/D.2g retire its production callers, and aggressive tests which force
+collection on both sides of every repaired handoff. Resolve every D.2b.2e
+entry assigned to D.2d; orchestration which already owns a root must transport
+it rather than project and register a replacement.
 
 ##### GCI11R-002D.2e — Built-in Front End and Compiler Values
 
@@ -1740,7 +1770,7 @@ and macro boundaries.
 
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
-Migrate the 26 reflection violations remaining after resumable-WHNF W5.
+Migrate the 25 reflection violations in the current executable inventory.
 Reflection-machine decoding and pure
 semantic substeps may use bounded access, while transaction state, query
 responses, blocked branches, task effects, and store journals retain roots or

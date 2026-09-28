@@ -1274,6 +1274,41 @@ fn d2c_evaluator_boundary_is_closed() {
 }
 
 #[test]
+fn d2d_orchestration_declarations_are_exact() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let actual = collect_occurrences(manifest)
+        .into_iter()
+        .filter(|occurrence| {
+            occurrence
+                .remediation_assignment()
+                .is_some_and(|assignment| assignment.owner == RemediationOwner::D2dOrchestration)
+        })
+        .map(|occurrence| occurrence.declaration)
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "src/evaluation.rs::trait ReflectionTaskLauncher::build",
+        "src/evaluation/access.rs::EvaluatorStepContext::project_root",
+        "src/evaluation/access.rs::EvaluatorStepContext::root_value",
+        "src/evaluation/coordinator/task.rs::PromiseProducerObligation::publish_assignment_detached",
+        "src/evaluation/coordinator/task.rs::PromiseProducerObligation::publish_assignment_guarded",
+        "src/evaluation/coordinator/task.rs::promise_assignment_terminal",
+        "src/evaluation/session.rs::EvalContext::clone_root",
+        "src/evaluation/session.rs::EvalContext::compose_builtin",
+        "src/evaluation/session.rs::EvalContext::evaluate_builtin_whnf",
+        "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf",
+        "src/evaluation/session.rs::EvalContext::reserve_reflection_task",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "D.2d begins from one exact orchestration manifest; new raw-value APIs require a reviewed owner"
+    );
+}
+
+#[test]
 fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
     let raw_names = BTreeSet::from(["Value".to_owned()]);
     let canonical_core_names = raw_names.clone();
