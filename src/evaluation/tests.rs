@@ -4925,17 +4925,19 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
 fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
     let fixture = SameRuntimeFixture::new();
     let forced = Arc::new(AtomicUsize::new(0));
-    let (lazy, promise, abandoned_wait) = {
+    let (lazy, promise, _promise_root, _promise_value, _lazy_value, abandoned_wait) = {
         let owner = fixture.context();
-        let promise = PromisedValue::new(owner.values(), "checkpointed session handoff");
-        let lazy = LazyValue::semantic_thunk(owner.values(), "checkpointed producer", {
-            let forced = forced.clone();
-            let promise = promise.clone();
-            move |_| {
-                forced.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Promised(promise.clone()))
-            }
-        });
+        let (promise, promise_root, promise_value) =
+            rooted_promise_value(owner.values(), "checkpointed session handoff");
+        let followed = promise.clone();
+        let (lazy, lazy_value) =
+            rooted_semantic_lazy_value(owner.values(), "checkpointed producer", {
+                let forced = forced.clone();
+                move |_| {
+                    forced.fetch_add(1, Ordering::AcqRel);
+                    Ok(Value::Promised(followed.clone()))
+                }
+            });
         let root = lazy.root(owner.values());
         let wait = crate::eval::lazy_root_wait(&owner, &root)
             .expect("the first session should admit the lazy producer");
@@ -4962,7 +4964,7 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
                 .checkpoint_snapshot()
                 .is_some()
         }));
-        (lazy, promise, wait)
+        (lazy, promise, promise_root, promise_value, lazy_value, wait)
     };
     let observer = fixture.context();
 
