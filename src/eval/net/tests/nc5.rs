@@ -501,6 +501,7 @@ fn install_ready_checkpoint(
     context: &EvalContext,
     focus: Value,
 ) -> (
+    crate::core::ManagedCoreNetRoot,
     CoreRuntimeNet,
     Call,
     crate::interaction_net::CallableCheckpointCall,
@@ -519,11 +520,12 @@ fn install_checkpoint(
         &crate::evaluation::EvaluationValueAccess<'_>,
     ) -> crate::eval::whnf::NetWhnfState,
 ) -> (
+    crate::core::ManagedCoreNetRoot,
     CoreRuntimeNet,
     Call,
     crate::interaction_net::CallableCheckpointCall,
 ) {
-    let (runtime, call) = claimed_core_call_in(context.values(), context.values().unit());
+    let (root, runtime, call) = rooted_claimed_core_call_in(context.values());
     let checkpoint = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
         evaluator.with_value_access(|access| {
             let state = build(&access);
@@ -536,7 +538,40 @@ fn install_checkpoint(
             checkpoint
         })
     });
-    (runtime, call, checkpoint)
+    (root, runtime, call, checkpoint)
+}
+
+fn rooted_claimed_core_call_in(
+    values: &CoreValueFactory,
+) -> (crate::core::ManagedCoreNetRoot, CoreRuntimeNet, Call) {
+    let mut net = NetBuilder::<CoreSpecialization>::new();
+    let bind = net.push(crate::interaction_net::Node::Bind);
+    let data = net.data(values.unit());
+    let erase = net.push(crate::interaction_net::Node::Erase);
+    net.wire(Port::principal(bind), data);
+    net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
+    let prepared = net.finish(Port::auxiliary(bind, 1)).instantiate();
+
+    values.with_runtime_value_access(|access| {
+        let root = access
+            .construct_rooted_managed_core_net(prepared)
+            .expect("managed core-call fixture must fit one collector run");
+        let runtime = CoreRuntimeNet::from_root(&root, &access);
+        let call = {
+            let net = runtime.access(&access);
+            let pair = net
+                .with(|net| net.active_pairs().next())
+                .expect("call pair must be active");
+            let reduction = net
+                .with_optional_mut(|net| net.reduce_pair(pair))
+                .expect("call pair must be claimable");
+            let ReductionKind::Call { bind, data } = reduction.kind else {
+                panic!("bind-data fixture must produce a call")
+            };
+            Call { pair, bind, data }
+        };
+        (root, runtime, call)
+    })
 }
 
 fn claimed_checkpoint_semantic_observation(
@@ -597,14 +632,18 @@ fn claimed_applied_core_call_in(
 
 #[test]
 fn two_workers_contend_for_one_linear_checkpoint_payload() {
-    let fixture = SameRuntimeFixture::new();
-    let setup = fixture.context();
-    let (runtime, call, checkpoint) =
+    let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+    let setup = EvalContext::isolated(values.clone());
+    let (_runtime_root, runtime, call, checkpoint) =
         install_ready_checkpoint(&setup, Value::Builtin(Builtin::Add));
+    setup
+        .values()
+        .collect_managed_for_test()
+        .expect("the rooted callable checkpoint must survive collection");
     reduce_checkpoint(setup.values(), &runtime, call.pair);
 
-    let first_context = fixture.context();
-    let second_context = fixture.context();
+    let first_context = EvalContext::isolated(values.clone());
+    let second_context = EvalContext::isolated(values);
     let first_runtime = runtime.clone();
     let second_runtime = runtime.clone();
     let interlock = Arc::new(Barrier::new(2));
@@ -656,7 +695,7 @@ fn two_workers_contend_for_one_linear_checkpoint_payload() {
 #[test]
 fn checkpoint_unwind_and_stale_publication_never_restore_a_predecessor() {
     let context = test_context();
-    let (runtime, call, original) =
+    let (_runtime_root, runtime, call, original) =
         install_ready_checkpoint(&context, Value::Builtin(Builtin::Add));
     reduce_checkpoint(context.values(), &runtime, call.pair);
 
@@ -902,7 +941,7 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
     assert_eq!(production.nonempty_cycle_promise, 2);
 
     let argument = context.values().unit();
-    let (runtime, call, _) = install_checkpoint(&context, |access| {
+    let (_runtime_root, runtime, call, _) = install_checkpoint(&context, |access| {
         crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
             access,
             Value::Builtin(Builtin::Add),

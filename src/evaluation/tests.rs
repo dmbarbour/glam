@@ -964,7 +964,7 @@ fn blocked_client_checkpoint_survives_collection_until_promise_assignment() {
         .expect("the blocked client checkpoint should remain a valid GC root");
     set_promise(&context, &promise, Value::Number(41.into()))
         .expect("the rooted promise should remain assignable after collection");
-    fixture.runtime.pump_until_stable();
+    poll_runtime_until(&coordinator, || handle.poll().is_some());
     assert!(matches!(
         handle.poll(),
         Some(ClientDemandResult::Complete(value))

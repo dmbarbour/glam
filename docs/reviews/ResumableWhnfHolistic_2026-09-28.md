@@ -428,7 +428,7 @@ obligation; the duplicate was removed. No semantic statement changed.
 The stale parent-plan inventory counts above remain evidence until HR6-HR7
 audit their ownership claims; they are not yet assigned severity or resolution.
 
-### WHNFHR-003 — Open: two checkpoint fixtures retain unrooted recursive owners
+### WHNFHR-003 — Resolved: two checkpoint fixtures retained unrooted recursive owners
 
 **Severity:** medium verification-boundary defect; no production ownership
 conclusion yet.
@@ -470,7 +470,12 @@ interlock itself is not reached.
    after the first checkpoint result is published, forcing both former gaps.
 3. `WHNFHR-003B` constructs the callable-checkpoint net and registered root in
    one access region, retains that root for all worker/interlock observations,
-   and adds a forced collection before either worker claims the payload.
+   and adds a forced collection before either worker claims the payload. The
+   deliberate overlapping-mutator interlock uses a private `NoAuto` value
+   domain: verification-only collection-before-every-entry would otherwise
+   make the second entry wait for the first mutator while the first worker is
+   intentionally waiting for the second at the barrier. Production is also
+   `NoAuto`; GCI11R-002F separately owns general schedule-fixture migration.
 4. Run both exact fixtures ordinarily and aggressively, then the complete
    ordinary/aggressive checkpoint filters. Only those forced runs may become
    HR2 ownership evidence.
@@ -482,7 +487,17 @@ If the rooted fixture still reaches pending finalization or trace failure, stop
 HR2 and reclassify this as a production owner/transition defect. The broader
 fixture migration remains GCI11R-002E work.
 
-### WHNFHR-004 — Open: blocked-client fixture asks the background pump to run foreground work
+**Resolution:** WHNFHR-003A now publishes all three builder handoffs as
+`RuntimeValueRoot` values and forces collection after initial construction,
+after checkpoint capture, and after restore construction. WHNFHR-003B builds
+and roots the callable-checkpoint net in one access region, forces collection,
+then runs the exact two-worker interlock in a private `NoAuto` domain. Both
+exact fixtures pass ordinarily and aggressively; the complete checkpoint
+filters pass 60 ordinary and 62 aggressive tests. WHNFHR-003C classified five
+new test root-publication entries and the single new test access entry; both
+119-test inventory filters pass ordinarily and aggressively.
+
+### WHNFHR-004 — Resolved: blocked-client fixture asked the background pump to run foreground work
 
 **Severity:** low test-policy drift; no production scheduling defect.
 
@@ -501,3 +516,8 @@ until it publishes. The exact fixture and complete aggressive checkpoint
 filter must pass. Reintroducing foreground claims into
 `pump_until_stable` is explicitly out of scope because it would reverse the
 reviewed client/worker ownership model.
+
+**Resolution:** the fixture now uses the existing exact foreground test driver
+after assigning the promise. It retains the forced collection and verifies the
+same terminal value. The exact aggressive fixture and complete aggressive
+checkpoint filter pass. No scheduler or public runtime behavior changed.

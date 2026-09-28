@@ -660,6 +660,30 @@ fn run_builder_at(
     })
 }
 
+fn run_rooted_builder_at(
+    context: &EvalContext,
+    operation: &crate::runtime::RuntimeValueRoot,
+    state: &crate::runtime::RuntimeValueRoot,
+    index: usize,
+) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
+    let selected = context.values().construct_runtime_value_root(|access| {
+        let results = Value::builtin_call_in(
+            access,
+            Builtin::InteractionNetBuilderRun,
+            vec![
+                operation.clone_core_with(access),
+                state.clone_core_with(access),
+            ],
+        );
+        Value::builtin_call_in(
+            access,
+            Builtin::ListAt,
+            vec![Value::Number((index as i64).into()), results],
+        )
+    });
+    context.evaluate_root_whnf(selected)
+}
+
 fn strict_fields(context: &EvalContext, value: &Value, name: &str) -> Vec<Value> {
     with_access(context, |access| {
         super::netlist::strict_record(access, value, name)
@@ -1714,11 +1738,26 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
                 ),
             ],
         );
-        (state, capture)
+        (
+            access.root_runtime_value(state),
+            access.root_runtime_value(capture),
+        )
     });
-    let [checkpoint, state] = run_builder_at(&context, capture, state, 0);
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("published builder inputs must survive collection");
+    let checkpoint_outcome = run_rooted_builder_at(&context, &capture, &state, 0)
+        .expect("capturing the reset scope must succeed");
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("published builder checkpoint must survive collection");
 
-    let restore = with_access(&context, |access| {
+    let (state, restore) = with_access(&context, |access| {
+        let outcome = checkpoint_outcome.clone_core_with(access);
+        let [checkpoint, state] = super::builder::decode_outcome(access, &outcome)
+            .expect("builder outcome should use the strict record schema");
         let clear = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
@@ -1749,17 +1788,30 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
             Builtin::InteractionNetBuilderSeq,
             vec![clear, constant_builder_continuation(access, restore)],
         );
-        partial_builder(
+        let restore = partial_builder(
             access,
             Builtin::InteractionNetBuilderReset,
             vec![prompt, clear_then_restore],
+        );
+        (
+            access.root_runtime_value(state),
+            access.root_runtime_value(restore),
         )
     });
+    drop(checkpoint_outcome);
+    context
+        .values()
+        .collect_managed_for_test()
+        .expect("published restore inputs must survive collection");
+    let restored = run_rooted_builder_at(&context, &restore, &state, 0)
+        .expect("restoring the captured reset scope must succeed");
 
-    assert_eq!(
-        run_builder_at(&context, restore, state, 0)[0],
-        Value::binary_from_text("restored checkpoint")
-    );
+    with_access(&context, |access| {
+        let outcome = restored.clone_core_with(access);
+        let [result, _] = super::builder::decode_outcome(access, &outcome)
+            .expect("builder outcome should use the strict record schema");
+        assert_eq!(result, Value::binary_from_text("restored checkpoint"));
+    });
 }
 
 #[test]

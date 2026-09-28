@@ -619,6 +619,7 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net/tests/nc5.rs::callable_checkpoint_usage_distinguishes_production_from_frame_fixture#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/net/tests/nc5.rs::rooted_claimed_core_call_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/test_support.rs::closed_function_value_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -904,7 +905,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // NC6C roots the task-terminal net in one additional bounded region;
         // aggressive collection may otherwise reclaim the test fixture
         // between construction and its terminal-state observation.
-        ("src/eval/net/tests/nc5.rs", GatewayCounts::new(4, 0)),
+        ("src/eval/net/tests/nc5.rs", GatewayCounts::new(5, 0)),
         ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
         // WHNFHR-001A constructs a complete closed-function/forwarding-lazy
         // fixture below one additional bounded test-only access region.

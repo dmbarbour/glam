@@ -1805,6 +1805,18 @@ ordinary/aggressive filters pass. This evidence reduces the eventual E.4
 worklist but does not replace the source-backed inventory or close any other
 002E item.
 
+WHNFHR-003 subsequently pulled forward two more exact fixtures from the same
+class. The hidden builder-reset fixture now uses rooted handoffs across each
+construction/evaluation boundary and forces collection at all three former
+gaps. The callable-checkpoint contention fixture now constructs and retains a
+rooted core net before its worker interlock. Its overlapping-mutator schedule
+runs in a private `NoAuto` domain, matching production policy; verification's
+collection-before-every-entry policy would intentionally deadlock that barrier
+shape and remains part of 002F's broader schedule audit. WHNFHR-004 also
+updated one blocked-client fixture to advance foreground work through its
+exact client driver rather than expecting the background-only runtime pump to
+claim it. These focused repairs reduce E.4/F worklists but do not close them.
+
 1. Build a source-backed inventory of self-opening `#[cfg(test)]` constructors
    reachable from a production `EvaluationRuntime` under aggressive mode.
 2. Add narrow fixture builders which allocate and install the actual fixture
