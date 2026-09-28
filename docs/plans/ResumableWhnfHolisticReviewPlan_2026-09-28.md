@@ -1,6 +1,6 @@
 # Resumable WHNF Holistic Review Plan — 2026-09-28
 
-Status: active. HR0-HR6 are complete; HR7-HR8 remain. This plan governs the final implementation review of
+Status: active. HR0-HR7 are complete; HR8 remains. This plan governs the final implementation review of
 [`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
 and its reconciliation with the two parent workstreams which remain open:
 
@@ -289,6 +289,10 @@ with exact prerequisites, inventories, and aggressive verification.
 
 ## HR7 — Persistent-edge P3-P5 reconciliation
 
+Status: complete on 2026-09-28. The exact 885-occurrence inventory and 77/59
+cutover split are current; the eight post-51 cursor/net-driver dependencies
+are named transitional P4 obligations rather than permanent exceptions.
+
 Rerun the persistent-edge occurrence and compatibility manifests against the
 current tree. Audit every WHNF-managed representation for accidental `Clone`,
 `Copy`, `Debug`, `PartialEq`, `Eq`, pointer comparison, or unqualified edge
@@ -361,7 +365,7 @@ counts, or compatibility assumptions.
 - [x] HR4 stack/budget/scheduler/concurrency claims accounted for.
 - [x] HR5 retained complexity and performance evidence accounted for.
 - [x] HR6 aggressive-remediation parent reconciled.
-- [ ] HR7 persistent-edge P3-P5 reconciled.
+- [x] HR7 persistent-edge P3-P5 reconciled.
 - [ ] HR8 verification ledger and forward path complete.
 - [ ] Every finding is resolved, accepted with rationale, or owned by a named
       future checkpoint with an exit condition.

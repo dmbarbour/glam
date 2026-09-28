@@ -1,6 +1,7 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2 complete; P3-P5 planned. This is the nested implementation plan
+Status: P0-P2 complete; P3 active through parent D.2d-D.2g; P4-P5 planned.
+This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 It must coordinate with D.2c-D.2g before its final trait-removal cutover. It is
@@ -623,10 +624,9 @@ removal.
 
 Progress, 2026-09-27, after parent D.2c/W8: the raw evaluator and builtin
 partition is zero, and no replacement implicit managed-edge trait was added.
-The 51-entry carrier interlock remains because D.2b and D.2d-D.2g still own
-core declarations and downstream consumers. P4 therefore remains closed until
-those parent partitions remove the dependencies and the exact manifest reaches
-zero; W8 completion alone is not authorization for the trait cutover.
+At that checkpoint the historical 51-entry carrier interlock remained because
+D.2b and D.2d-D.2g still owned core declarations and downstream consumers. W8
+completion alone was not authorization for the trait cutover.
 
 Planned W6B.4b.2 interlock, 2026-09-16: the private runtime-only
 `CallableCheckpoint` is a linear progress carrier, not another cloneable
@@ -658,6 +658,31 @@ assigned to NC2. In particular, the two whole-node cursor/frontier clones and
 the blanket `RuntimeNode` derives cannot be inherited by the checkpoint.
 NC2 must preserve the inventory's `Send`-only payload contract, and NC6 must
 relatch the exact set before P4 removes the remaining compatibility traits.
+
+Progress, 2026-09-28, after NC6, W9, and the resumable-WHNF holistic review:
+the executable inventory contains 885 occurrences: 200 production typed, 36
+production erased, 635 test typed, and 14 test erased. Seventy-seven remain
+classified as defects: five collector declarations for P4, thirteen managed
+facade declarations for P4 after parent closure, and 59 parent raw-value
+compatibility dependencies.
+
+The increase from the historical 51 parent dependencies is exactly these eight
+cursor/net-driver carrier traits:
+
+- `CoreCursorDependency: Clone + Debug`;
+- `CoreCursorStep: Debug`;
+- `CoreFrontierObservation: Clone + Debug`;
+- `NetDriverWork: Clone`; and
+- `NormalizationRequest: Clone`.
+
+They are reviewed transitional interlocks, not permanent semantic
+requirements. Cursor/frontier clones preserve a retry or worklist descriptor;
+driver/request clones retain work across contention and initialize one driver
+from a borrowed request. P4 must replace them with access-qualified managed
+edge duplication, explicit ownership transfer, or a representation which does
+not need the duplicate. It must not accept these traits merely because their
+current callers are convenient. The exact 59-entry source manifest is the
+current P3 authority; parent D.2d-D.2g must reduce it to zero before P4 begins.
 
 ## Phase P4 — Trait Removal Cutover
 

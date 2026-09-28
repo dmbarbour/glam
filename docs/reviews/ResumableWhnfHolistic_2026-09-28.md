@@ -156,12 +156,12 @@ classified as defects:
 | P4 managed facades after parent closure | 13 |
 | parent raw-value compatibility | 59 |
 
-The P3 prose still records older milestones of 69 total and 51 parent defects.
-The executable inventory's 77/59 split is current. HR7 must attribute the
-eight added parent dependencies and decide whether they are justified WHNF/net
-carrier interlocks, accidental trait reintroduction, or stale plan accounting.
-Passing the inventory proves the additions are exactly classified; it does not
-by itself prove that retaining them until P4 is desirable.
+The P3 prose originally recorded older milestones of 69 total and 51 parent
+defects. HR7 has reconciled it to the executable inventory's current 77/59
+split and attributed the eight additions to transitional cursor/net-driver
+carrier interlocks. Passing the inventory proves the additions are exactly
+classified; HR7's per-carrier disposition explains why none becomes a
+permanent P4 exception.
 
 ### Current ordinary and profiling baseline
 
@@ -763,6 +763,62 @@ they are not projected and re-registered. This is a plan/accounting repair,
 recorded as WHNFHR-007, rather than a reason to interrupt the holistic review
 with the D.2d implementation.
 
+## HR7 — Persistent-edge P3-P5 reconciliation
+
+HR7 is complete. The nine focused persistent-edge tests pass ordinarily and
+aggressively. The current inventory contains 885 occurrences, partitioned as
+200 production typed, 36 production erased, 635 test typed, and 14 test
+erased. Its 77 defects have exact cutover owners:
+
+| Cutover owner | Count |
+| --- | ---: |
+| P4 collector traits | 5 |
+| P4 managed facades after parent closure | 13 |
+| parent raw-value compatibility | 59 |
+
+No `WhnfState`, `WhnfContinuation`, managed WHNF checkpoint, callable
+checkpoint payload, client-demand record, reflection checkpoint, spark record,
+or task-machine record has gained an unqualified managed-edge trait. The
+expected legacy `PromisedValue` traits and managed promise-facade traits remain
+in the exact P4/parent manifests rather than being mistaken for new WHNF debt.
+
+### The eight post-51 carrier dependencies
+
+The historical P3 milestone had 51 parent compatibility defects. The current
+59-entry exact manifest adds only:
+
+| Carrier | Traits | Why it exists now | P4 disposition |
+| --- | --- | --- | --- |
+| `CoreCursorDependency` | `Clone`, `Debug` | one dependency is retained for retry/resumption and exposed through a derived step diagnostic | replace duplication under access; remove diagnostic dependency |
+| `CoreCursorStep` | `Debug` | transitively formats cursor dependency state | replace with explicit diagnostic projection or remove |
+| `CoreFrontierObservation` | `Clone`, `Debug` | observed source/frontier descriptors enter multiple worklist positions | duplicate the managed source under access or transfer ownership |
+| `NetDriverWork` | `Clone` | retains one unstarted item across normalization-batch contention | restructure rollback or explicitly duplicate edges under access |
+| `NormalizationRequest` | `Clone` | initializes a driver from a borrowed request while both retain the root net | transfer request ownership or explicitly duplicate under access |
+
+These eight occurrences are justified transitional compatibility, not traits
+which the semantic model requires. In particular, callable checkpoints remain
+`Send + 'static` without `Clone`, `Debug`, equality, or `Sync`; their boxed
+`NetWhnfState` is traced through the runtime net. P4 may not convert the table
+above into a permanent exception list.
+
+### Updated readiness boundary
+
+P3 is active, not merely “planned”: D.2b/D.2c have supplied their interlock
+records and D.2d-D.2g remain. The persistent-edge plan now records the current
+885/77/59 baseline and names all eight additions. P4 remains forbidden until:
+
+1. D.2d-D.2g and D.2h have reduced the parent manifest to zero;
+2. no production or test-only carrier depends on implicit `Gc<T>` copy,
+   equality, formatting, or pointer comparison;
+3. the five collector traits and thirteen facade traits are the only pending
+   cutover declarations; and
+4. P4's compile-time negative gates can replace the positive compatibility
+   manifest.
+
+P5 still reconciles final trait removal with Gate G3 and repository-wide
+aggressive verification. The count correction is WHNFHR-008; it does not
+justify starting P4 early or interrupting HR8 for an implementation repair.
+
 ## Preliminary reconciliation questions
 
 These are questions for the later passes, not findings yet:
@@ -773,9 +829,8 @@ These are questions for the later passes, not findings yet:
 2. Resolved by HR6: the declaration is D.2d, its production callers are D.2e
    and D.2g, and D.2h owns final production removal after those caller
    migrations.
-3. Which eight persistent-edge defects were added after the 51-entry P3
-   milestone, and are their traits inherent to current net/WHNF representations
-   or transitional conveniences?
+3. Resolved by HR7: the eight are cursor/frontier and net-driver retry-carrier
+   traits; all are transitional conveniences assigned to P4 replacement.
 4. Does every stateful machine's edge visitor cover precisely the fields it can
    retain across a poll, including pure net construction and callable
    checkpoints?
@@ -1033,3 +1088,23 @@ The facade remains one measured bridge until D.2e and D.2g remove their
 production calls; D.2h owns production removal or test-only narrowing. This
 preserves one orchestration implementation without pretending D.2d can close
 later call sites on its own.
+
+### WHNFHR-008 — Resolved: P3's prose omitted eight current net-driver trait dependencies
+
+**Severity:** medium planning drift; the executable manifest already rejected
+unclassified additions.
+
+P3 still described 69 total defects and 51 parent compatibility dependencies,
+while its source inventory correctly latched 77 and 59. The eight additions
+are `Clone`/`Debug` on `CoreCursorDependency`, `Debug` on `CoreCursorStep`,
+`Clone`/`Debug` on `CoreFrontierObservation`, and `Clone` on each of
+`NetDriverWork` and `NormalizationRequest`. They support present cursor retry,
+contention rollback, and driver initialization; none is an intended permanent
+managed-edge trait.
+
+The persistent-edge plan now records the 885-occurrence partition, the exact
+77/59 cutover split, and a per-carrier P4 disposition. P3 is marked active
+through parent D.2d-D.2g. P4 remains gated on a zero parent manifest and must
+replace these conveniences through ownership transfer, access-qualified
+duplication, or explicit diagnostic projection rather than grandfathering
+them.
