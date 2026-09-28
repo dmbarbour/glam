@@ -968,7 +968,12 @@ fn is_production_source(relative: &Path) -> bool {
 // W6G.1f.3g.4b removes the durable object-builtin owner and keeps its raw
 // object/spec/name/parts/definition state plus regional WHNF and list-front
 // progress beneath the same managed builtin checkpoint.
-const DECLARATION_BASELINE_COUNT: usize = 250;
+// W9C.1's forced shared-checkpoint verification exposed that managed key
+// conversions are observable by more than one copied value edge. The
+// checkpoint now retains one terminal success or failure state so later
+// observers replay rather than poll consumed regional work. The added failure
+// arm remains beneath the existing traced managed checkpoint owner.
+const DECLARATION_BASELINE_COUNT: usize = 251;
 // PNC1 gives the managed builtin checkpoint one additional traced raw value:
 // the already-selected strict semantic netlist consumed by hidden replay.
 // PNC2C adds three nested regional builder declarations and eight raw values
@@ -987,8 +992,8 @@ const DECLARATION_BASELINE_COUNT: usize = 250;
 // one explicit focus-and-parent stack. Declaration and field totals remain
 // stable; only the reviewed source-shaped fingerprint changes.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([318, 114, 5, 34, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_492_029_001_153_194_707;
+    DeclarationSignals::new([318, 114, 5, 35, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_406_068_151_733_480_475;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
