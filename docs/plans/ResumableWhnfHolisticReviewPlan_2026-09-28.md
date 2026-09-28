@@ -124,6 +124,13 @@ owner and test/inventory location, or a finding records its absence.
 
 ## HR1 — Original-intention accounting
 
+HR1 may pull forward a narrow pre-existing fixture repair only when a failed
+focused aggressive test would otherwise make HR1 and HR2 repeat conditional
+reasoning. Record the failure and exact GCI11R-002E ownership first, repair the
+fixture without changing production semantics, then rerun the complete focused
+ordinary/aggressive partition before continuing the contract matrix. This does
+not close or repartition the broader GCI11R-002E work.
+
 Audit the final implementation against, in order:
 
 1. the two original motives in `Purpose`;

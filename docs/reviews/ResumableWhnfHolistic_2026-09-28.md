@@ -2,7 +2,9 @@
 
 Implementation baseline: `8c611ae0`, after W9E closure.
 
-Status: in progress. HR0 baseline and artifact mapping are complete. HR1-HR8
+Status: in progress. HR0 baseline and artifact mapping are complete. HR1 found
+one focused aggressive-verification fixture gap before completing its contract
+matrix. The narrow WHNFHR-001 remediation precedes the rest of HR1-HR8, which
 remain governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -201,6 +203,49 @@ These are questions for the later passes, not findings yet:
 
 ## Findings
 
-Findings will be added beginning with HR1. The confirmed stale status/count
-statements above remain evidence until their underlying completion and
-ownership claims are audited; they are not yet assigned severity or resolution.
+### WHNFHR-001 — Open: two WHNF fixtures publish unrooted managed identities
+
+**Severity:** medium verification-boundary defect; no current evidence of a
+production WHNF ownership defect.
+
+The ordinary focused WHNF suite passes 85 tests, while a fresh
+`cargo test -q --features aggressive-gc-verification --lib whnf` run fails in:
+
+- `eval::tests::demanded_forwarding_chain_caches_whnf_in_every_lazy_member`,
+  after constructing each member of one forwarding chain through a separate
+  self-opening test factory call and retaining only raw lazy facades; and
+- `evaluation::tests::abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint`,
+  after separately constructing an unrooted promise, capturing it in an opaque
+  test thunk, constructing an unrooted lazy, and only then attempting to root
+  that lazy in another access region.
+
+The failures are respectively `managed pointer does not identify an allocated
+value` and `managed pointer does not belong to this heap`. The second failure's
+backtrace reaches `LazyValue::root` before coordinator admission or checkpoint
+installation. Both therefore fail at the already-declared test-fixture
+publication boundary rather than while tracing or resuming `WhnfState`.
+GCI11R-002E already owns this class of `SameRuntimeFixture` and evaluator lazy/
+promise migration, but leaving these exact fixtures broken would make the HR1
+aggressive matrix and HR2 ownership proof unnecessarily conditional.
+
+**Immediate remediation checkpoints:**
+
+1. `WHNFHR-001A` constructs the forwarding chain inside one matching access
+   region, publishes a durable outer root before leaving, and evaluates that
+   root. The root must keep every source/cache edge observable for the rest of
+   the fixture without adding one root per chain member.
+2. `WHNFHR-001B` uses the existing rooted promise and rooted semantic-lazy
+   fixture builders, retains the promise owner required by the opaque test
+   thunk, and uses the already-published lazy root for admission. It must not
+   alter production checkpoint or coordinator behavior.
+3. Rerun both tests individually in ordinary and aggressive modes, then rerun
+   the complete ordinary/aggressive `--lib whnf` filters. Only after all four
+   gates pass may HR1 treat focused aggressive WHNF behavior as evidence.
+
+This is a deliberate early pull-forward of two narrow GCI11R-002E fixtures,
+not closure of that parent checkpoint. The general test-fixture inventory and
+migration remain in 002E.
+
+The confirmed stale status/count statements above remain evidence until their
+underlying completion and ownership claims are audited; they are not yet
+assigned severity or resolution.
