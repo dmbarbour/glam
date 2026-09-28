@@ -3,9 +3,10 @@
 Implementation baseline: `8c611ae0`, after W9E closure.
 
 Status: in progress. HR0 baseline/artifact mapping, HR1 contract accounting,
-HR2 ownership/GC-safety review, and HR3 resumption-equivalence review are complete. HR2 repaired two
+HR2 ownership/GC-safety review, HR3 resumption-equivalence review, and HR4
+stack/budget/scheduling/concurrency review are complete. HR2 repaired two
 test-fixture publication gaps and one stale foreground-pump expectation before
-accepting its forced checkpoint evidence. HR4-HR8 remain
+accepting its forced checkpoint evidence. HR5-HR8 remain
 governed by
 [`ResumableWhnfHolisticReviewPlan_2026-09-28.md`](../plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md).
 No finding is closed merely by this initial inventory.
@@ -505,6 +506,103 @@ The only bounded/non-suspending exceptions are immediate scalar/tag/key
 operations and raw-net WHNF recognition. They neither call a host nor open a
 child computation. HR3 therefore accounts for every suspendable family named
 by the review plan without finding a new remediation item.
+
+## HR4 — Stack, budget, scheduling, and concurrency
+
+HR4 is complete. Current semantic and liveness claims are backed by bounded
+machine structure and forced interleavings rather than scheduler luck. The
+remaining shared-notification imprecision is a measured performance choice,
+not an authority or correctness mechanism.
+
+### Stack and budget closure
+
+The regional WHNF driver, every continuation family, list front/back walkers,
+object/comparison/access submachines, callable-net driver, and reflection
+request decoders retain their own explicit stack/cursor. The W7 source census
+rejects a new user-sized recursive production call unless it is classified.
+Retained Rust recursion is limited to logarithmic balanced persistent
+containers or fixed-shape helpers; neither scales with arbitrary evaluator
+delegation depth.
+
+Budgets are mutable shared counters across nested machine polls. A transition
+spends before beginning the next semantic step; exhaustion returns the same
+checkpoint without fabricating a wait token. Client, reflection, and spark
+yield release their claim and requeue the same FIFO record. Net-reduction and
+evaluator budgets remain distinct where their units differ, with explicit
+translation at their boundary.
+
+Fresh W7 evidence remains 21 ordinary/aggressive tests, 14 W7B small-stack
+tests, and five W7C one-unit scheduling tests. Those tests exercise 4,096-deep
+delegation/application/fixpoint/lazy/promise paths, cross-worker checkpoint
+resumption, zero/one/many budgets, and exact one-unit root/allocation
+stability.
+
+### Role and ownership audit
+
+| Concern | Current rule | Evidence and disposition |
+| --- | --- | --- |
+| foreground client work | only the retaining client-side driver may claim a foreground demand | worker/runtime selectors explicitly reject foreground records; bounded background-pump tests confirm exclusion. |
+| background reflection/task work | workers and optional client background pump may claim it | bounded pump reports runnable/busy/stable and never waits inside one bounded call. |
+| sparks | executor-owned best-effort work; a foreground client may share its canonical lazy producer but does not claim the spark record | client/spark sharing and quiescent abandonment fixtures preserve the lazy checkpoint. |
+| last subscriber | dropping the last route removes scheduling demand, not semantic partial work reachable through its lazy | route-loss, lazy checkpoint, and unreachable-cycle fixtures distinguish retention from collection. |
+| exact producer | lazy producer, task-owned promise producer, or coordinator record is followed; resolver-owned promises are terminal dependencies with no invented producer | foreground-route promise ownership and cross-session route fixtures. |
+| cycles | pure lazy cycles are terminalized; promise-inclusive cycles remain waits because an external resolver may still complete them | forced pure/mixed cycle tests and exact foreground-search cycle detection. |
+| runtime-global work generation | wake/readiness hint only | exact subscription records decide semantic readiness; a broad condition variable may wake another waiter class but cannot authorize a claim. |
+| exact route zipper | caller-local optimistic path | every frame is validated beneath mutation admission; authoritative full search handles any hazard or mismatch. |
+
+### Atomic subscription and exact-route evidence
+
+The subscription protocol covers completion before registration, during the
+registration hook, and after registration. The “during” tests use barriers and
+a spawned completer to force the contested window; task and spark families are
+both covered. Guarded completion updates authoritative state while mutation
+admission is held and defers the scheduler notification until after release.
+Duplicate registration delivery is rejected without advancing the work
+generation.
+
+The exact foreground zipper is similarly non-authoritative. Forced probes
+show that mutation admission and coordinator state remain held from validation
+through claim. Channels pause release at the exact publication seam while an
+unrelated mutation is committed; reconciliation then rejects the stale route
+and rebuilds from the root. Other fixtures force child-first completion,
+parent reblock at a new epoch, ancestor cancellation/retirement, observation
+wake, busy child handoff, unrelated neutral mutations, and independent
+revision wrap. Route counters distinguish validation, invalidation, retired
+work, and cold fallback.
+
+Fresh focused results are:
+
+```text
+cargo test -q --lib subscription       # 14 passed
+cargo test -q --lib exact_route         # 8 passed
+cargo test -q --lib background_pump     # 4 passed
+cargo test -q --lib w7c                 # 5 passed
+cargo test -q --lib claim_release       # 5 passed
+cargo test -q --lib cursor_driver       # 2 passed
+cargo test -q --lib normalization_batch # 6 passed
+```
+
+### Locks and the cursor exception
+
+Ordinary semantic waits, callbacks, coordinator mutation, and publication all
+occur after `EvaluationValueAccess` closes. Managed checkpoint mutexes cover
+only one budget-bounded callback-free quantum. Coordinator state and mutation
+admission are not held across callbacks, destruction, or notification.
+
+Cursor WHNF remains the narrow exception: a thread holding the same-net
+normalization lease may wait for a contending thread which currently owns the
+productive active-pair/cursor work. The dependency is structural within a
+closed net; drivers release each runtime before crossing to another net, and
+normalization-batch release publishes one disturbance after maximal local
+work. Forced release/waiter tests cover the handoff. This proof does not
+authorize ordinary promise/lazy waits under access.
+
+The reference collector's checkpoint-mutex proof and its concurrent-GC limit
+are already isolated in WHNFHR-005. Shared lifecycle notification can still
+wake a worker beside a parked client; W9 measured that behavior and retained
+one condition variable because exact subscriptions and claim validation make
+the wake harmless. HR5 assesses its cost. HR4 finds no current correctness
+claim resting on uncontrolled scheduling.
 
 ## Preliminary reconciliation questions
 
