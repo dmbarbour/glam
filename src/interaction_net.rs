@@ -6,7 +6,11 @@
 
 mod builder;
 mod model;
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg_attr(
+    all(test, not(feature = "interaction-net-profiling")),
+    allow(dead_code)
+)]
 pub(crate) mod profiling;
 mod runtime;
 

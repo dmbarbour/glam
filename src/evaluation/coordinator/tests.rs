@@ -85,6 +85,7 @@ fn exact_release_classification_is_non_overlapping() {
         end_generation: start_generation.wrapping_add(1),
         uninterrupted,
         disposition: ExactRouteDisposition::Runnable,
+        poll_end_mutations: CoordinatorMutationSnapshot::default(),
     };
 
     let mut valid = route(work, 7);

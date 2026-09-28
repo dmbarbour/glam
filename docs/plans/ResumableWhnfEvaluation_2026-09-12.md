@@ -8860,7 +8860,7 @@ split a factual kind if two call sites have materially different retained-
 route consequences; it must not relabel the whole kind from workload frequency
 alone.
 
-##### W9C.1 — Poll-window mutation metrics
+##### W9C.1 — Poll-window mutation metrics — Complete (2026-09-28)
 
 Under `cfg(test)` or the existing static interaction-net profiling feature,
 maintain monotonic counters per factual mutation kind. Capture a counter
@@ -8886,6 +8886,30 @@ The mutation kind must be compiled away, or reduce to the ordinary generation
 increment, outside instrumented builds. Measure or inspect the optimized code
 if centralizing the increment leaves any doubt; production scheduling must not
 pay for this diagnostic census.
+
+Completion record: instrumented builds now keep fixed per-kind occurrence and
+poll-origin counters in `WorkCoordinatorState`. Exact claim captures one
+counter snapshot and `ExactRouteReleaseTracker` captures the second snapshot
+at guarded-release entry, before release-side publications. Only a classified
+poll-generation invalidation aggregates the delta. The aggregate retains
+occurrence totals, windows containing each kind, a bitset histogram, route
+depth, and release disposition; it retains no work identity or event history.
+The scoped thread-local poll marker distinguishes mutations made synchronously
+by the claimed machine from concurrent or host-side mutations. Ordinary builds
+compile all counter state and the marker away, leaving the same private
+generation helper and wrapping increment.
+
+The two forced W9B orderings now latch the attribution boundary. Poll-owned
+and externally admitted work both publish `FreshWorkAdmission` plus
+`WorkActivation`, but only the former appears in the synchronous counters.
+The exact source-shaped fixture reconciles all 9,356 W9A invalidations. Every
+window is wholly synchronous: 9,306 contain only fresh admission, five contain
+fresh admission plus activation, and 45 additionally contain task-promise
+index admission. There are 9,361 fresh admissions, 50 activations, and 45
+task-promise admissions in total; external occurrences are zero. Every release
+is blocked with a producer. Route depth totals 1,409,621 and peaks at 572.
+The temporary process-output probe used to take this snapshot was removed;
+the static profiling snapshot and forced unit assertions remain.
 
 ##### W9C.2 — Forced relevance and workload attribution
 

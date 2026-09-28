@@ -1,5 +1,9 @@
 //! Runtime-owned work coordination independent of worker ownership.
 
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+use std::cell::Cell;
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -632,6 +636,8 @@ struct WorkCoordinatorState {
     spark_workers: usize,
     prefer_spark: bool,
     work_generation: u64,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    mutation_counters: CoordinatorMutationCounterState,
 }
 
 /// Factual source of one broad coordinator revision publication.
@@ -639,6 +645,7 @@ struct WorkCoordinatorState {
 /// These labels deliberately describe the state transition rather than its
 /// eventual exact-route policy. W9C.1 profiles them before W9C.3 decides which
 /// classes can affect a retained route.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoordinatorMutationKind {
     DemandSessionRegistry,
@@ -655,8 +662,6 @@ enum CoordinatorMutationKind {
     DependencyPromotion,
     DependencyWake,
     ObservationWake,
-    #[cfg(test)]
-    WorkPark,
     Cancellation,
     SessionClosure,
     TerminalSettlement,
@@ -664,7 +669,64 @@ enum CoordinatorMutationKind {
     FailureLedger,
     StageSettlement,
     #[cfg(test)]
+    WorkPark,
+    #[cfg(test)]
     TestTransition,
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+const PRODUCTION_COORDINATOR_MUTATION_KIND_COUNT: usize = 20;
+#[cfg(all(test, feature = "interaction-net-profiling"))]
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 22;
+#[cfg(all(test, not(feature = "interaction-net-profiling")))]
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 22;
+#[cfg(all(not(test), feature = "interaction-net-profiling"))]
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 20;
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CoordinatorMutationSnapshot {
+    occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    synchronous_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[derive(Debug, Default)]
+struct CoordinatorMutationCounterState {
+    occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    synchronous_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+thread_local! {
+    static EXACT_ROUTE_POLL_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+pub(super) struct ExactRoutePollOriginGuard;
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+impl ExactRoutePollOriginGuard {
+    pub(super) fn enter() -> Self {
+        EXACT_ROUTE_POLL_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+impl Drop for ExactRoutePollOriginGuard {
+    fn drop(&mut self) {
+        EXACT_ROUTE_POLL_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert_ne!(current, 0);
+            depth.set(current.saturating_sub(1));
+        });
+    }
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+fn in_exact_route_poll() -> bool {
+    EXACT_ROUTE_POLL_DEPTH.with(|depth| depth.get() != 0)
 }
 
 impl WorkCoordinatorState {
@@ -674,8 +736,27 @@ impl WorkCoordinatorState {
     /// W9C mutation census remains compile-exhaustive as coordinator paths are
     /// added or reorganized.
     fn advance_work_generation(&mut self, kind: CoordinatorMutationKind) {
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            let index = kind as usize;
+            self.mutation_counters.occurrences[index] =
+                self.mutation_counters.occurrences[index].wrapping_add(1);
+            if in_exact_route_poll() {
+                self.mutation_counters.synchronous_occurrences[index] =
+                    self.mutation_counters.synchronous_occurrences[index].wrapping_add(1);
+            }
+        }
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
         let _ = kind;
         self.work_generation = self.work_generation.wrapping_add(1);
+    }
+
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    fn mutation_snapshot(&self) -> CoordinatorMutationSnapshot {
+        CoordinatorMutationSnapshot {
+            occurrences: self.mutation_counters.occurrences,
+            synchronous_occurrences: self.mutation_counters.synchronous_occurrences,
+        }
     }
 }
 
@@ -707,6 +788,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    exact_route_mutation_profile: Mutex<ExactRouteMutationProfile>,
     #[cfg(test)]
     exact_selection_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -732,6 +815,80 @@ pub(super) struct ExactDemandRouteProfile {
     pub(super) changed_dependency_fallbacks: usize,
     pub(super) retired_work_fallbacks: usize,
     pub(super) branched_work_fallbacks: usize,
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[derive(Debug, Default)]
+struct ExactRouteMutationProfile {
+    invalidated_windows: u64,
+    mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    synchronous_mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    external_mutation_occurrences: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    windows_containing: [u64; COORDINATOR_MUTATION_KIND_COUNT],
+    mutation_set_histogram: BTreeMap<u32, u64>,
+    total_route_depth: u64,
+    maximum_route_depth: u64,
+    dispositions: crate::interaction_net::profiling::ExactRouteDispositionCounts,
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+impl ExactRouteMutationProfile {
+    fn snapshot(&self) -> crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot {
+        use crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot;
+
+        ExactRouteMutationProfileSnapshot {
+            invalidated_windows: self.invalidated_windows,
+            mutation_occurrences: mutation_counts_from_array(&self.mutation_occurrences),
+            synchronous_mutation_occurrences: mutation_counts_from_array(
+                &self.synchronous_mutation_occurrences,
+            ),
+            external_mutation_occurrences: mutation_counts_from_array(
+                &self.external_mutation_occurrences,
+            ),
+            windows_containing: mutation_counts_from_array(&self.windows_containing),
+            mutation_set_histogram: self
+                .mutation_set_histogram
+                .iter()
+                .map(|(&kinds, &windows)| (kinds, windows))
+                .collect(),
+            total_route_depth: self.total_route_depth,
+            maximum_route_depth: self.maximum_route_depth,
+            dispositions: self.dispositions,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+fn mutation_counts_from_array(
+    counts: &[u64; COORDINATOR_MUTATION_KIND_COUNT],
+) -> crate::interaction_net::profiling::CoordinatorMutationCounts {
+    use crate::interaction_net::profiling::CoordinatorMutationCounts;
+
+    debug_assert!(counts.len() >= PRODUCTION_COORDINATOR_MUTATION_KIND_COUNT);
+    CoordinatorMutationCounts {
+        demand_session_registry: counts[CoordinatorMutationKind::DemandSessionRegistry as usize],
+        executor_availability: counts[CoordinatorMutationKind::ExecutorAvailability as usize],
+        fresh_work_admission: counts[CoordinatorMutationKind::FreshWorkAdmission as usize],
+        work_activation: counts[CoordinatorMutationKind::WorkActivation as usize],
+        client_demand_admission: counts[CoordinatorMutationKind::ClientDemandAdmission as usize],
+        task_promise_index_admission: counts
+            [CoordinatorMutationKind::TaskPromiseIndexAdmission as usize],
+        task_promise_index_retirement: counts
+            [CoordinatorMutationKind::TaskPromiseIndexRetirement as usize],
+        work_claim: counts[CoordinatorMutationKind::WorkClaim as usize],
+        work_requeue: counts[CoordinatorMutationKind::WorkRequeue as usize],
+        work_release: counts[CoordinatorMutationKind::WorkRelease as usize],
+        client_demand_release: counts[CoordinatorMutationKind::ClientDemandRelease as usize],
+        dependency_promotion: counts[CoordinatorMutationKind::DependencyPromotion as usize],
+        dependency_wake: counts[CoordinatorMutationKind::DependencyWake as usize],
+        observation_wake: counts[CoordinatorMutationKind::ObservationWake as usize],
+        cancellation: counts[CoordinatorMutationKind::Cancellation as usize],
+        session_closure: counts[CoordinatorMutationKind::SessionClosure as usize],
+        terminal_settlement: counts[CoordinatorMutationKind::TerminalSettlement as usize],
+        work_retirement: counts[CoordinatorMutationKind::WorkRetirement as usize],
+        failure_ledger: counts[CoordinatorMutationKind::FailureLedger as usize],
+        stage_settlement: counts[CoordinatorMutationKind::StageSettlement as usize],
+    }
 }
 
 pub(super) enum CoordinatorSelection {
@@ -766,6 +923,15 @@ pub(crate) struct ExactDemandRoute {
     members: TrustedWorkIdSet,
     generation: Option<u64>,
     invalidation: Option<ExactRouteFallbackReason>,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    poll_start: Option<ExactRoutePollStart>,
+}
+
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[derive(Debug, Clone, Copy)]
+struct ExactRoutePollStart {
+    mutations: CoordinatorMutationSnapshot,
+    route_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -785,6 +951,10 @@ impl ExactDemandRoute {
             self.members.clear();
             self.generation = None;
             self.invalidation = None;
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            {
+                self.poll_start = None;
+            }
         }
     }
 
@@ -795,11 +965,19 @@ impl ExactDemandRoute {
         self.members.clear();
         self.generation = None;
         self.invalidation = None;
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            self.poll_start = None;
+        }
     }
 
     pub(crate) fn invalidate(&mut self, reason: ExactRouteFallbackReason) {
         self.generation = None;
         self.invalidation = Some(reason);
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            self.poll_start = None;
+        }
     }
 
     pub(crate) fn invalidate_missing_release(&mut self) {
@@ -819,6 +997,10 @@ impl ExactDemandRoute {
         if let Some(reason) = invalidation {
             self.invalidate(reason);
             return false;
+        }
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        {
+            self.poll_start = None;
         }
         match release.disposition {
             ExactRouteDisposition::Runnable | ExactRouteDisposition::Busy => {}
@@ -850,6 +1032,29 @@ impl ExactDemandRoute {
         self.generation = Some(release.end_generation);
         true
     }
+
+    pub(super) fn apply_profiled_release(
+        &mut self,
+        coordinator: &EvaluationWorkCoordinator,
+        release: ExactRouteRelease,
+    ) -> bool {
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        let attribution = if self.current == Some(release.work)
+            && self.generation != Some(release.start_generation)
+        {
+            self.poll_start
+        } else {
+            None
+        };
+        let applied = self.apply_release(release);
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        if let Some(start) = attribution {
+            coordinator.record_exact_route_poll_invalidation(start, &release);
+        }
+        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        let _ = coordinator;
+        applied
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -870,6 +1075,8 @@ pub(super) struct ExactRouteRelease {
     end_generation: u64,
     uninterrupted: bool,
     disposition: ExactRouteDisposition,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    poll_end_mutations: CoordinatorMutationSnapshot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -889,6 +1096,8 @@ pub(super) struct ExactRouteReleaseTracker {
     work: EvaluationWorkId,
     start_generation: u64,
     expected_generation: u64,
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    poll_end_mutations: CoordinatorMutationSnapshot,
 }
 
 impl ExactRouteReleaseTracker {
@@ -897,6 +1106,8 @@ impl ExactRouteReleaseTracker {
             work,
             start_generation: state.work_generation,
             expected_generation: state.work_generation,
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            poll_end_mutations: state.mutation_snapshot(),
         }
     }
 
@@ -914,6 +1125,8 @@ impl ExactRouteReleaseTracker {
             end_generation: state.work_generation,
             uninterrupted: state.work_generation == self.expected_generation,
             disposition,
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            poll_end_mutations: self.poll_end_mutations,
         }
     }
 }
@@ -970,6 +1183,8 @@ impl EvaluationWorkCoordinator {
             reflection_release_status_probe: Mutex::new(None),
             #[cfg(test)]
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
+            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
             #[cfg(test)]
             exact_selection_probe: Mutex::new(None),
         })
@@ -1033,6 +1248,7 @@ impl EvaluationWorkCoordinator {
             terminal_publication_probe: Mutex::new(None),
             reflection_release_status_probe: Mutex::new(None),
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
+            exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
             exact_selection_probe: Mutex::new(None),
         });
         values.attach_work_coordinator(&coordinator);
@@ -1126,6 +1342,69 @@ impl EvaluationWorkCoordinator {
             .exact_route_profile
             .lock()
             .expect("exact demand route profile was poisoned")
+    }
+
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    fn record_exact_route_poll_invalidation(
+        &self,
+        start: ExactRoutePollStart,
+        release: &ExactRouteRelease,
+    ) {
+        let mut profile = self
+            .exact_route_mutation_profile
+            .lock()
+            .expect("exact route mutation profile was poisoned");
+        profile.invalidated_windows = profile.invalidated_windows.wrapping_add(1);
+        profile.total_route_depth = profile
+            .total_route_depth
+            .wrapping_add(start.route_depth as u64);
+        profile.maximum_route_depth = profile.maximum_route_depth.max(start.route_depth as u64);
+
+        let mut kinds = 0_u32;
+        for index in 0..COORDINATOR_MUTATION_KIND_COUNT {
+            let occurrences = release.poll_end_mutations.occurrences[index]
+                .wrapping_sub(start.mutations.occurrences[index]);
+            let synchronous = release.poll_end_mutations.synchronous_occurrences[index]
+                .wrapping_sub(start.mutations.synchronous_occurrences[index]);
+            debug_assert!(synchronous <= occurrences);
+            profile.mutation_occurrences[index] =
+                profile.mutation_occurrences[index].wrapping_add(occurrences);
+            profile.synchronous_mutation_occurrences[index] =
+                profile.synchronous_mutation_occurrences[index].wrapping_add(synchronous);
+            profile.external_mutation_occurrences[index] = profile.external_mutation_occurrences
+                [index]
+                .wrapping_add(occurrences.saturating_sub(synchronous));
+            if occurrences != 0 {
+                profile.windows_containing[index] =
+                    profile.windows_containing[index].wrapping_add(1);
+                kinds |= 1_u32 << index;
+            }
+        }
+        *profile.mutation_set_histogram.entry(kinds).or_default() += 1;
+
+        let dispositions = &mut profile.dispositions;
+        match release.disposition {
+            ExactRouteDisposition::Runnable => dispositions.runnable += 1,
+            ExactRouteDisposition::Busy => dispositions.busy += 1,
+            ExactRouteDisposition::Blocked {
+                producer: Some(_), ..
+            } => dispositions.blocked_with_producer += 1,
+            ExactRouteDisposition::Blocked { producer: None, .. } => {
+                dispositions.blocked_without_producer += 1;
+            }
+            ExactRouteDisposition::Parked => dispositions.parked += 1,
+            ExactRouteDisposition::Terminal => dispositions.terminal += 1,
+        }
+    }
+
+    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    pub(crate) fn exact_route_mutation_profile(
+        &self,
+    ) -> crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot {
+        self.exact_route_mutation_profile
+            .lock()
+            .expect("exact route mutation profile was poisoned")
+            .snapshot()
     }
 
     #[cfg(test)]
@@ -1800,6 +2079,13 @@ impl EvaluationWorkCoordinator {
                             state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
                             route.current = Some(id);
                             route.generation = Some(state.work_generation);
+                            #[cfg(any(test, feature = "interaction-net-profiling"))]
+                            {
+                                route.poll_start = Some(ExactRoutePollStart {
+                                    mutations: state.mutation_snapshot(),
+                                    route_depth: route.parents.len() + 1,
+                                });
+                            }
                             ExactTargetSelection::Claimed(claimed)
                         }
                         None => {

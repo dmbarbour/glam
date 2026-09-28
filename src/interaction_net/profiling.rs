@@ -68,10 +68,96 @@ impl NetDriverCounts {
 }
 
 /// One point-in-time profiling snapshot for an evaluation runtime.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InteractionNetProfileSnapshot {
     pub reductions: NetReductionCounts,
     pub driver: NetDriverCounts,
+    pub exact_routes: ExactRouteMutationProfileSnapshot,
+}
+
+/// Coordinator mutations observed between an exact-route claim and guarded
+/// release.
+///
+/// The fields follow the factual W9C coordinator vocabulary. They are
+/// profiling observations, not scheduler policy: an occurrence does not by
+/// itself imply that the retained route became invalid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoordinatorMutationCounts {
+    pub demand_session_registry: u64,
+    pub executor_availability: u64,
+    pub fresh_work_admission: u64,
+    pub work_activation: u64,
+    pub client_demand_admission: u64,
+    pub task_promise_index_admission: u64,
+    pub task_promise_index_retirement: u64,
+    pub work_claim: u64,
+    pub work_requeue: u64,
+    pub work_release: u64,
+    pub client_demand_release: u64,
+    pub dependency_promotion: u64,
+    pub dependency_wake: u64,
+    pub observation_wake: u64,
+    pub cancellation: u64,
+    pub session_closure: u64,
+    pub terminal_settlement: u64,
+    pub work_retirement: u64,
+    pub failure_ledger: u64,
+    pub stage_settlement: u64,
+}
+
+impl CoordinatorMutationCounts {
+    pub fn total(self) -> u64 {
+        self.demand_session_registry
+            + self.executor_availability
+            + self.fresh_work_admission
+            + self.work_activation
+            + self.client_demand_admission
+            + self.task_promise_index_admission
+            + self.task_promise_index_retirement
+            + self.work_claim
+            + self.work_requeue
+            + self.work_release
+            + self.client_demand_release
+            + self.dependency_promotion
+            + self.dependency_wake
+            + self.observation_wake
+            + self.cancellation
+            + self.session_closure
+            + self.terminal_settlement
+            + self.work_retirement
+            + self.failure_ledger
+            + self.stage_settlement
+    }
+}
+
+/// Release dispositions attached to attributed exact-route poll windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExactRouteDispositionCounts {
+    pub runnable: u64,
+    pub busy: u64,
+    pub blocked_with_producer: u64,
+    pub blocked_without_producer: u64,
+    pub parked: u64,
+    pub terminal: u64,
+}
+
+/// Fixed-cost W9C attribution for poll-generation invalidations.
+///
+/// `mutation_set_histogram` is materialized only when a snapshot is requested.
+/// Each key is a bitset in the declaration order of
+/// [`CoordinatorMutationCounts`]; the runtime retains only aggregate counters,
+/// never an event history or work identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExactRouteMutationProfileSnapshot {
+    pub invalidated_windows: u64,
+    pub mutation_occurrences: CoordinatorMutationCounts,
+    pub synchronous_mutation_occurrences: CoordinatorMutationCounts,
+    pub external_mutation_occurrences: CoordinatorMutationCounts,
+    pub windows_containing: CoordinatorMutationCounts,
+    pub mutation_set_histogram: Vec<(u32, u64)>,
+    pub total_route_depth: u64,
+    pub maximum_route_depth: u64,
+    pub dispositions: ExactRouteDispositionCounts,
 }
 
 macro_rules! atomic_counts {
@@ -183,6 +269,7 @@ impl InteractionNetProfile {
         InteractionNetProfileSnapshot {
             reductions: self.reductions.snapshot(),
             driver: self.driver.snapshot(),
+            exact_routes: ExactRouteMutationProfileSnapshot::default(),
         }
     }
 

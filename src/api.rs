@@ -13,6 +13,7 @@ mod value;
 
 #[cfg(feature = "interaction-net-profiling")]
 pub use crate::interaction_net::profiling::{
+    CoordinatorMutationCounts, ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot,
     InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts,
 };
 pub(crate) use assembly::CompilationExecution;

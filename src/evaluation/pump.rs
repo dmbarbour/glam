@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "interaction-net-profiling"))]
+use super::coordinator::ExactRoutePollOriginGuard;
 use super::coordinator::{
     self, CausalChildSelection, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork,
     ClaimedTaskWork, ClientDemandOperation, DeferredLazyCycleMember, DeferredWorkPoll,
@@ -488,7 +490,11 @@ pub(super) fn pump_demand_on_route(
         let quantum = reservation_allowance.min(TASK_POLL_QUANTUM);
         reservation_allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        let _poll_origin = exact_claim.then(ExactRoutePollOriginGuard::enter);
         let poll = claimed.poll(&mut budget);
+        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        drop(_poll_origin);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
         let yielded = matches!(
             poll,
@@ -497,7 +503,7 @@ pub(super) fn pump_demand_on_route(
         let (_, _, released, route_release) = claimed.release(poll);
         if exact_claim {
             if let Some(release) = route_release {
-                let _handed_off = route.apply_release(release);
+                let _handed_off = route.apply_profiled_release(coordinator, release);
                 #[cfg(test)]
                 if _handed_off {
                     coordinator.record_exact_route_handoffs(1);

@@ -6284,6 +6284,23 @@ fn exact_route_classifies_poll_owned_admission_as_generation_movement() {
             ..ExactDemandRouteProfile::default()
         }
     );
+    let mutation_profile = source
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_route_mutation_profile();
+    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
+    assert_eq!(
+        mutation_profile.synchronous_mutation_occurrences, mutation_profile.mutation_occurrences,
+        "both admission publications must be attributed to the claimed poll"
+    );
+    assert_eq!(mutation_profile.external_mutation_occurrences.total(), 0);
+    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
+    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
+    assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
+    assert_eq!(mutation_profile.total_route_depth, 1);
+    assert_eq!(mutation_profile.maximum_route_depth, 1);
+    assert_eq!(mutation_profile.dispositions.runnable, 1);
 }
 
 #[test]
@@ -6331,6 +6348,20 @@ fn exact_route_classifies_latched_unrelated_poll_mutation_as_generation_movement
     assert_eq!(profile.checkpoint_invalidations, 1);
     assert_eq!(profile.poll_generation_movement_fallbacks, 1);
     assert_eq!(profile.guarded_release_mutation_fallbacks, 0);
+    let mutation_profile = source
+        .coordinator()
+        .expect("fixture coordinator should remain live")
+        .exact_route_mutation_profile();
+    assert_eq!(mutation_profile.invalidated_windows, 1);
+    assert_eq!(mutation_profile.mutation_occurrences.total(), 2);
+    assert_eq!(
+        mutation_profile.external_mutation_occurrences, mutation_profile.mutation_occurrences,
+        "the latched admission must be attributed outside the claimed poll"
+    );
+    assert_eq!(mutation_profile.synchronous_mutation_occurrences.total(), 0);
+    assert_eq!(mutation_profile.windows_containing.fresh_work_admission, 1);
+    assert_eq!(mutation_profile.windows_containing.work_activation, 1);
+    assert_eq!(mutation_profile.mutation_set_histogram, [(12, 1)]);
 }
 
 #[test]

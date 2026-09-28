@@ -31,7 +31,10 @@ pub use api::{
     RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
 #[cfg(feature = "interaction-net-profiling")]
-pub use api::{InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts};
+pub use api::{
+    CoordinatorMutationCounts, ExactRouteDispositionCounts, ExactRouteMutationProfileSnapshot,
+    InteractionNetProfileSnapshot, NetDriverCounts, NetReductionCounts,
+};
 pub use diagnostic::Severity;
 pub use g_source::{
     GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,

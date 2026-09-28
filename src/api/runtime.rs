@@ -487,12 +487,17 @@ impl EvaluationRuntime {
     pub fn interaction_net_profile(
         &self,
     ) -> crate::interaction_net::profiling::InteractionNetProfileSnapshot {
-        self.state
+        let mut snapshot = self
+            .state
             .shared_resources
             .values
             .core()
             .interaction_net_profile()
-            .snapshot()
+            .snapshot();
+        if let Some(work) = self.state.shared_resources.work.upgrade() {
+            snapshot.exact_routes = work.exact_route_mutation_profile();
+        }
+        snapshot
     }
 
     pub fn new(worker_threads: usize) -> Result<Self, Error> {
