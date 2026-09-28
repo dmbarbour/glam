@@ -7,7 +7,10 @@ compatibility wrappers, closes the D.2c raw evaluator partition, and reconciles
 the current architecture with the implemented resumable boundary. This review
 found no production W8 correctness defect. It records one test-fixture managed
 ownership gap and the expected repository-wide aggressive-verification gaps
-owned by later GC remediation phases; Gate G3 remains closed.
+owned by later GC remediation phases; Gate G3 remains closed. Every finding is
+closed for review purposes: WHNFW8R-001 is implemented, while WHNFW8R-002
+through WHNFW8R-005 have explicit plan owners and exit criteria but remain
+unimplemented.
 
 ## Scope and method
 
@@ -50,9 +53,10 @@ The implemented W8 boundary is coherent:
 The complete ordinary workspace suite passes. Focused W7, D.2c, inventory,
 and interaction-net profiling verification also passes, including aggressive
 collection for W7 and D.2c. The complete aggressive workspace suite still
-fails in the later raw-value ownership partitions and then fails to settle
-after reaching the end of the main test list. This was already the declared
-I11D.1/Gate G3 state; W8 neither hides nor widens it.
+fails across the later production raw-value partitions and the separately
+planned test-fixture/schedule workstreams, then fails to settle after reaching
+the end of the main test list. This was already the declared I11D.1/Gate G3
+state; W8 neither hides nor widens it.
 
 ## Invariant accounting
 
@@ -74,6 +78,12 @@ I11D.1/Gate G3 state; W8 neither hides nor widens it.
 
 ## Findings and resolutions
 
+In this review, **resolved** means the correction is implemented. **Resolved
+by plan** means the review no longer needs to retain an unowned concern: a
+named future checkpoint contains the work, verification, and exit condition,
+but the underlying implementation remains pending. It must not be read as a
+passing Gate G3 result.
+
 ### WHNFW8R-001 — Resolved: current documentation and the raw manifest retained deleted compatibility concepts
 
 **Severity:** medium documentation and closure-gate drift.
@@ -88,7 +98,7 @@ names every durable checkpoint owner, and uses one exact empty D.2c assertion.
 Chronological detail remains in plans and reviews rather than current
 architecture documents.
 
-### WHNFW8R-002 — Accepted future remediation: repository-wide aggressive verification still fails outside D.2c
+### WHNFW8R-002 — Resolved by plan: repository-wide aggressive verification still fails outside D.2c
 
 **Severity:** high Gate G3 blocker; not a W8 production regression.
 
@@ -101,11 +111,22 @@ main test list and was terminated after nearly nine minutes.
 
 Focused `--features aggressive-gc-verification --lib w7` and `--lib d2c`
 both pass. The raw manifest also reports no production D.2c occurrence.
-Accordingly these failures remain assigned to D.2d-D.2g and I11D.1 rather than
-being masked by a W8 compatibility path. Gate G3 remains closed, and production
-collection remains `NoAuto`.
+Accordingly these failures are not masked by a W8 compatibility path. The
+[`GarbageCollectorAggressiveVerificationRemediation`](../plans/GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md)
+plan owns them concretely:
 
-### WHNFW8R-003 — Accepted future remediation: one net contention fixture carries an unrooted test facade between access regions
+- D.2d-D.2g migrate the remaining production orchestration, front-end,
+  reflection, public API, compiler, and diagnostic raw-value boundaries;
+- D.2h closes the production violation and ownership inventories;
+- GCI11R-002E migrates test-only regional handoffs;
+- GCI11R-002F repairs aggressive-mode schedule-fixture interference;
+- GCI11R-002G requires every failing cluster to complete independently; and
+- GCI11R-002H reruns and records repository-wide certification.
+
+The finding is therefore closed by plan, not by implementation. I11D.1 and
+Gate G3 remain open, and production collection remains `NoAuto`.
+
+### WHNFW8R-003 — Resolved by plan: one net contention fixture carries an unrooted test facade between access regions
 
 **Severity:** medium verification-fixture ownership gap; no observed production
 defect.
@@ -116,22 +137,30 @@ new test access to inspect it. Aggressive collection correctly rejects that
 unrooted handoff before the contention schedule begins with “managed pointer
 does not belong to this heap.” The ordinary forced barrier schedule passes.
 
-The repair belongs to the later raw orchestration/test-fixture closure: retain
-an exact net root across the handoff or keep construction and initial
-observation inside one bounded access. Do not weaken heap validation or add a
-durable claim to the net. This fixture does not invalidate W8's WHNF ownership
-or concurrency semantics because it fails before installing the checkpoint.
+GCI11R-002E.4 explicitly owns `SameRuntimeFixture` and related evaluator,
+coordinator, promise, lazy, and net fixtures. Its required repair is to retain
+the intended public/runtime root across the handoff or keep construction and
+initial observation inside one bounded access. GCI11R-002G then requires the
+interaction-net/collector cluster to complete aggressively, and 002H includes
+it in repository certification. Do not weaken heap validation or add a durable
+claim to the net. The finding is closed by those plan checkpoints, while its
+code change remains pending. It does not invalidate W8's WHNF ownership or
+concurrency semantics because it fails before installing the checkpoint.
 
-### WHNFW8R-004 — Accepted interlock: persistent-edge P3-P5 and Gate G3 do not close with D.2c
+### WHNFW8R-004 — Closed by existing interlock: persistent-edge P3-P5 and Gate G3 do not close with D.2c
 
 **Severity:** none; forward-plan accounting.
 
 D.2c reaching zero removes the evaluator/builtin consumers, but the exact 51
 carrier dependencies remain owned by D.2b and D.2d-D.2g. P4/P5 therefore remain
 closed until that manifest reaches zero. W8 introduces no replacement implicit
-edge trait and provides no authorization for automatic collection.
+edge trait and provides no authorization for automatic collection. The
+[`GarbageCollectorPersistentEdgeTraits`](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+plan's P3 names each parent partition, P4 requires the zero-manifest trait
+cutover, and P5 reconciles the result with D.2h and Gate G3. This finding is an
+already-enforced sequencing constraint, not an additional remediation task.
 
-### WHNFW8R-005 — Confirmed future work: W9 remains correctly isolated
+### WHNFW8R-005 — Resolved by plan: W9 remains correctly isolated
 
 **Severity:** none; forward-plan accounting.
 
@@ -139,7 +168,11 @@ W8 changes evaluator admission and fixtures, not exact-route claim/release
 generation semantics. W9's classification-first repair therefore remains the
 right next phase, but it must reproduce or replace its measured W6G4 baseline
 after W8 rather than assuming the old traffic is current. The conservative
-guarded fallback remains authoritative meanwhile.
+guarded fallback remains authoritative meanwhile. W9A-E in the
+[`ResumableWhnfEvaluation`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
+plan own classification, forced ordering, the design gate, implementation,
+measurement, and a closing review. The finding is closed by that plan; the
+performance repair remains unimplemented.
 
 ## Completion-criteria accounting
 
@@ -149,7 +182,7 @@ root-free uninterrupted delegation, owner-specific publication, classified
 retryable callers, deterministic focused verification, bounded source-shaped
 work, and this post-implementation review are all present. Criterion 8 is not
 misread as repository-wide Gate G3 certification; W8's applicable collection
-matrix passes while the separately inventoried D.2d-D.2g gaps remain open.
+matrix passes while D.2d-D.2h and GCI11R-002E-H remain open.
 
 Criterion 11 is deliberately owned by W9 and keeps the overall resumable-WHNF
 plan open. W8 is complete; the larger GC integration is not.
@@ -176,7 +209,7 @@ cargo test -q
 scripts/check-interaction-net-profiling.sh
     every named profiling fixture passed
 cargo test -q --features aggressive-gc-verification
-    failed in later raw-owner partitions and did not settle; Gate G3 remains closed
+    failed in later production and fixture workstreams and did not settle; Gate G3 remains closed
 ```
 
 No uncontrolled repeated schedule is used as concurrency evidence.

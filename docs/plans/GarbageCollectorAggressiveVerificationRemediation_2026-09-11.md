@@ -1694,8 +1694,9 @@ test which forces both schedules.
 
 Completion record: ordinary and aggressive W7 and D.2c closure suites pass,
 the exact inventory suite passes, and the complete ordinary workspace passes.
-The complete aggressive workspace command still fails in D.2d-D.2g owners and
-does not settle after those failures; that is retained as the I11D.1/Gate G3
+The complete aggressive workspace command still fails across D.2d-D.2g
+production owners and GCI11R-002E-H fixture/schedule/certification work, and it
+does not settle after those failures. That is retained as the I11D.1/Gate G3
 blocker rather than attributed to the now-empty D.2c partition. See the linked
 W8 review for exact evidence and dispositions.
 

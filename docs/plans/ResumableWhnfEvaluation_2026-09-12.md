@@ -8623,9 +8623,10 @@ Completion record: formatting, all-feature Clippy, ordinary/aggressive W7,
 ordinary/aggressive D.2c closure, the 116-test inventory suite, the complete
 ordinary workspace suite, and every named interaction-net profiling fixture
 pass. The complete aggressive workspace command was also run: it fails in the
-still-inventoried D.2d-D.2g raw-owner partitions and did not settle after the
-main list reached its final tests. This preserves rather than obscures the
-declared I11D.1/Gate G3 blocker. The dated
+still-inventoried D.2d-D.2g production partitions and the separately planned
+GCI11R-002E-H fixture/schedule/certification workstreams, and it did not settle
+after the main list reached its final tests. This preserves rather than
+obscures the declared I11D.1/Gate G3 blocker. The dated
 [`ResumableWhnfW8_2026-09-27.md`](../reviews/ResumableWhnfW8_2026-09-27.md)
 review accounts for all twenty invariants, the completion criteria, one
 test-only net-facade ownership gap, P3-P5, Gate G3, and W9 drift. No new unsafe
