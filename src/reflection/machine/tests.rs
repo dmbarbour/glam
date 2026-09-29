@@ -48,6 +48,10 @@ fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
     Values::from_core_factory(values.clone()).wrap(value)
 }
 
+fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
+    context.values().construct_runtime_value_root(|_| value)
+}
+
 fn value_i64(assembler: &Assembler, value: &PublicValue) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
@@ -1000,8 +1004,9 @@ fn isolated_fusion_bytes(
 ) -> Vec<Vec<u8>> {
     let owned = EvalContext::isolated(assembler.core_values());
     let (context, owner) = owned.into_parts();
+    let effect = root_value(&context, effect.clone_core_for_test());
     let mut task = EffectTask::new_in_context_with_policy(
-        effect.clone_core_for_test(),
+        effect,
         TestEffects,
         Arc::new(TestHost::with_values(assembler.core_values())),
         context,
@@ -3516,6 +3521,10 @@ fn contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper()
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("context-root fixture should construct");
+    let context = task
+        .eval_context
+        .values()
+        .construct_runtime_value_root(|_| context);
     let task = ContextualValueEffectTask::new(task, context);
     assert_eq!(
         task.context.runtime_id(),
@@ -4688,13 +4697,9 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let (task_context, _task_owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let unrelated = EvalContext::isolated(assembler.core_values());
     let poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
-    let task = EffectTask::new_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        host,
-        task_context,
-    )
-    .expect("effect task should build");
+    let effect = root_value(&task_context, effect.clone_core_for_test());
+    let task = EffectTask::new_in_context(effect, TestEffects, host, task_context)
+        .expect("effect task should build");
     let mut machine = ValueEffectTask(task);
 
     let _ = machine.poll(
@@ -5196,6 +5201,7 @@ fn schedule_composed_test_task(
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, host, task_context)
                 .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                 .map_err(|error| Arc::from(error.to_string()))
@@ -5216,6 +5222,7 @@ fn schedule_composed_test_task_with_private_annotations(
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, host, task_context)
                 .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                 .map_err(|error| Arc::from(error.to_string()))
@@ -5234,6 +5241,7 @@ fn schedule_exit_child_test_task(
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, host, task_context)
                 .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                 .map_err(|error| Arc::from(error.to_string()))
@@ -6045,6 +6053,7 @@ fn resumable_reflection_decode_consumes_one_application_checkpoint_after_resumpt
     let task = context
         .schedule_task(move |task_context| {
             let task_context = task_context.with_deferred_pump_pause(pause_sender);
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
                 .map(|task| {
                     Box::new(ValueEffectTask(
@@ -6153,6 +6162,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
     let task = context
         .schedule_task(move |task_context| {
             let task_context = task_context.with_deferred_pump_pause(pause_sender);
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
                 .map(|task| {
                     Box::new(ValueEffectTask(
@@ -6239,6 +6249,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
     let task_host = host.clone();
     let task = context
         .schedule_task(move |task_context| {
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, task_host, task_context)
                 .map(|task| {
                     Box::new(ValueEffectTask(
@@ -6319,6 +6330,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
         vec![Value::Promised(promised.clone())],
     )
     .unwrap();
+    let effect = root_value(&observer, effect);
     let mut task = EffectTask::new_in_context(
         effect,
         TestEffects,
@@ -6368,13 +6380,8 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
     let promised_value = public_value(&assembler.core_values(), Value::Promised(promised.clone()));
     let effect = assembler.apply(&function, [promised_value]).unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let mut task = EffectTask::new_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        host.clone(),
-        observer,
-    )
-    .unwrap();
+    let effect = root_value(&observer, effect.clone_core_for_test());
+    let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
 
     let blocked = loop {
         match task.poll(256) {
@@ -6469,6 +6476,7 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
     )
     .unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let effect = root_value(&observer, effect);
     let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
 
     let blocked = loop {
@@ -7169,6 +7177,7 @@ fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction
     let effect = effect.clone_core_for_test();
     let task = context
         .schedule_task(move |task_context| {
+            let effect = root_value(&task_context, effect);
             EffectTask::new_in_context(effect, TestEffects, host.clone(), task_context)
                 .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
                 .map_err(|error| Arc::from(error.to_string()))

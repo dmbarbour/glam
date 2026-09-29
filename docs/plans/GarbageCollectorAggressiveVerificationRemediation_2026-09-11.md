@@ -1794,6 +1794,33 @@ representative lowering, macro, and cache publication boundaries. Resolve the
 D.2e root/admission ledger entries while retaining genuinely outer compiler
 and macro boundaries.
 
+Execute this phase by call tree rather than as one mechanical signature edit:
+
+1. **D.2e.0 — exact manifest. Complete (2026-09-29).** The source-backed
+   inventory assigns exactly 137 violations to D.2e: 30 compiler-value and
+   diagnostic-facade declarations, 60 expression/pattern/effect resolution
+   declarations, 34 module-definition/object/import declarations, and 13
+   parser/macro orchestration declarations. Keep these four partitions exact
+   while migrating them.
+2. **D.2e.1 — compiler values and diagnostic facade.** Give cached helper
+   construction and `ResolvedExpr<Value>` composition one caller-owned access
+   region. Cached and externally returned results remain roots; raw projections
+   are consumed before the region closes.
+3. **D.2e.2 — resolution graph.** Thread the same access through conditional,
+   do, effect-step, expression, pattern, and scope lowering. The resolved IR is
+   regional semantic data, not syntax and not a new durable value carrier.
+4. **D.2e.3 — module lowering.** Carry the regional authority through
+   definitions, object declarations, imports, and the module fixpoint. Import
+   callbacks remain outside access; their returned roots are projected only
+   after re-entry.
+5. **D.2e.4 — parser and macro orchestration.** Keep parser structures ordinary
+   Rust data. Root embedded semantic values and macro effects across isolated
+   evaluation or host boundaries, and reopen one region only for deterministic
+   parser/lowering work.
+6. **D.2e.5 — closure.** Require zero D.2e violations, reconcile the root and
+   mutator-admission ledgers, then run focused and complete ordinary/aggressive
+   front-end verification.
+
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
 Migrate the 19 reflection violations in the current executable inventory.
@@ -1809,6 +1836,34 @@ rollback tests in both modes, and forced collection before and after query
 publication and blocked-machine resumption. Resolve all D.2f construction and
 admission entries, distinguishing pure regional reflection work from rooted
 transaction/wait handoff.
+
+Use the following checkpoints, ahead of D.2e where useful because these APIs
+also serve macro-effect execution:
+
+1. **D.2f.0 — exact manifest. Complete (2026-09-29).** The live inventory
+   assigns 19 declarations to D.2f: twelve in the effect machine, two protocol
+   constructors, three request helpers, and two store helpers.
+2. **D.2f.1 — effect-task and branch admission. Complete (2026-09-29).** Replace raw effect/context
+   handoffs with roots, or require the caller's existing access when the value
+   is consumed synchronously. Keep raw-value convenience constructors test-only
+   if production no longer needs them. Effect-task constructors now accept the
+   root already owned by `api::Value`, isolated searches clone that root, and
+   contextual task wrappers take a root directly. This removes five raw
+   admission declarations without introducing an intermediate root or a
+   project-and-reroot cycle; fourteen D.2f declarations remain in the regional,
+   protocol/request, and store checkpoints below.
+3. **D.2f.2 — regional machine helpers.** Access-qualify effect API assembly,
+   request construction, branch delivery, diagnostic context construction,
+   alternative aggregation, and lazy-path construction. A helper returning a
+   root must publish it before its access island closes.
+4. **D.2f.3 — protocol and request helpers.** Access-qualify immediate request,
+   status, severity, and task-context values without granting reflection code a
+   general raw-value escape hatch.
+5. **D.2f.4 — store boundaries.** Consume raw edit/query values inside the
+   transaction's bounded access; journals and query state retain public roots.
+6. **D.2f.5 — closure.** Require zero D.2f violations, reconcile reflection
+   root/admission inventories, and run lifecycle, retry, rollback, blocked
+   resumption, and aggressive publication tests.
 
 ##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
 

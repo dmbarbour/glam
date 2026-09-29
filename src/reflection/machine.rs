@@ -220,13 +220,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
         eval_context: OwnedEvalContext,
     ) -> Result<Self, TaskHalt> {
         let (eval_context, owner) = eval_context.into_parts();
+        let effect = eval_context
+            .values()
+            .construct_runtime_value_root(|_| effect);
         let mut task = Self::new_in_context(effect, specialization, host, eval_context)?;
         task._demand_owner = Some(owner);
         Ok(task)
     }
 
     pub(super) fn new_in_context(
-        effect: Value,
+        effect: RuntimeValueRoot,
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
@@ -235,7 +238,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     pub(super) fn new_isolated_in_context(
-        effect: Value,
+        effect: RuntimeValueRoot,
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
@@ -244,7 +247,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn new_in_context_with_policy(
-        effect: Value,
+        effect: RuntimeValueRoot,
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
@@ -261,16 +264,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     pub(super) fn new_in_context_with_capabilities(
-        effect: Value,
+        effect: RuntimeValueRoot,
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
         retain_all: bool,
         exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
-        let effect = eval_context
-            .values()
-            .construct_runtime_value_root(|_| effect);
         Self::new_rooted_in_context_with_capabilities(
             effect,
             specialization,
@@ -355,6 +355,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
     ) -> Result<Self, TaskHalt> {
+        let effect = eval_context
+            .values()
+            .construct_runtime_value_root(|_| effect);
         Self::new_in_context_with_capabilities(
             effect,
             specialization,
@@ -3475,11 +3478,11 @@ pub(super) struct ContextualValueEffectTask<S: TaskSpecialization> {
 }
 
 impl<S: TaskSpecialization> ContextualValueEffectTask<S> {
-    pub(super) fn new(task: EffectTask<S>, context: Value) -> Self {
-        let context = task
-            .eval_context
-            .values()
-            .construct_runtime_value_root(|_| context);
+    pub(super) fn new(task: EffectTask<S>, context: RuntimeValueRoot) -> Self {
+        debug_assert_eq!(
+            task.eval_context.values().runtime_id(),
+            context.runtime_id()
+        );
         Self { task, context }
     }
 }

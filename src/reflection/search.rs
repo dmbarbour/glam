@@ -278,7 +278,8 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         context: EvalContext,
     ) -> Result<Self, TaskHalt> {
         let values = Values::from_core_factory(context.values().clone());
-        let effect = values.clone_core(effect)?;
+        values.require(effect)?;
+        let effect = effect.clone().into_runtime_root();
         EffectTask::new_isolated_in_context(effect, specialization, host, context)
             .map(|task| Self { task, _owner: None })
             .map_err(|error| error.root_for_values(values.core()))

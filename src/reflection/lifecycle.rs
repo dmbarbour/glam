@@ -394,10 +394,11 @@ impl<S: TaskSpecialization> EffectRun<S> {
         let runtime = runtime.expect("EffectRun construction always selects an evaluation runtime");
         let values = runtime.values();
         let session = runtime.new_evaluation_session()?;
-        let effect = values.clone_core(&effect).map_err(|error| {
+        values.require(&effect).map_err(|error| {
             contextualize_task_halt(error.into(), &values, failure_context.as_ref())
                 .root_for_values(values.core())
         })?;
+        let effect = effect.into_runtime_root();
         let mut task = EffectTask::new_in_context(
             effect,
             specialization,
@@ -468,14 +469,18 @@ impl<S: TaskSpecialization> EffectRun<S> {
                 move |task_context| {
                     let values =
                         crate::api::Values::from_core_factory(task_context.values().clone());
-                    let effect = values
-                        .clone_core(&effect)
+                    values
+                        .require(&effect)
                         .map_err(|error| Arc::new(EvaluationFailure::message(error.to_string())))?;
+                    let effect = effect.into_runtime_root();
                     let failure_context = failure_context
-                        .as_ref()
-                        .map(|context| values.clone_core(context))
-                        .transpose()
-                        .map_err(|error| Arc::new(EvaluationFailure::message(error.to_string())))?;
+                        .map(|context| {
+                            values.require(&context).map_err(|error| {
+                                Arc::new(EvaluationFailure::message(error.to_string()))
+                            })?;
+                            Ok::<_, Arc<EvaluationFailure>>(context.into_runtime_root())
+                        })
+                        .transpose()?;
                     let mut task = EffectTask::new_in_context_with_capabilities(
                         effect,
                         specialization,
@@ -487,7 +492,9 @@ impl<S: TaskSpecialization> EffectRun<S> {
                     .map_err(|error| {
                         let failure = error.into_failure();
                         match &failure_context {
-                            Some(context) => Arc::new(failure.with_context(context.clone())),
+                            Some(context) => values.core().with_runtime_value_access(|access| {
+                                Arc::new(failure.with_context(context.clone_core_with(&access)))
+                            }),
                             None => failure,
                         }
                     })?;
