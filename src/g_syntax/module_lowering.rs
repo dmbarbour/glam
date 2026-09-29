@@ -78,44 +78,38 @@ impl<'context> ModuleLowerer<'context> {
             kind @ (DeclarationKind::Definition(_)
             | DeclarationKind::Object(_)
             | DeclarationKind::Extend(_)) => {
-                let (definitions, module_reflection) =
-                    self.context.values().with_runtime_value_access(|access| {
-                        (
-                            self.definitions.clone_core_with(&access),
-                            ReflectionBoundary {
-                                annotator: self.module_reflection.clone_core_with(&access),
-                            },
-                        )
-                    });
-                let scope = NameScope::module_with_reflection(
-                    self.context,
-                    definitions.clone(),
-                    module_reflection,
-                );
-                let resolved = match kind {
-                    DeclarationKind::Definition(definition) => resolve_module_definition(
-                        definition,
-                        line,
+                let result = self.context.values().with_runtime_value_access(|access| {
+                    let definitions = self.definitions.clone_core_with(&access);
+                    let scope = NameScope::module_with_reflection(
+                        &access,
                         self.context,
-                        definitions,
-                        &scope,
-                    ),
-                    DeclarationKind::Object(object) => {
-                        lower_object(object, line, self.context, definitions, &scope)
-                    }
-                    DeclarationKind::Extend(extend) => {
-                        lower_extend(extend, line, self.context, definitions, &scope)
-                    }
-                    _ => unreachable!("resolved declarations were matched above"),
-                };
-                match resolved {
-                    Ok(resolved) => {
-                        self.definitions =
-                            self.context
-                                .values()
-                                .construct_runtime_value_root(|access| {
-                                    lower_resolved_expr_in(access, resolved)
-                                });
+                        definitions.clone(),
+                        ReflectionBoundary {
+                            annotator: self.module_reflection.clone_core_with(&access),
+                        },
+                    );
+                    let resolved = match kind {
+                        DeclarationKind::Definition(definition) => resolve_module_definition(
+                            &access,
+                            definition,
+                            line,
+                            self.context,
+                            definitions,
+                            &scope,
+                        ),
+                        DeclarationKind::Object(object) => {
+                            lower_object(&access, object, line, self.context, definitions, &scope)
+                        }
+                        DeclarationKind::Extend(extend) => {
+                            lower_extend(&access, extend, line, self.context, definitions, &scope)
+                        }
+                        _ => unreachable!("resolved declarations were matched above"),
+                    }?;
+                    Ok(access.root_runtime_value(lower_resolved_expr_in(&access, resolved)))
+                });
+                match result {
+                    Ok(definitions) => {
+                        self.definitions = definitions;
                         Ok(())
                     }
                     Err(diagnostic) => Err(diagnostic),
@@ -177,6 +171,7 @@ pub(in crate::g_syntax) fn lower_parsed_source(
 }
 
 fn resolve_module_definition(
+    access: &RuntimeValueAccess<'_>,
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
@@ -185,11 +180,12 @@ fn resolve_module_definition(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
     lower_definition_resolved(
+        access,
         definition,
         line,
         context,
         &ResolvedRoot::Provided(definitions),
-        &scope.resolved(),
+        &scope.resolved_in(access),
         &mut locals,
     )
 }

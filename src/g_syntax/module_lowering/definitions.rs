@@ -9,6 +9,7 @@ pub(in crate::g_syntax) enum BuiltinAssertion {
 
 /// Shared source and scope state for checking and updating one definition.
 pub(in crate::g_syntax) struct DefinitionTargetContext<'a> {
+    access: &'a RuntimeValueAccess<'a>,
     definitions: &'a ResolvedRoot,
     line: usize,
     compiler: &'a CompileContext,
@@ -17,12 +18,14 @@ pub(in crate::g_syntax) struct DefinitionTargetContext<'a> {
 
 impl<'a> DefinitionTargetContext<'a> {
     pub(in crate::g_syntax) fn new(
+        access: &'a RuntimeValueAccess<'a>,
         definitions: &'a ResolvedRoot,
         line: usize,
         compiler: &'a CompileContext,
         scope: &'a NameScope<ResolvedRoot>,
     ) -> Self {
         Self {
+            access,
             definitions,
             line,
             compiler,
@@ -38,6 +41,7 @@ impl<'a> DefinitionTargetContext<'a> {
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
         let prior = definition_target_access_resolved(
+            self.access,
             target,
             self.definitions,
             self.line,
@@ -47,6 +51,7 @@ impl<'a> DefinitionTargetContext<'a> {
         )?;
         if sugar_param_count == 0 {
             let update = syntax_expr_to_resolved_in_semantic_scope(
+                self.access,
                 update,
                 self.line,
                 self.compiler,
@@ -73,6 +78,7 @@ impl<'a> DefinitionTargetContext<'a> {
         let parameters =
             locals.extend_source_bindings(params.iter().map(String::as_str), self.line)?;
         let lowered = syntax_expr_to_resolved_in_semantic_scope(
+            self.access,
             body,
             self.line,
             self.compiler,
@@ -99,6 +105,7 @@ impl<'a> DefinitionTargetContext<'a> {
         };
         let singleton = |key: &str, value| {
             apply_builtin_resolved(
+                self.access,
                 Builtin::DictSingleton,
                 [
                     ResolvedExpr::Embedded(Value::Atom(atom_from_str(key))),
@@ -107,6 +114,7 @@ impl<'a> DefinitionTargetContext<'a> {
             )
         };
         let payload = apply_builtin_resolved(
+            self.access,
             Builtin::DictUnion,
             [
                 singleton(
@@ -118,6 +126,7 @@ impl<'a> DefinitionTargetContext<'a> {
                 singleton(
                     "value",
                     definition_target_access_resolved(
+                        self.access,
                         target,
                         self.definitions,
                         self.line,
@@ -129,7 +138,11 @@ impl<'a> DefinitionTargetContext<'a> {
             ],
         );
         let annotation = singleton(tag, payload);
-        Ok(apply_builtin_resolved(Builtin::Anno, [annotation, value]))
+        Ok(apply_builtin_resolved(
+            self.access,
+            Builtin::Anno,
+            [annotation, value],
+        ))
     }
 
     pub(in crate::g_syntax) fn annotate_static(
@@ -148,6 +161,7 @@ impl<'a> DefinitionTargetContext<'a> {
 }
 
 pub(in crate::g_syntax) fn lower_definition_resolved(
+    access: &RuntimeValueAccess<'_>,
     definition: &DefinitionDecl,
     line: usize,
     context: &CompileContext,
@@ -156,11 +170,12 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let Some(expr) = &definition.expr else {
-        return Ok(definitions.expr());
+        return Ok(definitions.expr(access));
     };
 
     let target_scope = definition_target_scope_resolved(scope, definitions.clone());
-    let target_context = DefinitionTargetContext::new(definitions, line, context, &target_scope);
+    let target_context =
+        DefinitionTargetContext::new(access, definitions, line, context, &target_scope);
     let (assertion, value) = match definition.kind {
         DefinitionKind::Introduce | DefinitionKind::Override => {
             let assertion = match definition.kind {
@@ -168,8 +183,9 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
                 DefinitionKind::Override => BuiltinAssertion::Defined,
                 DefinitionKind::Update => unreachable!(),
             };
-            let value =
-                syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
+            let value = syntax_expr_to_resolved_in_semantic_scope(
+                access, expr, line, context, scope, locals,
+            )?;
             (Some(assertion), value)
         }
         DefinitionKind::Update => (
@@ -182,18 +198,20 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
             )?,
         ),
     };
-    let value = decorate_reflection_boundary(&definition.target, value, scope)?;
+    let value = decorate_reflection_boundary(access, &definition.target, value, scope)?;
     let value = match assertion {
         Some(assertion) => target_context.annotate(assertion, &definition.target, value, locals)?,
         None => value,
     };
     let value = annotate_definition_context(
+        access,
         value,
         &definition_target_name(&definition.target),
         line,
         context,
     );
     update_definition_target_resolved(
+        access,
         definitions,
         &definition.target,
         value,
@@ -205,6 +223,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
 }
 
 fn decorate_reflection_boundary(
+    access: &RuntimeValueAccess<'_>,
     target: &[SyntaxKeyExpr],
     value: ResolvedExpr<Value>,
     scope: &NameScope<ResolvedRoot>,
@@ -222,14 +241,15 @@ fn decorate_reflection_boundary(
         return Ok(value);
     }
 
-    Ok(apply_reflection_boundary(value, boundary))
+    Ok(apply_reflection_boundary(access, value, boundary))
 }
 
 fn apply_reflection_boundary(
+    access: &RuntimeValueAccess<'_>,
     value: ResolvedExpr<Value>,
     boundary: &ReflectionBoundary<ResolvedRoot>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(boundary.annotator.expr(), [value])
+    ResolvedExpr::apply(boundary.annotator.expr(access), [value])
 }
 
 pub(in crate::g_syntax) fn definition_target_scope_resolved(
@@ -249,17 +269,20 @@ pub(in crate::g_syntax) fn definition_target_scope_resolved(
 }
 
 pub(in crate::g_syntax) fn update_module_resolved(
+    access: &RuntimeValueAccess<'_>,
     definitions: ResolvedExpr<Value>,
     target: &str,
     value: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
+        access,
         Builtin::DictUpdate,
-        [static_path_resolved(target), value, definitions],
+        [static_path_resolved(access, target), value, definitions],
     )
 }
 
 pub(in crate::g_syntax) fn update_definition_target_resolved(
+    access: &RuntimeValueAccess<'_>,
     definitions: &ResolvedRoot,
     target: &[SyntaxKeyExpr],
     value: ResolvedExpr<Value>,
@@ -269,16 +292,18 @@ pub(in crate::g_syntax) fn update_definition_target_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(apply_builtin_resolved(
+        access,
         Builtin::DictUpdate,
         [
-            definition_target_path_resolved(target, line, context, scope, locals)?,
+            definition_target_path_resolved(access, target, line, context, scope, locals)?,
             value,
-            definitions.expr(),
+            definitions.expr(access),
         ],
     ))
 }
 
 pub(in crate::g_syntax) fn definition_target_access_resolved(
+    access: &RuntimeValueAccess<'_>,
     target: &[SyntaxKeyExpr],
     definitions: &ResolvedRoot,
     line: usize,
@@ -288,22 +313,23 @@ pub(in crate::g_syntax) fn definition_target_access_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let path = target
         .iter()
-        .map(|part| syntax_key_expr_to_resolved_path(part, line, context, scope, locals))
+        .map(|part| syntax_key_expr_to_resolved_path(access, part, line, context, scope, locals))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResolvedExpr::Access {
-        base: Box::new(definitions.expr()),
+        base: Box::new(definitions.expr(access)),
         path,
     })
 }
 
 pub(in crate::g_syntax) fn definition_target_path_resolved(
+    access: &RuntimeValueAccess<'_>,
     target: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    syntax_path_resolved(target, line, context, scope, locals)
+    syntax_path_resolved(access, target, line, context, scope, locals)
 }
 
 fn definition_target_name(target: &[SyntaxKeyExpr]) -> String {
@@ -324,6 +350,7 @@ fn definition_target_name(target: &[SyntaxKeyExpr]) -> String {
 }
 
 pub(in crate::g_syntax) fn annotate_definition_context(
+    access: &RuntimeValueAccess<'_>,
     value: ResolvedExpr<Value>,
     definition: &str,
     line: usize,
@@ -346,10 +373,17 @@ pub(in crate::g_syntax) fn annotate_definition_context(
     );
     let frame = Value::Dict(Dict::new_sync().insert((*keys::G).clone(), compiler_context));
     let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame));
-    apply_builtin_resolved(Builtin::Anno, [ResolvedExpr::Embedded(annotation), value])
+    apply_builtin_resolved(
+        access,
+        Builtin::Anno,
+        [ResolvedExpr::Embedded(annotation), value],
+    )
 }
 
-pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Value> {
+pub(in crate::g_syntax) fn static_path_resolved(
+    _access: &RuntimeValueAccess<'_>,
+    target: &str,
+) -> ResolvedExpr<Value> {
     ResolvedExpr::List(
         target
             .split('.')
@@ -359,6 +393,7 @@ pub(in crate::g_syntax) fn static_path_resolved(target: &str) -> ResolvedExpr<Va
 }
 
 pub(in crate::g_syntax) fn path_resolved_in_definitions(
+    _access: &RuntimeValueAccess<'_>,
     target: &str,
     definitions: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
@@ -382,9 +417,10 @@ pub(in crate::g_syntax) fn update_module_value_in(
     lower_resolved_expr_in(
         access,
         apply_builtin_resolved(
+            access,
             Builtin::DictUpdate,
             [
-                ResolvedExpr::Embedded(path_value(target)),
+                ResolvedExpr::Embedded(path_value(access, target)),
                 ResolvedExpr::Provided(value),
                 ResolvedExpr::Provided(definitions),
             ],
@@ -419,6 +455,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
             _ => lower_resolved_expr_in(
                 access,
                 apply_builtin_resolved(
+                    access,
                     Builtin::DictUpdate,
                     [
                         ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
@@ -431,7 +468,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
     })
 }
 
-pub(in crate::g_syntax) fn path_value(target: &str) -> Value {
+pub(in crate::g_syntax) fn path_value(_access: &RuntimeValueAccess<'_>, target: &str) -> Value {
     Value::List(crate::core::List::from_values(
         target
             .split('.')

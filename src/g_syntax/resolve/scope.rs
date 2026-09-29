@@ -425,7 +425,10 @@ pub(in crate::g_syntax) enum ResolvedRoot {
 }
 
 impl ResolvedRoot {
-    pub(in crate::g_syntax) fn expr(&self) -> ResolvedExpr<Value> {
+    pub(in crate::g_syntax) fn expr(
+        &self,
+        _access: &RuntimeValueAccess<'_>,
+    ) -> ResolvedExpr<Value> {
         match self {
             Self::Provided(value) => ResolvedExpr::Provided(value.clone()),
             Self::Local(binding) => ResolvedExpr::Local(*binding),
@@ -441,6 +444,7 @@ pub(in crate::g_syntax) struct ResolvedBindings {
 impl ResolvedBindings {
     pub(in crate::g_syntax) fn bind(
         &mut self,
+        _access: &RuntimeValueAccess<'_>,
         locals: &mut ResolverContext,
         label: &str,
         value: ResolvedExpr<Value>,
@@ -450,7 +454,11 @@ impl ResolvedBindings {
         ResolvedRoot::Local(binding)
     }
 
-    pub(in crate::g_syntax) fn wrap(self, mut body: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
+    pub(in crate::g_syntax) fn wrap(
+        self,
+        _access: &RuntimeValueAccess<'_>,
+        mut body: ResolvedExpr<Value>,
+    ) -> ResolvedExpr<Value> {
         for (binding, value) in self.bindings.into_iter().rev() {
             body = ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], body), [value]);
         }
@@ -464,6 +472,7 @@ impl NameScope<Value> {
         context: &CompileContext,
         visible_definitions: Value,
     ) -> Self {
+        compiler_values::prepare(context.values());
         let reflection = ReflectionBoundary {
             annotator: compiler_values::reflection_annotator_value(
                 context.values(),
@@ -471,10 +480,13 @@ impl NameScope<Value> {
                 context.final_defs().clone(),
             ),
         };
-        Self::module_with_reflection(context, visible_definitions, reflection)
+        context.values().with_runtime_value_access(|access| {
+            Self::module_with_reflection(&access, context, visible_definitions, reflection)
+        })
     }
 
     pub(in crate::g_syntax) fn module_with_reflection(
+        _access: &RuntimeValueAccess<'_>,
         context: &CompileContext,
         visible_definitions: Value,
         reflection: ReflectionBoundary<Value>,
@@ -492,7 +504,10 @@ impl NameScope<Value> {
         }
     }
 
-    pub(in crate::g_syntax) fn resolved(&self) -> NameScope<ResolvedRoot> {
+    pub(in crate::g_syntax) fn resolved_in(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> NameScope<ResolvedRoot> {
         NameScope {
             final_defs: ResolvedRoot::Provided(self.final_defs.clone()),
             prior_defs: ResolvedRoot::Provided(self.prior_defs.clone()),
@@ -507,8 +522,18 @@ impl NameScope<Value> {
             parent: self
                 .parent
                 .as_deref()
-                .map(NameScope::resolved)
+                .map(|parent| parent.resolved_in(access))
                 .map(Box::new),
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::g_syntax) fn resolved(
+        &self,
+        context: &CompileContext,
+    ) -> NameScope<ResolvedRoot> {
+        context
+            .values()
+            .with_runtime_value_access(|access| self.resolved_in(&access))
     }
 }

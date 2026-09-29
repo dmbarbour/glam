@@ -75,15 +75,17 @@ impl PatternStepSink for ConditionalPatternStepSink<'_> {
 }
 
 pub(super) fn lower_guard_choices_resolved(
+    access: &RuntimeValueAccess<'_>,
     alternatives: &[GuardChoiceArm<'_>],
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    Ok(resolve_guard_choice(alternatives, context, scope, locals)?.emit(context.values()))
+    Ok(resolve_guard_choice(access, alternatives, context, scope, locals)?.emit(access))
 }
 
 pub(super) fn lower_if_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     if_expr: &IfExpr,
     line: usize,
     context: &CompileContext,
@@ -106,22 +108,22 @@ pub(super) fn lower_if_expr_resolved(
             result: &if_expr.else_result,
         },
     ];
-    let search = lower_guard_choices_resolved(&alternatives, context, scope, locals)?;
+    let search = lower_guard_choices_resolved(access, &alternatives, context, scope, locals)?;
     Ok(match if_expr.mode {
-        ConditionalMode::Pure => context.values().with_runtime_value_access(|access| {
-            compiler_values::run_pure_conditional_resolved(&access, search)
-        }),
+        ConditionalMode::Pure => compiler_values::run_pure_conditional_resolved(access, search),
         ConditionalMode::Host => search,
     })
 }
 
 pub(super) fn lower_match_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     match_expr: &MatchExpr,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let subject = syntax_expr_to_resolved_in_semantic_scope(
+        access,
         &match_expr.subject,
         match_expr.line,
         context,
@@ -131,14 +133,20 @@ pub(super) fn lower_match_expr_resolved(
     let base_len = locals.len();
     let subject_binding = locals.fresh_binding();
     let resolved = (|| {
-        let selected =
-            resolve_match_choice(&match_expr.arms, subject_binding, context, scope, locals)?
-                .emit_match(
-                    context.values(),
-                    match_expr.mode,
-                    match_expr.commitment,
-                    match_expr.line,
-                );
+        let selected = resolve_match_choice(
+            access,
+            &match_expr.arms,
+            subject_binding,
+            context,
+            scope,
+            locals,
+        )?
+        .emit_match(
+            access,
+            match_expr.mode,
+            match_expr.commitment,
+            match_expr.line,
+        );
         Ok(ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![subject_binding], selected),
             [subject],
@@ -149,14 +157,15 @@ pub(super) fn lower_match_expr_resolved(
 }
 
 pub(super) fn lower_match_when_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     match_when: &MatchWhenExpr,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(
-        resolve_when_choice(&match_when.arms, context, scope, locals)?.emit_match(
-            context.values(),
+        resolve_when_choice(access, &match_when.arms, context, scope, locals)?.emit_match(
+            access,
             match_when.mode,
             match_when.commitment,
             match_when.line,
@@ -165,6 +174,7 @@ pub(super) fn lower_match_when_expr_resolved(
 }
 
 fn resolve_guard_choice(
+    access: &RuntimeValueAccess<'_>,
     alternatives: &[GuardChoiceArm<'_>],
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
@@ -175,6 +185,7 @@ fn resolve_guard_choice(
 
     for alternative in alternatives {
         let branch = resolve_alternative(
+            access,
             ChoiceArmSpec {
                 pattern: None,
                 guards: alternative.guards,
@@ -198,12 +209,14 @@ fn resolve_guard_choice(
 }
 
 fn resolve_alternative(
+    access: &RuntimeValueAccess<'_>,
     arm: ChoiceArmSpec<'_>,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedAlternative, Diagnostic> {
     let steps = resolve_prefix_steps(
+        access,
         arm.pattern,
         arm.guards,
         arm.line,
@@ -213,6 +226,7 @@ fn resolve_alternative(
         locals,
     )?;
     let result = syntax_expr_to_resolved_in_semantic_scope(
+        access,
         arm.result,
         arm.result_line,
         context,
@@ -227,6 +241,7 @@ fn resolve_alternative(
 }
 
 fn resolve_match_choice(
+    access: &RuntimeValueAccess<'_>,
     arms: &[MatchArm],
     subject: BindingId,
     context: &CompileContext,
@@ -236,7 +251,7 @@ fn resolve_match_choice(
     let base_len = locals.len();
     let mut alternatives = Vec::with_capacity(arms.len());
     for arm in arms {
-        let branch = resolve_match_alternative(arm, subject, context, scope, locals);
+        let branch = resolve_match_alternative(access, arm, subject, context, scope, locals);
         locals.truncate(base_len);
         alternatives.push(branch?);
     }
@@ -244,6 +259,7 @@ fn resolve_match_choice(
 }
 
 fn resolve_match_alternative(
+    access: &RuntimeValueAccess<'_>,
     arm: &MatchArm,
     subject: BindingId,
     context: &CompileContext,
@@ -251,6 +267,7 @@ fn resolve_match_alternative(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedAlternative, Diagnostic> {
     let steps = resolve_prefix_steps(
+        access,
         Some((subject, &arm.pattern)),
         &arm.guards,
         arm.line,
@@ -259,11 +276,12 @@ fn resolve_match_alternative(
         scope,
         locals,
     )?;
-    let outcome = resolve_match_outcome(&arm.outcome, context, scope, locals)?;
+    let outcome = resolve_match_outcome(access, &arm.outcome, context, scope, locals)?;
     Ok(ResolvedAlternative { steps, outcome })
 }
 
 fn resolve_when_choice(
+    access: &RuntimeValueAccess<'_>,
     arms: &[WhenArm],
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
@@ -272,7 +290,7 @@ fn resolve_when_choice(
     let base_len = locals.len();
     let mut alternatives = Vec::with_capacity(arms.len());
     for arm in arms {
-        let branch = resolve_when_alternative(arm, context, scope, locals);
+        let branch = resolve_when_alternative(access, arm, context, scope, locals);
         locals.truncate(base_len);
         alternatives.push(branch?);
     }
@@ -280,12 +298,14 @@ fn resolve_when_choice(
 }
 
 fn resolve_when_alternative(
+    access: &RuntimeValueAccess<'_>,
     arm: &WhenArm,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedAlternative, Diagnostic> {
     let steps = resolve_prefix_steps(
+        access,
         None,
         &arm.guards,
         arm.line,
@@ -294,11 +314,12 @@ fn resolve_when_alternative(
         scope,
         locals,
     )?;
-    let outcome = resolve_match_outcome(&arm.outcome, context, scope, locals)?;
+    let outcome = resolve_match_outcome(access, &arm.outcome, context, scope, locals)?;
     Ok(ResolvedAlternative { steps, outcome })
 }
 
 fn resolve_match_outcome(
+    access: &RuntimeValueAccess<'_>,
     outcome: &MatchOutcome,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
@@ -309,18 +330,20 @@ fn resolve_match_outcome(
             line,
             mode,
             expression,
-        } => syntax_expr_to_resolved_in_semantic_scope(expression, *line, context, scope, locals)
-            .map(|result| match mode {
-                ConditionalResultMode::Ordinary => ResolvedChoiceOutcome::Value(result),
-                ConditionalResultMode::Tentative => ResolvedChoiceOutcome::Effect(result),
-            }),
-        MatchOutcome::Nested(arms) => {
-            resolve_when_choice(arms, context, scope, locals).map(ResolvedChoiceOutcome::Nested)
-        }
+        } => syntax_expr_to_resolved_in_semantic_scope(
+            access, expression, *line, context, scope, locals,
+        )
+        .map(|result| match mode {
+            ConditionalResultMode::Ordinary => ResolvedChoiceOutcome::Value(result),
+            ConditionalResultMode::Tentative => ResolvedChoiceOutcome::Effect(result),
+        }),
+        MatchOutcome::Nested(arms) => resolve_when_choice(access, arms, context, scope, locals)
+            .map(ResolvedChoiceOutcome::Nested),
     }
 }
 
 fn resolve_prefix_steps(
+    access: &RuntimeValueAccess<'_>,
     pattern: Option<(BindingId, &SyntaxPattern)>,
     guards: &[SyntaxGuardClause],
     line: usize,
@@ -334,7 +357,7 @@ fn resolve_prefix_steps(
         steps: &mut steps,
         locals,
     };
-    let mut lowering = PatternLoweringContext::new(context, scope, &mut sink)
+    let mut lowering = PatternLoweringContext::new(access, context, scope, &mut sink)
         .with_unit_assertion_context(unit_assertion_context);
     if let Some((subject, pattern)) = pattern {
         append_pattern_steps(
@@ -351,61 +374,57 @@ fn resolve_prefix_steps(
 impl ResolvedChoice {
     fn emit_match(
         self,
-        values: &CoreValueFactory,
+        access: &RuntimeValueAccess<'_>,
         mode: ConditionalMode,
         commitment: MatchCommitment,
         line: usize,
     ) -> ResolvedExpr<Value> {
         match (mode, commitment) {
             (ConditionalMode::Pure, MatchCommitment::Cut) => {
-                let search = self.emit_search(values);
-                values.with_runtime_value_access(|access| {
-                    compiler_values::run_pure_match_resolved(&access, search, line)
-                })
+                let search = self.emit_search(access);
+                compiler_values::run_pure_match_resolved(access, search, line)
             }
             (ConditionalMode::Pure, MatchCommitment::Open) => {
-                let search = self.emit_search(values);
-                values.with_runtime_value_access(|access| {
-                    compiler_values::run_pure_open_match_resolved(&access, search)
-                })
+                let search = self.emit_search(access);
+                compiler_values::run_pure_open_match_resolved(access, search)
             }
-            (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(values),
-            (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(values),
+            (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(access),
+            (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(access),
         }
     }
 
-    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
-        effect_call_resolved(values, "cut", [self.emit_search(values)])
+    fn emit(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        effect_call_resolved(access, "cut", [self.emit_search(access)])
     }
 
-    fn emit_search(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
+    fn emit_search(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
         let mut alternatives = self
             .alternatives
             .into_iter()
-            .map(|alternative| alternative.emit(values))
+            .map(|alternative| alternative.emit(access))
             .rev();
         let mut search = alternatives
             .next()
-            .unwrap_or_else(|| lower_effect_expr_resolved(values, "fail"));
+            .unwrap_or_else(|| lower_effect_expr_resolved(access, "fail"));
         for alternative in alternatives {
-            search = effect_call_resolved(values, "alt", [alternative, search]);
+            search = effect_call_resolved(access, "alt", [alternative, search]);
         }
         search
     }
 }
 
 impl ResolvedAlternative {
-    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
-        emit_effect_steps(values, self.steps, self.outcome.emit(values))
+    fn emit(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        emit_effect_steps(access, self.steps, self.outcome.emit(access))
     }
 }
 
 impl ResolvedChoiceOutcome {
-    fn emit(self, values: &CoreValueFactory) -> ResolvedExpr<Value> {
+    fn emit(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
         match self {
-            Self::Value(result) => effect_call_resolved(values, "r", [result]),
+            Self::Value(result) => effect_call_resolved(access, "r", [result]),
             Self::Effect(result) => result,
-            Self::Nested(choice) => choice.emit_search(values),
+            Self::Nested(choice) => choice.emit_search(access),
         }
     }
 }
@@ -416,13 +435,86 @@ mod tests {
     use crate::g_syntax::resolve::effect_steps::ResolvedEffectStepKind;
     use crate::number::Number;
 
+    fn effect_call_resolved(
+        values: &CoreValueFactory,
+        name: &str,
+        arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
+    ) -> ResolvedExpr<Value> {
+        compiler_values::prepare(values);
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
+        values.with_runtime_value_access(|access| {
+            super::effect_call_resolved(&access, name, arguments)
+        })
+    }
+
+    fn lower_effect_expr_resolved(values: &CoreValueFactory, name: &str) -> ResolvedExpr<Value> {
+        compiler_values::prepare(values);
+        values.with_runtime_value_access(|access| super::lower_effect_expr_resolved(&access, name))
+    }
+
+    fn lower_guard_choices_resolved(
+        alternatives: &[GuardChoiceArm<'_>],
+        context: &CompileContext,
+        scope: &NameScope<ResolvedRoot>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        context.values().with_runtime_value_access(|access| {
+            super::lower_guard_choices_resolved(&access, alternatives, context, scope, locals)
+        })
+    }
+
+    fn resolve_guard_choice(
+        alternatives: &[GuardChoiceArm<'_>],
+        context: &CompileContext,
+        scope: &NameScope<ResolvedRoot>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedChoice, Diagnostic> {
+        context.values().with_runtime_value_access(|access| {
+            super::resolve_guard_choice(&access, alternatives, context, scope, locals)
+        })
+    }
+
+    fn lower_if_expr_resolved(
+        if_expr: &IfExpr,
+        line: usize,
+        context: &CompileContext,
+        scope: &NameScope<ResolvedRoot>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        context.values().with_runtime_value_access(|access| {
+            super::lower_if_expr_resolved(&access, if_expr, line, context, scope, locals)
+        })
+    }
+
+    fn lower_match_expr_resolved(
+        match_expr: &MatchExpr,
+        context: &CompileContext,
+        scope: &NameScope<ResolvedRoot>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        context.values().with_runtime_value_access(|access| {
+            super::lower_match_expr_resolved(&access, match_expr, context, scope, locals)
+        })
+    }
+
+    fn lower_match_when_expr_resolved(
+        match_when: &MatchWhenExpr,
+        context: &CompileContext,
+        scope: &NameScope<ResolvedRoot>,
+        locals: &mut ResolverContext,
+    ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+        context.values().with_runtime_value_access(|access| {
+            super::lower_match_when_expr_resolved(&access, match_when, context, scope, locals)
+        })
+    }
+
     fn resolve(alternatives: &[GuardChoiceArm<'_>]) -> ResolvedExpr<Value> {
         let context = CompileContext::default();
         let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
         lower_guard_choices_resolved(
             alternatives,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("guard choice should resolve")
@@ -569,7 +661,7 @@ mod tests {
                 result: &result,
             }],
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut locals,
         )
         .expect("direct value guard should resolve");
@@ -652,7 +744,7 @@ mod tests {
                 },
             ],
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut locals,
         )
         .expect("sibling branch captures should resolve independently");
@@ -692,7 +784,7 @@ mod tests {
             &if_expr,
             1,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("prefix if should resolve");
@@ -718,7 +810,7 @@ mod tests {
             &host_if,
             1,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("host try should resolve");
@@ -733,7 +825,7 @@ mod tests {
         let resolved_match = lower_match_when_expr_resolved(
             &host_match_when,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("empty host try_match should resolve");
@@ -755,7 +847,7 @@ mod tests {
         let resolved_host = lower_match_when_expr_resolved(
             &host,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("empty open host match should resolve");
@@ -773,7 +865,7 @@ mod tests {
         let resolved_pure = lower_match_when_expr_resolved(
             &pure,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("empty open pure match should resolve");
@@ -826,7 +918,7 @@ mod tests {
         let resolved = lower_match_expr_resolved(
             &match_expr,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("subject match should resolve");
@@ -883,7 +975,7 @@ mod tests {
         let resolved = lower_match_expr_resolved(
             &match_expr,
             &context,
-            &scope.resolved(),
+            &scope.resolved(&context),
             &mut ResolverContext::default(),
         )
         .expect("hierarchical match should resolve");

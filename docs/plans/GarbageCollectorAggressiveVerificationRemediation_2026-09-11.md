@@ -1814,13 +1814,20 @@ Execute this phase by call tree rather than as one mechanical signature edit:
    diagnostic emissions cross into the still-pending compiler boundary as
    roots. This converts all 30 planned declarations, removes the obsolete
    `apply_closed` raw facade, and leaves 106 D.2e violations.
-3. **D.2e.2 — resolution graph.** Thread the same access through conditional,
+3. **D.2e.2 — resolution graph. Complete (2026-09-29).** Thread the same access through conditional,
    do, effect-step, expression, pattern, and scope lowering. The resolved IR is
    regional semantic data, not syntax and not a new durable value carrier.
-4. **D.2e.3 — module lowering.** Carry the regional authority through
+   Conditional, do, effect-step, expression, pattern, and scope lowering now
+   share the caller's access. Test-only convenience adapters remain visibly
+   test-only; production resolved IR cannot cross the regional boundary.
+4. **D.2e.3 — module lowering. Complete (2026-09-29).** Carry the regional authority through
    definitions, object declarations, imports, and the module fixpoint. Import
    callbacks remain outside access; their returned roots are projected only
-   after re-entry.
+   after re-entry. Definition and object resolution, resolved-net lowering,
+   and publication of the next definitions root now occur beneath one access
+   instead of projecting definitions before resolution and reopening access
+   to publish the result. These two checkpoints convert 92 declarations and
+   leave exactly fourteen parser/macro violations for D.2e.4.
 5. **D.2e.4 — parser and macro orchestration.** Keep parser structures ordinary
    Rust data. Root embedded semantic values and macro effects across isolated
    evaluation or host boundaries, and reopen one region only for deterministic

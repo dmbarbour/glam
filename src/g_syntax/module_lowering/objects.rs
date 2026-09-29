@@ -2,6 +2,7 @@ use super::super::*;
 use super::definitions::*;
 
 pub(in crate::g_syntax) fn lower_object(
+    access: &RuntimeValueAccess<'_>,
     object: &ObjectDecl,
     line: usize,
     context: &CompileContext,
@@ -9,10 +10,11 @@ pub(in crate::g_syntax) fn lower_object(
     module_scope: &NameScope<Value>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
-    let scope = module_scope.resolved();
+    let scope = module_scope.resolved_in(access);
     let definitions_root = ResolvedRoot::Provided(definitions);
     let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
     let object_value = object_decl_resolved_in_scope(
+        access,
         object,
         line,
         context,
@@ -21,16 +23,19 @@ pub(in crate::g_syntax) fn lower_object(
         name,
         declared_target_has_reflection(&object.target),
     )?;
-    let target_context = DefinitionTargetContext::new(&definitions_root, line, context, &scope);
+    let target_context =
+        DefinitionTargetContext::new(access, &definitions_root, line, context, &scope);
     let object_value = target_context.annotate_static(
         BuiltinAssertion::Undefined,
         &object.target,
         object_value,
         &mut locals,
     )?;
-    let object_value = annotate_definition_context(object_value, &object.target, line, context);
+    let object_value =
+        annotate_definition_context(access, object_value, &object.target, line, context);
     Ok(update_module_resolved(
-        definitions_root.expr(),
+        access,
+        definitions_root.expr(access),
         &object.target,
         object_value,
     ))
@@ -45,6 +50,7 @@ pub(in crate::g_syntax) fn object_instance_from_parts_value_in(
     lower_resolved_expr_in(
         access,
         object_instance_from_parts_resolved(
+            access,
             ResolvedExpr::Provided(name),
             ResolvedExpr::Provided(deps),
             ResolvedExpr::Provided(defs),
@@ -53,25 +59,31 @@ pub(in crate::g_syntax) fn object_instance_from_parts_value_in(
 }
 
 pub(in crate::g_syntax) fn apply_builtin_resolved(
+    _access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(ResolvedExpr::Embedded(Value::Builtin(builtin)), arguments)
 }
 
-pub(in crate::g_syntax) fn object_spec_resolved(value: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
-    apply_builtin_resolved(Builtin::ObjectSpec, [value])
+pub(in crate::g_syntax) fn object_spec_resolved(
+    access: &RuntimeValueAccess<'_>,
+    value: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    apply_builtin_resolved(access, Builtin::ObjectSpec, [value])
 }
 
 pub(in crate::g_syntax) fn object_instance_from_parts_resolved(
+    access: &RuntimeValueAccess<'_>,
     name: ResolvedExpr<Value>,
     deps: ResolvedExpr<Value>,
     defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
-    apply_builtin_resolved(Builtin::ObjectInstanceFromParts, [name, deps, defs])
+    apply_builtin_resolved(access, Builtin::ObjectInstanceFromParts, [name, deps, defs])
 }
 
 pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
+    access: &RuntimeValueAccess<'_>,
     object: &ObjectDecl,
     line: usize,
     context: &CompileContext,
@@ -80,8 +92,9 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     name: ResolvedExpr<Value>,
     declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let deps = object_parents_resolved(&object.deps, line, context, &parent_scope, locals)?;
+    let deps = object_parents_resolved(access, &object.deps, line, context, &parent_scope, locals)?;
     let defs = object_body_defs_resolved_in_scope(
+        access,
         &object.body,
         object.alias.as_deref(),
         line,
@@ -91,6 +104,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         declared_reflection,
     )?;
     Ok(object_from_parts_resolved(
+        access,
         object.realization,
         name,
         ResolvedExpr::List(deps),
@@ -99,25 +113,30 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
 }
 
 pub(in crate::g_syntax) fn object_from_parts_resolved(
+    access: &RuntimeValueAccess<'_>,
     realization: ObjectRealization,
     name: ResolvedExpr<Value>,
     deps: ResolvedExpr<Value>,
     defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     match realization {
-        ObjectRealization::Instance => object_instance_from_parts_resolved(name, deps, defs),
+        ObjectRealization::Instance => {
+            object_instance_from_parts_resolved(access, name, deps, defs)
+        }
         ObjectRealization::Abstract => {
-            let spec = resolved_record([("name", name), ("deps", deps), ("defs", defs)]);
-            resolved_record([("spec", spec)])
+            let spec = resolved_record(access, [("name", name), ("deps", deps), ("defs", defs)]);
+            resolved_record(access, [("spec", spec)])
         }
     }
 }
 
 fn resolved_record(
+    access: &RuntimeValueAccess<'_>,
     fields: impl IntoIterator<Item = (&'static str, ResolvedExpr<Value>)>,
 ) -> ResolvedExpr<Value> {
     let mut fields = fields.into_iter().map(|(name, value)| {
         apply_builtin_resolved(
+            access,
             Builtin::DictSingleton,
             [
                 ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
@@ -129,11 +148,12 @@ fn resolved_record(
         return ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()));
     };
     fields.fold(first, |record, field| {
-        apply_builtin_resolved(Builtin::DictUnion, [record, field])
+        apply_builtin_resolved(access, Builtin::DictUnion, [record, field])
     })
 }
 
 pub(in crate::g_syntax) fn object_parents_resolved(
+    access: &RuntimeValueAccess<'_>,
     parents: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
@@ -143,14 +163,16 @@ pub(in crate::g_syntax) fn object_parents_resolved(
     parents
         .iter()
         .map(|parent| {
-            let parent =
-                syntax_expr_to_resolved_in_semantic_scope(parent, line, context, scope, locals)?;
-            Ok(object_spec_resolved(parent))
+            let parent = syntax_expr_to_resolved_in_semantic_scope(
+                access, parent, line, context, scope, locals,
+            )?;
+            Ok(object_spec_resolved(access, parent))
         })
         .collect()
 }
 
 pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
+    access: &RuntimeValueAccess<'_>,
     body: &[ObjectBodyDefinition],
     alias: Option<&str>,
     _line: usize,
@@ -166,32 +188,34 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     let mut bindings = ResolvedBindings::default();
     let reflection_guard = declared_reflection.then(|| {
         bindings.bind(
+            access,
             locals,
             "<object-reflection-guard>",
-            object_reflection_guard_resolved(context.values(), object_final_defs.expr()),
+            object_reflection_guard_resolved(access, object_final_defs.expr(access)),
         )
     });
     let reflection_annotator = reflection_guard.map(|guard| {
         bindings.bind(
+            access,
             locals,
             "<object-reflection-annotator>",
-            context.values().with_runtime_value_access(|access| {
-                compiler_values::reflection_annotator_resolved(
-                    &access,
-                    guard.expr(),
-                    object_final_defs.expr(),
-                )
-            }),
+            compiler_values::reflection_annotator_resolved(
+                access,
+                guard.expr(access),
+                object_final_defs.expr(access),
+            ),
         )
     });
     let mut definitions = bindings.bind(
+        access,
         locals,
         "<object-visible-defs>",
-        remove_object_spec_resolved(ResolvedExpr::Local(prior_self)),
+        remove_object_spec_resolved(access, ResolvedExpr::Local(prior_self)),
     );
 
     for body_definition in body {
         let scope = object_body_scope_resolved(
+            access,
             alias,
             object_final_defs.clone(),
             definitions.clone(),
@@ -199,6 +223,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             reflection_annotator.clone(),
         );
         let updated = lower_object_body_item_resolved(
+            access,
             body_definition,
             context,
             &definitions,
@@ -206,18 +231,20 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             locals,
         )?;
         definitions = bindings.bind(
+            access,
             locals,
             "<object-visible-defs>",
-            remove_object_spec_resolved(updated),
+            remove_object_spec_resolved(access, updated),
         );
     }
 
-    let body = bindings.wrap(definitions.expr());
+    let body = bindings.wrap(access, definitions.expr(access));
     locals.truncate(base_len);
     Ok(ResolvedExpr::lambda(vec![prior_self, final_self], body))
 }
 
 pub(in crate::g_syntax) fn lower_object_body_item_resolved(
+    access: &RuntimeValueAccess<'_>,
     item: &ObjectBodyDefinition,
     context: &CompileContext,
     definitions: &ResolvedRoot,
@@ -225,19 +252,38 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match &item.kind {
-        ObjectBodyDefinitionKind::Definition(definition) => {
-            lower_definition_resolved(definition, item.line, context, definitions, scope, locals)
-        }
-        ObjectBodyDefinitionKind::Object(object) => {
-            lower_nested_object_resolved(object, item.line, context, definitions, scope, locals)
-        }
-        ObjectBodyDefinitionKind::Extend(extend) => {
-            lower_nested_extend_resolved(extend, item.line, context, definitions, scope, locals)
-        }
+        ObjectBodyDefinitionKind::Definition(definition) => lower_definition_resolved(
+            access,
+            definition,
+            item.line,
+            context,
+            definitions,
+            scope,
+            locals,
+        ),
+        ObjectBodyDefinitionKind::Object(object) => lower_nested_object_resolved(
+            access,
+            object,
+            item.line,
+            context,
+            definitions,
+            scope,
+            locals,
+        ),
+        ObjectBodyDefinitionKind::Extend(extend) => lower_nested_extend_resolved(
+            access,
+            extend,
+            item.line,
+            context,
+            definitions,
+            scope,
+            locals,
+        ),
     }
 }
 
 pub(in crate::g_syntax) fn lower_nested_object_resolved(
+    access: &RuntimeValueAccess<'_>,
     object: &ObjectDecl,
     line: usize,
     context: &CompileContext,
@@ -245,8 +291,9 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let name = hierarchical_object_name_resolved(&object.target, line, scope)?;
+    let name = hierarchical_object_name_resolved(access, &object.target, line, scope)?;
     let object_value = object_decl_resolved_in_scope(
+        access,
         object,
         line,
         context,
@@ -255,22 +302,25 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         name,
         scope.reflection.is_some() && declared_target_has_reflection(&object.target),
     )?;
-    let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
+    let target_context = DefinitionTargetContext::new(access, definitions, line, context, scope);
     let object_value = target_context.annotate_static(
         BuiltinAssertion::Undefined,
         &object.target,
         object_value,
         locals,
     )?;
-    let object_value = annotate_definition_context(object_value, &object.target, line, context);
+    let object_value =
+        annotate_definition_context(access, object_value, &object.target, line, context);
     Ok(update_module_resolved(
-        definitions.expr(),
+        access,
+        definitions.expr(access),
         &object.target,
         object_value,
     ))
 }
 
 pub(in crate::g_syntax) fn hierarchical_object_name_resolved(
+    access: &RuntimeValueAccess<'_>,
     target: &str,
     line: usize,
     scope: &NameScope<ResolvedRoot>,
@@ -288,18 +338,21 @@ pub(in crate::g_syntax) fn hierarchical_object_name_resolved(
             .collect::<Vec<_>>(),
     );
     Ok(apply_builtin_resolved(
+        access,
         Builtin::ObjectLocalName,
-        [host.expr(), parts],
+        [host.expr(access), parts],
     ))
 }
 
 pub(in crate::g_syntax) fn remove_object_spec_resolved(
+    access: &RuntimeValueAccess<'_>,
     value: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
+        access,
         Builtin::DictUpdate,
         [
-            static_path_resolved("spec"),
+            static_path_resolved(access, "spec"),
             ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
             value,
         ],
@@ -307,15 +360,15 @@ pub(in crate::g_syntax) fn remove_object_spec_resolved(
 }
 
 fn object_reflection_guard_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     object_final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     let object_name = ResolvedExpr::Access {
-        base: Box::new(object_spec_resolved(object_final_defs)),
+        base: Box::new(object_spec_resolved(access, object_final_defs)),
         path: vec![ResolvedPathPart::Key(name_as_key("name"))],
     };
     ResolvedExpr::List(vec![
-        ResolvedExpr::Embedded(values.object_reflection_guard()),
+        ResolvedExpr::Embedded(access.values().object_reflection_guard()),
         object_name,
     ])
 }
@@ -325,6 +378,7 @@ fn declared_target_has_reflection(target: &str) -> bool {
 }
 
 pub(in crate::g_syntax) fn object_body_scope_resolved(
+    _access: &RuntimeValueAccess<'_>,
     alias: Option<&str>,
     object_final_defs: ResolvedRoot,
     object_prior_defs: ResolvedRoot,
@@ -354,6 +408,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_extend(
+    access: &RuntimeValueAccess<'_>,
     extend: &ObjectExtendDecl,
     line: usize,
     context: &CompileContext,
@@ -361,9 +416,10 @@ pub(in crate::g_syntax) fn lower_extend(
     module_scope: &NameScope<Value>,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let mut locals = ResolverContext::default();
-    let scope = module_scope.resolved();
+    let scope = module_scope.resolved_in(access);
     let definitions_root = ResolvedRoot::Provided(definitions);
     extend_object_resolved_in_scope(
+        access,
         extend,
         line,
         context,
@@ -375,6 +431,7 @@ pub(in crate::g_syntax) fn lower_extend(
 }
 
 pub(in crate::g_syntax) fn lower_nested_extend_resolved(
+    access: &RuntimeValueAccess<'_>,
     extend: &ObjectExtendDecl,
     line: usize,
     context: &CompileContext,
@@ -383,6 +440,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     extend_object_resolved_in_scope(
+        access,
         extend,
         line,
         context,
@@ -394,6 +452,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
 }
 
 fn extend_object_resolved_in_scope(
+    access: &RuntimeValueAccess<'_>,
     extend: &ObjectExtendDecl,
     line: usize,
     context: &CompileContext,
@@ -403,6 +462,7 @@ fn extend_object_resolved_in_scope(
     declared_reflection: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let extension_defs = object_body_defs_resolved_in_scope(
+        access,
         &extend.body,
         extend.alias.as_deref(),
         line,
@@ -411,12 +471,13 @@ fn extend_object_resolved_in_scope(
         locals,
         declared_reflection,
     )?;
-    let prior_object = path_resolved_in_definitions(&extend.target, definitions.expr());
-    let prior_spec = object_spec_resolved(prior_object);
+    let prior_object =
+        path_resolved_in_definitions(access, &extend.target, definitions.expr(access));
+    let prior_spec = object_spec_resolved(access, prior_object);
     let mut bindings = ResolvedBindings::default();
-    let prior_spec = bindings.bind(locals, "<extended-object-spec>", prior_spec);
+    let prior_spec = bindings.bind(access, locals, "<extended-object-spec>", prior_spec);
     let spec_member = |name| ResolvedExpr::Access {
-        base: Box::new(prior_spec.expr()),
+        base: Box::new(prior_spec.expr(access)),
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
     let prior_defs = spec_member("defs");
@@ -433,22 +494,28 @@ fn extend_object_resolved_in_scope(
             [prior_result, ResolvedExpr::Local(self_value)],
         ),
     );
-    let object_value = bindings.wrap(object_from_parts_resolved(
-        extend.realization,
-        spec_member("name"),
-        spec_member("deps"),
-        composed_defs,
-    ));
-    let target_context = DefinitionTargetContext::new(definitions, line, context, scope);
+    let object_value = bindings.wrap(
+        access,
+        object_from_parts_resolved(
+            access,
+            extend.realization,
+            spec_member("name"),
+            spec_member("deps"),
+            composed_defs,
+        ),
+    );
+    let target_context = DefinitionTargetContext::new(access, definitions, line, context, scope);
     let object_value = target_context.annotate_static(
         BuiltinAssertion::Defined,
         &extend.target,
         object_value,
         locals,
     )?;
-    let object_value = annotate_definition_context(object_value, &extend.target, line, context);
+    let object_value =
+        annotate_definition_context(access, object_value, &extend.target, line, context);
     Ok(update_module_resolved(
-        definitions.expr(),
+        access,
+        definitions.expr(access),
         &extend.target,
         object_value,
     ))
@@ -462,12 +529,12 @@ pub(in crate::g_syntax) fn extend_object_with_defs_in(
 ) -> Result<Value, Diagnostic> {
     let mut locals = ResolverContext::default();
     let prior_object =
-        path_resolved_in_definitions(target, ResolvedExpr::Provided(visible_definitions));
-    let prior_spec = object_spec_resolved(prior_object);
+        path_resolved_in_definitions(access, target, ResolvedExpr::Provided(visible_definitions));
+    let prior_spec = object_spec_resolved(access, prior_object);
     let mut bindings = ResolvedBindings::default();
-    let prior_spec = bindings.bind(&mut locals, "<extended-object-spec>", prior_spec);
+    let prior_spec = bindings.bind(access, &mut locals, "<extended-object-spec>", prior_spec);
     let spec_member = |name| ResolvedExpr::Access {
-        base: Box::new(prior_spec.expr()),
+        base: Box::new(prior_spec.expr(access)),
         path: vec![ResolvedPathPart::Key(name_as_key(name))],
     };
     let base = locals.push_internal_binding("<extension-base>");
@@ -485,11 +552,15 @@ pub(in crate::g_syntax) fn extend_object_with_defs_in(
     );
     Ok(lower_resolved_expr_in(
         access,
-        bindings.wrap(object_from_parts_resolved(
-            ObjectRealization::Instance,
-            spec_member("name"),
-            spec_member("deps"),
-            composed_defs,
-        )),
+        bindings.wrap(
+            access,
+            object_from_parts_resolved(
+                access,
+                ObjectRealization::Instance,
+                spec_member("name"),
+                spec_member("deps"),
+                composed_defs,
+            ),
+        ),
     ))
 }

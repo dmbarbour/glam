@@ -19,6 +19,7 @@ pub(super) trait PatternStepSink {
 }
 
 pub(super) struct PatternLoweringContext<'a> {
+    access: &'a RuntimeValueAccess<'a>,
     context: &'a CompileContext,
     scope: &'a NameScope<ResolvedRoot>,
     sink: &'a mut dyn PatternStepSink,
@@ -27,11 +28,13 @@ pub(super) struct PatternLoweringContext<'a> {
 
 impl<'a> PatternLoweringContext<'a> {
     pub(super) fn new(
+        access: &'a RuntimeValueAccess<'a>,
         context: &'a CompileContext,
         scope: &'a NameScope<ResolvedRoot>,
         sink: &'a mut dyn PatternStepSink,
     ) -> Self {
         Self {
+            access,
             context,
             scope,
             sink,
@@ -53,6 +56,7 @@ impl<'a> PatternLoweringContext<'a> {
         line: usize,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
         syntax_expr_to_resolved_in_semantic_scope(
+            self.access,
             expression,
             line,
             self.context,
@@ -163,12 +167,10 @@ fn append_match_steps(
         SyntaxPatternKind::Literal(literal) => {
             append_then(
                 pattern_builtin(
+                    lowering.access,
                     Builtin::PatternEqual,
                     [
-                        ResolvedExpr::Embedded(pattern_literal_value(
-                            lowering.context.values(),
-                            literal,
-                        )),
+                        ResolvedExpr::Embedded(pattern_literal_value(lowering.access, literal)),
                         ResolvedExpr::Local(subject),
                     ],
                 ),
@@ -181,6 +183,7 @@ fn append_match_steps(
         SyntaxPatternKind::Dict { .. } => append_dict_match(subject, pattern, line, lowering),
         SyntaxPatternKind::QuotedPath(path) => {
             let expected = syntax_path_resolved(
+                lowering.access,
                 path,
                 line,
                 lowering.context,
@@ -189,6 +192,7 @@ fn append_match_steps(
             )?;
             append_then(
                 pattern_builtin(
+                    lowering.access,
                     Builtin::PatternPathEqual,
                     [expected, ResolvedExpr::Local(subject)],
                 ),
@@ -245,7 +249,11 @@ fn append_list_match(
         unreachable!("list expansion receives a list pattern");
     };
     append_then(
-        pattern_builtin(Builtin::PatternIsList, [ResolvedExpr::Local(subject)]),
+        pattern_builtin(
+            lowering.access,
+            Builtin::PatternIsList,
+            [ResolvedExpr::Local(subject)],
+        ),
         line,
         lowering,
     );
@@ -253,18 +261,23 @@ fn append_list_match(
     let mut remainder = ResolvedExpr::Local(subject);
     for pattern in prefix {
         let parts = append_bind(
-            pattern_builtin(Builtin::PatternListTryUncons, [remainder]),
+            pattern_builtin(lowering.access, Builtin::PatternListTryUncons, [remainder]),
             line,
             lowering,
         );
-        append_value_pattern(part_access(parts, &keys::HEAD), pattern, line, lowering)?;
-        remainder = part_access(parts, &keys::TAIL);
+        append_value_pattern(
+            part_access(lowering.access, parts, &keys::HEAD),
+            pattern,
+            line,
+            lowering,
+        )?;
+        remainder = part_access(lowering.access, parts, &keys::TAIL);
     }
 
     let mut extracted_suffix = Vec::with_capacity(suffix.len());
     for pattern in suffix.iter().rev() {
         let parts = append_bind(
-            pattern_builtin(Builtin::PatternListTryUnsnoc, [remainder]),
+            pattern_builtin(lowering.access, Builtin::PatternListTryUnsnoc, [remainder]),
             line,
             lowering,
         );
@@ -272,19 +285,19 @@ fn append_list_match(
         lowering.push_step(
             line,
             ResolvedEffectStepKind::ValueBind {
-                value: part_access(parts, &keys::LAST),
+                value: part_access(lowering.access, parts, &keys::LAST),
                 binding: last,
             },
         );
         extracted_suffix.push((pattern, last));
-        remainder = part_access(parts, &keys::INIT);
+        remainder = part_access(lowering.access, parts, &keys::INIT);
     }
 
     if let Some(middle) = middle.as_deref() {
         append_value_pattern(remainder, middle, line, lowering)?;
     } else {
         append_then(
-            pattern_builtin(Builtin::PatternListIsEmpty, [remainder]),
+            pattern_builtin(lowering.access, Builtin::PatternListIsEmpty, [remainder]),
             line,
             lowering,
         );
@@ -306,7 +319,11 @@ fn append_dict_match(
         unreachable!("dictionary expansion receives a dictionary pattern");
     };
     append_then(
-        pattern_builtin(Builtin::PatternIsDict, [ResolvedExpr::Local(subject)]),
+        pattern_builtin(
+            lowering.access,
+            Builtin::PatternIsDict,
+            [ResolvedExpr::Local(subject)],
+        ),
         line,
         lowering,
     );
@@ -319,27 +336,32 @@ fn append_dict_match(
             Builtin::PatternDictTryTake
         };
         let path = syntax_path_resolved(
+            lowering.access,
             &entry.path,
             line,
             lowering.context,
             lowering.scope,
             lowering.sink.locals(),
         )?;
-        let parts = append_bind(pattern_builtin(builtin, [path, rest]), line, lowering);
+        let parts = append_bind(
+            pattern_builtin(lowering.access, builtin, [path, rest]),
+            line,
+            lowering,
+        );
         append_value_pattern(
-            part_access(parts, &keys::VALUE),
+            part_access(lowering.access, parts, &keys::VALUE),
             &entry.pattern,
             line,
             lowering,
         )?;
-        rest = part_access(parts, &keys::REST);
+        rest = part_access(lowering.access, parts, &keys::REST);
     }
 
     if let Some(remainder) = remainder.as_deref() {
         append_value_pattern(rest, remainder, line, lowering)
     } else {
         append_then(
-            pattern_builtin(Builtin::PatternDictIsEmpty, [rest]),
+            pattern_builtin(lowering.access, Builtin::PatternDictIsEmpty, [rest]),
             line,
             lowering,
         );
@@ -377,22 +399,27 @@ fn append_then(
 }
 
 fn pattern_builtin(
+    _access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(ResolvedExpr::Embedded(Value::Builtin(builtin)), arguments)
 }
 
-fn part_access(parts: BindingId, key: &Key) -> ResolvedExpr<Value> {
+fn part_access(
+    _access: &RuntimeValueAccess<'_>,
+    parts: BindingId,
+    key: &Key,
+) -> ResolvedExpr<Value> {
     ResolvedExpr::Access {
         base: Box::new(ResolvedExpr::Local(parts)),
         path: vec![ResolvedPathPart::Key(key.clone())],
     }
 }
 
-fn pattern_literal_value(values: &CoreValueFactory, literal: &SyntaxPatternLiteral) -> Value {
+fn pattern_literal_value(access: &RuntimeValueAccess<'_>, literal: &SyntaxPatternLiteral) -> Value {
     match literal {
-        SyntaxPatternLiteral::Unit => values.unit(),
+        SyntaxPatternLiteral::Unit => access.values().unit(),
         SyntaxPatternLiteral::Number(number) => Value::Number(number.clone()),
         SyntaxPatternLiteral::Atom(name) => {
             Value::Atom(Atom::from_key(&Key::binary_from_text(name)))

@@ -43,7 +43,7 @@ impl ResolvedPatternInput {
 }
 
 pub(super) fn emit_effect_steps<I>(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     steps: I,
     mut continuation: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value>
@@ -52,19 +52,19 @@ where
     I::IntoIter: DoubleEndedIterator,
 {
     for step in steps.into_iter().rev() {
-        continuation = emit_effect_step(values, step, continuation);
+        continuation = emit_effect_step(access, step, continuation);
     }
     continuation
 }
 
 fn emit_effect_step(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     step: ResolvedEffectStep,
     continuation: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     match step.kind {
         ResolvedEffectStepKind::EffectBind { operation, binding } => effect_call_resolved(
-            values,
+            access,
             "seq",
             [operation, ResolvedExpr::lambda(vec![binding], continuation)],
         ),
@@ -77,12 +77,13 @@ fn emit_effect_step(
             diagnostic_context,
         } => {
             let body = assert_unit_resolved(
+                access,
                 diagnostic_context,
                 ResolvedExpr::Local(result),
                 continuation,
             );
             effect_call_resolved(
-                values,
+                access,
                 "seq",
                 [operation, ResolvedExpr::lambda(vec![result], body)],
             )

@@ -35,11 +35,13 @@ struct ResolvedDoBlock {
 }
 
 struct DoLowering<'a> {
+    access: &'a RuntimeValueAccess<'a>,
     context: &'a CompileContext,
     scope: &'a NameScope<ResolvedRoot>,
 }
 
 struct DoEmitter<'a> {
+    access: &'a RuntimeValueAccess<'a>,
     steps: &'a mut [Option<RecursiveEffectStep>],
     forwards: &'a [ResolvedForward],
     plan: &'a RecursiveDoPlan,
@@ -82,12 +84,17 @@ impl PatternStepSink for DoPatternStepSink<'_> {
 }
 
 pub(in crate::g_syntax) fn lower_do_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     do_expr: &DoExpr,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let lowering = DoLowering { context, scope };
+    let lowering = DoLowering {
+        access,
+        context,
+        scope,
+    };
     let block = lowering.resolve(do_expr, locals)?;
     Ok(lowering.emit(block))
 }
@@ -134,6 +141,7 @@ impl DoLowering<'_> {
                     }
                     DoStepKind::Bind { pattern, operation } => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
+                            self.access,
                             operation,
                             step.line,
                             self.context,
@@ -146,8 +154,12 @@ impl DoLowering<'_> {
                             locals,
                             forwards: &mut forwards,
                         };
-                        let mut pattern_lowering =
-                            PatternLoweringContext::new(self.context, self.scope, &mut sink);
+                        let mut pattern_lowering = PatternLoweringContext::new(
+                            self.access,
+                            self.context,
+                            self.scope,
+                            &mut sink,
+                        );
                         append_pattern_steps(
                             ResolvedPatternInput::Effect(operation),
                             pattern,
@@ -157,6 +169,7 @@ impl DoLowering<'_> {
                     }
                     DoStepKind::ValueBind { pattern, value } => {
                         let value = syntax_expr_to_resolved_in_semantic_scope(
+                            self.access,
                             value,
                             step.line,
                             self.context,
@@ -169,8 +182,12 @@ impl DoLowering<'_> {
                             locals,
                             forwards: &mut forwards,
                         };
-                        let mut pattern_lowering =
-                            PatternLoweringContext::new(self.context, self.scope, &mut sink);
+                        let mut pattern_lowering = PatternLoweringContext::new(
+                            self.access,
+                            self.context,
+                            self.scope,
+                            &mut sink,
+                        );
                         append_pattern_steps(
                             ResolvedPatternInput::Value(value),
                             pattern,
@@ -180,6 +197,7 @@ impl DoLowering<'_> {
                     }
                     DoStepKind::Then(operation) => {
                         let operation = syntax_expr_to_resolved_in_semantic_scope(
+                            self.access,
                             operation,
                             step.line,
                             self.context,
@@ -205,6 +223,7 @@ impl DoLowering<'_> {
             }
 
             let result = syntax_expr_to_resolved_in_semantic_scope(
+                self.access,
                 &do_expr.result,
                 do_expr.result_line,
                 self.context,
@@ -244,6 +263,7 @@ impl DoLowering<'_> {
         let end = steps.len();
         let roots = plan.roots.clone();
         let emitted = DoEmitter {
+            access: self.access,
             steps: &mut steps,
             forwards: &forwards,
             plan: &plan,
@@ -332,7 +352,7 @@ impl DoEmitter<'_> {
                 .expect("planned recursive-do step is emitted exactly once")
                 .effect
         });
-        emit_effect_steps(self.context.values(), effects, continuation)
+        emit_effect_steps(self.access, effects, continuation)
     }
 
     fn emit_fix_scope(
@@ -362,7 +382,7 @@ impl DoEmitter<'_> {
             .expect("planned abstract name has a continuation parameter");
 
         let payload = effect_call_resolved(
-            self.context.values(),
+            self.access,
             "r",
             [ResolvedExpr::List(vec![
                 ResolvedExpr::Local(resolved_binding),
@@ -372,20 +392,25 @@ impl DoEmitter<'_> {
         let body = self.emit_range(scope_start, scope_end + 1, &children, payload);
         let body = ResolvedExpr::apply(
             ResolvedExpr::lambda(vec![forward_binding], body),
-            [list_at_resolved(0, ResolvedExpr::Local(future_binding))],
+            [list_at_resolved(
+                self.access,
+                0,
+                ResolvedExpr::Local(future_binding),
+            )],
         );
         let fixed = effect_call_resolved(
-            self.context.values(),
+            self.access,
             "fix",
             [ResolvedExpr::lambda(vec![future_binding], body)],
         );
-        let continuation = list_at_resolved(1, ResolvedExpr::Local(fixed_result_binding));
+        let continuation =
+            list_at_resolved(self.access, 1, ResolvedExpr::Local(fixed_result_binding));
         let resumed = ResolvedExpr::apply(
             continuation,
             [ResolvedExpr::Embedded(self.context.unit_value())],
         );
         effect_call_resolved(
-            self.context.values(),
+            self.access,
             "seq",
             [
                 fixed,
@@ -395,8 +420,13 @@ impl DoEmitter<'_> {
     }
 }
 
-fn list_at_resolved(index: usize, list: ResolvedExpr<Value>) -> ResolvedExpr<Value> {
+fn list_at_resolved(
+    _access: &RuntimeValueAccess<'_>,
+    index: usize,
+    list: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
+        _access,
         Builtin::ListAt,
         [
             ResolvedExpr::Embedded(Value::Number(Number::from_usize(index))),

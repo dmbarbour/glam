@@ -8,10 +8,20 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_scope(
     scope: &NameScope,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, &scope.resolved(), locals)
+    context.values().with_runtime_value_access(|access| {
+        syntax_expr_to_resolved_in_semantic_scope(
+            &access,
+            expr,
+            line,
+            context,
+            &scope.resolved_in(&access),
+            locals,
+        )
+    })
 }
 
 pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
+    access: &RuntimeValueAccess<'_>,
     expr: &SyntaxExpr,
     line: usize,
     context: &CompileContext,
@@ -36,6 +46,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             explicit_module,
             path,
         } => lower_abstract_global_path_resolved(
+            access,
             *explicit_module,
             path,
             line,
@@ -44,33 +55,43 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             locals,
         )?,
         SyntaxExpr::PathDict(path, value) => {
-            lower_path_dict_resolved(path, value, line, context, scope, locals)?
+            lower_path_dict_resolved(access, path, value, line, context, scope, locals)?
         }
         SyntaxExpr::TaggedConstructor(path) => {
-            lower_tagged_constructor_resolved(path, line, context, scope, locals)?
+            lower_tagged_constructor_resolved(access, path, line, context, scope, locals)?
         }
         SyntaxExpr::DictUnion(items) => {
-            lower_dict_union_resolved(items, line, context, scope, locals)?
+            lower_dict_union_resolved(access, items, line, context, scope, locals)?
         }
-        SyntaxExpr::Name(name) => lower_name_expr_resolved(name, context, scope, locals),
-        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(name, line, scope)?,
+        SyntaxExpr::Name(name) => lower_name_expr_resolved(access, name, context, scope, locals),
+        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(access, name, line, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(scope, *depth, line)?;
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, &escaped_scope, locals)?
+            syntax_expr_to_resolved_in_semantic_scope(
+                access,
+                expr,
+                line,
+                context,
+                &escaped_scope,
+                locals,
+            )?
         }
         SyntaxExpr::Access(base, parts) => ResolvedExpr::Access {
             base: Box::new(syntax_expr_to_resolved_in_semantic_scope(
-                base, line, context, scope, locals,
+                access, base, line, context, scope, locals,
             )?),
             path: parts
                 .iter()
-                .map(|part| syntax_key_expr_to_resolved_path(part, line, context, scope, locals))
+                .map(|part| {
+                    syntax_key_expr_to_resolved_path(access, part, line, context, scope, locals)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         },
         SyntaxExpr::Object(object) => {
-            lower_object_expr_resolved(object, line, context, scope, locals)?
+            lower_object_expr_resolved(access, object, line, context, scope, locals)?
         }
         SyntaxExpr::With { base, alias, body } => lower_dict_with_expr_resolved(
+            access,
             base,
             alias.as_deref(),
             body,
@@ -80,13 +101,15 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             locals,
         )?,
         SyntaxExpr::Using { namespace, body } => {
-            lower_using_expr_resolved(namespace, body, line, context, scope, locals)?
+            lower_using_expr_resolved(access, namespace, body, line, context, scope, locals)?
         }
         SyntaxExpr::List(items) => ResolvedExpr::List(
             items
                 .iter()
                 .map(|expr| {
-                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
+                    syntax_expr_to_resolved_in_semantic_scope(
+                        access, expr, line, context, scope, locals,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
@@ -99,7 +122,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
                         .iter()
                         .map(|expr| {
                             syntax_expr_to_resolved_in_semantic_scope(
-                                expr, line, context, scope, locals,
+                                access, expr, line, context, scope, locals,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?,
@@ -107,40 +130,43 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             ],
         ),
         SyntaxExpr::Lambda(params, body) => {
-            lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
+            lower_lambda_expr_resolved(access, params, body, line, context, scope, locals)?
         }
-        SyntaxExpr::Do(do_expr) => lower_do_expr_resolved(do_expr, context, scope, locals)?,
-        SyntaxExpr::If(if_expr) => {
-            super::conditional::lower_if_expr_resolved(if_expr, line, context, scope, locals)?
-        }
-        SyntaxExpr::Match(match_expr) => {
-            super::conditional::lower_match_expr_resolved(match_expr, context, scope, locals)?
-        }
-        SyntaxExpr::MatchWhen(match_when) => {
-            super::conditional::lower_match_when_expr_resolved(match_when, context, scope, locals)?
-        }
+        SyntaxExpr::Do(do_expr) => lower_do_expr_resolved(access, do_expr, context, scope, locals)?,
+        SyntaxExpr::If(if_expr) => super::conditional::lower_if_expr_resolved(
+            access, if_expr, line, context, scope, locals,
+        )?,
+        SyntaxExpr::Match(match_expr) => super::conditional::lower_match_expr_resolved(
+            access, match_expr, context, scope, locals,
+        )?,
+        SyntaxExpr::MatchWhen(match_when) => super::conditional::lower_match_when_expr_resolved(
+            access, match_when, context, scope, locals,
+        )?,
         SyntaxExpr::Let { bindings, body } => {
-            lower_let_expr_resolved(bindings, body, line, context, scope, locals)?
+            lower_let_expr_resolved(access, bindings, body, line, context, scope, locals)?
         }
-        SyntaxExpr::Apply(function, argument) => {
-            lower_application_expr_resolved(function, argument, line, context, scope, locals)?
-        }
+        SyntaxExpr::Apply(function, argument) => lower_application_expr_resolved(
+            access, function, argument, line, context, scope, locals,
+        )?,
         SyntaxExpr::OperatorApply {
             operator,
             left,
             right,
         } => lower_syntax_operator_expr_resolved(
-            *operator, left, right, line, context, scope, locals,
+            access, *operator, left, right, line, context, scope, locals,
         )?,
         SyntaxExpr::ComparisonChain { first, rest } => {
-            lower_comparison_chain_resolved(first, rest, line, context, scope, locals)?
+            lower_comparison_chain_resolved(access, first, rest, line, context, scope, locals)?
         }
         SyntaxExpr::OperatorSection {
             operator,
             left,
             right,
-        } => lower_operator_section_resolved(*operator, left, right, line, context, scope, locals)?,
+        } => lower_operator_section_resolved(
+            access, *operator, left, right, line, context, scope, locals,
+        )?,
         SyntaxExpr::Multiply(left, right) => lower_builtin_expr_resolved(
+            access,
             Builtin::Multiply,
             left,
             right,
@@ -149,13 +175,28 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             scope,
             locals,
         )?,
-        SyntaxExpr::Divide(left, right) => {
-            lower_builtin_expr_resolved(Builtin::Divide, left, right, line, context, scope, locals)?
-        }
-        SyntaxExpr::Add(left, right) => {
-            lower_builtin_expr_resolved(Builtin::Add, left, right, line, context, scope, locals)?
-        }
+        SyntaxExpr::Divide(left, right) => lower_builtin_expr_resolved(
+            access,
+            Builtin::Divide,
+            left,
+            right,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
+        SyntaxExpr::Add(left, right) => lower_builtin_expr_resolved(
+            access,
+            Builtin::Add,
+            left,
+            right,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
         SyntaxExpr::Subtract(left, right) => lower_builtin_expr_resolved(
+            access,
             Builtin::Subtract,
             left,
             right,
@@ -164,9 +205,16 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             scope,
             locals,
         )?,
-        SyntaxExpr::Append(left, right) => {
-            lower_builtin_expr_resolved(Builtin::Append, left, right, line, context, scope, locals)?
-        }
+        SyntaxExpr::Append(left, right) => lower_builtin_expr_resolved(
+            access,
+            Builtin::Append,
+            left,
+            right,
+            line,
+            context,
+            scope,
+            locals,
+        )?,
     })
 }
 
@@ -176,6 +224,7 @@ enum ResolvedDictPath {
 }
 
 fn lower_path_dict_resolved(
+    access: &RuntimeValueAccess<'_>,
     path: &[SyntaxKeyExpr],
     value: &SyntaxExpr,
     line: usize,
@@ -183,12 +232,14 @@ fn lower_path_dict_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let path = resolve_dict_path(path, line, context, scope, locals)?;
-    let value = syntax_expr_to_resolved_in_semantic_scope(value, line, context, scope, locals)?;
-    Ok(build_path_dict_resolved(path, value))
+    let path = resolve_dict_path(access, path, line, context, scope, locals)?;
+    let value =
+        syntax_expr_to_resolved_in_semantic_scope(access, value, line, context, scope, locals)?;
+    Ok(build_path_dict_resolved(access, path, value))
 }
 
 fn resolve_dict_path(
+    access: &RuntimeValueAccess<'_>,
     path: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
@@ -199,16 +250,17 @@ fn resolve_dict_path(
         && !matches!(key, SyntaxKeyExpr::PathIndex(_))
     {
         return Ok(ResolvedDictPath::Key(syntax_key_expr_to_resolved_value(
-            key, line, context, scope, locals,
+            access, key, line, context, scope, locals,
         )?));
     }
 
     Ok(ResolvedDictPath::Path(syntax_path_resolved(
-        path, line, context, scope, locals,
+        access, path, line, context, scope, locals,
     )?))
 }
 
 fn build_path_dict_resolved(
+    _access: &RuntimeValueAccess<'_>,
     path: ResolvedDictPath,
     value: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
@@ -229,6 +281,7 @@ fn build_path_dict_resolved(
 }
 
 fn lower_tagged_constructor_resolved(
+    access: &RuntimeValueAccess<'_>,
     path: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
@@ -237,13 +290,14 @@ fn lower_tagged_constructor_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     // Resolve the path in the surrounding scope before introducing the
     // constructor's inaccessible, hygienic argument binding.
-    let path = resolve_dict_path(path, line, context, scope, locals)?;
+    let path = resolve_dict_path(access, path, line, context, scope, locals)?;
     let payload = locals.fresh_binding();
-    let body = build_path_dict_resolved(path, ResolvedExpr::Local(payload));
+    let body = build_path_dict_resolved(access, path, ResolvedExpr::Local(payload));
     Ok(ResolvedExpr::lambda(vec![payload], body))
 }
 
 pub(in crate::g_syntax) fn lower_object_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     object: &ObjectExpr,
     line: usize,
     context: &CompileContext,
@@ -252,12 +306,13 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let name = match &object.name {
         Some(name) => {
-            syntax_expr_to_resolved_in_semantic_scope(name, line, context, scope, locals)?
+            syntax_expr_to_resolved_in_semantic_scope(access, name, line, context, scope, locals)?
         }
         None => ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
     };
-    let deps = object_parents_resolved(&object.deps, line, context, scope, locals)?;
+    let deps = object_parents_resolved(access, &object.deps, line, context, scope, locals)?;
     let defs = object_body_defs_resolved_in_scope(
+        access,
         &object.body,
         object.alias.as_deref(),
         line,
@@ -267,6 +322,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         false,
     )?;
     Ok(object_from_parts_resolved(
+        access,
         object.realization,
         name,
         ResolvedExpr::List(deps),
@@ -275,6 +331,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     base: &SyntaxExpr,
     alias: Option<&str>,
     body: &[ObjectBodyDefinition],
@@ -285,7 +342,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     let prior_value =
-        syntax_expr_to_resolved_in_semantic_scope(base, line, context, scope, locals)?;
+        syntax_expr_to_resolved_in_semantic_scope(access, base, line, context, scope, locals)?;
     let prior_binding = locals.push_internal_binding("<with-prior-defs>");
     let final_binding = locals.push_internal_binding("<with-final-defs>");
     let final_defs = ResolvedRoot::Local(final_binding);
@@ -300,16 +357,17 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
             scope.clone(),
         );
         let updated = lower_object_body_item_resolved(
+            access,
             body_definition,
             context,
             &definitions,
             &body_scope,
             locals,
         )?;
-        definitions = body_bindings.bind(locals, "<with-visible-defs>", updated);
+        definitions = body_bindings.bind(access, locals, "<with-visible-defs>", updated);
     }
 
-    let lambda_body = body_bindings.wrap(definitions.expr());
+    let lambda_body = body_bindings.wrap(access, definitions.expr(access));
     let extension_defs = ResolvedExpr::lambda(vec![prior_binding, final_binding], lambda_body);
     let extended = ResolvedExpr::apply(
         ResolvedExpr::Embedded(Value::Builtin(Builtin::ObjectWithDefs)),
@@ -350,6 +408,7 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
 }
 
 fn lower_using_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     namespace: &SyntaxExpr,
     body: &SyntaxExpr,
     line: usize,
@@ -357,20 +416,33 @@ fn lower_using_expr_resolved(
     parent_scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let namespace =
-        syntax_expr_to_resolved_in_semantic_scope(namespace, line, context, parent_scope, locals)?;
+    let namespace = syntax_expr_to_resolved_in_semantic_scope(
+        access,
+        namespace,
+        line,
+        context,
+        parent_scope,
+        locals,
+    )?;
     let base_len = locals.len();
     let namespace_binding = locals.push_internal_binding("<using-namespace>");
     let namespace_root = ResolvedRoot::Local(namespace_binding);
     let using_scope = object_body_scope_resolved(
+        access,
         None,
         namespace_root,
         ResolvedRoot::Provided(Value::Dict(Dict::new_sync())),
         parent_scope.clone(),
         None,
     );
-    let body =
-        syntax_expr_to_resolved_in_semantic_scope(body, line, context, &using_scope, locals)?;
+    let body = syntax_expr_to_resolved_in_semantic_scope(
+        access,
+        body,
+        line,
+        context,
+        &using_scope,
+        locals,
+    )?;
     locals.truncate(base_len);
 
     Ok(ResolvedExpr::apply(
@@ -380,6 +452,7 @@ fn lower_using_expr_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     left: &SyntaxExpr,
     right: &SyntaxExpr,
@@ -391,22 +464,21 @@ pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
     Ok(ResolvedExpr::apply(
         ResolvedExpr::Embedded(Value::Builtin(builtin)),
         [
-            syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?,
-            syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(access, left, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(access, right, line, context, scope, locals)?,
         ],
     ))
 }
 
 pub(in crate::g_syntax) fn lower_effect_expr_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     name: &str,
 ) -> ResolvedExpr<Value> {
-    values.with_runtime_value_access(|access| {
-        ResolvedExpr::Embedded(compiler_values::effect_value(&access, name))
-    })
+    ResolvedExpr::Embedded(compiler_values::effect_value(access, name))
 }
 
 pub(in crate::g_syntax) fn lower_operator_section_resolved(
+    access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,
     left: &Option<Box<SyntaxExpr>>,
     right: &Option<Box<SyntaxExpr>>,
@@ -418,14 +490,12 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
     match (left, right) {
         (None, None) => {
             return Ok(lower_syntax_operator_function_resolved(
-                context.values(),
-                operator,
-                locals,
+                access, operator, locals,
             ));
         }
         (Some(left), Some(right)) => {
             return lower_syntax_operator_expr_resolved(
-                operator, left, right, line, context, scope, locals,
+                access, operator, left, right, line, context, scope, locals,
             );
         }
         _ => {}
@@ -435,28 +505,24 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
     let parameter = locals.push_internal_binding("<operator-section>");
     let left = left
         .as_deref()
-        .map(|expr| syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals))
+        .map(|expr| {
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
+        })
         .transpose()?;
     let right = right
         .as_deref()
-        .map(|expr| syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals))
+        .map(|expr| {
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
+        })
         .transpose()?;
     let argument = ResolvedExpr::Local(parameter);
     let body = match (left, right) {
-        (None, Some(right)) => lower_syntax_operator_values_resolved(
-            context.values(),
-            operator,
-            argument,
-            right,
-            locals,
-        ),
-        (Some(left), None) => lower_syntax_operator_values_resolved(
-            context.values(),
-            operator,
-            left,
-            argument,
-            locals,
-        ),
+        (None, Some(right)) => {
+            lower_syntax_operator_values_resolved(access, operator, argument, right, locals)
+        }
+        (Some(left), None) => {
+            lower_syntax_operator_values_resolved(access, operator, left, argument, locals)
+        }
         _ => unreachable!("operator section arity was handled before lowering operands"),
     };
     locals.truncate(base_len);
@@ -464,6 +530,7 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,
     left: &SyntaxExpr,
     right: &SyntaxExpr,
@@ -472,19 +539,17 @@ pub(in crate::g_syntax) fn lower_syntax_operator_expr_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let left = syntax_expr_to_resolved_in_semantic_scope(left, line, context, scope, locals)?;
-    let right = syntax_expr_to_resolved_in_semantic_scope(right, line, context, scope, locals)?;
+    let left =
+        syntax_expr_to_resolved_in_semantic_scope(access, left, line, context, scope, locals)?;
+    let right =
+        syntax_expr_to_resolved_in_semantic_scope(access, right, line, context, scope, locals)?;
     Ok(lower_syntax_operator_values_resolved(
-        context.values(),
-        operator,
-        left,
-        right,
-        locals,
+        access, operator, left, right, locals,
     ))
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,
     locals: &mut ResolverContext,
 ) -> ResolvedExpr<Value> {
@@ -496,7 +561,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
     let left = locals.push_internal_binding("<operator-left>");
     let right = locals.push_internal_binding("<operator-right>");
     let body = lower_syntax_operator_values_resolved(
-        values,
+        access,
         operator,
         ResolvedExpr::Local(left),
         ResolvedExpr::Local(right),
@@ -507,7 +572,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_function_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,
     left: ResolvedExpr<Value>,
     right: ResolvedExpr<Value>,
@@ -519,23 +584,23 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
             [left, right],
         ),
         SyntaxOperator::BoolAnd => {
-            effect_then_resolved(values, left, right, "`and` left operand", locals)
+            effect_then_resolved(access, left, right, "`and` left operand", locals)
         }
-        SyntaxOperator::BoolOr => effect_call_resolved(values, "alt", [left, right]),
+        SyntaxOperator::BoolOr => effect_call_resolved(access, "alt", [left, right]),
         SyntaxOperator::PipeForward => ResolvedExpr::apply(right, [left]),
         SyntaxOperator::PipeBackward => ResolvedExpr::apply(left, [right]),
         SyntaxOperator::ApplicativeForward => {
-            applicative_resolved(values, left, right, false, locals)
+            applicative_resolved(access, left, right, false, locals)
         }
         SyntaxOperator::ApplicativeBackward => {
-            applicative_resolved(values, left, right, true, locals)
+            applicative_resolved(access, left, right, true, locals)
         }
-        SyntaxOperator::ComposeForward => compose_resolved(left, right, locals),
-        SyntaxOperator::ComposeBackward => compose_resolved(right, left, locals),
-        SyntaxOperator::EffectBind => effect_call_resolved(values, "seq", [left, right]),
-        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(values, left, right, locals),
+        SyntaxOperator::ComposeForward => compose_resolved(access, left, right, locals),
+        SyntaxOperator::ComposeBackward => compose_resolved(access, right, left, locals),
+        SyntaxOperator::EffectBind => effect_call_resolved(access, "seq", [left, right]),
+        SyntaxOperator::KleisliCompose => kleisli_compose_resolved(access, left, right, locals),
         SyntaxOperator::EffectThen => {
-            effect_then_resolved(values, left, right, "`=>>` discarded result", locals)
+            effect_then_resolved(access, left, right, "`=>>` discarded result", locals)
         }
     }
 }
@@ -543,7 +608,7 @@ pub(in crate::g_syntax) fn lower_syntax_operator_values_resolved(
 /// Sequences two effects in source order, then applies the function produced
 /// by one to the value produced by the other and returns that result.
 pub(in crate::g_syntax) fn applicative_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     first_operation: ResolvedExpr<Value>,
     second_operation: ResolvedExpr<Value>,
     first_is_function: bool,
@@ -564,15 +629,16 @@ pub(in crate::g_syntax) fn applicative_resolved(
         )
     };
     let result = ResolvedExpr::apply(function, [argument]);
-    let returned = effect_call_resolved(values, "r", [result]);
+    let returned = effect_call_resolved(access, "r", [result]);
     let second_continuation = ResolvedExpr::lambda(vec![second_result], returned);
-    let after_first = effect_call_resolved(values, "seq", [second_operation, second_continuation]);
+    let after_first = effect_call_resolved(access, "seq", [second_operation, second_continuation]);
     let first_continuation = ResolvedExpr::lambda(vec![first_result], after_first);
     locals.truncate(base_len);
-    effect_call_resolved(values, "seq", [first_operation, first_continuation])
+    effect_call_resolved(access, "seq", [first_operation, first_continuation])
 }
 
 pub(in crate::g_syntax) fn compose_resolved(
+    _access: &RuntimeValueAccess<'_>,
     first: ResolvedExpr<Value>,
     second: ResolvedExpr<Value>,
     locals: &mut ResolverContext,
@@ -588,7 +654,7 @@ pub(in crate::g_syntax) fn compose_resolved(
 }
 
 pub(in crate::g_syntax) fn kleisli_compose_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     first: ResolvedExpr<Value>,
     second: ResolvedExpr<Value>,
     locals: &mut ResolverContext,
@@ -596,13 +662,13 @@ pub(in crate::g_syntax) fn kleisli_compose_resolved(
     let base_len = locals.len();
     let input = locals.push_internal_binding("<kleisli-input>");
     let operation = ResolvedExpr::apply(first, [ResolvedExpr::Local(input)]);
-    let body = effect_call_resolved(values, "seq", [operation, second]);
+    let body = effect_call_resolved(access, "seq", [operation, second]);
     locals.truncate(base_len);
     ResolvedExpr::lambda(vec![input], body)
 }
 
 pub(in crate::g_syntax) fn effect_then_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     operation: ResolvedExpr<Value>,
     next: ResolvedExpr<Value>,
     diagnostic_context: &'static str,
@@ -610,21 +676,27 @@ pub(in crate::g_syntax) fn effect_then_resolved(
 ) -> ResolvedExpr<Value> {
     let base_len = locals.len();
     let result = locals.push_internal_binding("<effect-result>");
-    let body = assert_unit_resolved(diagnostic_context, ResolvedExpr::Local(result), next);
+    let body = assert_unit_resolved(
+        access,
+        diagnostic_context,
+        ResolvedExpr::Local(result),
+        next,
+    );
     let continuation = ResolvedExpr::lambda(vec![result], body);
     locals.truncate(base_len);
-    effect_call_resolved(values, "seq", [operation, continuation])
+    effect_call_resolved(access, "seq", [operation, continuation])
 }
 
 pub(in crate::g_syntax) fn effect_call_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     name: &str,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(lower_effect_expr_resolved(values, name), arguments)
+    ResolvedExpr::apply(lower_effect_expr_resolved(access, name), arguments)
 }
 
 pub(in crate::g_syntax) fn assert_unit_resolved(
+    _access: &RuntimeValueAccess<'_>,
     diagnostic_context: &'static str,
     value: ResolvedExpr<Value>,
     target: ResolvedExpr<Value>,
@@ -640,6 +712,7 @@ pub(in crate::g_syntax) fn assert_unit_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
+    access: &RuntimeValueAccess<'_>,
     first: &SyntaxExpr,
     rest: &[(SyntaxOperator, SyntaxExpr)],
     line: usize,
@@ -647,7 +720,8 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let left = syntax_expr_to_resolved_in_semantic_scope(first, line, context, scope, locals)?;
+    let left =
+        syntax_expr_to_resolved_in_semantic_scope(access, first, line, context, scope, locals)?;
     let rest = rest
         .iter()
         .map(|(operator, expr)| {
@@ -659,12 +733,14 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
             }
             Ok((
                 *operator,
-                syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(
+                    access, expr, line, context, scope, locals,
+                )?,
             ))
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     Ok(lower_comparison_chain_values_resolved(
-        context.values(),
+        access,
         left,
         rest.into_iter(),
         locals,
@@ -672,7 +748,7 @@ pub(in crate::g_syntax) fn lower_comparison_chain_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     left: ResolvedExpr<Value>,
     mut rest: std::vec::IntoIter<(SyntaxOperator, ResolvedExpr<Value>)>,
     locals: &mut ResolverContext,
@@ -681,26 +757,26 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
         return left;
     };
     if rest.len() == 0 {
-        return lower_syntax_operator_values_resolved(values, operator, left, right, locals);
+        return lower_syntax_operator_values_resolved(access, operator, left, right, locals);
     }
 
     let base_len = locals.len();
     let right_binding = locals.push_internal_binding("<comparison-right>");
     let first_condition = lower_syntax_operator_values_resolved(
-        values,
+        access,
         operator,
         left,
         ResolvedExpr::Local(right_binding),
         locals,
     );
     let remaining_condition = lower_comparison_chain_values_resolved(
-        values,
+        access,
         ResolvedExpr::Local(right_binding),
         rest,
         locals,
     );
     let body = lower_syntax_operator_values_resolved(
-        values,
+        access,
         SyntaxOperator::BoolAnd,
         first_condition,
         remaining_condition,
@@ -711,6 +787,7 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
 }
 
 pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_value(
+    access: &RuntimeValueAccess<'_>,
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
@@ -720,7 +797,7 @@ pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_value(
     match key {
         SyntaxKeyExpr::Atom(name) => Ok(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name)))),
         SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
         }
         SyntaxKeyExpr::PathIndex(_) => Err(Diagnostic::error(
             line,
@@ -730,6 +807,7 @@ pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_value(
 }
 
 pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_path(
+    access: &RuntimeValueAccess<'_>,
     key: &SyntaxKeyExpr,
     line: usize,
     context: &CompileContext,
@@ -739,15 +817,16 @@ pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_path(
     Ok(match key {
         SyntaxKeyExpr::Atom(name) => ResolvedPathPart::Key(name_as_key(name)),
         SyntaxKeyExpr::Index(expr) => ResolvedPathPart::Index(Box::new(
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)?,
         )),
         SyntaxKeyExpr::PathIndex(expr) => ResolvedPathPart::PathIndex(Box::new(
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?,
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)?,
         )),
     })
 }
 
 pub(in crate::g_syntax) fn syntax_path_resolved(
+    access: &RuntimeValueAccess<'_>,
     parts: &[SyntaxKeyExpr],
     line: usize,
     context: &CompileContext,
@@ -762,30 +841,38 @@ pub(in crate::g_syntax) fn syntax_path_resolved(
             SyntaxKeyExpr::PathIndex(expr) => {
                 let prefix = ResolvedExpr::List(std::mem::take(&mut pending));
                 let combined = match result {
-                    Some(result) => apply_builtin_resolved(Builtin::Append, [result, prefix]),
+                    Some(result) => {
+                        apply_builtin_resolved(access, Builtin::Append, [result, prefix])
+                    }
                     None => prefix,
                 };
-                let splice =
-                    syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)?;
-                result = Some(apply_builtin_resolved(Builtin::Append, [combined, splice]));
+                let splice = syntax_expr_to_resolved_in_semantic_scope(
+                    access, expr, line, context, scope, locals,
+                )?;
+                result = Some(apply_builtin_resolved(
+                    access,
+                    Builtin::Append,
+                    [combined, splice],
+                ));
             }
             SyntaxKeyExpr::Atom(name) => {
                 pending.push(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))))
             }
             SyntaxKeyExpr::Index(expr) => pending.push(syntax_expr_to_resolved_in_semantic_scope(
-                expr, line, context, scope, locals,
+                access, expr, line, context, scope, locals,
             )?),
         }
     }
 
     let tail = ResolvedExpr::List(pending);
     Ok(match result {
-        Some(result) => apply_builtin_resolved(Builtin::Append, [result, tail]),
+        Some(result) => apply_builtin_resolved(access, Builtin::Append, [result, tail]),
         None => tail,
     })
 }
 
 pub(in crate::g_syntax) fn lower_dict_union_resolved(
+    access: &RuntimeValueAccess<'_>,
     items: &[SyntaxExpr],
     line: usize,
     context: &CompileContext,
@@ -797,13 +884,16 @@ pub(in crate::g_syntax) fn lower_dict_union_resolved(
         return Ok(ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())));
     };
 
-    let mut value = syntax_expr_to_resolved_in_semantic_scope(first, line, context, scope, locals)?;
+    let mut value =
+        syntax_expr_to_resolved_in_semantic_scope(access, first, line, context, scope, locals)?;
     for item in items {
         value = ResolvedExpr::apply(
             ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
             [
                 value,
-                syntax_expr_to_resolved_in_semantic_scope(item, line, context, scope, locals)?,
+                syntax_expr_to_resolved_in_semantic_scope(
+                    access, item, line, context, scope, locals,
+                )?,
             ],
         );
     }
@@ -811,6 +901,7 @@ pub(in crate::g_syntax) fn lower_dict_union_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_lambda_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     params: &[String],
     body: &SyntaxExpr,
     line: usize,
@@ -820,13 +911,15 @@ pub(in crate::g_syntax) fn lower_lambda_expr_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let base_len = locals.len();
     let parameters = locals.extend_source_bindings(params.iter().map(String::as_str), line)?;
-    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
+    let lowered =
+        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
     Ok(ResolvedExpr::lambda(parameters, lowered))
 }
 
 pub(in crate::g_syntax) fn lower_application_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     function: &SyntaxExpr,
     argument: &SyntaxExpr,
     line: usize,
@@ -844,20 +937,25 @@ pub(in crate::g_syntax) fn lower_application_expr_resolved(
 
     let function = match head {
         SyntaxExpr::Lambda(params, body) => {
-            lower_lambda_expr_resolved(params, body, line, context, scope, locals)?
+            lower_lambda_expr_resolved(access, params, body, line, context, scope, locals)?
         }
-        head => syntax_expr_to_resolved_in_semantic_scope(head, line, context, scope, locals)?,
+        head => {
+            syntax_expr_to_resolved_in_semantic_scope(access, head, line, context, scope, locals)?
+        }
     };
     let arguments = arguments
         .into_iter()
         .map(|argument| {
-            syntax_expr_to_resolved_in_semantic_scope(argument, line, context, scope, locals)
+            syntax_expr_to_resolved_in_semantic_scope(
+                access, argument, line, context, scope, locals,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResolvedExpr::apply(function, arguments))
 }
 
 fn lower_abstract_global_path_resolved(
+    _access: &RuntimeValueAccess<'_>,
     explicit_module: bool,
     path: &[String],
     line: usize,
@@ -910,6 +1008,7 @@ fn lower_abstract_global_path_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_let_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     bindings: &[(String, SyntaxExpr)],
     body: &SyntaxExpr,
     line: usize,
@@ -918,20 +1017,23 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     if bindings.is_empty() {
-        return syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals);
+        return syntax_expr_to_resolved_in_semantic_scope(
+            access, body, line, context, scope, locals,
+        );
     }
 
     let values = bindings
         .iter()
         .map(|(_, expr)| {
-            syntax_expr_to_resolved_in_semantic_scope(expr, line, context, scope, locals)
+            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let base_len = locals.len();
     let parameters =
         locals.extend_source_bindings(bindings.iter().map(|(name, _)| name.as_str()), line)?;
-    let lowered = syntax_expr_to_resolved_in_semantic_scope(body, line, context, scope, locals)?;
+    let lowered =
+        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
     locals.truncate(base_len);
 
     Ok(ResolvedExpr::apply(
@@ -941,13 +1043,14 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
 }
 
 pub(in crate::g_syntax) fn lower_name_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     name: &str,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &ResolverContext,
 ) -> ResolvedExpr<Value> {
     match name {
-        "module" => return scope.module_final_defs.expr(),
+        "module" => return scope.module_final_defs.expr(access),
         "module_origin" => {
             return ResolvedExpr::Embedded(
                 context
@@ -960,7 +1063,7 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
                 .object_final_defs
                 .as_ref()
                 .unwrap_or(&scope.module_final_defs)
-                .expr();
+                .expr(access);
         }
         _ => {}
     }
@@ -980,16 +1083,17 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
     if scope.object_alias.as_deref() == Some(name)
         && let Some(object_final_defs) = &scope.object_final_defs
     {
-        return object_final_defs.expr();
+        return object_final_defs.expr(access);
     }
 
     ResolvedExpr::Access {
-        base: Box::new(scope.final_defs.expr()),
+        base: Box::new(scope.final_defs.expr(access)),
         path: vec![ResolvedPathPart::Key(Key::atom_from_text(name))],
     }
 }
 
 pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
+    access: &RuntimeValueAccess<'_>,
     name: &str,
     line: usize,
     scope: &NameScope<ResolvedRoot>,
@@ -1002,13 +1106,13 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     }
 
     match name {
-        "module" => return Ok(scope.module_prior_defs.expr()),
+        "module" => return Ok(scope.module_prior_defs.expr(access)),
         "self" => {
             return Ok(scope
                 .object_prior_defs
                 .as_ref()
                 .unwrap_or(&scope.module_prior_defs)
-                .expr());
+                .expr(access));
         }
         _ => {}
     }
@@ -1016,11 +1120,11 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     if scope.object_alias.as_deref() == Some(name)
         && let Some(object_prior_defs) = &scope.object_prior_defs
     {
-        return Ok(object_prior_defs.expr());
+        return Ok(object_prior_defs.expr(access));
     }
 
     Ok(ResolvedExpr::Access {
-        base: Box::new(scope.prior_defs.expr()),
+        base: Box::new(scope.prior_defs.expr(access)),
         path: vec![ResolvedPathPart::Key(Key::atom_from_text(name))],
     })
 }

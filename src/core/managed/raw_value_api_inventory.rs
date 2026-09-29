@@ -1044,7 +1044,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        1_042_060_685_449_619_603,
+        15_232_249_917_877_092_761,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,9 +1073,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 343),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 435),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 182),
+        ((ApiKind::Function, ApiDisposition::Violation), 90),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1109,8 +1109,8 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
             && occurrence.disposition() == ApiDisposition::Violation
     }));
     assert!(actual.iter().any(|occurrence| {
-        occurrence.declaration == "src/g_syntax/resolve/scope.rs::NameScope::resolved"
-            && occurrence.disposition() == ApiDisposition::Violation
+        occurrence.declaration == "src/g_syntax/resolve/scope.rs::NameScope::resolved_in"
+            && occurrence.disposition() == ApiDisposition::RegionalAccess
     }));
     assert!(
         actual
@@ -1158,7 +1158,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2eFrontend,
                 ReplacementShape::FrontendRegion,
             ),
-            106,
+            14,
         ),
         (
             (

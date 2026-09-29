@@ -173,9 +173,10 @@ fn inherited_import_env_object_value_in(
     let name = context.abstract_global_path(&format!("{target}.env"));
     let deps = lower_resolved_expr_in(
         access,
-        ResolvedExpr::List(vec![object_spec_resolved(ResolvedExpr::Provided(
-            parent_env,
-        ))]),
+        ResolvedExpr::List(vec![object_spec_resolved(
+            access,
+            ResolvedExpr::Provided(parent_env),
+        )]),
     );
     Ok(object_instance_from_parts_value_in(
         access,
@@ -204,6 +205,7 @@ fn module_object_value_with_defs_in(
     lower_resolved_expr_in(
         access,
         object_instance_from_parts_resolved(
+            access,
             ResolvedExpr::Embedded(context.abstract_global_path(target)),
             ResolvedExpr::List(Vec::new()),
             ResolvedExpr::Provided(definitions),
