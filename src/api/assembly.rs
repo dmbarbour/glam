@@ -200,19 +200,21 @@ impl CompilationExecution {
 }
 
 fn macro_reflection_diagnostic(values: &CoreValueFactory, diagnostic: &Diagnostic) -> Diagnostic {
-    let reasoning = CoreValue::Dict(Dict::new_sync().insert(
-        Key::atom_from_text("role"),
-        CoreValue::Atom(crate::core::Atom::from_key(&Key::binary_from_text("macro"))),
-    ));
-    let origin =
-        CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("reasoning"), reasoning));
+    let public_values = Values::from_core_factory(values.clone());
+    let origin = public_values.with_access(|access| {
+        let reasoning = CoreValue::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("role"),
+            CoreValue::Atom(crate::core::Atom::from_key(&Key::binary_from_text("macro"))),
+        ));
+        access.wrap(CoreValue::Dict(
+            Dict::new_sync().insert(Key::atom_from_text("reasoning"), reasoning),
+        ))
+    });
     Diagnostic::from_parts(
-        values,
+        &public_values,
         diagnostic.source.clone(),
         diagnostic.severity,
-        Values::from_core_factory(values.clone())
-            .clone_core(&diagnostic.emission)
-            .expect("forwarded macro diagnostics belong to the compilation runtime"),
+        diagnostic.emission.clone(),
         Some(origin),
     )
 }
@@ -462,20 +464,26 @@ pub(super) fn authoritative_reflection_environment(
     environment: Value,
     role: &str,
 ) -> Result<(Value, bool), Error> {
-    let CoreValue::Dict(root) = values.clone_core(&environment)? else {
-        return Err(Error::new("reflection environment must be a dictionary"));
-    };
-    let glam_key = Key::atom_from_text("glam");
-    let replaced_glam = root.get(&glam_key).is_some();
-    Ok((
-        values.wrap(CoreValue::Dict(
-            root.insert(glam_key, authoritative_glam_environment(role)),
-        )),
-        replaced_glam,
-    ))
+    values.with_access(|access| {
+        let CoreValue::Dict(root) = access.clone_core(&environment)? else {
+            return Err(Error::new("reflection environment must be a dictionary"));
+        };
+        let glam_key = Key::atom_from_text("glam");
+        let replaced_glam = root.get(&glam_key).is_some();
+        Ok((
+            access.wrap(CoreValue::Dict(root.insert(
+                glam_key,
+                authoritative_glam_environment(access.runtime_access(), role),
+            ))),
+            replaced_glam,
+        ))
+    })
 }
 
-fn authoritative_glam_environment(role: &str) -> CoreValue {
+fn authoritative_glam_environment(
+    _access: &crate::core::RuntimeValueAccess<'_>,
+    role: &str,
+) -> CoreValue {
     let implementation = Dict::new_sync()
         .insert(
             Key::atom_from_text("name"),
@@ -512,16 +520,18 @@ fn authoritative_glam_environment(role: &str) -> CoreValue {
 }
 
 fn reflection_environment_for_role(values: &Values, environment: &Value, role: &str) -> Value {
-    let CoreValue::Dict(root) = values
-        .clone_core(environment)
-        .expect("authoritative reflection environment belongs to its runtime")
-    else {
-        unreachable!("authoritative reflection environment must be a dictionary")
-    };
-    values.wrap(CoreValue::Dict(root.insert(
-        Key::atom_from_text("glam"),
-        authoritative_glam_environment(role),
-    )))
+    values.with_access(|access| {
+        let CoreValue::Dict(root) = access
+            .clone_core(environment)
+            .expect("authoritative reflection environment belongs to its runtime")
+        else {
+            unreachable!("authoritative reflection environment must be a dictionary")
+        };
+        access.wrap(CoreValue::Dict(root.insert(
+            Key::atom_from_text("glam"),
+            authoritative_glam_environment(access.runtime_access(), role),
+        )))
+    })
 }
 
 /// Owner handle for one protected volume in an evaluation runtime.

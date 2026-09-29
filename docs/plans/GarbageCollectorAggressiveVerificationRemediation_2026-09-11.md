@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2f complete; GCI11R-002D.2g active; D.2h planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2g complete; GCI11R-002D.2h planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -1939,16 +1939,23 @@ compiler/diagnostic regional functions.
    signatures. Freeze their replacement family separately so a public raw
    escape cannot disappear into an internal regional helper. The live gate
    freezes exactly ten public and 34 compiler/diagnostic declarations.
-2. **D.2g.1 — public value boundary.** Remove authority-free projection and
+2. **D.2g.1 — public value boundary. Complete (2026-09-29).** Remove authority-free projection and
    wrapping helpers from `api::Value`, `EvaluatedValue`, `ValueKind`, and
    `Values`. Public operations either retain opaque rooted handles or perform
    inspection/construction under the existing `ScopedValues` access. Update
    callers without registering replacement roots for already-rooted values.
-3. **D.2g.2 — public diagnostic and assembly boundary.** Make diagnostic
+   Production code now projects through caller access or an existing public
+   root; the former authority-free `wrap`/`clone_core` compatibility surface is
+   test-only, and `EvaluatedValue::with_core` was removed.
+3. **D.2g.2 — public diagnostic and assembly boundary. Complete (2026-09-29).** Make diagnostic
    envelopes accept and retain public values or runtime roots. Build the
    authoritative reflection environment within the assembler's existing
    scoped construction region. Change compiler diagnostic callbacks to carry
-   a durable root rather than an unrooted core value.
+   a durable root rather than an unrooted core value. Diagnostic envelopes now
+   retain public rooted values, readiness and assembly paths root before
+   publication, the authoritative environment uses one caller region, and
+   compiler callbacks receive a `RuntimeValueRoot` only after that region
+   closes.
 4. **D.2g.3 — source provenance and compilation trace. Complete (2026-09-29).** Give source/digest
    and trace-to-value constructors explicit caller access. Keep these
    constructors structural and non-demanding; they must neither open a nested
@@ -1965,29 +1972,55 @@ compiler/diagnostic regional functions.
    region has closed. Ten violations became five regional operations and one
    raw callback alias disappeared. The remaining D.2g manifest contains 20
    declarations: six public boundaries and fourteen diagnostic helpers.
-6. **D.2g.5 — diagnostic transformations.** Split immediate structural
+6. **D.2g.5 — diagnostic transformations. Complete (2026-09-29).** Split immediate structural
    construction/inspection into access-qualified helpers and demand-capable
    normalization into rooted operations. Remove the last production callers
    of `evaluate_compatibility_whnf`; never hold value access while evaluation,
-   logging, or a host callback can run.
-7. **D.2g.6 — closure.** Require zero D.2g violations and reconcile the raw,
+   logging, or a host callback can run. Immediate message/context construction
+   now requires caller access; transformation stages exchange runtime roots and
+   explicitly close access before every evaluator or host-capable boundary.
+   `evaluate_compatibility_whnf` is test-only and has no production caller.
+7. **D.2g.6 — closure. Complete (2026-09-29).** Require zero D.2g violations and reconcile the raw,
    root-publication, mutator-introduction, durable-owner, containment, and call
    graph ledgers. Run focused public/compiler/diagnostic tests ordinarily and
    aggressively, then the routine repository gates. Record any downstream
    aggressive defect under its actual D.2h/E/F owner rather than weakening
-   the D.2g closure.
+   the D.2g closure. The executable manifest now has zero D.2g and zero D.2d
+   violations; the remaining production compatibility surface is exactly the
+   29 functions and three derived-trait occurrences assigned to D.2b. Public
+   root/admission, durable-owner, persistent-edge, mutator-introduction, and
+   resolved-call ledgers were reconciled to the new rooted boundary. Focused
+   ordinary/aggressive diagnostic and compiler partitions pass, as do all
+   eight raw-value and nineteen access inventories, the complete ordinary
+   suite, clippy, formatting, and the interaction-net profiling gate.
+
+   The ordinary gate also exposed that the claimed-exact-lazy fixture latched
+   a pre-wait probe and required the first schedule-sensitive wake to be
+   productive. It now latches the actual condition-variable wait; the blocking
+   driver uses the exact-target wait helper, and the assertion requires every
+   release to be classified while allowing intermediate relevant/unrelated
+   disturbances before terminal publication. The parallel aggressive compiler
+   discrepancy remains explicitly assigned to D.2h.0 rather than being hidden
+   by its isolated pass.
 
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 
-0. Repair the aggressive list-effect checkpoint admission witness exposed by
-   `source_macro_layout_dedents_resume_inside_delimiter_groups` and
-   `source_macros_write_nested_and_same_anchor_layouts`. Macro compilation is
-   already complete when these fail: opening the next evaluator access may
-   collect a lazy edge carried only by the regional `RegionalListEffect` state
-   before `ManagedListEffectCheckpointCell` becomes its traced durable owner.
-   Preserve that state through admission without placing roots inside the
-   managed value graph, and add an exact aggressive handoff test independent
-   of the source-macro fixtures.
+0. Repair the aggressive admission witnesses exposed by closure verification:
+   - `source_macro_layout_dedents_resume_inside_delimiter_groups` and
+     `source_macros_write_nested_and_same_anchor_layouts`: macro compilation is
+     already complete when these fail. Opening the next evaluator access may
+     collect a lazy edge carried only by the regional `RegionalListEffect`
+     state before `ManagedListEffectCheckpointCell` becomes its traced durable
+     owner. Preserve that state through admission without placing roots inside
+     the managed value graph, and add an exact aggressive handoff test
+     independent of the source-macro fixtures.
+   - `compiler::tests::invalid_local_request_never_reaches_the_loader` passed
+     in an isolated aggressive process but failed in the parallel aggressive
+     compiler partition while rooting a pointer already pending finalization.
+     Treat repetition or the isolated pass as no evidence of safety. First
+     reproduce both relevant schedules with injected collector/admission
+     barriers, then assign the defect to the production handoff or shared test
+     interference before changing code.
 1. Run the syntax-backed API inventory in closure mode and require zero
    `Violation` occurrences. The accepted collector primitive set remains an
    exact declaration allowlist rather than a path-prefix escape hatch.

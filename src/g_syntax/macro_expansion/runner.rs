@@ -328,15 +328,18 @@ fn unique_values(
     let public_values = Values::from_core_factory(factory.clone());
     let mut unique = Vec::new();
     for value in values {
-        let core_value = public_values
-            .clone_core(&value)
-            .expect("macro case values belong to the compilation runtime");
-        if !unique.iter().any(|prior| {
-            let prior = public_values
-                .clone_core(prior)
+        let duplicate = public_values.with_access(|access| {
+            let core_value = access
+                .clone_core(&value)
                 .expect("macro case values belong to the compilation runtime");
-            core_value == prior
-        }) {
+            unique.iter().any(|prior| {
+                let prior = access
+                    .clone_core(prior)
+                    .expect("macro case values belong to the compilation runtime");
+                core_value == prior
+            })
+        });
+        if !duplicate {
             unique.push(value);
         }
     }

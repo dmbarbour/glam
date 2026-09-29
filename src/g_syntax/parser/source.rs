@@ -437,8 +437,8 @@ fn macro_compiler_diagnostic(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> Diagnostic {
-    let emission = values.construct_runtime_value_root(|_| {
-        crate::diagnostic::text_message(Some(invocation.line), &message)
+    let emission = values.construct_runtime_value_root(|access| {
+        crate::diagnostic::text_message_in(access, Some(invocation.line), &message)
     });
     let emission = apply_macro_context(values, emission, frontier, cases, frames);
     Diagnostic::error(invocation.line, message).with_emission_root(emission)

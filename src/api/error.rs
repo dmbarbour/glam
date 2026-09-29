@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{Diagnostic, Value, Values};
-use crate::core::{CoreValueFactory, EvaluationHalt, Value as CoreValue};
+use crate::core::{CoreValueFactory, EvaluationHalt};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvaluationSessionId, EvaluationTaskId};
 use crate::interaction_net::NetBuildError;
@@ -30,24 +30,32 @@ impl Error {
         let message: Arc<str> = Arc::from(error.to_string());
         Self::from_eval_parts(
             values,
-            crate::diagnostic::halt_diagnostic_value_with(values, &error),
+            crate::diagnostic::halt_diagnostic_root_with(values, &error),
             message,
         )
     }
 
     fn from_eval_parts(
         values: &CoreValueFactory,
-        emission: Option<CoreValue>,
+        emission: Option<crate::runtime::RuntimeValueRoot>,
         message: Arc<str>,
     ) -> Self {
         let (message, diagnostic) = match emission {
             Some(emission) => {
-                let message = crate::diagnostic::conventional_summary_with(values, &emission)
-                    .1
-                    .unwrap_or(message);
+                let message =
+                    crate::diagnostic::conventional_summary_root(values, emission.clone())
+                        .1
+                        .unwrap_or(message);
+                let public_values = Values::from_core_factory(values.clone());
                 (
                     message,
-                    Diagnostic::from_parts(values, None, Severity::Error, emission, None),
+                    Diagnostic::from_parts(
+                        &public_values,
+                        None,
+                        Severity::Error,
+                        Value::from_runtime_root(emission),
+                        None,
+                    ),
                 )
             }
             None => (
@@ -80,23 +88,9 @@ impl Error {
             return self.with_context(values, context);
         };
         diagnostic.emission.require_runtime(values.runtime)?;
-        let emission = crate::diagnostic::prepend_contexts_with(
-            &values.core,
-            values.clone_core(&diagnostic.emission)?,
-            &[values.clone_core(&context)?],
-        )
-        .unwrap_or_else(|_| {
-            values
-                .clone_core(&diagnostic.emission)
-                .expect("the diagnostic runtime was checked")
-        });
-        self.diagnostic = Some(Arc::new(Diagnostic::from_parts(
-            &values.core,
-            None,
-            diagnostic.severity,
-            emission,
-            None,
-        )));
+        self.diagnostic = Some(Arc::new(
+            diagnostic.as_ref().clone().with_context(values, context)?,
+        ));
         Ok(self)
     }
 

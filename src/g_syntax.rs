@@ -117,8 +117,8 @@ impl Diagnostic {
 
     fn into_emission(self, values: &CoreValueFactory) -> RuntimeValueRoot {
         self.emission.unwrap_or_else(|| {
-            values.construct_runtime_value_root(|_| {
-                crate::diagnostic::text_message(Some(self.line), &self.message)
+            values.construct_runtime_value_root(|access| {
+                crate::diagnostic::text_message_in(access, Some(self.line), &self.message)
             })
         })
     }

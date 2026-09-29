@@ -47,13 +47,15 @@ impl Diagnostic {
         message: impl Into<Arc<str>>,
     ) -> Self {
         let message = message.into();
-        Self::from_parts(
-            values,
-            None,
-            severity,
-            crate::diagnostic::text_message(None, &message),
-            None,
-        )
+        let public_values = Values::from_core_factory(values.clone());
+        let emission = public_values.with_access(|access| {
+            access.wrap(crate::diagnostic::text_message_in(
+                access.runtime_access(),
+                None,
+                &message,
+            ))
+        });
+        Self::from_parts(&public_values, None, severity, emission, None)
     }
 
     /// Wraps an arbitrary diagnostic value with separately supplied severity.
@@ -63,14 +65,8 @@ impl Diagnostic {
         severity: Severity,
         emission: Value,
     ) -> Result<Self, Error> {
-        let emission = values.clone_core(&emission)?;
-        Ok(Self::from_parts(
-            values.core(),
-            None,
-            severity,
-            emission,
-            None,
-        ))
+        emission.require_runtime(values.runtime)?;
+        Ok(Self::from_parts(values, None, severity, emission, None))
     }
 
     pub fn with_source_location(
@@ -87,11 +83,15 @@ impl Diagnostic {
                 identity.value(access.runtime_access()),
             ));
             Ok(Self::from_parts(
-                values.core(),
+                values,
                 Some(source.clone()),
                 self.severity,
-                crate::diagnostic::text_message(Some(line), &self.message),
-                Some(origin),
+                access.wrap(crate::diagnostic::text_message_in(
+                    access.runtime_access(),
+                    Some(line),
+                    &self.message,
+                )),
+                Some(access.wrap(origin)),
             ))
         })
     }
@@ -114,16 +114,17 @@ impl Diagnostic {
 
     pub(crate) fn enrich_with_factory(&self, values: &CoreValueFactory) -> Result<Value, Error> {
         let public_values = Values::from_core_factory(values.clone());
-        crate::diagnostic::enrich(
+        self.emission.require_runtime(public_values.runtime)?;
+        if let Some(origin) = &self.origin {
+            origin.require_runtime(public_values.runtime)?;
+        }
+        crate::diagnostic::enrich_root(
             values,
-            public_values.clone_core(&self.emission)?,
+            self.emission.0.clone(),
             self.severity,
-            self.origin
-                .as_ref()
-                .map(|origin| public_values.clone_core(origin))
-                .transpose()?,
+            self.origin.as_ref().map(|origin| origin.0.clone()),
         )
-        .map(|value| public_values.wrap(value))
+        .map(Value::from_runtime_root)
         .map_err(|error| Error::from_eval(values, error))
     }
 
@@ -174,13 +175,9 @@ impl Diagnostic {
     pub fn enrich_with(&self, values: &Values, updates: Value) -> Result<Value, Error> {
         updates.require_runtime(values.runtime)?;
         let enriched = self.enrich(values)?;
-        crate::diagnostic::apply_updates(
-            &values.core,
-            values.clone_core(&enriched)?,
-            values.clone_core(&updates)?,
-        )
-        .map(|value| values.wrap(value))
-        .map_err(|error| Error::from_eval(&values.core, error))
+        crate::diagnostic::apply_emission_updates_root(&values.core, enriched.0, updates.0)
+            .map(Value::from_runtime_root)
+            .map_err(|error| Error::from_eval(&values.core, error))
     }
 
     /// Applies observer-owned updates to an arbitrary diagnostic-style value.
@@ -191,10 +188,8 @@ impl Diagnostic {
     pub fn apply_updates(values: &Values, message: &Value, updates: Value) -> Result<Value, Error> {
         message.require_runtime(values.runtime)?;
         updates.require_runtime(values.runtime)?;
-        let message = values.clone_core(message)?;
-        let updates = values.clone_core(&updates)?;
-        crate::diagnostic::apply_emission_updates(&values.core, message, updates)
-            .map(|value| values.wrap(value))
+        crate::diagnostic::apply_emission_updates_root(&values.core, message.0.clone(), updates.0)
+            .map(Value::from_runtime_root)
             .map_err(|error| Error::from_eval(&values.core, error))
     }
 
@@ -204,25 +199,29 @@ impl Diagnostic {
     pub fn with_context(self, values: &Values, context: Value) -> Result<Self, Error> {
         self.emission.require_runtime(values.runtime)?;
         context.require_runtime(values.runtime)?;
-        let emission = crate::diagnostic::prepend_contexts_with(
-            &values.core,
-            values.clone_core(&self.emission)?,
-            &[values.clone_core(&context)?],
-        )
-        .unwrap_or_else(|_| {
-            values
-                .clone_core(&self.emission)
-                .expect("the diagnostic runtime was checked")
+        let contexts = values.with_access(|access| {
+            let context = access
+                .clone_core(&context)
+                .expect("the diagnostic runtime was checked");
+            access
+                .wrap(CoreValue::List(crate::core::List::from_values(vec![
+                    context,
+                ])))
+                .0
         });
+        let emission = crate::diagnostic::prepend_contexts_root(
+            &values.core,
+            self.emission.0.clone(),
+            contexts,
+        )
+        .map(Value::from_runtime_root)
+        .unwrap_or_else(|_| self.emission.clone());
         Ok(Self::from_parts(
-            values.core(),
+            values,
             self.source,
             self.severity,
             emission,
-            self.origin
-                .as_ref()
-                .map(|origin| values.clone_core(origin))
-                .transpose()?,
+            self.origin,
         ))
     }
 
@@ -307,7 +306,8 @@ impl Diagnostic {
                     })
                     .transpose()?;
                 let origin = field("origin").cloned().map(|origin| access.wrap(origin));
-                let (projected_line, message) = crate::diagnostic::conventional_summary(&emission);
+                let (projected_line, message) =
+                    crate::diagnostic::conventional_summary(access.runtime_access(), &emission);
                 Ok(Self {
                     emission: access.wrap(emission),
                     origin,
@@ -343,29 +343,42 @@ impl Diagnostic {
         severity: Severity,
         message: &crate::runtime::RuntimeValueRoot,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::from_parts(
-                values,
-                Some(Arc::from(trace.source_label())),
-                severity,
-                message.clone_core_with(&access),
-                Some(trace.origin_value(&access)),
-            )
-        })
+        let public_values = Values::from_core_factory(values.clone());
+        let origin = values.construct_runtime_value_root(|access| trace.origin_value(access));
+        Self::from_parts(
+            &public_values,
+            Some(Arc::from(trace.source_label())),
+            severity,
+            Value::from_runtime_root(message.clone()),
+            Some(Value::from_runtime_root(origin)),
+        )
     }
 
     pub(crate) fn from_parts(
-        values: &CoreValueFactory,
+        values: &Values,
         source: Option<Arc<str>>,
         severity: Severity,
-        message: CoreValue,
-        origin: Option<CoreValue>,
+        emission: Value,
+        origin: Option<Value>,
     ) -> Self {
-        let (line, text) = crate::diagnostic::conventional_summary(&message);
-        let public_values = Values::from_core_factory(values.clone());
+        emission
+            .require_runtime(values.runtime)
+            .expect("diagnostic emission must belong to its Values domain");
+        if let Some(origin) = &origin {
+            origin
+                .require_runtime(values.runtime)
+                .expect("diagnostic origin must belong to its Values domain");
+        }
+        let (line, text) = values.with_access(|access| {
+            access
+                .with_core(&emission, |emission| {
+                    crate::diagnostic::conventional_summary(access.runtime_access(), emission)
+                })
+                .unwrap_or((None, None))
+        });
         Self {
-            emission: public_values.wrap(message),
-            origin: origin.map(|origin| public_values.wrap(origin)),
+            emission,
+            origin,
             source,
             severity,
             line,

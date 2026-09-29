@@ -3463,10 +3463,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 }
 
-fn effect_dispatch_context(_access: &RuntimeValueAccess<'_>, stage: &str) -> Value {
+fn effect_dispatch_context(access: &RuntimeValueAccess<'_>, stage: &str) -> Value {
     let stage_key = Key::binary_from_text("stage");
     let stage = Value::Atom(Atom::from_key(&Key::binary_from_text(stage)));
-    crate::diagnostic::evaluation_context_frame_with_args(
+    crate::diagnostic::evaluation_context_frame_with_args_in(
+        access,
         "effect_dispatch",
         Dict::new_sync().insert(stage_key, stage),
     )

@@ -207,7 +207,7 @@ impl TaskPromiseTerminalMapper {
             EvaluationWaitTerminal::Failed(failure) | EvaluationWaitTerminal::Killed(failure) => {
                 Err(Arc::new(failure.as_failure().with_context_in(
                     access,
-                    crate::diagnostic::evaluation_context_frame(operation),
+                    crate::diagnostic::evaluation_context_frame_in(access, operation),
                 )))
             }
             EvaluationWaitTerminal::Cancelled => Err(reflection_terminal_failure(
@@ -240,7 +240,7 @@ fn reflection_terminal_failure(
 ) -> Arc<EvaluationFailure> {
     Arc::new(EvaluationFailure::message(message).with_context_in(
         access,
-        crate::diagnostic::evaluation_context_frame(operation),
+        crate::diagnostic::evaluation_context_frame_in(access, operation),
     ))
 }
 

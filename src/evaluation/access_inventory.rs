@@ -463,7 +463,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/api/value.rs::impl PromiseResolver::fail#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl PromiseResolver::fail_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl PromiseResolver::resolve#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/diagnostics.rs::impl Diagnostic::from_compile#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/tests.rs::opaque_compilation_origin_round_trips_only_through_its_reflection_cap#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/api/value.rs::impl Value::clone_core_in_own_domain#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/api/value.rs::impl Values::with_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -591,9 +590,13 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::diagnostic_object#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::enrich#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::conventional_summary_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::conventional_summary_root#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::conventional_summary_root#3|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::conventional_summary_root#4|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::conventional_summary_root#5|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::prepend_contexts_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/diagnostic.rs::tests::digest_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::tests::trace_origin_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/application.rs::apply_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -852,7 +855,6 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // D.2b.2 publishes imported bytes and the final module promise through
         // one explicit bounded value region.
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
-        ("src/api/diagnostics.rs", GatewayCounts::new(1, 0)),
         ("src/api/tests.rs", GatewayCounts::new(3, 2)),
         // D.2b.2 removes authority-free promise publication and public-root
         // reprojection. Resolver success, structured failure, textual failure,
@@ -942,7 +944,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // access authority as topology inspection. P2C adds one explicit
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(17, 0)),
-        ("src/diagnostic.rs", GatewayCounts::new(7, 0)),
+        ("src/diagnostic.rs", GatewayCounts::new(11, 0)),
         // W6F.4d.3 gives test application construction the same short,
         // callback-free value region used by production lazy application.
         ("src/eval/application.rs", GatewayCounts::new(1, 0)),
@@ -1256,7 +1258,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        55
+        58
     );
 }
 

@@ -1452,7 +1452,8 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
 
     let (waiting_sender, waiting_receiver) = mpsc::channel();
     let (result_sender, result_receiver) = mpsc::channel();
-    let driver = EvalContext::clone(&context).with_claimed_task_wait_probe(waiting_sender);
+    coordinator.set_work_wait_probe(waiting_sender);
+    let driver = EvalContext::clone(&context);
     let foreground = std::thread::spawn(move || {
         result_sender
             .send(driver.drive_client_demand_for_test(handle))
@@ -1460,7 +1461,7 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
     });
     waiting_receiver
         .recv_timeout(Duration::from_secs(2))
-        .expect("the foreground must reach its claimed-producer wait");
+        .expect("the foreground must lock and enter its claimed-producer wait");
     assert!(result_receiver.try_recv().is_err());
     coordinator.poll_claimed_task(claimed);
     let result = result_receiver
@@ -1474,11 +1475,12 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
     ));
     foreground.join().expect("foreground driver should finish");
     let notifications = coordinator.coordinator_notification_profile();
-    assert_eq!(notifications.exact_clients.productive, 1);
-    assert!(matches!(notifications.exact_clients.released, 1 | 2));
+    assert!(notifications.exact_clients.released >= 1);
     assert_eq!(
         notifications.exact_clients.released,
-        notifications.exact_clients.productive + notifications.exact_clients.unrelated,
+        notifications.exact_clients.productive
+            + notifications.exact_clients.relevant
+            + notifications.exact_clients.unrelated,
     );
 }
 

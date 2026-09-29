@@ -973,7 +973,7 @@ fn is_production_source(relative: &Path) -> bool {
 // checkpoint now retains one terminal success or failure state so later
 // observers replay rather than poll consumed regional work. The added failure
 // arm remains beneath the existing traced managed checkpoint owner.
-const DECLARATION_BASELINE_COUNT: usize = 251;
+const DECLARATION_BASELINE_COUNT: usize = 253;
 // PNC1 gives the managed builtin checkpoint one additional traced raw value:
 // the already-selected strict semantic netlist consumed by hidden replay.
 // PNC2C adds three nested regional builder declarations and eight raw values
@@ -995,9 +995,14 @@ const DECLARATION_BASELINE_COUNT: usize = 251;
 // in syntax expressions and lexical arenas with runtime roots. The same three
 // declarations remain, but their durable ownership now survives macro
 // rewriting and staged parsing without an unrooted semantic payload.
+// GCI11R-002D.2g.1-.2 make public diagnostic envelopes durable Value owners
+// and keep reflection key-list progress in public rooted values. Diagnostic
+// retains two Value fields, while KeyListStep contributes five bounded Value
+// fields; the diagnostic transformation boundary also replaces one raw Value
+// field with an existing RuntimeValueRoot.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([315, 117, 5, 35, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_465_787_609_358_317_563;
+    DeclarationSignals::new([320, 118, 5, 35, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_218_284_482_102_248_769;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

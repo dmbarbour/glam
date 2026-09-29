@@ -34,12 +34,13 @@ use super::coordinator::{
 use super::pump::test_reflection_dependency;
 use super::pump::{EvaluationPumpOutcome, pump_demand_on_route};
 use super::{
-    EvaluationDemandState, EvaluationPollContext, ReflectionTaskProfile, RuntimeObservationEpoch,
-    RuntimeObservationState, allocate_route_wait_token, allocate_task_id, allocate_wait_token,
-    evaluation_failure,
+    EvaluationDemandState, ReflectionTaskProfile, RuntimeObservationEpoch, RuntimeObservationState,
+    allocate_route_wait_token, allocate_task_id, allocate_wait_token, evaluation_failure,
 };
 #[cfg(test)]
-use super::{EvaluatorStepContext, PendingTestPromiseTask, ReflectionTaskLauncher};
+use super::{
+    EvaluationPollContext, EvaluatorStepContext, PendingTestPromiseTask, ReflectionTaskLauncher,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationSessionRun {
@@ -911,6 +912,7 @@ impl EvalContext {
     /// input root, opens no mutator while pumping, then projects the completed
     /// root only for its raw return. GCI11R-002D.2 owns its remaining callers
     /// and eventual removal.
+    #[cfg(test)]
     pub(crate) fn evaluate_compatibility_whnf(
         &self,
         value: &Value,
@@ -1043,7 +1045,7 @@ impl EvalContext {
                                 continue;
                             }
                             EvaluationPumpOutcome::Busy => {
-                                self.wait_for_client_progress(&coordinator, &handle, generation);
+                                self.wait_for_claimed_task_on_route(wait, &mut exact_demand_route);
                                 continue;
                             }
                             EvaluationPumpOutcome::NoProgress

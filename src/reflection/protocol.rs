@@ -624,10 +624,13 @@ impl TaskHalt {
             .permanent_failure()
             .expect("a blocked task halt has no failure diagnostic");
         Diagnostic::from_parts(
-            values.core(),
+            values,
             None,
             Severity::Error,
-            crate::diagnostic::failure_diagnostic_value_with(values.core(), failure),
+            PublicValue::from_runtime_root(crate::diagnostic::failure_diagnostic_root_with(
+                values.core(),
+                failure,
+            )),
             None,
         )
     }

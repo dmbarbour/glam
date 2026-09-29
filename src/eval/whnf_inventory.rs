@@ -1294,15 +1294,19 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // W7B replaces recursive dictionary/list key conversion with one explicit
 // parent-stack walk. Its trace visitor contributes one reviewed access-path
 // loop; no recursive semantic call remains.
-const EXPECTED_OCCURRENCES: usize = 139;
+// GCI11R-002D.2g's routine gate exposed that the blocking client driver used
+// the generic coordinator wait after observing a claimed exact producer. It
+// now delegates that case to the existing exact-route wait, adding one
+// reviewed coordinator/orchestration boundary without adding recursion.
+const EXPECTED_OCCURRENCES: usize = 140;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 10_646_175_208_961_668_511;
+const EXPECTED_FINGERPRINT: u64 = 1_610_920_067_487_280_071;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::RetryableWait, 4),
     (Signal::UnassignedPromise, 1),
     (Signal::DependencyTranslation, 2),
-    (Signal::CoordinatorBoundary, 13),
+    (Signal::CoordinatorBoundary, 14),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
     (Signal::NetBoundary, 1),
@@ -1315,13 +1319,13 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 8),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 43),
+    (WorkShape::OrchestrationHandoff, 44),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 17_951_364_132_856_715_980;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 6_488_633_449_337_451_583;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
     (W7Disposition::ExplicitIteration, 91),
-    (W7Disposition::Orchestration, 48),
+    (W7Disposition::Orchestration, 49),
 ];
 
 const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
@@ -1332,8 +1336,12 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // remains empty.
 // D.2e makes the already-open resolver access explicit at the effect-path
 // call site, adding one statically resolved edge without changing recursion.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 1_649_659_280_329_684_321;
+// GCI11R-002D.2g removes the production compatibility-WHNF diagnostic path;
+// rooted normalization resumes through the ordinary evaluator boundary. The
+// two deleted helper edges leave the resolved graph smaller without changing
+// its cycle set.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_138;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 3_859_013_188_797_305_230;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

@@ -35,7 +35,7 @@ pub(crate) fn failure_diagnostic_value_in(
 ) -> Value {
     let emission = match failure.emission_value_in(access) {
         Some(Value::Binary(text)) => {
-            crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
+            crate::diagnostic::text_message_in(access, None, String::from_utf8_lossy(text))
         }
         Some(emission @ Value::Dict(_)) => access.duplicate_value(emission),
         Some(other) => {
@@ -46,10 +46,11 @@ pub(crate) fn failure_diagnostic_value_in(
                 failure_contexts_value(access, failure),
             );
         }
-        None => crate::diagnostic::text_message(None, failure.to_string()),
+        None => crate::diagnostic::text_message_in(access, None, failure.to_string()),
     };
 
-    crate::diagnostic::prepend_contexts(
+    crate::diagnostic::prepend_contexts_in(
+        access,
         access.duplicate_value(&emission),
         failure.contexts_in(access),
     )

@@ -1038,13 +1038,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        549,
+        533,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        3_979_508_304_391_981_044,
+        14_755_529_202_494_495_996,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,9 +1073,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 458),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 465),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 52),
+        ((ApiKind::Function, ApiDisposition::Violation), 29),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             6,
@@ -1092,17 +1092,10 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
     assert!(actual.iter().all(|occurrence| {
         occurrence.declaration != "src/evaluation/session.rs::EvalContext::evaluate_whnf"
     }));
-    let compatibility_evaluate_whnf = actual
-        .iter()
-        .find(|occurrence| {
-            occurrence.declaration
-                == "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf"
-        })
-        .expect("the narrowed raw WHNF compatibility facade remains assigned to D.2");
-    assert_eq!(
-        compatibility_evaluate_whnf.disposition(),
-        ApiDisposition::Violation
-    );
+    assert!(actual.iter().all(|occurrence| {
+        occurrence.declaration
+            != "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf"
+    }));
 
     assert!(actual.iter().all(|occurrence| {
         occurrence.declaration != "src/api/assembly.rs::Assembler::compile_diagnostic_emitter"
@@ -1137,36 +1130,13 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
 fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
-    let expected = BTreeMap::from([
+    let expected = BTreeMap::from([(
         (
-            (
-                RemediationOwner::D2bCoreCompatibility,
-                ReplacementShape::CoreStructuralOperation,
-            ),
-            34,
+            RemediationOwner::D2bCoreCompatibility,
+            ReplacementShape::CoreStructuralOperation,
         ),
-        (
-            (
-                RemediationOwner::D2dOrchestration,
-                ReplacementShape::RootedOrchestration,
-            ),
-            1,
-        ),
-        (
-            (
-                RemediationOwner::D2gPublicCompilerDiagnostics,
-                ReplacementShape::PublicDurableBoundary,
-            ),
-            6,
-        ),
-        (
-            (
-                RemediationOwner::D2gPublicCompilerDiagnostics,
-                ReplacementShape::CompilerDiagnosticRegion,
-            ),
-            14,
-        ),
-    ]);
+        32,
+    )]);
 
     assert_eq!(
         remediation_summary(&actual),
@@ -1209,9 +1179,7 @@ fn d2b_core_compatibility_declarations_are_exact() {
         "src/core.rs::CoreValueFactory::warn",
         "src/core.rs::EvaluatedValue::into_value",
         "src/core.rs::EvaluatedValue::try_from",
-        "src/core.rs::EvaluationFailure::contexts",
         "src/core.rs::EvaluationFailure::emission",
-        "src/core.rs::EvaluationFailure::emission_value",
         "src/core.rs::EvaluationFailure::visit_direct_values",
         "src/core.rs::EvaluationFailure::with_context",
         "src/core.rs::HostCallProducer::captures",
@@ -1270,10 +1238,7 @@ fn d2d_orchestration_declarations_are_exact() {
         })
         .map(|occurrence| occurrence.declaration)
         .collect::<BTreeSet<_>>();
-    let expected = ["src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::new();
 
     assert_eq!(
         actual, expected,
@@ -1295,31 +1260,7 @@ fn d2g_public_compiler_diagnostic_declarations_are_exact() {
         })
         .map(|occurrence| occurrence.declaration)
         .collect::<BTreeSet<_>>();
-    let expected = [
-        "src/api/assembly.rs::authoritative_glam_environment",
-        "src/api/diagnostics.rs::Diagnostic::from_parts",
-        "src/api/error.rs::Error::from_eval_parts",
-        "src/api/value.rs::EvaluatedValue::with_core",
-        "src/api/value.rs::Values::clone_core",
-        "src/api/value.rs::Values::wrap",
-        "src/diagnostic.rs::apply_emission_updates",
-        "src/diagnostic.rs::apply_updates",
-        "src/diagnostic.rs::conventional_summary",
-        "src/diagnostic.rs::conventional_summary_with",
-        "src/diagnostic.rs::diagnostic_object",
-        "src/diagnostic.rs::enrich",
-        "src/diagnostic.rs::evaluation_context_frame",
-        "src/diagnostic.rs::evaluation_context_frame_with_args",
-        "src/diagnostic.rs::failure_diagnostic_value_with",
-        "src/diagnostic.rs::fallback_failure_diagnostic",
-        "src/diagnostic.rs::halt_diagnostic_value_with",
-        "src/diagnostic.rs::prepend_contexts",
-        "src/diagnostic.rs::prepend_contexts_with",
-        "src/diagnostic.rs::text_message",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::new();
 
     assert_eq!(
         actual, expected,

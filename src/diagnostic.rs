@@ -6,6 +6,7 @@ use crate::core::{
     OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, Value, keys,
 };
 use crate::number::Number;
+use crate::runtime::RuntimeValueRoot;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +252,26 @@ impl Severity {
 
 /// Builds the conventional bootstrap message body. Severity and assembler
 /// provenance are emission-effect metadata and are mixed in later.
+pub(crate) fn text_message_in(
+    _access: &RuntimeValueAccess<'_>,
+    line: Option<usize>,
+    message: impl AsRef<str>,
+) -> Value {
+    let mut message_dict = Dict::new_sync().insert(
+        (*keys::TEXT).clone(),
+        Value::binary_from_text(message.as_ref()),
+    );
+    if let Some(line) = line {
+        let location = Dict::new_sync().insert(
+            (*keys::LINE).clone(),
+            Value::Number(Number::from_usize(line)),
+        );
+        message_dict = message_dict.insert((*keys::LOCATION).clone(), Value::Dict(location));
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message_dict)))
+}
+
+#[cfg(test)]
 pub(crate) fn text_message(line: Option<usize>, message: impl AsRef<str>) -> Value {
     let mut message_dict = Dict::new_sync().insert(
         (*keys::TEXT).clone(),
@@ -269,10 +290,34 @@ pub(crate) fn text_message(line: Option<usize>, message: impl AsRef<str>) -> Val
 /// Transitional context-frame constructor for orchestration, reflection, and
 /// compiler callers which have not yet adopted their regional value-access
 /// boundary. Evaluator code uses `eval::evaluation_context_frame_in` instead.
+pub(crate) fn evaluation_context_frame_in(
+    access: &RuntimeValueAccess<'_>,
+    operation: &str,
+) -> Value {
+    evaluation_context_frame_with_args_in(access, operation, Dict::new_sync())
+}
+
+pub(crate) fn evaluation_context_frame_with_args_in(
+    _access: &RuntimeValueAccess<'_>,
+    operation: &str,
+    args: Dict,
+) -> Value {
+    let operation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+        operation,
+    )));
+    let mut detail = Dict::new_sync().insert((*keys::OP).clone(), operation);
+    if !args.is_empty() {
+        detail = detail.insert((*keys::ARGS).clone(), Value::Dict(args));
+    }
+    Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::Dict(detail)))
+}
+
+#[cfg(test)]
 pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
     evaluation_context_frame_with_args(operation, Dict::new_sync())
 }
 
+#[cfg(test)]
 pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
     let operation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
         operation,
@@ -290,34 +335,57 @@ pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) ->
 /// emission while normalizing it into a diagnostic object. It therefore must
 /// not receive or retain an active value-access region. D.2g replaces its raw
 /// compatibility transport at the public diagnostic boundary.
-pub(crate) fn failure_diagnostic_value_with(
+pub(crate) fn failure_diagnostic_root_with(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
-) -> Value {
-    let emission = match failure.emission_value() {
-        Some(Value::Binary(text)) => text_message(None, String::from_utf8_lossy(text)),
-        Some(emission) => emission.clone(),
-        None => text_message(None, failure.to_string()),
-    };
-
-    prepend_contexts_with(values, emission.clone(), failure.contexts()).unwrap_or_else(|_| {
-        fallback_failure_diagnostic(
-            failure,
-            Some(emission),
-            Value::List(List::from_values(failure.contexts().to_vec())),
+) -> RuntimeValueRoot {
+    let (emission, contexts) = values.with_runtime_value_access(|access| {
+        let emission = match failure.emission_value_in(&access) {
+            Some(Value::Binary(text)) => {
+                text_message_in(&access, None, String::from_utf8_lossy(text))
+            }
+            Some(emission) => access.duplicate_value(emission),
+            None => text_message_in(&access, None, failure.to_string()),
+        };
+        let contexts = failure
+            .contexts_in(&access)
+            .iter()
+            .map(|context| access.duplicate_value(context))
+            .collect();
+        (
+            access.root_runtime_value(emission),
+            access.root_runtime_value(Value::List(List::from_values(contexts))),
         )
+    });
+    prepend_contexts_root(values, emission.clone(), contexts).unwrap_or_else(|_| {
+        values.construct_runtime_value_root(|access| {
+            let emission = emission.clone_core_with(access);
+            fallback_failure_diagnostic(
+                access,
+                failure,
+                Some(emission),
+                Value::List(List::from_values(
+                    failure
+                        .contexts_in(access)
+                        .iter()
+                        .map(|context| access.duplicate_value(context))
+                        .collect(),
+                )),
+            )
+        })
     })
 }
 
-pub(crate) fn halt_diagnostic_value_with(
+pub(crate) fn halt_diagnostic_root_with(
     values: &CoreValueFactory,
     halt: &EvaluationHalt,
-) -> Option<Value> {
+) -> Option<RuntimeValueRoot> {
     halt.permanent_failure()
-        .map(|failure| failure_diagnostic_value_with(values, failure))
+        .map(|failure| failure_diagnostic_root_with(values, failure))
 }
 
 fn fallback_failure_diagnostic(
+    _access: &RuntimeValueAccess<'_>,
     failure: &EvaluationFailure,
     emission: Option<Value>,
     contexts: Value,
@@ -351,55 +419,50 @@ pub(crate) fn assembler_metadata(
 /// Applies one set of object updates as a definitions mixin. Keeping this
 /// operation separate lets observers add their own context without mutating
 /// the original emission.
-pub(crate) fn apply_updates(
-    values: &CoreValueFactory,
-    message: Value,
-    updates: Value,
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, |_| vec![updates]);
-    let result = context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, |access| {
-        vec![message, extension_defs.clone_core_with(access)]
-    })?;
-    Ok(values.with_runtime_value_access(|access| result.clone_core_with(&access)))
-}
-
-/// Turns a diagnostic emission into an object when needed, then applies an
-/// independent compiler- or observer-owned mixin without changing the source
-/// emission.
-pub(crate) fn apply_emission_updates(
-    values: &CoreValueFactory,
-    message: Value,
-    updates: Value,
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(values, message)?;
-    apply_updates(values, message, updates)
-}
-
 /// Root-preserving form of [`apply_emission_updates`] for orchestration which
 /// must release managed access before diagnostic normalization can demand
 /// values or run object builtins.
 pub(crate) fn apply_emission_updates_root(
     values: &CoreValueFactory,
-    message: crate::runtime::RuntimeValueRoot,
-    updates: crate::runtime::RuntimeValueRoot,
-) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
+    message: RuntimeValueRoot,
+    updates: RuntimeValueRoot,
+) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
     let message = diagnostic_object_root(&context, message)?;
-    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, |access| {
-        vec![updates.clone_core_with(access)]
-    });
-    context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, |access| {
-        vec![
-            message.clone_core_with(access),
-            extension_defs.clone_core_with(access),
-        ]
-    })
+    apply_updates_root(&context, message, updates)
 }
 
-/// Prepends semantic demand frames while preserving context supplied by the
-/// original diagnostic emission. An empty prefix still normalizes
-/// `msg.context` to a list.
+pub(crate) fn prepend_contexts_in(
+    access: &RuntimeValueAccess<'_>,
+    message: Value,
+    contexts: &[Value],
+) -> Result<Value, crate::core::EvaluationHalt> {
+    let Value::Dict(message) = message else {
+        return Err(crate::core::EvaluationHalt::new(
+            "diagnostic context requires an immediately structured diagnostic",
+        ));
+    };
+    let interface = match message.get(&*keys::MSG) {
+        Some(Value::Dict(interface)) => interface.clone(),
+        _ => Dict::new_sync(),
+    };
+    let existing = match interface.get(&*keys::CONTEXT) {
+        Some(Value::List(contexts)) => contexts.clone(),
+        Some(context) => List::from_values(vec![access.duplicate_value(context)]),
+        None => List::empty(),
+    };
+    let prefix = contexts
+        .iter()
+        .map(|context| access.duplicate_value(context))
+        .collect();
+    let contexts = List::concat(List::from_values(prefix), existing);
+    let interface = interface.insert((*keys::CONTEXT).clone(), Value::List(contexts));
+    Ok(Value::Dict(
+        message.insert((*keys::MSG).clone(), Value::Dict(interface)),
+    ))
+}
+
+#[cfg(test)]
 pub(crate) fn prepend_contexts(
     message: Value,
     contexts: &[Value],
@@ -425,78 +488,87 @@ pub(crate) fn prepend_contexts(
     ))
 }
 
-/// Runtime-aware context projection for evaluator failures. Unlike the
-/// structural fast path, this may demand an error emission far enough to
-/// expose its diagnostic object before adding the context list.
-pub(crate) fn prepend_contexts_with(
-    values: &CoreValueFactory,
-    message: Value,
-    contexts: &[Value],
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(values, message)?;
-    let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let existing = match &message {
-        Value::Dict(message) => match message.get(&*keys::MSG) {
-            Some(interface) => match context.evaluate_compatibility_whnf(interface)? {
-                Value::Dict(interface) => match interface.get(&*keys::CONTEXT) {
-                    Some(Value::List(contexts)) => contexts.clone(),
-                    Some(context) => List::from_values(vec![context.clone()]),
-                    None => List::empty(),
-                },
-                _ => List::empty(),
-            },
-            None => List::empty(),
-        },
-        _ => unreachable!("diagnostic_object always returns a dictionary"),
-    };
-    let contexts = List::concat(List::from_values(contexts.to_vec()), existing);
-    let updates = Value::Dict(Dict::new_sync().insert(
-        (*keys::MSG).clone(),
-        Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts))),
-    ));
-    apply_updates(values, message, updates)
-}
-
-/// Applies assembler-owned metadata as a real object definitions mixin so the
-/// resulting `spec` also records the extension for subsequent observers.
-pub(crate) fn enrich(
-    values: &CoreValueFactory,
-    message: Value,
-    severity: Severity,
-    origin: Option<Value>,
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let message = diagnostic_object(values, message)?;
-    let updates = values.with_runtime_value_access(|access| {
-        Value::Dict(assembler_metadata(&access, values, severity, origin))
+fn apply_updates_root(
+    context: &crate::evaluation::EvalContext,
+    message: RuntimeValueRoot,
+    updates: RuntimeValueRoot,
+) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, |access| {
+        vec![updates.clone_core_with(access)]
     });
-    apply_updates(values, message, updates)
+    context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, |access| {
+        vec![
+            message.clone_core_with(access),
+            extension_defs.clone_core_with(access),
+        ]
+    })
 }
 
-fn diagnostic_object(
+pub(crate) fn prepend_contexts_root(
     values: &CoreValueFactory,
-    message: Value,
-) -> Result<Value, crate::core::EvaluationHalt> {
+    message: RuntimeValueRoot,
+    contexts: RuntimeValueRoot,
+) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let message = context.evaluate_compatibility_whnf(&message)?;
-    let has_defined_spec = match &message {
-        Value::Dict(message) => match message.get(&*keys::SPEC) {
-            Some(spec) => {
-                let spec = context.evaluate_compatibility_whnf(spec)?;
-                !matches!(spec, Value::Dict(spec) if spec.is_empty())
-            }
-            None => false,
-        },
-        _ => false,
+    let message = diagnostic_object_root(&context, message)?;
+    let interface = values.with_runtime_value_access(|access| {
+        message.with_core(&access, |message| match message {
+            Value::Dict(message) => message
+                .get(&*keys::MSG)
+                .map(|interface| access.root_runtime_value(interface.clone())),
+            _ => None,
+        })
+    });
+    let interface = match interface.flatten() {
+        Some(interface) => Some(context.evaluate_root_whnf(interface)?),
+        None => None,
     };
-    let message = if has_defined_spec {
-        message
-    } else {
-        let message = context.evaluate_builtin_whnf(Builtin::ObjectFromDict, |_| vec![message])?;
-        values.with_runtime_value_access(|access| message.clone_core_with(&access))
-    };
-    Ok(message)
+    let updates = values.construct_runtime_value_root(|access| {
+        let prefix = contexts
+            .with_core(access, |contexts| match contexts {
+                Value::List(contexts) => contexts.clone(),
+                _ => List::empty(),
+            })
+            .unwrap_or_else(List::empty);
+        let existing = interface
+            .as_ref()
+            .and_then(|interface| {
+                interface.with_core(access, |interface| match interface {
+                    Value::Dict(interface) => interface.get(&*keys::CONTEXT).cloned(),
+                    _ => None,
+                })
+            })
+            .flatten();
+        let existing = match existing {
+            Some(Value::List(contexts)) => contexts,
+            Some(context) => List::from_values(vec![context]),
+            None => List::empty(),
+        };
+        let contexts = List::concat(prefix, existing);
+        Value::Dict(Dict::new_sync().insert(
+            (*keys::MSG).clone(),
+            Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts))),
+        ))
+    });
+    apply_updates_root(&context, message, updates)
 }
 
+pub(crate) fn enrich_root(
+    values: &CoreValueFactory,
+    message: RuntimeValueRoot,
+    severity: Severity,
+    origin: Option<RuntimeValueRoot>,
+) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+    let updates = values.construct_runtime_value_root(|access| {
+        let origin = origin.as_ref().map(|origin| origin.clone_core_with(access));
+        Value::Dict(assembler_metadata(access, values, severity, origin))
+    });
+    apply_emission_updates_root(values, message, updates)
+}
+
+/// Prepends semantic demand frames while preserving context supplied by the
+/// original diagnostic emission. An empty prefix still normalizes
+/// `msg.context` to a list.
 fn diagnostic_object_root(
     context: &crate::evaluation::EvalContext,
     message: crate::runtime::RuntimeValueRoot,
@@ -533,7 +605,87 @@ fn diagnostic_object_root(
     }
 }
 
-pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Arc<str>>) {
+pub(crate) fn conventional_summary_root(
+    values: &CoreValueFactory,
+    message: RuntimeValueRoot,
+) -> (Option<usize>, Option<Arc<str>>) {
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
+    let Ok(message) = context.evaluate_root_whnf(message) else {
+        return (None, None);
+    };
+    let interface = values.with_runtime_value_access(|access| {
+        message.with_core(&access, |message| match message {
+            Value::Dict(message) => message
+                .get(&*keys::MSG)
+                .map(|interface| access.root_runtime_value(interface.clone())),
+            _ => None,
+        })
+    });
+    let Some(interface) = interface.flatten() else {
+        return (None, None);
+    };
+    let Ok(interface) = context.evaluate_root_whnf(interface) else {
+        return (None, None);
+    };
+    let (text, location) = values
+        .with_runtime_value_access(|access| {
+            interface.with_core(&access, |interface| match interface {
+                Value::Dict(interface) => (
+                    interface
+                        .get(&*keys::TEXT)
+                        .map(|text| access.root_runtime_value(text.clone())),
+                    interface
+                        .get(&*keys::LOCATION)
+                        .map(|location| access.root_runtime_value(location.clone())),
+                ),
+                _ => (None, None),
+            })
+        })
+        .unwrap_or((None, None));
+    let text = text
+        .and_then(|text| context.evaluate_root_whnf(text).ok())
+        .and_then(|text| {
+            values.with_runtime_value_access(|access| {
+                text.with_core(&access, |text| match text {
+                    Value::Binary(bytes) => {
+                        Some(Arc::from(String::from_utf8_lossy(bytes).as_ref()))
+                    }
+                    _ => None,
+                })
+            })
+        })
+        .flatten();
+    let line = location
+        .and_then(|location| context.evaluate_root_whnf(location).ok())
+        .and_then(|location| {
+            values.with_runtime_value_access(|access| {
+                location.with_core(&access, |location| match location {
+                    Value::Dict(location) => location
+                        .get(&*keys::LINE)
+                        .map(|line| access.root_runtime_value(line.clone())),
+                    _ => None,
+                })
+            })
+        })
+        .flatten()
+        .and_then(|line| context.evaluate_root_whnf(line).ok())
+        .and_then(|line| {
+            values.with_runtime_value_access(|access| {
+                line.with_core(&access, |line| match line {
+                    Value::Number(number) => number.to_i64_if_integer(),
+                    _ => None,
+                })
+            })
+        })
+        .flatten()
+        .and_then(|line| usize::try_from(line).ok());
+    (line, text)
+}
+
+pub(crate) fn conventional_summary(
+    _access: &RuntimeValueAccess<'_>,
+    message: &Value,
+) -> (Option<usize>, Option<Arc<str>>) {
     let Value::Dict(message) = message else {
         return (None, None);
     };
@@ -550,42 +702,6 @@ pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Ar
             Value::Dict(location) => location.get(&*keys::LINE),
             _ => None,
         })
-        .and_then(|value| match value {
-            Value::Number(number) => number.to_i64_if_integer(),
-            _ => None,
-        })
-        .and_then(|line| usize::try_from(line).ok());
-    (line, text)
-}
-
-pub(crate) fn conventional_summary_with(
-    values: &CoreValueFactory,
-    message: &Value,
-) -> (Option<usize>, Option<Arc<str>>) {
-    let context = crate::evaluation::EvalContext::isolated(values.clone());
-    let Ok(Value::Dict(message)) = context.evaluate_compatibility_whnf(message) else {
-        return (None, None);
-    };
-    let Some(interface) = message.get(&*keys::MSG) else {
-        return (None, None);
-    };
-    let Ok(Value::Dict(interface)) = context.evaluate_compatibility_whnf(interface) else {
-        return (None, None);
-    };
-    let text = interface.get(&*keys::TEXT).and_then(|value| {
-        let Value::Binary(bytes) = context.evaluate_compatibility_whnf(value).ok()? else {
-            return None;
-        };
-        Some(Arc::from(String::from_utf8_lossy(&bytes).as_ref()))
-    });
-    let line = interface
-        .get(&*keys::LOCATION)
-        .and_then(|value| context.evaluate_compatibility_whnf(value).ok())
-        .and_then(|value| match value {
-            Value::Dict(location) => location.get(&*keys::LINE).cloned(),
-            _ => None,
-        })
-        .and_then(|value| context.evaluate_compatibility_whnf(&value).ok())
         .and_then(|value| match value {
             Value::Number(number) => number.to_i64_if_integer(),
             _ => None,

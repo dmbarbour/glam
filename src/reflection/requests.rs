@@ -134,6 +134,13 @@ pub(crate) struct KeyListRequestWork {
     converted: Vec<Key>,
 }
 
+enum KeyListStep {
+    Empty,
+    Byte { byte: u8, tail: Value },
+    Value { value: Value, tail: Value },
+    Deferred { deferred: Value, suffix: Value },
+}
+
 enum ListDemand {
     Start(Value),
     Awaiting,
@@ -336,11 +343,12 @@ where
                             "completed `.eval` demand failure must retain a permanent failure",
                         );
                         let values = context.values();
-                        let diagnostic =
-                            values.wrap(crate::diagnostic::failure_diagnostic_value_with(
+                        let diagnostic = Value::from_runtime_root(
+                            crate::diagnostic::failure_diagnostic_root_with(
                                 context.eval_context().values(),
                                 failure,
-                            ));
+                            ),
+                        );
                         tagged_result(&values, &keys::ERR, diagnostic)
                     }
                 };
@@ -675,7 +683,7 @@ fn evaluated_task_handle<S: TaskSpecialization>(
     handle: &crate::api::EvaluatedValue,
     request: &str,
 ) -> Result<Arc<TaskHandleCell>, TaskHalt> {
-    handle.with_core(|value| {
+    handle.with_core_access(|value, _| {
         let CoreValue::Opaque(handle) = value else {
             return Err(TaskHalt::new(format!(
                 "`.{request}` requires a reflection task handle"
@@ -741,16 +749,14 @@ where
         TaskHalt::new("current reflection host does not support task status queries")
     })?;
     let values = context.values();
-    let effect = values.clone_core(&effect)?;
+    let effect = effect.into_runtime_root();
     let launched = task_status_public_value(&values, EvaluationTaskStatus::Launched);
     let handle = if let Some(mut transaction) = context.transaction() {
         let result = transaction
             .store()
             .reserve_query_with(launched.clone())
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let effect = eval_context
-            .values()
-            .construct_runtime_value_root(|_| effect);
+        let effect = effect.clone();
         let pending = eval_context
             .reserve_reflection_task(effect)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -776,9 +782,7 @@ where
         let result = store
             .reserve_query_with(launched)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let effect = eval_context
-            .values()
-            .construct_runtime_value_root(|_| effect);
+        let effect = effect.clone();
         let pending = eval_context
             .reserve_reflection_task(effect)
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
@@ -849,16 +853,18 @@ impl ValuePathRequestWork {
         }
         let current = demand_value(input, "resumed value-path work")?;
         let key = &self.path[self.next];
-        let selected = current.with_core(|value| {
+        let selected = current.with_core_access(|value, access| {
             let CoreValue::Dict(dict) = value else {
                 return Err(TaskHalt::new("state path traverses a non-dictionary value"));
             };
-            Ok(dict
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| CoreValue::Dict(Dict::new_sync())))
+            Ok(context.values().wrap_in(
+                access,
+                dict.get(key)
+                    .map(|value| access.duplicate_value(value))
+                    .unwrap_or_else(|| CoreValue::Dict(Dict::new_sync())),
+            ))
         })??;
-        self.current = context.values().wrap(selected);
+        self.current = selected;
         self.next += 1;
         self.awaiting = false;
         Ok(PreparationPoll::Progress)
@@ -895,13 +901,9 @@ impl KeyConversionRequestWork {
                         Ok(PreparationPoll::Progress)
                     }
                     ClassifiedRequestKey::Dict(members) => {
-                        let values = context.values();
                         self.state =
                             KeyConversionRequestState::Dict(Box::new(DictKeyRequestWork {
-                                members: members
-                                    .into_iter()
-                                    .map(|(key, value)| (key, values.wrap(value)))
-                                    .collect(),
+                                members,
                                 next: 0,
                                 converted: Vec::new(),
                                 child: None,
@@ -949,7 +951,7 @@ impl KeyConversionRequestWork {
 enum ClassifiedRequestKey {
     Ready(Key),
     List,
-    Dict(Vec<(Key, CoreValue)>),
+    Dict(Vec<(Key, Value)>),
     Invalid,
 }
 
@@ -957,14 +959,21 @@ fn classify_key_value(
     value: &crate::api::EvaluatedValue,
 ) -> Result<ClassifiedRequestKey, TaskHalt> {
     value
-        .with_core(|value| match value {
+        .with_core_access(|value, access| match value {
             CoreValue::Atom(atom) => ClassifiedRequestKey::Ready(Key::Atom(*atom)),
             CoreValue::Number(number) => ClassifiedRequestKey::Ready(Key::Number(number.clone())),
             CoreValue::Binary(bytes) => ClassifiedRequestKey::Ready(Key::Binary(bytes.clone())),
             CoreValue::List(_) => ClassifiedRequestKey::List,
             CoreValue::Dict(dict) => ClassifiedRequestKey::Dict(
                 dict.iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            Value::from_runtime_root(
+                                access.root_runtime_value(access.duplicate_value(value)),
+                            ),
+                        )
+                    })
                     .collect(),
             ),
             CoreValue::Builtin(_)
@@ -1056,7 +1065,8 @@ impl KeyListRequestWork {
                 }
                 ListDemand::Awaiting => {
                     let value = demand_value(input, "resumed key-list demand")?;
-                    let is_list = value.with_core(|value| matches!(value, CoreValue::List(_)))?;
+                    let is_list =
+                        value.with_core_access(|value, _| matches!(value, CoreValue::List(_)))?;
                     if !is_list {
                         return Err(TaskHalt::new(
                             "path-list operand must evaluate to a list value",
@@ -1075,35 +1085,56 @@ impl KeyListRequestWork {
             let CoreValue::List(list) = value else {
                 unreachable!("key-list work retains only validated lists")
             };
-            list.pop_front_step_by(&mut |value| access.duplicate_value(value), &mut |thunk| {
-                thunk.duplicate_as_value_in(access)
-            })
+            let step = list
+                .pop_front_step_by(&mut |value| access.duplicate_value(value), &mut |thunk| {
+                    thunk.duplicate_as_value_in(access)
+                });
+            match step {
+                ListFrontStep::Empty => KeyListStep::Empty,
+                ListFrontStep::Item {
+                    item: ListItem::Byte(byte),
+                    tail,
+                } => KeyListStep::Byte {
+                    byte,
+                    tail: context.values().wrap_in(access, CoreValue::List(tail)),
+                },
+                ListFrontStep::Item {
+                    item: ListItem::Value(value),
+                    tail,
+                } => KeyListStep::Value {
+                    value: context.values().wrap_in(access, value),
+                    tail: context.values().wrap_in(access, CoreValue::List(tail)),
+                },
+                ListFrontStep::Deferred { deferred, suffix } => KeyListStep::Deferred {
+                    deferred: context.values().wrap_in(access, deferred),
+                    suffix: context.values().wrap_in(access, CoreValue::List(suffix)),
+                },
+            }
         })?;
         match step {
-            ListFrontStep::Empty => Ok(PreparationPoll::Progress),
-            ListFrontStep::Item { item, tail } => {
-                let tail = context.values().wrap(CoreValue::List(tail));
+            KeyListStep::Empty => Ok(PreparationPoll::Progress),
+            KeyListStep::Byte { byte, tail } => {
                 self.lists.push(crate::api::EvaluatedValue::from_whnf(
                     &context.values(),
                     tail,
                 ));
-                match item {
-                    ListItem::Byte(byte) => self.converted.push(Key::Number(Number::from_u8(byte))),
-                    ListItem::Value(value) => {
-                        self.child = Some(Box::new(KeyConversionRequestWork::new(
-                            context.values().wrap(value),
-                        )));
-                    }
-                }
+                self.converted.push(Key::Number(Number::from_u8(byte)));
                 Ok(PreparationPoll::Progress)
             }
-            ListFrontStep::Deferred { deferred, suffix } => {
-                let suffix = context.values().wrap(CoreValue::List(suffix));
+            KeyListStep::Value { value, tail } => {
+                self.lists.push(crate::api::EvaluatedValue::from_whnf(
+                    &context.values(),
+                    tail,
+                ));
+                self.child = Some(Box::new(KeyConversionRequestWork::new(value)));
+                Ok(PreparationPoll::Progress)
+            }
+            KeyListStep::Deferred { deferred, suffix } => {
                 self.lists.push(crate::api::EvaluatedValue::from_whnf(
                     &context.values(),
                     suffix,
                 ));
-                self.pending = Some(ListDemand::Start(context.values().wrap(deferred)));
+                self.pending = Some(ListDemand::Start(deferred));
                 Ok(PreparationPoll::Progress)
             }
         }
@@ -1132,7 +1163,7 @@ fn contextual_demand_value<S: TaskSpecialization>(
             .with_runtime_value_access(|access| {
                 error.with_core_context_in(
                     &access,
-                    crate::diagnostic::evaluation_context_frame(operation),
+                    crate::diagnostic::evaluation_context_frame_in(&access, operation),
                 )
             })
     })
@@ -1192,33 +1223,40 @@ fn inspect_dict_items<S: TaskSpecialization>(
     dict: &crate::api::EvaluatedValue,
 ) -> Result<RequestResult, TaskHalt> {
     let values = context.values();
-    let items = dict.with_core(|value| {
+    let items = dict.with_core_access(|value, access| {
         let CoreValue::Dict(dict) = value else {
             return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
         };
-        Ok(CoreValue::List(crate::core::List::from_values(
-            dict.iter()
-                .map(|(key, value)| {
-                    CoreValue::Dict(
-                        Dict::new_sync()
-                            .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
-                            .insert((*keys::VALUE).clone(), value.clone()),
-                    )
-                })
-                .collect(),
-        )))
+        Ok(context.values().wrap_in(
+            access,
+            CoreValue::List(crate::core::List::from_values(
+                dict.iter()
+                    .map(|(key, value)| {
+                        CoreValue::Dict(
+                            Dict::new_sync()
+                                .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
+                                .insert((*keys::VALUE).clone(), value.clone()),
+                        )
+                    })
+                    .collect(),
+            )),
+        ))
     })??;
-    Ok(RequestResult::Return(values.wrap(items)))
+    Ok(RequestResult::Return(items))
 }
 
 fn inspect_metadata<S: TaskSpecialization>(
     context: &RequestContext<'_, S>,
     value: &crate::api::EvaluatedValue,
 ) -> Result<RequestResult, TaskHalt> {
-    let Some(metadata) = value.with_core(CoreValue::associated_metadata)? else {
+    let Some(metadata) = value.with_core_access(|value, access| {
+        CoreValue::associated_metadata(value)
+            .map(|metadata| context.values().wrap_in(access, metadata))
+    })?
+    else {
         return Ok(RequestResult::Fail);
     };
-    Ok(RequestResult::Return(context.values().wrap(metadata)))
+    Ok(RequestResult::Return(metadata))
 }
 
 #[derive(Clone)]
@@ -1450,14 +1488,16 @@ pub fn environment_diagnostic_request_specs() -> Vec<EffectRequestSpec<Reflectio
 
 /// Handles one reusable reflection request inside a composed task.
 fn tagged_result(values: &Values, tag: &Key, value: Value) -> Value {
-    values.wrap(CoreValue::Dict(
-        Dict::new_sync().insert(
-            tag.clone(),
-            values
-                .clone_core(&value)
-                .expect("tagged result belongs to its request runtime"),
-        ),
-    ))
+    values.with_access(|access| {
+        access.wrap(CoreValue::Dict(
+            Dict::new_sync().insert(
+                tag.clone(),
+                access
+                    .clone_core(&value)
+                    .expect("tagged result belongs to its request runtime"),
+            ),
+        ))
+    })
 }
 
 /// Runtime-local opaque task capability shared by every clone of the Glam
@@ -1513,7 +1553,9 @@ fn task_handle_value(context: &EvalContext, handle: Arc<TaskHandleCell>) -> Valu
     let values = Values::from_core_factory(context.values().clone());
     debug_assert_eq!(handle.runtime, values.runtime_id());
     debug_assert_eq!(handle.runtime, handle.task.runtime_id());
-    values.wrap(CoreValue::Opaque(OpaqueValue::new(values.core(), handle)))
+    values.with_access(|access| {
+        access.wrap(CoreValue::Opaque(OpaqueValue::new(values.core(), handle)))
+    })
 }
 
 fn task_join_context(_access: &RuntimeValueAccess<'_>, task: EvaluationTaskId) -> CoreValue {
@@ -1562,11 +1604,14 @@ fn task_status_query_value(
 fn task_status_public_value(values: &Values, status: EvaluationTaskStatus) -> Value {
     let failure_diagnostic = match &status {
         EvaluationTaskStatus::Failed(error) => Some(
-            crate::diagnostic::failure_diagnostic_value_with(values.core(), error.as_failure()),
+            crate::diagnostic::failure_diagnostic_root_with(values.core(), error.as_failure()),
         ),
         _ => None,
     };
     Value::from_runtime_root(values.core().construct_runtime_value_root(|access| {
+        let failure_diagnostic = failure_diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.clone_core_with(access));
         task_status_query_value(access, status, failure_diagnostic)
     }))
 }
@@ -1599,38 +1644,44 @@ enum TaggedTaskState {
 }
 
 fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, TaskHalt> {
-    let value = values.clone_core(value)?;
-    if value == values.core().key_value(&keys::LAUNCHED) {
-        return Ok(TaggedTaskState::Launched);
-    }
-    if value == values.core().key_value(&keys::BLOCKED) {
-        return Ok(TaggedTaskState::Blocked);
-    }
-    if value == values.core().key_value(&keys::CANCELED) {
-        return Ok(TaggedTaskState::Cancelled);
-    }
-    if value == values.core().key_value(&keys::ABANDONED) {
-        return Ok(TaggedTaskState::Abandoned);
-    }
-    if value == values.core().key_value(&keys::EXITED) {
-        return Ok(TaggedTaskState::Exited);
-    }
-    if value == values.core().key_value(&keys::KILLED) {
-        return Ok(TaggedTaskState::Killed);
-    }
-    let CoreValue::Dict(state) = value else {
-        return Err(TaskHalt::new("reflection task status is malformed"));
-    };
-    if state.iter().count() != 1 {
-        return Err(TaskHalt::new("reflection task status is malformed"));
-    }
-    if let Some(value) = state.get(&*keys::OK) {
-        return Ok(TaggedTaskState::Complete(values.wrap(value.clone())));
-    }
-    if let Some(error) = state.get(&*keys::ERR) {
-        return Ok(TaggedTaskState::Failed(values.wrap(error.clone())));
-    }
-    Err(TaskHalt::new("reflection task status is malformed"))
+    values.with_access(|access| {
+        let value = access.clone_core(value)?;
+        if value == values.core().key_value(&keys::LAUNCHED) {
+            return Ok(TaggedTaskState::Launched);
+        }
+        if value == values.core().key_value(&keys::BLOCKED) {
+            return Ok(TaggedTaskState::Blocked);
+        }
+        if value == values.core().key_value(&keys::CANCELED) {
+            return Ok(TaggedTaskState::Cancelled);
+        }
+        if value == values.core().key_value(&keys::ABANDONED) {
+            return Ok(TaggedTaskState::Abandoned);
+        }
+        if value == values.core().key_value(&keys::EXITED) {
+            return Ok(TaggedTaskState::Exited);
+        }
+        if value == values.core().key_value(&keys::KILLED) {
+            return Ok(TaggedTaskState::Killed);
+        }
+        let CoreValue::Dict(state) = value else {
+            return Err(TaskHalt::new("reflection task status is malformed"));
+        };
+        if state.iter().count() != 1 {
+            return Err(TaskHalt::new("reflection task status is malformed"));
+        }
+        if let Some(value) = state.get(&*keys::OK) {
+            return Ok(TaggedTaskState::Complete(
+                access.wrap(access.runtime_access().duplicate_value(value)),
+            ));
+        }
+        if let Some(error) = state.get(&*keys::ERR) {
+            return Ok(TaggedTaskState::Failed(
+                access.wrap(access.runtime_access().duplicate_value(error)),
+            ));
+        }
+        Err(TaskHalt::new("reflection task status is malformed"))
+    })
 }
 
 fn ensure_runtime_task(context: &EvalContext, handle: &TaskHandleCell) -> Result<(), TaskHalt> {

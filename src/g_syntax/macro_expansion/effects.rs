@@ -338,10 +338,13 @@ fn macro_demand(
         SpecializationRequestInput::Value(value) => Ok(value),
         SpecializationRequestInput::Failed(error) => {
             let values = context.values();
-            Err(error.with_context(
-                &values,
-                values.wrap(crate::diagnostic::evaluation_context_frame(operation)),
-            ))
+            let frame = values.with_access(|access| {
+                access.wrap(crate::diagnostic::evaluation_context_frame_in(
+                    access.runtime_access(),
+                    operation,
+                ))
+            });
+            Err(error.with_context(&values, frame))
         }
     }
 }
@@ -711,12 +714,12 @@ fn hidden_effect(context: &RequestContext<'_, MacroEffects>, tag: [&str; 5]) -> 
 }
 
 fn span_value(context: &RequestContext<'_, MacroEffects>, span: String) -> Value {
-    context
-        .values()
-        .wrap(CoreValue::Dict(Dict::new_sync().insert(
+    context.values().with_access(|access| {
+        access.wrap(CoreValue::Dict(Dict::new_sync().insert(
             Key::atom_from_text("span"),
             CoreValue::binary_from_text(&span),
         )))
+    })
 }
 
 fn macro_transaction<'context, 'request>(

@@ -20,11 +20,14 @@ pub(super) fn reasoning_diagnostic(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
 ) -> Diagnostic {
+    let public_values = Values::from_core_factory(values.clone());
     Diagnostic::from_parts(
-        values,
+        &public_values,
         None,
         Severity::Error,
-        crate::diagnostic::failure_diagnostic_value_with(values, failure),
+        Value::from_runtime_root(crate::diagnostic::failure_diagnostic_root_with(
+            values, failure,
+        )),
         None,
     )
 }
@@ -37,14 +40,22 @@ fn blocked_reasoning_diagnostic(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
 ) -> Diagnostic {
-    let emission = match failure.emission_value() {
-        Some(CoreValue::Binary(message)) => {
-            crate::diagnostic::text_message(None, String::from_utf8_lossy(message))
-        }
-        Some(emission) => emission.clone(),
-        None => crate::diagnostic::text_message(None, failure.to_string()),
-    };
-    Diagnostic::from_parts(values, None, Severity::Error, emission, None)
+    let public_values = Values::from_core_factory(values.clone());
+    let emission =
+        values.construct_runtime_value_root(|access| match failure.emission_value_in(access) {
+            Some(CoreValue::Binary(message)) => {
+                crate::diagnostic::text_message_in(access, None, String::from_utf8_lossy(message))
+            }
+            Some(emission) => access.duplicate_value(emission),
+            None => crate::diagnostic::text_message_in(access, None, failure.to_string()),
+        });
+    Diagnostic::from_parts(
+        &public_values,
+        None,
+        Severity::Error,
+        Value::from_runtime_root(emission),
+        None,
+    )
 }
 
 /// Stable, observational classification of one runtime instant.

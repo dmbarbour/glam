@@ -1094,10 +1094,11 @@ fn compile_effect_with_runtime(
 }
 
 fn task_halt_contexts(assembler: &Assembler, halt: &TaskHalt) -> Vec<Value> {
-    let diagnostic = crate::diagnostic::failure_diagnostic_value_with(
+    let diagnostic = crate::diagnostic::failure_diagnostic_root_with(
         &assembler.core_values(),
         halt.clone().into_failure().as_ref(),
-    );
+    )
+    .clone_core_for_test();
     let context = assembler.eval_context();
     let Value::Dict(diagnostic) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &diagnostic).unwrap()

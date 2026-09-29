@@ -534,22 +534,22 @@ fn macro_input(
                     delimiter: None,
                 }
             }
-            TokenKind::Number(id) => MacroInputKind::Data(
-                public_values.wrap(Value::Number(
+            TokenKind::Number(id) => MacroInputKind::Data(public_values.with_access(|access| {
+                access.wrap(Value::Number(
                     source
                         .number(*id)
                         .expect("logical number token should reference its arena")
                         .clone(),
-                )),
-            ),
-            TokenKind::Text(id) => MacroInputKind::Data(
-                public_values.wrap(Value::binary_from_text(
+                ))
+            })),
+            TokenKind::Text(id) => MacroInputKind::Data(public_values.with_access(|access| {
+                access.wrap(Value::binary_from_text(
                     source
                         .text(*id)
                         .expect("logical text token should reference its arena")
                         .value(),
-                )),
-            ),
+                ))
+            })),
             TokenKind::Embedded(id) => MacroInputKind::Data(PublicValue::from_runtime_root(
                 source
                     .embedded_value(*id)

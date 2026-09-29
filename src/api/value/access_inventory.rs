@@ -71,6 +71,22 @@ const INVENTORY: &[InventoryEntry] = &[
         "I3E.2 bounded compiler regions; I4F.1 durable roots; GCI11R-002D.1b rooted module completion"
     ),
     entry!(
+        "src/api/diagnostics.rs",
+        0,
+        1,
+        0,
+        "rooted compilation origins at the public diagnostic boundary",
+        "GCI11R-002D.2g durable diagnostic envelopes"
+    ),
+    entry!(
+        "src/api/runtime/readiness.rs",
+        0,
+        1,
+        0,
+        "observational blocked-failure diagnostic publication",
+        "GCI11R-002D.2g durable diagnostic envelopes"
+    ),
+    entry!(
         "src/api/value.rs",
         0,
         0,
@@ -121,10 +137,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/diagnostic.rs",
         0,
-        0,
-        1,
-        "root-preserving diagnostic normalization publishes an inspected spec before releasing its bounded access",
-        "GCI11R-002D.2e.4 macro diagnostic handoff; GCI11R-002D.2g shared diagnostic closure"
+        3,
+        8,
+        "root-preserving diagnostic normalization, context composition, and summary demand",
+        "GCI11R-002D.2g rooted diagnostic transformations"
     ),
     entry!(
         "src/eval/access_machine.rs",
@@ -297,10 +313,10 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/requests.rs",
         0,
-        3,
-        0,
-        "task-new request effects rooted before reflection-task admission",
-        "GCI11R-002D.2d.2 rooted reflection-task admission"
+        1,
+        1,
+        "task request state and classified dictionary members published under access",
+        "GCI11R-002D.2g public value boundary"
     ),
     entry!(
         "src/reflection/store.rs",
@@ -452,6 +468,8 @@ impl RootPublicationOccurrence {
                 }
                 "src/api/value.rs::impl ScopedValues < '_ >::wrap"
                 | "src/api/value.rs::impl Values::wrap_in"
+                | "src/api/diagnostics.rs::impl Diagnostic::from_compile"
+                | "src/api/runtime/readiness.rs::blocked_reasoning_diagnostic"
                 | "src/compiler.rs::impl CompileContext::new"
                 | "src/compiler.rs::impl CompileContext::with_compilation_trace"
                 | "src/core.rs::impl CoreValues::new"
@@ -471,6 +489,10 @@ impl RootPublicationOccurrence {
                 | "src/evaluation/pump.rs::poison_lazy_cycle"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
                 | "src/diagnostic.rs::diagnostic_object_root"
+                | "src/diagnostic.rs::conventional_summary_root"
+                | "src/diagnostic.rs::enrich_root"
+                | "src/diagnostic.rs::failure_diagnostic_root_with"
+                | "src/diagnostic.rs::prepend_contexts_root"
                 | "src/g_syntax/compiler_values.rs::build_effect_path_value"
                 | "src/g_syntax/compiler_values.rs::fail_effect_root"
                 | "src/g_syntax/compiler_values.rs::root_value"
@@ -483,6 +505,7 @@ impl RootPublicationOccurrence {
                 | "src/reflection/machine.rs::impl EffectTask < S >::interpret_decoded_drive"
                 | "src/reflection/machine.rs::impl EffectTask < S >::store_path_step"
                 | "src/reflection/machine.rs::lazy_value_path_root"
+                | "src/reflection/requests.rs::classify_key_value"
                 | "src/reflection/store.rs::apply_edit"
                 | "src/reflection/store.rs::apply_value_at_path"
                 | "src/reflection/store.rs::decode_query_state"
@@ -687,6 +710,8 @@ fn collect_root_publication_occurrences(manifest: &Path) -> Vec<RootPublicationO
 
 const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/api/assembly.rs::impl Assembler::load_local_binary#1|surface=scoped-factory|scope=production",
+    "src/api/diagnostics.rs::impl Diagnostic::from_compile#1|surface=scoped-factory|scope=production",
+    "src/api/runtime/readiness.rs::blocked_reasoning_diagnostic#1|surface=scoped-factory|scope=production",
     "src/api/tests/diagnostic_tests.rs::diagnostic_enrichment_is_an_authoritative_object_mixin#1|surface=scoped-factory|scope=test",
     "src/api/tests/diagnostic_tests.rs::viewers_can_inherit_one_diagnostic_independently#1|surface=scoped-factory|scope=test",
     "src/api/value.rs::impl ScopedValues < '_ >::wrap#1|surface=access-publication|scope=production",
@@ -715,7 +740,17 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
+    "src/diagnostic.rs::conventional_summary_root#1|surface=access-publication|scope=production",
+    "src/diagnostic.rs::conventional_summary_root#2|surface=access-publication|scope=production",
+    "src/diagnostic.rs::conventional_summary_root#3|surface=access-publication|scope=production",
+    "src/diagnostic.rs::conventional_summary_root#4|surface=access-publication|scope=production",
     "src/diagnostic.rs::diagnostic_object_root#1|surface=access-publication|scope=production",
+    "src/diagnostic.rs::enrich_root#1|surface=scoped-factory|scope=production",
+    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=scoped-factory|scope=production",
+    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=access-publication|scope=production",
+    "src/diagnostic.rs::failure_diagnostic_root_with#2|surface=access-publication|scope=production",
+    "src/diagnostic.rs::prepend_contexts_root#1|surface=scoped-factory|scope=production",
+    "src/diagnostic.rs::prepend_contexts_root#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
     "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#1|surface=access-publication|scope=test",
@@ -809,7 +844,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
     "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
     "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
-    "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=production",
+    "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=test",
     "src/evaluation/tests.rs::abandoning_one_client_demand_preserves_another_exact_consumer#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::all_poll_routes_use_scheduler_context#1|surface=compatibility-new|scope=test",
     "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=access-publication|scope=test",
@@ -932,8 +967,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::resume_request_decodes_lazy_ids_once_in_source_order#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::root_value#1|surface=scoped-factory|scope=test",
     "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect#1|surface=scoped-factory|scope=production",
-    "src/reflection/requests.rs::create_task#1|surface=scoped-factory|scope=production",
-    "src/reflection/requests.rs::create_task#2|surface=scoped-factory|scope=production",
+    "src/reflection/requests.rs::classify_key_value#1|surface=access-publication|scope=production",
     "src/reflection/requests.rs::task_status_public_value#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::apply_edit#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::complete_query_value#1|surface=scoped-factory|scope=production",

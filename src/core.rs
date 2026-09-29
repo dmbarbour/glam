@@ -172,6 +172,7 @@ impl EvaluationFailure {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn emission_value(&self) -> Option<&Value> {
         match &self.kind {
             EvaluationFailureKind::Emission(emission) => Some(emission),
@@ -179,6 +180,7 @@ impl EvaluationFailure {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn contexts(&self) -> &[Value] {
         &self.contexts
     }

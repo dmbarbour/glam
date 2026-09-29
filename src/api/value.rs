@@ -355,6 +355,7 @@ impl Values {
         Value(access.root_runtime_value(value))
     }
 
+    #[cfg(test)]
     pub(crate) fn wrap(&self, value: CoreValue) -> Value {
         self.with_access(|values| values.wrap(value))
     }
@@ -379,6 +380,7 @@ impl Values {
         value.clone_core_with(access)
     }
 
+    #[cfg(test)]
     pub(crate) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
         self.with_access(|values| values.clone_core(value))
     }
@@ -821,6 +823,10 @@ impl Value {
         self.0
     }
 
+    pub(crate) fn runtime_root(&self) -> &RuntimeValueRoot {
+        &self.0
+    }
+
     #[cfg(test)]
     pub(crate) fn clone_core_for_test(&self) -> CoreValue {
         self.0.clone_core_for_test()
@@ -891,13 +897,6 @@ impl EvaluatedValue {
                     self.observer.runtime_id().get()
                 ))
             })
-    }
-
-    pub(crate) fn with_core<R>(
-        &self,
-        operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
-    ) -> Result<R, Error> {
-        self.with_core_access(|value, _| operation(value))
     }
 
     pub(crate) fn with_core_access<R>(

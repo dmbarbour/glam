@@ -206,9 +206,7 @@ impl StoreSnapshot {
                 |access| {
                     lazy_core_value_path(
                         access,
-                        values
-                            .clone_core(root)
-                            .expect("query root belongs to its store runtime"),
+                        root.runtime_root().clone_core_with(access),
                         &query_path(handle.id),
                     )
                 },
@@ -375,9 +373,7 @@ impl StoreJournal {
                 self.snapshot.values.construct_runtime_value_root(|access| {
                     lazy_core_value_path(
                         access,
-                        values
-                            .clone_core(&root)
-                            .expect("query view belongs to its store runtime"),
+                        root.runtime_root().clone_core_with(access),
                         &query_path(handle.id),
                     )
                 }),

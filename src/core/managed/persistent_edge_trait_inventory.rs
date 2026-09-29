@@ -962,9 +962,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // WHNFHR-001A moves closed-function construction beneath its caller's
     // access, adding one test-only mutator-local core-net duplicate while
     // keeping the complete forwarding chain under one published outer root.
+    // GCI11R-002D.2g moves the authority-free Values::wrap compatibility
+    // helper behind cfg(test). Its sole Gc projection therefore moves from
+    // the production typed partition to the test typed partition; no edge is
+    // added or removed, while source-qualified identity changes accordingly.
     assert_eq!(
         occurrence_fingerprint(actual),
-        7_633_687_913_568_420_939,
+        15_952_803_931_990_826_020,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1009,9 +1013,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 199),
+            ((SourceScope::Production, EdgeSurface::Typed), 198),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 635),
+            ((SourceScope::Test, EdgeSurface::Typed), 636),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
