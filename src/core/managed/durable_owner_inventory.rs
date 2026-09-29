@@ -991,9 +991,13 @@ const DECLARATION_BASELINE_COUNT: usize = 251;
 // W7B replaces recursively boxed dictionary/list key-conversion children with
 // one explicit focus-and-parent stack. Declaration and field totals remain
 // stable; only the reviewed source-shaped fingerprint changes.
+// GCI11R-002D.2e.4 replaces the three parser-owned raw embedded-value fields
+// in syntax expressions and lexical arenas with runtime roots. The same three
+// declarations remain, but their durable ownership now survives macro
+// rewriting and staged parsing without an unrooted semantic payload.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([318, 114, 5, 35, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 4_406_068_151_733_480_475;
+    DeclarationSignals::new([315, 117, 5, 35, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 3_465_787_609_358_317_563;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,
