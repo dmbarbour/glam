@@ -1862,9 +1862,14 @@ also serve macro-effect execution:
    the access that publishes the lazy path result. All machine-local D.2f
    violations are gone; the seven remaining entries are protocol/request/store
    boundaries.
-4. **D.2f.3 — protocol and request helpers.** Access-qualify immediate request,
+4. **D.2f.3 — protocol and request helpers. Complete (2026-09-29).** Access-qualify immediate request,
    status, severity, and task-context values without granting reflection code a
-   general raw-value escape hatch.
+   general raw-value escape hatch. Request envelopes, task-join frames, status
+   query values, and severity matching now require the active access region.
+   Status publication roots the finished encoding directly, while effect
+   tokens and task-failure contexts reuse existing public/runtime roots. The
+   obsolete authority-free context method and now-unused runtime-root
+   projection helper were removed rather than retained as compatibility APIs.
 5. **D.2f.4 — store boundaries.** Consume raw edit/query values inside the
    transaction's bounded access; journals and query state retain public roots.
 6. **D.2f.5 — closure.** Require zero D.2f violations, reconcile reflection

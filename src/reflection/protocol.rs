@@ -97,19 +97,19 @@ impl<R> EffectRequestSpec<R> {
                 arguments.len()
             )));
         }
-        let arguments = arguments
-            .iter()
-            .map(|argument| values.clone_core(argument))
-            .collect::<Result<Vec<_>, _>>()?;
-        let request = request_value(
-            &Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref)),
-            arguments,
-        );
-        Ok(PublicValue::from_runtime_root(
-            values
-                .core()
-                .construct_runtime_value_root(|access| eval::constant_effect_in(access, request)),
-        ))
+        let tag = Key::abstract_global_path(self.tag_path.iter().map(Arc::as_ref));
+        let effect = values.core().try_construct_runtime_value_root(|access| {
+            let arguments = arguments
+                .iter()
+                .map(|argument| {
+                    values.require(argument)?;
+                    Ok(argument.clone().into_runtime_root().clone_core_with(access))
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+            let request = request_value(access, &tag, arguments);
+            Ok(eval::constant_effect_in(access, request))
+        })?;
+        Ok(PublicValue::from_runtime_root(effect))
     }
 }
 
@@ -567,25 +567,6 @@ impl TaskHalt {
         }
     }
 
-    pub(super) fn with_core_context(self, context: Value) -> Self {
-        match self.0 {
-            TaskHaltKind::Failure(failure) => {
-                let observer = match &failure {
-                    TaskFailure::Rooted(failure) => Some(failure.value_observer().clone()),
-                    TaskFailure::EdgeFree(_) => None,
-                };
-                let failure = Arc::new(failure.into_failure().with_context(context));
-                match observer {
-                    Some(observer) => {
-                        Self::rooted_failure(RuntimeFailureRoot::from_observer(&observer, failure))
-                    }
-                    None => Self::failure(failure),
-                }
-            }
-            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
-        }
-    }
-
     pub(super) fn with_core_context_in(
         self,
         access: &RuntimeValueAccess<'_>,
@@ -628,12 +609,13 @@ impl TaskHalt {
                     .get()
             ));
         }
-        self.with_core_context(
-            values
-                .clone_core(&context)
-                .expect("task context runtime was checked"),
-        )
-        .root_for_values(values.core())
+        values.core().with_runtime_value_access(|access| {
+            self.with_core_context_in(
+                &access,
+                context.into_runtime_root().clone_core_with(&access),
+            )
+            .root_for_values(values.core())
+        })
     }
 
     /// Projects a permanent task failure into its structured diagnostic.
@@ -850,7 +832,11 @@ impl<S: TaskSpecialization> TransactionContext<'_, S> {
     }
 }
 
-pub(super) fn request_value(tag: &Key, arguments: Vec<Value>) -> Value {
+pub(super) fn request_value(
+    _access: &RuntimeValueAccess<'_>,
+    tag: &Key,
+    arguments: Vec<Value>,
+) -> Value {
     Value::Dict(Dict::new_sync().insert(tag.clone(), Value::List(List::from_values(arguments))))
 }
 

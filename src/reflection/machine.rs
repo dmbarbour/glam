@@ -5584,13 +5584,17 @@ fn alternative_returns_root(
                 eval::constant_effect_in(
                     access,
                     request_value(
+                        access,
                         &tags.r,
                         vec![value.clone().into_runtime_root().clone_core_with(access)],
                     ),
                 )
             })
             .reduce(|right, left| {
-                eval::constant_effect_in(access, request_value(&tags.alt, vec![left, right]))
+                eval::constant_effect_in(
+                    access,
+                    request_value(access, &tags.alt, vec![left, right]),
+                )
             })
             .expect("alternative return construction requires at least two values"),
     )

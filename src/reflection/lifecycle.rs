@@ -581,7 +581,8 @@ fn combine_composed_result(
             let context = values.with_runtime_value_access(|access| {
                 eval::failure_diagnostic_value_in(&access, child_failure)
             });
-            Err(parent.with_core_context(context))
+            Err(values
+                .with_runtime_value_access(|access| parent.with_core_context_in(&access, context)))
         }
     }
 }

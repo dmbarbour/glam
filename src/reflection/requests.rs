@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::api::{Diagnostic, Value, Values};
-use crate::core::{Atom, CoreValueFactory, Dict, Key, OpaqueValue, Value as CoreValue, keys};
+use crate::core::{
+    Atom, CoreValueFactory, Dict, Key, OpaqueValue, RuntimeValueAccess, Value as CoreValue, keys,
+};
 use crate::diagnostic::Severity;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
@@ -387,7 +389,7 @@ where
                 Ok(SpecializationRequestPoll::Demand(message))
             }
             ReflectionRequestOperation::Log(LogRequestWork::Message { severity }) => {
-                let message = contextual_demand_value(input, "log_message")?;
+                let message = contextual_demand_value(input, "log_message", context)?;
                 let interface = message.with_core(|value| {
                     let CoreValue::Dict(message) = value else {
                         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
@@ -413,7 +415,7 @@ where
                 severity,
                 message,
             }) => {
-                let interface = contextual_demand_value(input, "log_message")?;
+                let interface = contextual_demand_value(input, "log_message", context)?;
                 let values = context.values();
                 let message = message.with_core(|value| {
                     let CoreValue::Dict(message) = value else {
@@ -429,7 +431,7 @@ where
                 Ok(SpecializationRequestPoll::Demand(severity))
             }
             ReflectionRequestOperation::Log(LogRequestWork::Severity { message }) => {
-                let severity = contextual_demand_value(input, "log_severity")?;
+                let severity = contextual_demand_value(input, "log_severity", context)?;
                 let severity = parse_evaluated_severity(&severity)?;
                 emit_log(context, severity, message)?;
                 Ok(SpecializationRequestPoll::Complete(
@@ -550,22 +552,30 @@ fn poll_task_join<S: TaskSpecialization>(
         )),
         EvaluationWaitPoll::Failed(error) => {
             handle.task.acknowledge_propagated_failure();
-            Err(TaskHalt::rooted_failure(error)
-                .with_core_context(task_join_context(handle.task.id())))
+            Err(with_task_join_context(
+                context.eval_context(),
+                TaskHalt::rooted_failure(error),
+                handle.task.id(),
+            ))
         }
         EvaluationWaitPoll::Cancelled => Err(TaskHalt::new("joined reflection task was cancelled")),
-        EvaluationWaitPoll::Abandoned => Err(TaskHalt::new(
-            "joined reflection task was abandoned when its evaluation session closed",
-        )
-        .with_core_context(task_join_context(handle.task.id()))),
-        EvaluationWaitPoll::Exited => Err(TaskHalt::new(
-            "joined reflection task exited without producing a result",
-        )
-        .with_core_context(task_join_context(handle.task.id()))),
-        EvaluationWaitPoll::Killed(error) => {
-            Err(TaskHalt::rooted_failure(error)
-                .with_core_context(task_join_context(handle.task.id())))
-        }
+        EvaluationWaitPoll::Abandoned => Err(with_task_join_context(
+            context.eval_context(),
+            TaskHalt::new(
+                "joined reflection task was abandoned when its evaluation session closed",
+            ),
+            handle.task.id(),
+        )),
+        EvaluationWaitPoll::Exited => Err(with_task_join_context(
+            context.eval_context(),
+            TaskHalt::new("joined reflection task exited without producing a result"),
+            handle.task.id(),
+        )),
+        EvaluationWaitPoll::Killed(error) => Err(with_task_join_context(
+            context.eval_context(),
+            TaskHalt::rooted_failure(error),
+            handle.task.id(),
+        )),
     }
 }
 
@@ -727,10 +737,7 @@ where
     })?;
     let values = context.values();
     let effect = values.clone_core(&effect)?;
-    let launched = values.wrap(task_status_query_value(
-        &values,
-        EvaluationTaskStatus::Launched,
-    ));
+    let launched = task_status_public_value(&values, EvaluationTaskStatus::Launched);
     let handle = if let Some(mut transaction) = context.transaction() {
         let result = transaction
             .store()
@@ -1108,12 +1115,21 @@ fn demand_value(
     }
 }
 
-fn contextual_demand_value(
+fn contextual_demand_value<S: TaskSpecialization>(
     input: Option<SpecializationRequestInput>,
     operation: &str,
+    context: &RequestContext<'_, S>,
 ) -> Result<crate::api::EvaluatedValue, TaskHalt> {
     demand_value(input, "resumed log preparation").map_err(|error| {
-        error.with_core_context(crate::diagnostic::evaluation_context_frame(operation))
+        context
+            .eval_context()
+            .values()
+            .with_runtime_value_access(|access| {
+                error.with_core_context_in(
+                    &access,
+                    crate::diagnostic::evaluation_context_frame(operation),
+                )
+            })
     })
 }
 
@@ -1146,11 +1162,11 @@ where
 pub(crate) fn parse_evaluated_severity(
     value: &crate::api::EvaluatedValue,
 ) -> Result<Severity, TaskHalt> {
-    let (info, warn, error) = value.with_core(|value| {
+    let (info, warn, error) = value.with_core_access(|value, access| {
         (
-            severity_matches(value, "info", &keys::INFO),
-            severity_matches(value, "warn", &keys::WARN),
-            severity_matches(value, "error", &keys::ERROR),
+            severity_matches(access, value, "info", &keys::INFO),
+            severity_matches(access, value, "warn", &keys::WARN),
+            severity_matches(access, value, "error", &keys::ERROR),
         )
     })?;
     if info {
@@ -1495,7 +1511,7 @@ fn task_handle_value(context: &EvalContext, handle: Arc<TaskHandleCell>) -> Valu
     values.wrap(CoreValue::Opaque(OpaqueValue::new(values.core(), handle)))
 }
 
-fn task_join_context(task: EvaluationTaskId) -> CoreValue {
+fn task_join_context(_access: &RuntimeValueAccess<'_>, task: EvaluationTaskId) -> CoreValue {
     let operation = CoreValue::Atom(Atom::from_key(&Key::binary_from_text("join")));
     let detail = Dict::new_sync()
         .insert(Key::atom_from_text("operation"), operation)
@@ -1506,27 +1522,48 @@ fn task_join_context(task: EvaluationTaskId) -> CoreValue {
     CoreValue::Dict(Dict::new_sync().insert(Key::atom_from_text("task"), CoreValue::Dict(detail)))
 }
 
-fn task_status_query_value(values: &Values, status: EvaluationTaskStatus) -> CoreValue {
+fn with_task_join_context(
+    context: &EvalContext,
+    error: TaskHalt,
+    task: EvaluationTaskId,
+) -> TaskHalt {
+    context.values().with_runtime_value_access(|access| {
+        error.with_core_context_in(&access, task_join_context(&access, task))
+    })
+}
+
+fn task_status_query_value(
+    access: &RuntimeValueAccess<'_>,
+    status: EvaluationTaskStatus,
+    failure_diagnostic: Option<CoreValue>,
+) -> CoreValue {
     match status {
-        EvaluationTaskStatus::Launched => values.core().key_value(&keys::LAUNCHED),
-        EvaluationTaskStatus::Blocked => values.core().key_value(&keys::BLOCKED),
+        EvaluationTaskStatus::Launched => access.value_from_key(&keys::LAUNCHED),
+        EvaluationTaskStatus::Blocked => access.value_from_key(&keys::BLOCKED),
         EvaluationTaskStatus::Complete(value) => CoreValue::Dict(
-            Dict::new_sync().insert(
-                (*keys::OK).clone(),
-                values
-                    .clone_runtime_root(&value)
-                    .expect("completed task value belongs to its query runtime"),
-            ),
+            Dict::new_sync().insert((*keys::OK).clone(), value.clone_core_with(access)),
         ),
-        EvaluationTaskStatus::Failed(error) => CoreValue::Dict(Dict::new_sync().insert(
+        EvaluationTaskStatus::Failed(_) => CoreValue::Dict(Dict::new_sync().insert(
             (*keys::ERR).clone(),
-            crate::diagnostic::failure_diagnostic_value_with(values.core(), error.as_failure()),
+            failure_diagnostic.expect("failed task status precomputes its diagnostic"),
         )),
-        EvaluationTaskStatus::Cancelled => values.core().key_value(&keys::CANCELED),
-        EvaluationTaskStatus::Abandoned => values.core().key_value(&keys::ABANDONED),
-        EvaluationTaskStatus::Exited => values.core().key_value(&keys::EXITED),
-        EvaluationTaskStatus::Killed(_) => values.core().key_value(&keys::KILLED),
+        EvaluationTaskStatus::Cancelled => access.value_from_key(&keys::CANCELED),
+        EvaluationTaskStatus::Abandoned => access.value_from_key(&keys::ABANDONED),
+        EvaluationTaskStatus::Exited => access.value_from_key(&keys::EXITED),
+        EvaluationTaskStatus::Killed(_) => access.value_from_key(&keys::KILLED),
     }
+}
+
+fn task_status_public_value(values: &Values, status: EvaluationTaskStatus) -> Value {
+    let failure_diagnostic = match &status {
+        EvaluationTaskStatus::Failed(error) => Some(
+            crate::diagnostic::failure_diagnostic_value_with(values.core(), error.as_failure()),
+        ),
+        _ => None,
+    };
+    Value::from_runtime_root(values.core().construct_runtime_value_root(|access| {
+        task_status_query_value(access, status, failure_diagnostic)
+    }))
 }
 
 fn task_status_publisher(
@@ -1539,7 +1576,7 @@ fn task_status_publisher(
         let notify = writer.update_query_guarded(
             ReflectionQueryMutation::new(mutation),
             &handle,
-            values.wrap(task_status_query_value(&values, status)),
+            task_status_public_value(&values, status),
         );
         TaskStatusWake::new(notify)
     })
@@ -1616,8 +1653,13 @@ fn observe_query_change<S: TaskSpecialization>(
     }
 }
 
-fn severity_matches(value: &CoreValue, name: &str, canonical: &Key) -> bool {
-    Key::from_value(value).as_ref() == Some(canonical)
+fn severity_matches(
+    access: &RuntimeValueAccess<'_>,
+    value: &CoreValue,
+    name: &str,
+    canonical: &Key,
+) -> bool {
+    access.key_from_value(value).as_ref() == Some(canonical)
         || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))
 }
 
@@ -1801,10 +1843,7 @@ mod tests {
     fn abandoned_task_status_has_a_distinct_round_trip() {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core);
-        let encoded = values.wrap(task_status_query_value(
-            &values,
-            EvaluationTaskStatus::Abandoned,
-        ));
+        let encoded = task_status_public_value(&values, EvaluationTaskStatus::Abandoned);
 
         assert_eq!(
             values.clone_core(&encoded).unwrap(),
@@ -1820,10 +1859,7 @@ mod tests {
     fn exited_and_killed_task_statuses_have_distinct_round_trips() {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core.clone());
-        let exited = values.wrap(task_status_query_value(
-            &values,
-            EvaluationTaskStatus::Exited,
-        ));
+        let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
         assert_eq!(
             values.clone_core(&exited).unwrap(),
             values.core().key_value(&keys::EXITED)
@@ -1833,13 +1869,13 @@ mod tests {
             TaggedTaskState::Exited
         ));
 
-        let killed = values.wrap(task_status_query_value(
+        let killed = task_status_public_value(
             &values,
             EvaluationTaskStatus::Killed(crate::runtime::RuntimeFailureRoot::new(
                 &core,
                 Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
             )),
-        ));
+        );
         assert_eq!(
             values.clone_core(&killed).unwrap(),
             values.core().key_value(&keys::KILLED)
@@ -1862,10 +1898,10 @@ mod tests {
             let mut store = store.lock().expect("test query store was poisoned");
             let mut journal = StoreJournal::new(store.snapshot());
             let handle = journal
-                .reserve_query_with(public_values.wrap(task_status_query_value(
+                .reserve_query_with(task_status_public_value(
                     &public_values,
                     EvaluationTaskStatus::Launched,
-                )))
+                ))
                 .expect("test status query should reserve");
             assert!(matches!(
                 store.try_commit(&journal),
@@ -1927,10 +1963,10 @@ mod tests {
             let mut store = store.lock().expect("test query store was poisoned");
             let mut journal = StoreJournal::new(store.snapshot());
             let status = journal
-                .reserve_query_with(public_values.wrap(task_status_query_value(
+                .reserve_query_with(task_status_public_value(
                     &public_values,
                     EvaluationTaskStatus::Launched,
-                )))
+                ))
                 .expect("task status query should reserve");
             assert!(matches!(
                 store.try_commit(&journal),
@@ -1987,10 +2023,10 @@ mod tests {
             );
             let mut journal = StoreJournal::new(store.snapshot());
             let status = journal
-                .reserve_query_with(public_values.wrap(task_status_query_value(
+                .reserve_query_with(task_status_public_value(
                     &public_values,
                     EvaluationTaskStatus::Launched,
-                )))
+                ))
                 .expect("task status query should reserve");
             assert!(matches!(
                 store.try_commit(&journal),
@@ -2038,10 +2074,10 @@ mod tests {
         let status = {
             let mut journal = StoreJournal::new(store.snapshot());
             let status = journal
-                .reserve_query_with(public_values.wrap(task_status_query_value(
+                .reserve_query_with(task_status_public_value(
                     &public_values,
                     EvaluationTaskStatus::Launched,
-                )))
+                ))
                 .expect("foreign-runtime task status query should reserve");
             assert!(matches!(
                 store.try_commit(&journal),

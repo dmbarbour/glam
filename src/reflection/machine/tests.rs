@@ -52,6 +52,10 @@ fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|_| value)
 }
 
+fn request_value_for_test(values: &CoreValueFactory, tag: &Key, arguments: Vec<Value>) -> Value {
+    values.with_runtime_value_access(|access| request_value(&access, tag, arguments))
+}
+
 fn value_i64(assembler: &Assembler, value: &PublicValue) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
@@ -2406,11 +2410,12 @@ fn reset_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedVa
     values.with_runtime_value_access(|access| {
         let operation = eval::constant_effect_in(
             &access,
-            request_value(&tags.r, vec![Value::binary_from_text("done")]),
+            request_value(&access, &tags.r, vec![Value::binary_from_text("done")]),
         );
         eval::constant_effect_in(
             &access,
             request_value(
+                &access,
                 &tags.reset,
                 vec![Value::Promised(key.duplicate_in(&access)), operation],
             ),
@@ -2423,6 +2428,7 @@ fn shift_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedVa
         eval::constant_effect_in(
             &access,
             request_value(
+                &access,
                 &tags.shift,
                 vec![
                     Value::Promised(key.duplicate_in(&access)),
@@ -2561,7 +2567,11 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
         &values,
         eval::constant_effect(
             &values,
-            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+            request_value_for_test(
+                &values,
+                &Tags::new().r,
+                vec![Value::binary_from_text("unused")],
+            ),
         ),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
@@ -2730,7 +2740,11 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         &values,
         eval::constant_effect(
             &values,
-            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+            request_value_for_test(
+                &values,
+                &Tags::new().r,
+                vec![Value::binary_from_text("unused")],
+            ),
         ),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
@@ -2793,7 +2807,11 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
             &values,
             eval::constant_effect(
                 &values,
-                request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+                request_value_for_test(
+                    &values,
+                    &Tags::new().r,
+                    vec![Value::binary_from_text("unused")],
+                ),
             ),
             TestEffects,
             Arc::new(TestHost::with_values(values.clone())),
@@ -2882,7 +2900,11 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
         &values,
         eval::constant_effect(
             &values,
-            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+            request_value_for_test(
+                &values,
+                &Tags::new().r,
+                vec![Value::binary_from_text("unused")],
+            ),
         ),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
@@ -2973,7 +2995,11 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
         &values,
         eval::constant_effect(
             &values,
-            request_value(&Tags::new().r, vec![Value::binary_from_text("unused")]),
+            request_value_for_test(
+                &values,
+                &Tags::new().r,
+                vec![Value::binary_from_text("unused")],
+            ),
         ),
         TestEffects,
         host,
