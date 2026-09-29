@@ -44,7 +44,7 @@ pub(in crate::g_syntax) fn lower_builtin_import(
     access: &RuntimeValueAccess<'_>,
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
-    let module = compiler_values::builtin_module(context.values(), name)
+    let module = compiler_values::builtin_module(access, name)
         .ok_or_else(|| Diagnostic::error(line, format!("unknown built-in module `'{name}`")))?;
 
     *definitions = match placement {
@@ -103,7 +103,7 @@ pub(in crate::g_syntax) fn lower_local_import(
             let scoped_prior = path_value_in_definitions_in(access, target, definitions.clone())?;
             let loaded =
                 scoped_local_import_value_in(access, request, target, scoped_prior, context)?;
-            let loaded_defs = constant_object_defs(context, loaded);
+            let loaded_defs = constant_object_defs(access, context, loaded);
             let object = extend_object_with_defs_in(
                 access,
                 target,
@@ -181,7 +181,7 @@ fn inherited_import_env_object_value_in(
         access,
         name,
         deps,
-        compiler_values::empty_object_defs(context.values()),
+        compiler_values::empty_object_defs(access),
     ))
 }
 
@@ -191,7 +191,7 @@ fn module_object_value_in(
     module: Value,
     context: &CompileContext,
 ) -> Value {
-    let definitions = constant_object_defs(context, module);
+    let definitions = constant_object_defs(access, context, module);
     module_object_value_with_defs_in(access, target, definitions.clone_core_with(access), context)
 }
 
@@ -212,10 +212,12 @@ fn module_object_value_with_defs_in(
 }
 
 pub(in crate::g_syntax) fn constant_object_defs(
+    access: &RuntimeValueAccess<'_>,
     context: &CompileContext,
     value: Value,
 ) -> crate::runtime::RuntimeValueRoot {
-    compiler_values::constant_object_defs(context.values(), value)
+    debug_assert!(access.belongs_to(context.values()));
+    compiler_values::constant_object_defs(access, value)
 }
 
 pub(in crate::g_syntax) fn lower_unique(

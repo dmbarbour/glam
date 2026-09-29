@@ -1802,10 +1802,18 @@ Execute this phase by call tree rather than as one mechanical signature edit:
    declarations, 34 module-definition/object/import declarations, and 13
    parser/macro orchestration declarations. Keep these four partitions exact
    while migrating them.
-2. **D.2e.1 — compiler values and diagnostic facade.** Give cached helper
+2. **D.2e.1 — compiler values and diagnostic facade. Complete (2026-09-29).** Give cached helper
    construction and `ResolvedExpr<Value>` composition one caller-owned access
    region. Cached and externally returned results remain roots; raw projections
-   are consumed before the region closes.
+   are consumed before the region closes. Compiler helper construction now
+   builds and roots a closed input within one caller-owned access, releases
+   that access before WHNF evaluation, and retains only runtime roots in the
+   cache. Purely structural effect, module, annotation, and macro-environment
+   applications may instead publish an unevaluated rooted result directly.
+   Compiler-value and formatter composition is access-qualified, while
+   diagnostic emissions cross into the still-pending compiler boundary as
+   roots. This converts all 30 planned declarations, removes the obsolete
+   `apply_closed` raw facade, and leaves 106 D.2e violations.
 3. **D.2e.2 — resolution graph.** Thread the same access through conditional,
    do, effect-step, expression, pattern, and scope lowering. The resolved IR is
    regional semantic data, not syntax and not a new durable value carrier.

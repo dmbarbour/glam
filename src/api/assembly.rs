@@ -955,9 +955,9 @@ impl Assembler {
     /// the conventional `msg` and `viewer` fields, including the observer's
     /// complete textual `viewer.header`, and returns bytes.
     pub fn default_diagnostic_formatter(&self) -> Value {
-        let values = self.core_values();
-        self.values()
-            .wrap(crate::g_syntax::default_diagnostic_formatter(&values))
+        Value::from_runtime_root(crate::g_syntax::default_diagnostic_formatter_root(
+            &self.core_values(),
+        ))
     }
 
     /// Returns the read-only environment shared by reflection tasks in this

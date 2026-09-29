@@ -61,31 +61,34 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Runtime
     } = lower_source(source, context);
     for diagnostic in diagnostics {
         let severity = diagnostic.severity;
-        context.emit_diagnostic(severity, diagnostic.into_emission());
+        context.emit_diagnostic_root(severity, diagnostic.into_emission(context.values()));
     }
     definitions_root
 }
 
-pub(crate) fn default_diagnostic_formatter(values: &CoreValueFactory) -> Value {
-    diagnostic_formatter::value(values)
+pub(crate) fn default_diagnostic_formatter_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    diagnostic_formatter::root(values)
 }
 
-pub(crate) fn defined_or_value(values: &CoreValueFactory) -> Value {
-    compiler_values::defined_or(values)
+pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    compiler_values::defined_or_root(values)
 }
 
-pub(crate) fn require_defined_value(values: &CoreValueFactory) -> Value {
-    compiler_values::require_defined(values)
+pub(crate) fn require_defined_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    compiler_values::require_defined_root(values)
 }
 
-pub(crate) fn fail_effect_value(values: &CoreValueFactory) -> Value {
-    compiler_values::effect_value(values, "fail")
+pub(crate) fn fail_effect_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    compiler_values::fail_effect_root(values)
 }
 
 #[cfg(test)]
 pub(crate) fn initialize_cached_compiler_values(values: &CoreValueFactory) {
-    let _ = compiler_values::builtin_module(values, "std")
-        .expect("the cached g compiler must provide `std`");
+    compiler_values::prepare(values);
+    values.with_runtime_value_access(|access| {
+        let _ = compiler_values::builtin_module(&access, "std")
+            .expect("the cached g compiler must provide `std`");
+    });
 }
 
 impl Diagnostic {
@@ -107,21 +110,17 @@ impl Diagnostic {
         }
     }
 
-    fn with_emission(mut self, values: &CoreValueFactory, emission: Value) -> Self {
-        self.emission = Some(values.construct_runtime_value_root(|_| emission));
+    fn with_emission(mut self, access: &RuntimeValueAccess<'_>, emission: Value) -> Self {
+        self.emission = Some(access.root_runtime_value(emission));
         self
     }
 
-    fn into_emission(self) -> Value {
-        self.emission
-            .map(|emission| {
-                let values = emission
-                    .value_observer()
-                    .upgrade()
-                    .expect("a compiler diagnostic emission retains its value domain");
-                values.with_runtime_value_access(|access| emission.clone_core_with(&access))
+    fn into_emission(self, values: &CoreValueFactory) -> RuntimeValueRoot {
+        self.emission.unwrap_or_else(|| {
+            values.construct_runtime_value_root(|_| {
+                crate::diagnostic::text_message(Some(self.line), &self.message)
             })
-            .unwrap_or_else(|| crate::diagnostic::text_message(Some(self.line), &self.message))
+        })
     }
 }
 

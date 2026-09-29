@@ -24,10 +24,14 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
-        SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
-            context.values(),
-            &path.iter().map(String::as_str).collect::<Vec<_>>(),
-        )),
+        SyntaxExpr::Effect(path) => {
+            ResolvedExpr::Embedded(context.values().with_runtime_value_access(|access| {
+                compiler_values::effect_path_value(
+                    &access,
+                    &path.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+            }))
+        }
         SyntaxExpr::AbstractGlobalPath {
             explicit_module,
             path,
@@ -397,7 +401,9 @@ pub(in crate::g_syntax) fn lower_effect_expr_resolved(
     values: &CoreValueFactory,
     name: &str,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::Embedded(compiler_values::effect_value(values, name))
+    values.with_runtime_value_access(|access| {
+        ResolvedExpr::Embedded(compiler_values::effect_value(&access, name))
+    })
 }
 
 pub(in crate::g_syntax) fn lower_operator_section_resolved(

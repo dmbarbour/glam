@@ -614,21 +614,19 @@ impl Values {
     /// Returns the cached closed Glam helper `\fallback value -> ...` which
     /// selects `fallback` exactly when `value` is logically equal to `{}`.
     pub fn defined_or_function(&self) -> Value {
-        self.with_access(|values| values.wrap(crate::g_syntax::defined_or_value(values.core())))
+        Value::from_runtime_root(crate::g_syntax::defined_or_root(self.core()))
     }
 
     /// Constructs the standard failing effect without evaluating anything.
     pub fn fail_effect(&self) -> Value {
-        self.with_access(|values| values.wrap(crate::g_syntax::fail_effect_value(values.core())))
+        Value::from_runtime_root(crate::g_syntax::fail_effect_root(self.core()))
     }
 
     /// Returns the cached closed Glam helper which asserts that its second
     /// argument is logically defined, using its first argument as the name in
     /// a structured failure.
     pub fn require_defined_function(&self) -> Value {
-        self.with_access(|values| {
-            values.wrap(crate::g_syntax::require_defined_value(values.core()))
-        })
+        Value::from_runtime_root(crate::g_syntax::require_defined_root(self.core()))
     }
 
     pub fn empty_object(&self, name: Value) -> Result<Value, Error> {

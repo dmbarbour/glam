@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value(
+                &crate::g_syntax::compiler_values::effect_test_value(
                     &crate::compiler::test_value_factory(),
                     "r",
                 )
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value(
+                &crate::g_syntax::compiler_values::effect_test_value(
                     &crate::compiler::test_value_factory(),
                     "fix",
                 )
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(
             count_embedded_value(
                 &resolved,
-                &crate::g_syntax::compiler_values::effect_value(
+                &crate::g_syntax::compiler_values::effect_test_value(
                     &crate::compiler::test_value_factory(),
                     "fix",
                 )

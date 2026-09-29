@@ -108,9 +108,9 @@ pub(super) fn lower_if_expr_resolved(
     ];
     let search = lower_guard_choices_resolved(&alternatives, context, scope, locals)?;
     Ok(match if_expr.mode {
-        ConditionalMode::Pure => {
-            compiler_values::run_pure_conditional_resolved(context.values(), search)
-        }
+        ConditionalMode::Pure => context.values().with_runtime_value_access(|access| {
+            compiler_values::run_pure_conditional_resolved(&access, search)
+        }),
         ConditionalMode::Host => search,
     })
 }
@@ -358,10 +358,16 @@ impl ResolvedChoice {
     ) -> ResolvedExpr<Value> {
         match (mode, commitment) {
             (ConditionalMode::Pure, MatchCommitment::Cut) => {
-                compiler_values::run_pure_match_resolved(values, self.emit_search(values), line)
+                let search = self.emit_search(values);
+                values.with_runtime_value_access(|access| {
+                    compiler_values::run_pure_match_resolved(&access, search, line)
+                })
             }
             (ConditionalMode::Pure, MatchCommitment::Open) => {
-                compiler_values::run_pure_open_match_resolved(self.emit_search(values))
+                let search = self.emit_search(values);
+                values.with_runtime_value_access(|access| {
+                    compiler_values::run_pure_open_match_resolved(&access, search)
+                })
             }
             (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(values),
             (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(values),
@@ -442,7 +448,7 @@ mod tests {
             expression,
             ResolvedExpr::Apply { function, .. }
                 if function.as_ref()
-                    == &ResolvedExpr::Embedded(compiler_values::effect_value(&values, name))
+                    == &ResolvedExpr::Embedded(compiler_values::effect_test_value(&values, name))
         )
     }
 
@@ -773,10 +779,10 @@ mod tests {
         .expect("empty open pure match should resolve");
         assert_eq!(
             resolved_pure,
-            compiler_values::run_pure_open_match_resolved(lower_effect_expr_resolved(
+            compiler_values::run_pure_open_match_test_resolved(
                 &crate::compiler::test_value_factory(),
-                "fail",
-            ))
+                lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail"),
+            )
         );
         assert!(!contains_effect(&resolved_pure, "cut"));
     }
@@ -910,7 +916,8 @@ mod tests {
     }
 
     fn contains_effect(expression: &ResolvedExpr<Value>, name: &str) -> bool {
-        let target = compiler_values::effect_value(&crate::compiler::test_value_factory(), name);
+        let target =
+            compiler_values::effect_test_value(&crate::compiler::test_value_factory(), name);
         match expression {
             ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value == &target,
             ResolvedExpr::Local(_) => false,

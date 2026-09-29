@@ -25,10 +25,15 @@ unsafe impl RuntimeCacheFamily for CachedDiagnosticFormatter {
     }
 }
 
-pub(super) fn value(values: &CoreValueFactory) -> Value {
-    let root = &cached(values).0;
-    assert_eq!(root.runtime_id(), values.runtime_id());
-    values.with_runtime_value_access(|access| root.clone_core_with(&access))
+#[cfg(test)]
+fn value(access: &RuntimeValueAccess<'_>) -> Value {
+    let root = &cached(access.values()).0;
+    assert_eq!(root.runtime_id(), access.runtime_id());
+    root.clone_core_with(access)
+}
+
+pub(super) fn root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    cached(values).0.clone()
 }
 
 fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
@@ -36,7 +41,11 @@ fn cached(values: &CoreValueFactory) -> Arc<CachedDiagnosticFormatter> {
 }
 
 fn build(values: &CoreValueFactory) -> RuntimeValueRoot {
-    fn field(local: BindingId, path: &[&str]) -> ResolvedExpr<Value> {
+    fn field(
+        _access: &RuntimeValueAccess<'_>,
+        local: BindingId,
+        path: &[&str],
+    ) -> ResolvedExpr<Value> {
         ResolvedExpr::Access {
             base: Box::new(ResolvedExpr::Local(local)),
             path: path
@@ -46,81 +55,104 @@ fn build(values: &CoreValueFactory) -> RuntimeValueRoot {
         }
     }
 
-    fn append(items: impl IntoIterator<Item = ResolvedExpr<Value>>) -> ResolvedExpr<Value> {
+    fn append(
+        _access: &RuntimeValueAccess<'_>,
+        items: impl IntoIterator<Item = ResolvedExpr<Value>>,
+    ) -> ResolvedExpr<Value> {
         items
             .into_iter()
-            .reduce(|left, right| apply_builtin(Builtin::Append, [left, right]))
+            .reduce(|left, right| {
+                ResolvedExpr::apply(
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::Append)),
+                    [left, right],
+                )
+            })
             .unwrap_or_else(|| ResolvedExpr::Embedded(Value::List(crate::core::List::empty())))
     }
 
-    let mut locals = ResolverContext::default();
-    let diagnostic = locals.push_internal_binding("<diagnostic>");
-    let lines = locals.push_internal_binding("<diagnostic-lines>");
-    let continuation_line = locals.push_internal_binding("<diagnostic-continuation-line>");
-    let context_line = locals.push_internal_binding("<diagnostic-context-line>");
+    super::compiler_values::evaluate_closed(values, |access| {
+        let mut locals = ResolverContext::default();
+        let diagnostic = locals.push_internal_binding("<diagnostic>");
+        let lines = locals.push_internal_binding("<diagnostic-lines>");
+        let continuation_line = locals.push_internal_binding("<diagnostic-continuation-line>");
+        let context_line = locals.push_internal_binding("<diagnostic-context-line>");
 
-    let header = || field(diagnostic, &["viewer", "header"]);
-    let indented_continuations = apply_builtin(
-        Builtin::ListConcat,
-        [apply_builtin(
-            Builtin::Map,
+        let header = || field(access, diagnostic, &["viewer", "header"]);
+        let indented_continuations = apply_builtin(
+            access,
+            Builtin::ListConcat,
+            [apply_builtin(
+                access,
+                Builtin::Map,
+                [
+                    ResolvedExpr::lambda(
+                        vec![continuation_line],
+                        append(
+                            access,
+                            [
+                                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                                field(access, diagnostic, &["viewer", "indent"]),
+                                ResolvedExpr::Local(continuation_line),
+                            ],
+                        ),
+                    ),
+                    apply_builtin(access, Builtin::ListTail, [ResolvedExpr::Local(lines)]),
+                ],
+            )],
+        );
+        let context_lines = apply_builtin(
+            access,
+            Builtin::ListConcat,
+            [apply_builtin(
+                access,
+                Builtin::Map,
+                [
+                    ResolvedExpr::lambda(
+                        vec![context_line],
+                        append(
+                            access,
+                            [
+                                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
+                                ResolvedExpr::Local(context_line),
+                            ],
+                        ),
+                    ),
+                    field(access, diagnostic, &["viewer", "context_lines"]),
+                ],
+            )],
+        );
+        let formatted = append(
+            access,
             [
-                ResolvedExpr::lambda(
-                    vec![continuation_line],
-                    append([
-                        ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-                        field(diagnostic, &["viewer", "indent"]),
-                        ResolvedExpr::Local(continuation_line),
-                    ]),
-                ),
-                apply_builtin(Builtin::ListTail, [ResolvedExpr::Local(lines)]),
+                header(),
+                apply_builtin(access, Builtin::ListHead, [ResolvedExpr::Local(lines)]),
+                indented_continuations,
+                context_lines,
+                ResolvedExpr::Embedded(Value::binary_from_text("\n")),
             ],
-        )],
-    );
-    let context_lines = apply_builtin(
-        Builtin::ListConcat,
-        [apply_builtin(
-            Builtin::Map,
+        );
+        let binary = apply_builtin(
+            access,
+            Builtin::Anno,
             [
-                ResolvedExpr::lambda(
-                    vec![context_line],
-                    append([
-                        ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-                        ResolvedExpr::Local(context_line),
-                    ]),
-                ),
-                field(diagnostic, &["viewer", "context_lines"]),
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str("binary"))),
+                formatted,
             ],
-        )],
-    );
-    let formatted = append([
-        header(),
-        apply_builtin(Builtin::ListHead, [ResolvedExpr::Local(lines)]),
-        indented_continuations,
-        context_lines,
-        ResolvedExpr::Embedded(Value::binary_from_text("\n")),
-    ]);
-    let binary = apply_builtin(
-        Builtin::Anno,
-        [
-            ResolvedExpr::Embedded(Value::Atom(atom_from_str("binary"))),
-            formatted,
-        ],
-    );
-    let with_lines = ResolvedExpr::apply(
-        ResolvedExpr::lambda(vec![lines], binary),
-        [apply_builtin(
-            Builtin::TextLines,
-            [field(diagnostic, &["msg", "text"])],
-        )],
-    );
-    super::compiler_values::evaluate_closed(
-        values,
-        ResolvedExpr::lambda(vec![diagnostic], with_lines),
-    )
+        );
+        let with_lines = ResolvedExpr::apply(
+            ResolvedExpr::lambda(vec![lines], binary),
+            [apply_builtin(
+                access,
+                Builtin::TextLines,
+                [field(access, diagnostic, &["msg", "text"])],
+            )],
+        );
+        ResolvedExpr::lambda(vec![diagnostic], with_lines)
+    })
 }
 
 fn apply_builtin(
+    _access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
     arguments: impl IntoIterator<Item = ResolvedExpr<Value>>,
 ) -> ResolvedExpr<Value> {
@@ -161,15 +193,18 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before the formatter fixture");
-        let first = value(&values);
-        let second = value(&values);
+        let _ = root(&values);
+        let first = values.with_runtime_value_access(|access| value(&access));
+        let second = values.with_runtime_value_access(|access| value(&access));
         assert!(matches!(first, Value::Function(_)));
         assert_eq!(first, second);
         let live = values
             .collect_managed_for_test()
             .expect("the cached formatter root should survive collection");
         assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert!(matches!(value(&values), Value::Function(_)));
+        assert!(
+            values.with_runtime_value_access(|access| matches!(value(&access), Value::Function(_)))
+        );
     }
 
     #[test]

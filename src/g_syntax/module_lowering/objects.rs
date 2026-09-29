@@ -175,11 +175,13 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         bindings.bind(
             locals,
             "<object-reflection-annotator>",
-            compiler_values::reflection_annotator_resolved(
-                context.values(),
-                guard.expr(),
-                object_final_defs.expr(),
-            ),
+            context.values().with_runtime_value_access(|access| {
+                compiler_values::reflection_annotator_resolved(
+                    &access,
+                    guard.expr(),
+                    object_final_defs.expr(),
+                )
+            }),
         )
     });
     let mut definitions = bindings.bind(

@@ -202,11 +202,13 @@ impl<'source> StagedSourceParser<'source> {
                 return Some(Vec::new());
             }
         };
-        let environment = super::super::compiler_values::macro_environment(
-            context.values(),
-            base_environment,
-            declared_language_value(language),
-        );
+        let environment = context.values().with_runtime_value_access(|access| {
+            super::super::compiler_values::macro_environment(
+                &access,
+                base_environment,
+                declared_language_value(language),
+            )
+        });
         let invocations = work.invocations().to_vec();
         let mut macro_diagnostics = Vec::new();
         for original in invocations {
@@ -430,7 +432,9 @@ fn macro_compiler_diagnostic(
 ) -> Diagnostic {
     let emission = crate::diagnostic::text_message(Some(invocation.line), &message);
     let emission = apply_macro_context(values, emission, frontier, cases, frames);
-    Diagnostic::error(invocation.line, message).with_emission(values, emission)
+    values.with_runtime_value_access(|access| {
+        Diagnostic::error(invocation.line, message).with_emission(&access, emission)
+    })
 }
 
 fn apply_public_macro_context(

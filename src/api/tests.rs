@@ -823,14 +823,9 @@ fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let defined_or = public_value(
-        &core_values,
-        crate::g_syntax::defined_or_value(&core_values),
-    );
-    let require_defined = public_value(
-        &core_values,
-        crate::g_syntax::require_defined_value(&core_values),
-    );
+    let defined_or = Value::from_runtime_root(crate::g_syntax::defined_or_root(&core_values));
+    let require_defined =
+        Value::from_runtime_root(crate::g_syntax::require_defined_root(&core_values));
     let fallback = values.integer(7);
 
     for undefined in [
@@ -2322,10 +2317,11 @@ fn compiler_cache_does_not_form_a_value_domain_cycle() {
     let value_domain = Arc::downgrade(values.value_domain());
 
     crate::g_syntax::initialize_cached_compiler_values(values);
-    assert!(matches!(
-        crate::g_syntax::default_diagnostic_formatter(values),
+    let formatter = crate::g_syntax::default_diagnostic_formatter_root(values);
+    assert!(values.with_runtime_value_access(|access| matches!(
+        formatter.clone_core_with(&access),
         CoreValue::Function(_)
-    ));
+    )));
 
     drop(runtime);
     assert!(value_domain.upgrade().is_none());
@@ -2360,9 +2356,12 @@ fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
     let values = runtime.state.shared_resources.values.core();
 
     crate::g_syntax::initialize_cached_compiler_values(values);
-    let formatter = crate::g_syntax::default_diagnostic_formatter(values);
+    let formatter = crate::g_syntax::default_diagnostic_formatter_root(values);
 
-    assert!(matches!(formatter, CoreValue::Function(_)));
+    assert!(values.with_runtime_value_access(|access| matches!(
+        formatter.clone_core_with(&access),
+        CoreValue::Function(_)
+    )));
     assert_eq!(
         runtime.state.work.scheduler_inventory_for_test(),
         before,

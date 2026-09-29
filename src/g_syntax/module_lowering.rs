@@ -37,11 +37,14 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
 
 impl<'context> ModuleLowerer<'context> {
     pub(in crate::g_syntax) fn new(context: &'context CompileContext) -> Self {
-        let module_reflection = compiler_values::reflection_annotator_root(
-            context.values(),
-            context.abstract_global_path("refl"),
-            context.final_defs(),
-        );
+        compiler_values::prepare(context.values());
+        let module_reflection = context.values().with_runtime_value_access(|access| {
+            compiler_values::reflection_annotator_root(
+                &access,
+                context.abstract_global_path("refl"),
+                context.final_defs(),
+            )
+        });
         Self {
             context,
             definitions: context.prior_defs_root().clone(),

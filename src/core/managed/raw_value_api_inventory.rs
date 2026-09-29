@@ -1038,13 +1038,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        573,
+        565,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        10_668_360_136_174_300_802,
+        1_042_060_685_449_619_603,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,9 +1073,9 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 320),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 343),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 213),
+        ((ApiKind::Function, ApiDisposition::Violation), 182),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
             7,
@@ -1158,7 +1158,7 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2eFrontend,
                 ReplacementShape::FrontendRegion,
             ),
-            137,
+            106,
         ),
         (
             (

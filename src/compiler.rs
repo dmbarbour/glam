@@ -250,6 +250,12 @@ impl CompileContext {
         }
     }
 
+    pub(crate) fn emit_diagnostic_root(&self, severity: Severity, message: RuntimeValueRoot) {
+        self.values.with_runtime_value_access(|access| {
+            self.emit_diagnostic(severity, message.clone_core_with(&access));
+        });
+    }
+
     pub(crate) fn unit_value(&self) -> Value {
         self.values.unit()
     }

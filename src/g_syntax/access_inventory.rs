@@ -64,22 +64,22 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/compiler.rs",
-        [24, 0, 3, 0],
+        [25, 0, 4, 0],
         "rooted source definitions, final promise, origin, and import result; D.2b.2 removes direct constructor names; deferred import inputs are I10A HostCall captures"
     ),
     entry!(
         "src/g_syntax.rs",
-        [4, 0, 1, 0],
+        [9, 0, 1, 0],
         "rooted compiler diagnostics and lowered definitions across publication; D.2b.2 projects diagnostic emissions through explicit access"
     ),
     entry!(
         "src/g_syntax/compiler_values.rs",
-        [39, 0, 1, 0],
+        [46, 0, 9, 0],
         "owned closed-evaluation results and admitted complete compiler-helper and effect caches; D.2b.2 uses scoped root construction"
     ),
     entry!(
         "src/g_syntax/diagnostic_formatter.rs",
-        [4, 0, 1, 0],
+        [5, 0, 3, 0],
         "admitted rooted closed diagnostic formatter cache"
     ),
     entry!(
@@ -89,7 +89,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [3, 0, 4, 0],
+        [3, 0, 5, 0],
         "rooted declaration-to-declaration definitions and reflection boundary; syntax resolution sits between projection and final lowering regions"
     ),
     entry!(
@@ -99,7 +99,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/parser/source.rs",
-        [0, 7, 0, 0],
+        [0, 7, 2, 0],
         "bounded macro-data and diagnostic-context projection"
     ),
 ];
@@ -151,7 +151,7 @@ fn closed_compiler_evaluation_returns_its_client_demand_owner() {
 
     assert!(
         compiler_values.contains(
-            "pub(in crate::g_syntax) fn evaluate_closed(\n    values: &CoreValueFactory,\n    expression: ResolvedExpr<Value>,\n) -> RuntimeValueRoot"
+            "pub(in crate::g_syntax) fn evaluate_closed(\n    values: &CoreValueFactory,\n    construct: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> ResolvedExpr<Value>,\n) -> RuntimeValueRoot"
         ),
         "closed compiler evaluation must return a canonical runtime root"
     );
