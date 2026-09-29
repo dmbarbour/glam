@@ -2005,6 +2005,34 @@ compiler/diagnostic regional functions.
 
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 
+Execution is partitioned so the final trait cutover is not hidden inside an
+inventory relatch:
+
+- **D.2h.0 — aggressive admission witnesses:** repair and latch the two
+  production-shaped failures discovered by D.2g closure.
+- **D.2h.1 — cutover readiness: complete 2026-09-29.** Run the raw-value, persistent-edge,
+  root-publication, and mutator-introduction ledgers; reconcile every remaining
+  entry with nested persistent-edge Phase P4. The executable pre-cutover
+  baseline is 32 raw core-value violations and 77 persistent-edge defects:
+  five collector traits, thirteen managed-facade traits/identity shims, and
+  fifty-nine parent carrier dependencies. The root and mutator ledgers also
+  pass their exact baselines after admitting the two new D.2h fixtures. These
+  entries must be removed, not reclassified.
+- **D.2h.2 — nested P4 cutover:** execute P4A-P4C from
+  `GarbageCollectorPersistentEdgeTraits_2026-09-12.md`, including removal of
+  the parent carrier traits, the managed-facade traits, and the five `Gc<T>`
+  traits. Keep access-qualified diagnostics and collector-private `ErasedGc`
+  distinct from the removed surface.
+- **D.2h.3 — ledger closure:** require zero raw violations, zero persistent
+  typed-edge defects, no pending production root/admission disposition, and no
+  unreviewed fixture exception. Update exact counts and fingerprints only from
+  the resulting source.
+- **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
+  checks followed by the routine workspace gates and the complete aggressive
+  workspace suite.
+- **D.2h.5 — record:** publish the dated accepted-surface and verification
+  record, and close nested P3/P4/P5 only to the extent evidenced here.
+
 0. Repair the aggressive admission witnesses exposed by closure verification:
    - **List-effect admission: complete 2026-09-29.**
      `source_macro_layout_dedents_resume_inside_delimiter_groups` and

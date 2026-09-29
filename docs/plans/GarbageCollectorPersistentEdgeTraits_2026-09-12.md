@@ -1,6 +1,7 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2 complete; P3 active through parent D.2d-D.2g; P4-P5 planned.
+Status: P0-P2 complete; P3 active through parent D.2h; P4-P5 planned as the
+explicit D.2h.2-D.2h.5 cutover and closure sequence.
 This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
