@@ -602,37 +602,54 @@ mod tests {
 
     #[test]
     fn invalid_local_request_never_reaches_the_loader() {
-        let context = CompileContext::default().with_local_module_loader(Arc::new(|args| {
-            panic!("invalid request reached loader: {}", args.request.as_str())
-        }));
-        let eval_context = crate::evaluation::EvalContext::isolated(context.values().clone());
-        let error = eval_context
-            .evaluate_compatibility_whnf(&context.import_module(
-                "../outside.g",
-                None,
-                Value::Dict(Dict::new_sync()),
-                Value::Dict(Dict::new_sync()),
-            ))
-            .expect_err("parent-relative request should be a stuck error");
-        assert!(error.to_string().contains("must not traverse to a parent"));
-        let failure = error.into_permanent_failure();
-        let request = failure
-            .contexts()
-            .iter()
-            .find_map(|context| {
-                let Value::Dict(context) = context else {
-                    return None;
-                };
-                let Value::Dict(context) = context.get(&*keys::IMPORT)? else {
-                    return None;
-                };
-                let Value::Dict(request) = context.get(&*keys::REQUEST)? else {
-                    return None;
-                };
-                request.get(&*keys::FILE)
-            })
-            .expect("invalid request should retain its source spelling");
-        assert_eq!(request, &Value::binary_from_text("../outside.g"));
+        for collect_before_evaluation in [false, true] {
+            let values = CoreValueFactory::new(
+                crate::runtime::allocate_evaluation_runtime_id(),
+                crate::runtime::RuntimeIds::new(),
+            );
+            let context =
+                CompileContext::new(values.clone()).with_local_module_loader(Arc::new(|args| {
+                    panic!("invalid request reached loader: {}", args.request.as_str())
+                }));
+            let request = values.construct_runtime_value_root(|access| {
+                context.import_module_in(
+                    access,
+                    "../outside.g",
+                    None,
+                    Value::Dict(Dict::new_sync()),
+                    Value::Dict(Dict::new_sync()),
+                )
+            });
+            if collect_before_evaluation {
+                values
+                    .collect_managed_for_test()
+                    .expect("the rooted invalid request must survive collection before demand");
+            }
+
+            let eval_context = crate::evaluation::EvalContext::isolated(values);
+            let error = eval_context
+                .evaluate_root_whnf(request)
+                .expect_err("parent-relative request should be a stuck error");
+            assert!(error.to_string().contains("must not traverse to a parent"));
+            let failure = error.into_permanent_failure();
+            let request = failure
+                .contexts()
+                .iter()
+                .find_map(|context| {
+                    let Value::Dict(context) = context else {
+                        return None;
+                    };
+                    let Value::Dict(context) = context.get(&*keys::IMPORT)? else {
+                        return None;
+                    };
+                    let Value::Dict(request) = context.get(&*keys::REQUEST)? else {
+                        return None;
+                    };
+                    request.get(&*keys::FILE)
+                })
+                .expect("invalid request should retain its source spelling");
+            assert_eq!(request, &Value::binary_from_text("../outside.g"));
+        }
     }
 
     #[test]

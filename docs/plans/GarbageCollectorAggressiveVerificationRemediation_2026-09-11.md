@@ -2022,13 +2022,22 @@ compiler/diagnostic regional functions.
      durable owner, then admits the checkpoint and collects again. It and both
      macro witnesses pass ordinarily and aggressively without placing a root
      inside the managed graph.
-   - `compiler::tests::invalid_local_request_never_reaches_the_loader` passed
+   - **Invalid-import fixture: complete 2026-09-29.**
+     `compiler::tests::invalid_local_request_never_reaches_the_loader` passed
      in an isolated aggressive process but failed in the parallel aggressive
      compiler partition while rooting a pointer already pending finalization.
-     Treat repetition or the isolated pass as no evidence of safety. First
-     reproduce both relevant schedules with injected collector/admission
-     barriers, then assign the defect to the production handoff or shared test
-     interference before changing code.
+     The cause was shared test interference: `CompileContext::default()` used
+     the process-wide compiler-test heap, while the test-only `import_module`
+     wrapper returned a raw lazy after closing its construction access. An
+     unrelated collector could therefore retire that fixture before
+     `evaluate_compatibility_whnf` registered its replacement root. The
+     repaired fixture uses a private value domain, publishes the import value
+     as `RuntimeValueRoot` in the construction region, and demands it through
+     `evaluate_root_whnf`. Its loop forces both relevant serial orders directly
+     (demand before collection and collection before demand), so the former
+     parallel-only `PendingFinalization` symptom is no longer accepted as a
+     repetition-based race check. Both orders pass ordinarily and
+     aggressively; no production handoff changed.
 1. Run the syntax-backed API inventory in closure mode and require zero
    `Violation` occurrences. The accepted collector primitive set remains an
    exact declaration allowlist rather than a path-prefix escape hatch.
