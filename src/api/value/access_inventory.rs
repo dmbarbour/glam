@@ -722,6 +722,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/compiler.rs::impl CompileContext::with_compilation_trace#1|surface=scoped-factory|scope=production",
     "src/compiler.rs::impl CompileContext::with_prior_defs#1|surface=scoped-factory|scope=test",
     "src/compiler.rs::tests::binary_import_forwards_hidden_source_provenance#1|surface=compatibility-new|scope=test",
+    "src/compiler.rs::tests::invalid_local_request_never_reaches_the_loader#1|surface=scoped-factory|scope=test",
     "src/compiler.rs::tests::module_import_qualifies_only_the_relative_child_namespace#1|surface=compatibility-new|scope=test",
     "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#1|surface=compatibility-new|scope=test",
     "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#2|surface=compatibility-new|scope=test",

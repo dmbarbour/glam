@@ -682,6 +682,8 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/eval/value/tests/w4.rs::list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk#2|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::list_effect_fix_checkpoint_constructs_and_assigns_one_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -1007,7 +1009,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // into public construction fixtures before forced route loss.
         // PNC7 adds two bounded checkpoint-cycle construction/projection
         // regions and one second-demand projection after route loss.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(49, 0)),
+        ("src/eval/value/tests/w4.rs", GatewayCounts::new(51, 0)),
         // W2B.2's focused promise-follower fixture constructs the exact
         // managed promise root under one bounded test access region.
         // W6G.1f.3a.1 adds two short production regions on either side of the
