@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2f complete; GCI11R-002D.2g-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2f complete; GCI11R-002D.2g active; D.2h planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -1929,6 +1929,46 @@ diagnostic callback boundaries, the D.1b no-reroot counter, and source latches
 rejecting a raw public or host-callback signature. Resolve all D.2g entries in
 the root-traffic and mutator-introduction ledgers; public handles should reuse
 their existing root cells rather than cause hidden re-registration.
+
+Use the following checkpoints. The live D.2g manifest is 44 declarations, not
+the historical 45: ten public durable-boundary functions and 34
+compiler/diagnostic regional functions.
+
+1. **D.2g.0 — exact manifest. Complete (2026-09-29).** Add a source-backed declaration gate for the
+   ten public and 34 compiler/diagnostic violations before changing their
+   signatures. Freeze their replacement family separately so a public raw
+   escape cannot disappear into an internal regional helper. The live gate
+   freezes exactly ten public and 34 compiler/diagnostic declarations.
+2. **D.2g.1 — public value boundary.** Remove authority-free projection and
+   wrapping helpers from `api::Value`, `EvaluatedValue`, `ValueKind`, and
+   `Values`. Public operations either retain opaque rooted handles or perform
+   inspection/construction under the existing `ScopedValues` access. Update
+   callers without registering replacement roots for already-rooted values.
+3. **D.2g.2 — public diagnostic and assembly boundary.** Make diagnostic
+   envelopes accept and retain public values or runtime roots. Build the
+   authoritative reflection environment within the assembler's existing
+   scoped construction region. Change compiler diagnostic callbacks to carry
+   a durable root rather than an unrooted core value.
+4. **D.2g.3 — source provenance and compilation trace.** Give source/digest
+   and trace-to-value constructors explicit caller access. Keep these
+   constructors structural and non-demanding; they must neither open a nested
+   region nor create a durable root on their own.
+5. **D.2g.4 — compiler context.** Expose prior/final definitions and origin as
+   existing runtime roots or project them only through caller access. Thread
+   one front-end region through abstract-path, unit, import-failure, and
+   diagnostic construction. Invoke diagnostic callbacks only after rooting
+   their message and releasing regional access.
+6. **D.2g.5 — diagnostic transformations.** Split immediate structural
+   construction/inspection into access-qualified helpers and demand-capable
+   normalization into rooted operations. Remove the last production callers
+   of `evaluate_compatibility_whnf`; never hold value access while evaluation,
+   logging, or a host callback can run.
+7. **D.2g.6 — closure.** Require zero D.2g violations and reconcile the raw,
+   root-publication, mutator-introduction, durable-owner, containment, and call
+   graph ledgers. Run focused public/compiler/diagnostic tests ordinarily and
+   aggressively, then the routine repository gates. Record any downstream
+   aggressive defect under its actual D.2h/E/F owner rather than weakening
+   the D.2g closure.
 
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 

@@ -1283,6 +1283,76 @@ fn d2d_orchestration_declarations_are_exact() {
 }
 
 #[test]
+fn d2g_public_compiler_diagnostic_declarations_are_exact() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let actual = collect_occurrences(manifest)
+        .into_iter()
+        .filter(|occurrence| {
+            occurrence
+                .remediation_assignment()
+                .is_some_and(|assignment| {
+                    assignment.owner == RemediationOwner::D2gPublicCompilerDiagnostics
+                })
+        })
+        .map(|occurrence| occurrence.declaration)
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "src/api/assembly.rs::Assembler::compile_diagnostic_emitter",
+        "src/api/assembly.rs::authoritative_glam_environment",
+        "src/api/diagnostics.rs::Diagnostic::from_compile",
+        "src/api/diagnostics.rs::Diagnostic::from_parts",
+        "src/api/error.rs::Error::from_eval_parts",
+        "src/api/value.rs::EvaluatedValue::with_core",
+        "src/api/value.rs::Value::clone_core_in_own_domain",
+        "src/api/value.rs::ValueKind::from_core",
+        "src/api/value.rs::Values::clone_core",
+        "src/api/value.rs::Values::wrap",
+        "src/compiler.rs::CompileContext::abstract_global_path",
+        "src/compiler.rs::CompileContext::clone_root",
+        "src/compiler.rs::CompileContext::emit_diagnostic",
+        "src/compiler.rs::CompileContext::final_defs",
+        "src/compiler.rs::CompileContext::opaque_origin",
+        "src/compiler.rs::CompileContext::unavailable_origin",
+        "src/compiler.rs::CompileContext::unit_value",
+        "src/compiler.rs::CompileContext::with_diagnostic_emitter",
+        "src/diagnostic.rs::CompilationInvocationId::value",
+        "src/diagnostic.rs::CompilationTrace::frame_value",
+        "src/diagnostic.rs::CompilationTrace::import_chain_value",
+        "src/diagnostic.rs::CompilationTrace::origin_value",
+        "src/diagnostic.rs::ImportOrigin::edge_value",
+        "src/diagnostic.rs::Severity::value",
+        "src/diagnostic.rs::apply_emission_updates",
+        "src/diagnostic.rs::apply_updates",
+        "src/diagnostic.rs::assembler_metadata",
+        "src/diagnostic.rs::conventional_summary",
+        "src/diagnostic.rs::conventional_summary_with",
+        "src/diagnostic.rs::diagnostic_object",
+        "src/diagnostic.rs::enrich",
+        "src/diagnostic.rs::evaluation_context_frame",
+        "src/diagnostic.rs::evaluation_context_frame_with_args",
+        "src/diagnostic.rs::failure_diagnostic_value_with",
+        "src/diagnostic.rs::fallback_failure_diagnostic",
+        "src/diagnostic.rs::halt_diagnostic_value_with",
+        "src/diagnostic.rs::inspect_compilation_origin",
+        "src/diagnostic.rs::namespace_value",
+        "src/diagnostic.rs::opaque_compilation_origin",
+        "src/diagnostic.rs::prepend_contexts",
+        "src/diagnostic.rs::prepend_contexts_with",
+        "src/diagnostic.rs::text_message",
+        "src/source.rs::ContentDigest::value",
+        "src/source.rs::SourceIdentity::value",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "D.2g begins from one exact public/compiler/diagnostic manifest; new raw-value APIs require a reviewed owner"
+    );
+}
+
+#[test]
 fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
     let raw_names = BTreeSet::from(["Value".to_owned()]);
     let canonical_core_names = raw_names.clone();
