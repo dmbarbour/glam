@@ -225,7 +225,10 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
         self.source.number(id)
     }
 
-    pub(super) fn embedded_value(self, id: EmbeddedValueId) -> Option<&'lex crate::core::Value> {
+    pub(super) fn embedded_value(
+        self,
+        id: EmbeddedValueId,
+    ) -> Option<&'lex crate::runtime::RuntimeValueRoot> {
         self.source.embedded_value(id)
     }
 

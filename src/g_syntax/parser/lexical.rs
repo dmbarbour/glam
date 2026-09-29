@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use super::super::Diagnostic;
-use crate::core::Value;
 use crate::number::Number;
+use crate::runtime::RuntimeValueRoot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ByteSpan {
@@ -222,7 +222,7 @@ pub(super) struct LexedSource<'source> {
     tokens: Vec<SpannedToken<'source>>,
     numbers: Vec<Number>,
     texts: Vec<LexedText>,
-    embedded_values: Vec<Value>,
+    embedded_values: Vec<RuntimeValueRoot>,
     groups: Vec<DelimiterGroup>,
     declarations: Vec<DeclarationSection>,
     line_starts: Vec<usize>,
@@ -247,14 +247,14 @@ impl<'source> LexedSource<'source> {
         self.numbers.get(id)
     }
 
-    pub(super) fn embedded_value(&self, id: EmbeddedValueId) -> Option<&Value> {
+    pub(super) fn embedded_value(&self, id: EmbeddedValueId) -> Option<&RuntimeValueRoot> {
         self.embedded_values.get(id)
     }
 
     pub(super) fn replace_unknowns_with_embedded(
         mut self,
         marker: char,
-        values: Vec<Value>,
+        values: Vec<RuntimeValueRoot>,
     ) -> Result<Self, String> {
         let mut values = values.into_iter();
         for token in &mut self.tokens {
@@ -434,7 +434,7 @@ pub(super) fn lex_source(source: &str) -> LexedSource<'_> {
 }
 
 #[cfg(test)]
-pub(super) fn embedded_source(value: Value) -> LexedSource<'static> {
+pub(super) fn embedded_source(value: RuntimeValueRoot) -> LexedSource<'static> {
     LexedSource {
         source: "",
         tokens: vec![SpannedToken {
@@ -473,7 +473,7 @@ struct Lexer<'source> {
     tokens: Vec<SpannedToken<'source>>,
     numbers: Vec<Number>,
     texts: Vec<LexedText>,
-    embedded_values: Vec<Value>,
+    embedded_values: Vec<RuntimeValueRoot>,
     groups: Vec<DelimiterGroup>,
     group_stack: Vec<GroupId>,
     declarations: Vec<DeclarationSection>,

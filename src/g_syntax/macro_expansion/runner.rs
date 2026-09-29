@@ -76,13 +76,12 @@ impl MacroRun {
 
 pub(in crate::g_syntax) fn run_macro_effect(
     execution: &CompilationExecution,
-    effect: Value,
+    effect: RuntimeValueRoot,
     environment: RuntimeValueRoot,
     input: MacroInput,
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let values = execution.macro_context().values();
-    let public_values = Values::from_core_factory(values.clone());
-    let effect = public_values.wrap(effect);
+    let effect = PublicValue::from_runtime_root(effect);
     let environment = PublicValue::from_runtime_root(environment);
     let host = Arc::new(MacroHost::new_core(
         values.clone(),
@@ -176,26 +175,27 @@ pub(in crate::g_syntax) fn run_macro_effect(
     let value = branch
         .value()
         .expect("successful branch was selected above");
-    let value = public_values.clone_core(value).map_err(|error| {
-        macro_error(
-            values,
-            format!("macro result belongs to another runtime: {error}"),
-        )
-    })?;
-    let value = force_result(execution, value).map_err(|error| {
+    let value = force_result(execution, value.clone().into_runtime_root()).map_err(|error| {
         error.with_context(
             execution.macro_context().values(),
             branch.journal().cursor.consumed_end(&input),
             branch.journal().active_cases.iter().cloned(),
         )
     })?;
-    if value != execution.macro_context().values().unit() {
+    let (is_unit, kind) = values.with_runtime_value_access(|access| {
+        value
+            .with_core(&access, |value| {
+                (
+                    value == &access.values().unit(),
+                    access.diagnostic_kind_name(value),
+                )
+            })
+            .expect("macro result belongs to the macro runtime")
+    });
+    if !is_unit {
         return Err(macro_error(
             values,
-            format!(
-                "macro effect terminated with {}, expected unit",
-                value.diagnostic_kind_name()
-            ),
+            format!("macro effect terminated with {kind}, expected unit"),
         ));
     }
     if !branch.journal().cursor.balanced() {
@@ -227,11 +227,11 @@ pub(in crate::g_syntax) fn run_macro_effect(
 
 fn force_result(
     execution: &CompilationExecution,
-    value: Value,
-) -> Result<Value, Box<MacroFailure>> {
+    value: RuntimeValueRoot,
+) -> Result<RuntimeValueRoot, Box<MacroFailure>> {
     execution
         .macro_context()
-        .evaluate_compatibility_whnf(&value)
+        .evaluate_root_whnf(value)
         .map_err(|error| {
             let detail = if error.blocked_on().is_some() {
                 "macro result is waiting on a lazy producer unavailable to the macro demand session"
@@ -247,28 +247,43 @@ pub(in crate::g_syntax) fn render_macro_case(
     execution: &CompilationExecution,
     value: &PublicValue,
 ) -> String {
-    let values = Values::from_core_factory(execution.macro_context().values().clone());
-    let value = match values
-        .clone_core(value)
-        .map_err(|error| macro_error(execution.macro_context().values(), error.to_string()))
-        .and_then(|value| force_result(execution, value))
-    {
+    let value = match force_result(execution, value.clone().into_runtime_root()) {
         Ok(value) => value,
         Err(error) => return format!("explanation unavailable ({})", error.message()),
     };
-    if let Value::Binary(bytes) = &value {
-        return String::from_utf8(bytes.to_vec())
-            .unwrap_or_else(|_| "explanation is non-UTF-8 binary data".to_owned());
+    let immediate = execution
+        .macro_context()
+        .values()
+        .with_runtime_value_access(|access| {
+            value
+                .with_core(&access, |value| match value {
+                    Value::Binary(bytes) => Ok(String::from_utf8(bytes.to_vec())
+                        .unwrap_or_else(|_| "explanation is non-UTF-8 binary data".to_owned())),
+                    Value::Dict(_) => Err(None),
+                    value => Err(Some(access.diagnostic_kind_name(value))),
+                })
+                .expect("macro explanation belongs to the macro runtime")
+        });
+    match immediate {
+        Ok(text) => return text,
+        Err(Some(kind)) => return format!("explanation has kind {kind}"),
+        Err(None) => {}
     }
-    let Value::Dict(dict) = &value else {
-        return format!("explanation has kind {}", value.diagnostic_kind_name());
-    };
     let field = |name| {
-        dict.get(&crate::core::Key::atom_from_text(name))
-            .and_then(|value| force_result(execution, value.clone()).ok())
-            .and_then(|value| match value {
-                Value::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
-                _ => None,
+        select_field_root(execution, &value, name)
+            .and_then(|value| force_result(execution, value).ok())
+            .and_then(|value| {
+                execution
+                    .macro_context()
+                    .values()
+                    .with_runtime_value_access(|access| {
+                        value
+                            .with_core(&access, |value| match value {
+                                Value::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                                _ => None,
+                            })
+                            .flatten()
+                    })
             })
     };
     let usage = field("usage");
@@ -283,6 +298,27 @@ pub(in crate::g_syntax) fn render_macro_case(
             "explanation has no textual `usage`, `summary`, or `details`".to_owned()
         }
     }
+}
+
+fn select_field_root(
+    execution: &CompilationExecution,
+    value: &RuntimeValueRoot,
+    name: &str,
+) -> Option<RuntimeValueRoot> {
+    execution
+        .macro_context()
+        .values()
+        .with_runtime_value_access(|access| {
+            value
+                .with_core(&access, |value| {
+                    let Value::Dict(dict) = value else {
+                        return None;
+                    };
+                    dict.get(&crate::core::Key::atom_from_text(name))
+                        .map(|value| access.root_runtime_value(access.duplicate_value(value)))
+                })
+                .flatten()
+        })
 }
 
 fn unique_values(

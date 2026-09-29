@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2d complete; GCI11R-002D.2e-H planned. This plan expands
+Status: GCI11R-002A-C and D.1a-D.2f complete; GCI11R-002D.2g-H planned. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -1828,13 +1828,28 @@ Execute this phase by call tree rather than as one mechanical signature edit:
    instead of projecting definitions before resolution and reopening access
    to publish the result. These two checkpoints convert 92 declarations and
    leave exactly fourteen parser/macro violations for D.2e.4.
-5. **D.2e.4 — parser and macro orchestration.** Keep parser structures ordinary
+5. **D.2e.4 — parser and macro orchestration. Complete (2026-09-29).** Keep parser structures ordinary
    Rust data. Root embedded semantic values and macro effects across isolated
    evaluation or host boundaries, and reopen one region only for deterministic
-   parser/lowering work.
-6. **D.2e.5 — closure.** Require zero D.2e violations, reconcile the root and
+   parser/lowering work. `SyntaxExpr::Embedded`, lexical embedded-data tables,
+   staged macro effects/results, and declaration materialization now retain
+   runtime roots. Macro lookup demands one rooted step at a time; parser
+   projection and output installation occur only inside bounded regions.
+   Diagnostic context construction roots both the source emission and compiler
+   update before normalization, because a user emission may demand arbitrary
+   work and must not be normalized beneath managed access.
+6. **D.2e.5 — closure. Complete (2026-09-29).** Require zero D.2e violations, reconcile the root and
    mutator-admission ledgers, then run focused and complete ordinary/aggressive
-   front-end verification.
+   front-end verification. The syntax-backed inventory now assigns zero
+   violations to `g_syntax`; its exact baseline is 553 declarations, including
+   437 regional operations and 76 remaining violations owned outside D.2e.
+   Both compiler-access inventories pass, all 454 ordinary `g_syntax` tests
+   pass, and 33 of 35 aggressive macro-expansion tests pass. The two remaining
+   tests complete macro compilation, then expose the independently owned
+   list-effect checkpoint admission defect recorded in D.2h.0 while evaluating
+   the compiled result. Two stale reflection-gate fixtures discovered by the
+   same run now construct and retain their actual roots rather than depending
+   on an unrooted test facade.
 
 ##### GCI11R-002D.2f — Reflection Machine and Store
 
@@ -1917,6 +1932,15 @@ their existing root cells rather than cause hidden re-registration.
 
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 
+0. Repair the aggressive list-effect checkpoint admission witness exposed by
+   `source_macro_layout_dedents_resume_inside_delimiter_groups` and
+   `source_macros_write_nested_and_same_anchor_layouts`. Macro compilation is
+   already complete when these fail: opening the next evaluator access may
+   collect a lazy edge carried only by the regional `RegionalListEffect` state
+   before `ManagedListEffectCheckpointCell` becomes its traced durable owner.
+   Preserve that state through admission without placing roots inside the
+   managed value graph, and add an exact aggressive handoff test independent
+   of the source-macro fixtures.
 1. Run the syntax-backed API inventory in closure mode and require zero
    `Violation` occurrences. The accepted collector primitive set remains an
    exact declaration allowlist rather than a path-prefix escape hatch.

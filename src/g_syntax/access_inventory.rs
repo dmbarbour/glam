@@ -69,7 +69,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax.rs",
-        [9, 0, 1, 0],
+        [10, 0, 1, 0],
         "rooted compiler diagnostics and lowered definitions across publication; D.2b.2 projects diagnostic emissions through explicit access"
     ),
     entry!(
@@ -84,23 +84,23 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",
-        [2, 13, 0, 0],
-        "rooted macro environment input, outputs, failures, and public diagnostic values"
+        [7, 14, 4, 0],
+        "rooted macro environment, effect, result, output, failure, and diagnostic values with bounded inspection regions"
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [3, 0, 5, 0],
-        "rooted declaration-to-declaration definitions and reflection boundary; syntax resolution sits between projection and final lowering regions"
+        [4, 0, 4, 0],
+        "rooted declaration-to-declaration definitions and reflection boundary; syntax resolution and lowering share one regional projection"
     ),
     entry!(
         "src/g_syntax/parser/logical.rs",
-        [0, 6, 0, 0],
+        [0, 7, 0, 0],
         "rooted embedded macro data across declaration rewrites"
     ),
     entry!(
         "src/g_syntax/parser/source.rs",
-        [0, 7, 2, 0],
-        "bounded macro-data and diagnostic-context projection"
+        [9, 7, 3, 0],
+        "rooted embedded values, macro effects, and diagnostic emissions with bounded macro-data and diagnostic-context projection"
     ),
 ];
 

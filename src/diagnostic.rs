@@ -361,6 +361,27 @@ pub(crate) fn apply_emission_updates(
     apply_updates(values, message, updates)
 }
 
+/// Root-preserving form of [`apply_emission_updates`] for orchestration which
+/// must release managed access before diagnostic normalization can demand
+/// values or run object builtins.
+pub(crate) fn apply_emission_updates_root(
+    values: &CoreValueFactory,
+    message: crate::runtime::RuntimeValueRoot,
+    updates: crate::runtime::RuntimeValueRoot,
+) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
+    let context = crate::evaluation::EvalContext::isolated(values.clone());
+    let message = diagnostic_object_root(&context, message)?;
+    let extension_defs = context.compose_builtin(Builtin::ObjectOverrideDefs, |access| {
+        vec![updates.clone_core_with(access)]
+    });
+    context.evaluate_builtin_whnf(Builtin::ObjectWithDefs, |access| {
+        vec![
+            message.clone_core_with(access),
+            extension_defs.clone_core_with(access),
+        ]
+    })
+}
+
 /// Prepends semantic demand frames while preserving context supplied by the
 /// original diagnostic emission. An empty prefix still normalizes
 /// `msg.context` to a list.
@@ -460,6 +481,42 @@ fn diagnostic_object(
         values.with_runtime_value_access(|access| message.clone_core_with(&access))
     };
     Ok(message)
+}
+
+fn diagnostic_object_root(
+    context: &crate::evaluation::EvalContext,
+    message: crate::runtime::RuntimeValueRoot,
+) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
+    let message = context.evaluate_root_whnf(message)?;
+    let spec = context.values().with_runtime_value_access(|access| {
+        message
+            .with_core(&access, |message| match message {
+                Value::Dict(message) => message
+                    .get(&*keys::SPEC)
+                    .map(|spec| access.root_runtime_value(spec.clone())),
+                _ => None,
+            })
+            .flatten()
+    });
+    let has_defined_spec = if let Some(spec) = spec {
+        let spec = context.evaluate_root_whnf(spec)?;
+        context.values().with_runtime_value_access(|access| {
+            spec.with_core(
+                &access,
+                |spec| !matches!(spec, Value::Dict(spec) if spec.is_empty()),
+            )
+            .unwrap_or(false)
+        })
+    } else {
+        false
+    };
+    if has_defined_spec {
+        Ok(message)
+    } else {
+        context.evaluate_builtin_whnf(Builtin::ObjectFromDict, |access| {
+            vec![message.clone_core_with(access)]
+        })
+    }
 }
 
 pub(crate) fn conventional_summary(message: &Value) -> (Option<usize>, Option<Arc<str>>) {

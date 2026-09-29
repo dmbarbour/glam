@@ -110,8 +110,8 @@ impl Diagnostic {
         }
     }
 
-    fn with_emission(mut self, access: &RuntimeValueAccess<'_>, emission: Value) -> Self {
-        self.emission = Some(access.root_runtime_value(emission));
+    fn with_emission_root(mut self, emission: RuntimeValueRoot) -> Self {
+        self.emission = Some(emission);
         self
     }
 

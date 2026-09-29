@@ -4,7 +4,7 @@ use crate::api::{
     Assembler, CompilationExecution, Diagnostic, DiagnosticEvent, DiagnosticSubscriber,
     TestValueFacade, Value as PublicValue,
 };
-use crate::core::{CoreValueFactory, Dict, Key, List, Value, keys};
+use crate::core::{CoreValueFactory, Dict, Key, LazyValue, List, Value, keys};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::runtime::RuntimeValueRoot;
@@ -78,10 +78,6 @@ fn compile_effects(source: &str) -> (Assembler, PublicValue) {
     (assembler, effects)
 }
 
-fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
-    crate::api::Values::from_core_factory(values.clone()).wrap(value)
-}
-
 fn run(
     execution: &CompilationExecution,
     effect: &PublicValue,
@@ -89,7 +85,7 @@ fn run(
 ) -> Result<MacroRun, Box<MacroFailure>> {
     run_macro_effect(
         execution,
-        effect.clone_core_for_test(),
+        effect.clone().into_runtime_root(),
         environment_root(execution, environment),
         MacroInput::empty(),
     )
@@ -176,7 +172,7 @@ fn macro_runner_distinguishes_a_non_effect_value() {
     let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
         &execution,
-        assembler.values().integer(42).clone_core_for_test(),
+        assembler.values().integer(42).into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         MacroInput::empty(),
     )
@@ -211,7 +207,7 @@ fn macro_failure_keeps_only_furthest_active_cases() {
     let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
         &execution,
-        effect.clone_core_for_test(),
+        effect.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
@@ -241,12 +237,17 @@ fn macro_api_omits_heap_tasks_and_full_reflection_requests() {
 fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let assembler = Assembler::default();
     let execution = assembler.test_compilation_execution();
-    let reflection = return_effect(&assembler.core_values(), keys::unit_value());
-    let gate = Value::reflection_gate(&assembler.core_values(), reflection, keys::unit_value());
-    let macro_effect = public_value(
-        &assembler.core_values(),
-        return_effect(&assembler.core_values(), gate),
-    );
+    let values = assembler.core_values();
+    let macro_effect =
+        PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+            let reflection = return_effect(&values, keys::unit_value());
+            let gate = Value::Lazy(LazyValue::from_reflection_gate_in(
+                access,
+                reflection,
+                keys::unit_value(),
+            ));
+            return_effect(&values, gate)
+        }));
 
     run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect("macro session should launch and complete its reflection gate");
@@ -256,18 +257,29 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() {
     let (assembler, reflection) = compile_effects(".env ['glam,'reasoning,'role]");
     let execution = assembler.test_compilation_execution();
-    let result = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        execution.macro_context(),
-        &Value::reflection_task_result(&assembler.core_values(), reflection.clone_core_for_test()),
-    )
-    .expect("a macro-started reflection result should complete");
+    let values = assembler.core_values();
+    let result = values.construct_runtime_value_root(|access| {
+        Value::reflection_task_result_in(
+            access,
+            reflection
+                .clone()
+                .into_runtime_root()
+                .clone_core_with(access),
+        )
+    });
+    let result = execution
+        .macro_context()
+        .evaluate_root_whnf(result)
+        .expect("a macro-started reflection result should complete");
 
-    assert_eq!(
-        result,
-        Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
-            "assembler"
-        )))
-    );
+    values.with_runtime_value_access(|access| {
+        assert_eq!(
+            result.clone_core_with(&access),
+            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+                "assembler"
+            )))
+        );
+    });
 }
 
 #[test]
@@ -287,21 +299,26 @@ fn reflection_annotations_use_runtime_default_profile_from_macro_demand() {
 fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     let (assembler, reflection) = compile_effects(".cut (.heap.get '.missing >>= (\\_ -> .fail))");
     let execution = assembler.test_compilation_execution();
-    let gate = Value::reflection_gate(
-        &assembler.core_values(),
-        reflection.clone_core_for_test(),
-        keys::unit_value(),
-    );
-    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &assembler.eval_context(),
-        &gate,
-    )
-    .expect_err("assembler observation should start and block the gate");
+    let values = assembler.core_values();
+    let gate = values.construct_runtime_value_root(|access| {
+        Value::Lazy(LazyValue::from_reflection_gate_in(
+            access,
+            reflection
+                .clone()
+                .into_runtime_root()
+                .clone_core_with(access),
+            keys::unit_value(),
+        ))
+    });
+    let error = assembler
+        .eval_context()
+        .evaluate_root_whnf(gate.clone())
+        .expect_err("assembler observation should start and block the gate");
     assert!(error.blocked_on().is_some());
-    let macro_effect = public_value(
-        &assembler.core_values(),
-        return_effect(&assembler.core_values(), gate),
-    );
+    let macro_effect =
+        PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+            return_effect(&values, gate.clone_core_with(access))
+        }));
 
     let error = run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
         .expect_err("macro execution must not migrate a gate claimed by another demand session");
@@ -444,7 +461,7 @@ fn inline_macro_readers_and_writers_are_transactional() {
     );
     let layout_run = run_macro_effect(
         &execution,
-        effect.clone_core_for_test(),
+        effect.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
@@ -492,7 +509,7 @@ fn layout_readers_require_scoped_anchors_and_leave_root_anchor_as_failure() {
     let execution = assembler.test_compilation_execution();
     let layout_run = run_macro_effect(
         &execution,
-        effect.clone_core_for_test(),
+        effect.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
@@ -651,7 +668,7 @@ fn text_span_and_end_cover_the_current_nonstructural_run() {
     );
     let run = run_macro_effect(
         &execution,
-        effect.clone_core_for_test(),
+        effect.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input,
     )
@@ -1105,7 +1122,7 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
     let execution = assembler.test_compilation_execution();
     run_macro_effect(
         &execution,
-        balanced.clone_core_for_test(),
+        balanced.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input(),
     )
@@ -1115,7 +1132,7 @@ fn macro_reader_must_balance_only_the_delimiters_it_opens() {
     let execution = assembler.test_compilation_execution();
     let error = run_macro_effect(
         &execution,
-        unbalanced.clone_core_for_test(),
+        unbalanced.clone().into_runtime_root(),
         environment_root(&execution, Value::Dict(Dict::new_sync())),
         input(),
     )

@@ -23,11 +23,13 @@ fn assert_rejects(source: &str) {
 #[test]
 fn embedded_data_is_an_ordinary_parser_atom() {
     let value = crate::core::Value::Number(crate::number::Number::from(42_i64));
-    let lexical = super::super::lexical::embedded_source(value.clone());
+    let values = crate::compiler::test_value_factory();
+    let rooted = crate::runtime::RuntimeValueRoot::new(&values, value.clone());
+    let lexical = super::super::lexical::embedded_source(rooted.clone());
     let view = TokenView::whole(&lexical);
     let parsed = parse_expression_view(view, ExpressionContext::for_fragment(view)).unwrap();
 
-    assert_eq!(parsed, SyntaxExpr::Embedded(value));
+    assert_eq!(parsed, SyntaxExpr::Embedded(rooted));
 }
 
 #[test]

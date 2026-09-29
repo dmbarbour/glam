@@ -244,19 +244,14 @@ impl DeclarationMacroWork {
 
     fn lexical(
         &self,
-        values: &crate::core::CoreValueFactory,
+        _values: &crate::core::CoreValueFactory,
     ) -> Result<LexedSource<'_>, Vec<Diagnostic>> {
-        let public_values = Values::from_core_factory(values.clone());
         let lexical = lex_source(&self.text)
             .replace_unknowns_with_embedded(
                 EMBEDDED_MARKER,
                 self.embedded_values
                     .iter()
-                    .map(|value| {
-                        public_values
-                            .clone_core(value)
-                            .expect("embedded macro data must belong to the parser runtime")
-                    })
+                    .map(|value| value.clone().into_runtime_root())
                     .collect(),
             )
             .map_err(|error| vec![Diagnostic::error(self.line, error)])?;
@@ -555,14 +550,12 @@ fn macro_input(
                         .value(),
                 )),
             ),
-            TokenKind::Embedded(id) => MacroInputKind::Data(
-                public_values.wrap(
-                    source
-                        .embedded_value(*id)
-                        .expect("embedded token should reference its arena")
-                        .clone(),
-                ),
-            ),
+            TokenKind::Embedded(id) => MacroInputKind::Data(PublicValue::from_runtime_root(
+                source
+                    .embedded_value(*id)
+                    .expect("embedded token should reference its arena")
+                    .clone(),
+            )),
             TokenKind::Open { delimiter, .. } => MacroInputKind::Text {
                 text: Arc::from(delimiter_text(*delimiter, true)),
                 delimiter: Some((macro_delimiter(*delimiter), true)),

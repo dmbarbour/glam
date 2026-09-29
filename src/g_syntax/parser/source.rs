@@ -13,10 +13,11 @@ use super::layout::validate_delimited_layouts;
 use super::lexical::{DeclarationSection, LexedSource, TokenKind, lex_source};
 use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocation};
 use crate::api::CompilationExecution;
-use crate::api::{Value as PublicValue, Values};
+use crate::api::Value as PublicValue;
 use crate::compiler::CompileContext;
-use crate::core::{Atom, Dict, Key, List, Value};
+use crate::core::{Atom, Dict, Key, List, RuntimeValueAccess, Value};
 use crate::number::Number;
+use crate::runtime::RuntimeValueRoot;
 
 pub(crate) fn inspect_source(source: &[u8]) -> InspectedSource {
     let mut parser = StagedSourceParser::new(source);
@@ -146,7 +147,7 @@ impl<'source> StagedSourceParser<'source> {
     pub(in crate::g_syntax) fn next_expanded_declarations(
         &mut self,
         context: &CompileContext,
-        prior_definitions: &Value,
+        prior_definitions: &RuntimeValueRoot,
         language: Option<&super::super::LanguageDecl>,
     ) -> Option<Vec<Declaration>> {
         let lexical = self.lexical.as_ref()?;
@@ -203,11 +204,9 @@ impl<'source> StagedSourceParser<'source> {
             }
         };
         let environment = context.values().with_runtime_value_access(|access| {
-            super::super::compiler_values::macro_environment(
-                &access,
-                base_environment,
-                declared_language_value(language),
-            )
+            let base_environment = base_environment.clone_core_with(&access);
+            let language = declared_language_value(&access, language);
+            super::super::compiler_values::macro_environment(&access, base_environment, language)
         });
         let invocations = work.invocations().to_vec();
         let mut macro_diagnostics = Vec::new();
@@ -225,7 +224,15 @@ impl<'source> StagedSourceParser<'source> {
                 .map(Key::atom_from_text)
                 .collect::<Vec<_>>();
             let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
-                Ok(effect) if effect != Value::Dict(Dict::new_sync()) => effect,
+                Ok(effect)
+                    if !context.values().with_runtime_value_access(|access| {
+                        effect
+                            .with_core(&access, |value| value == &Value::Dict(Dict::new_sync()))
+                            .expect("selected macro belongs to the compilation runtime")
+                    }) =>
+                {
+                    effect
+                }
                 Ok(_) => {
                     self.diagnostics.push(macro_compiler_diagnostic(
                         context.values(),
@@ -336,7 +343,7 @@ impl<'source> StagedSourceParser<'source> {
                         &[],
                         std::slice::from_ref(&original),
                     );
-                    context.emit_diagnostic(diagnostic.severity(), emission);
+                    context.emit_diagnostic_root(diagnostic.severity(), emission);
                 }
             }
         } else {
@@ -430,11 +437,11 @@ fn macro_compiler_diagnostic(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> Diagnostic {
-    let emission = crate::diagnostic::text_message(Some(invocation.line), &message);
+    let emission = values.construct_runtime_value_root(|_| {
+        crate::diagnostic::text_message(Some(invocation.line), &message)
+    });
     let emission = apply_macro_context(values, emission, frontier, cases, frames);
-    values.with_runtime_value_access(|access| {
-        Diagnostic::error(invocation.line, message).with_emission(&access, emission)
-    })
+    Diagnostic::error(invocation.line, message).with_emission_root(emission)
 }
 
 fn apply_public_macro_context(
@@ -443,27 +450,32 @@ fn apply_public_macro_context(
     frontier: Option<(usize, usize, usize)>,
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
-) -> Value {
-    let public_values = Values::from_core_factory(values.clone());
-    let message = public_values
-        .clone_core(message)
-        .expect("macro diagnostic must belong to the compiler runtime");
-    apply_macro_context_scoped(values, message, frontier, cases, frames)
+) -> RuntimeValueRoot {
+    apply_macro_context(
+        values,
+        message.clone().into_runtime_root(),
+        frontier,
+        cases,
+        frames,
+    )
 }
 
 fn apply_macro_context(
     values: &crate::core::CoreValueFactory,
-    message: Value,
+    message: RuntimeValueRoot,
     frontier: Option<(usize, usize, usize)>,
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
-) -> Value {
-    apply_macro_context_scoped(values, message, frontier, cases, frames)
+) -> RuntimeValueRoot {
+    let updates = values.construct_runtime_value_root(|access| {
+        macro_context_updates(&access, frontier, cases, frames)
+    });
+    crate::diagnostic::apply_emission_updates_root(values, message.clone(), updates)
+        .unwrap_or(message)
 }
 
-fn apply_macro_context_scoped(
-    values: &crate::core::CoreValueFactory,
-    message: Value,
+fn macro_context_updates(
+    access: &RuntimeValueAccess<'_>,
     frontier: Option<(usize, usize, usize)>,
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
@@ -471,7 +483,10 @@ fn apply_macro_context_scoped(
     let mut context = Dict::new_sync().insert(
         Key::atom_from_text("frames"),
         Value::List(List::from_values(
-            frames.iter().map(macro_frame_value).collect(),
+            frames
+                .iter()
+                .map(|frame| macro_frame_value(access, frame))
+                .collect(),
         )),
     );
     if let Some((byte, line, column)) = frontier {
@@ -491,27 +506,20 @@ fn apply_macro_context_scoped(
         context = context.insert(Key::atom_from_text("input_position"), Value::Dict(position));
     }
     if !cases.is_empty() {
-        let public_values = Values::from_core_factory(values.clone());
         context = context.insert(
             Key::atom_from_text("cases"),
             Value::List(List::from_values(
                 cases
                     .iter()
-                    .map(|case| {
-                        public_values
-                            .clone_core(case)
-                            .expect("macro case must belong to the compiler runtime")
-                    })
+                    .map(|case| case.clone().into_runtime_root().clone_core_with(access))
                     .collect(),
             )),
         );
     }
-    let updates =
-        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("macro"), Value::Dict(context)));
-    crate::diagnostic::apply_emission_updates(values, message.clone(), updates).unwrap_or(message)
+    Value::Dict(Dict::new_sync().insert(Key::atom_from_text("macro"), Value::Dict(context)))
 }
 
-fn macro_frame_value(frame: &OriginalMacroInvocation) -> Value {
+fn macro_frame_value(_access: &RuntimeValueAccess<'_>, frame: &OriginalMacroInvocation) -> Value {
     let path = Value::List(List::from_values(
         frame
             .path
@@ -541,20 +549,30 @@ fn macro_frame_value(frame: &OriginalMacroInvocation) -> Value {
 
 fn macro_lookup(
     execution: &CompilationExecution,
-    root: &Value,
+    root: &RuntimeValueRoot,
     path: &[Key],
     force_result: bool,
-) -> Result<Value, String> {
+) -> Result<RuntimeValueRoot, String> {
     let mut current = root.clone();
     for key in path {
         let evaluated = force_macro_lookup_value(execution, current)?;
-        let Value::Dict(dict) = evaluated else {
-            return Err("macro path traverses a non-dictionary value".to_owned());
-        };
-        current = dict
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
+        current = execution
+            .lookup_context()
+            .values()
+            .with_runtime_value_access(|access| {
+                evaluated
+                    .with_core(&access, |value| {
+                        let Value::Dict(dict) = value else {
+                            return Err("macro path traverses a non-dictionary value".to_owned());
+                        };
+                        Ok(access.root_runtime_value(
+                            dict.get(key)
+                                .map(|value| access.duplicate_value(value))
+                                .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+                        ))
+                    })
+                    .expect("macro lookup root belongs to the lookup runtime")
+            })?;
     }
     if force_result {
         force_macro_lookup_value(execution, current)
@@ -565,28 +583,23 @@ fn macro_lookup(
 
 fn force_macro_lookup_value(
     execution: &CompilationExecution,
-    value: Value,
-) -> Result<Value, String> {
+    value: RuntimeValueRoot,
+) -> Result<RuntimeValueRoot, String> {
     execution
         .lookup_context()
-        .evaluate_compatibility_whnf(&value)
+        .evaluate_root_whnf(value)
         .map_err(|error| error.to_string())
 }
 
 fn parse_expanded_declaration(
-    values: &crate::core::CoreValueFactory,
+    _values: &crate::core::CoreValueFactory,
     rewritten: &str,
     embedded: Vec<PublicValue>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<Declaration> {
-    let public_values = Values::from_core_factory(values.clone());
     let embedded = embedded
         .iter()
-        .map(|value| {
-            public_values
-                .clone_core(value)
-                .expect("expanded macro data must belong to the parser runtime")
-        })
+        .map(|value| value.clone().into_runtime_root())
         .collect();
     let lexical =
         match lex_source(rewritten).replace_unknowns_with_embedded(EMBEDDED_MARKER, embedded) {
@@ -609,7 +622,10 @@ fn parse_expanded_declaration(
         .collect()
 }
 
-fn declared_language_value(language: &super::super::LanguageDecl) -> Value {
+fn declared_language_value(
+    _access: &crate::core::RuntimeValueAccess<'_>,
+    language: &super::super::LanguageDecl,
+) -> Value {
     Value::Dict(
         Dict::new_sync()
             .insert(
