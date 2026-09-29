@@ -119,6 +119,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "I5 managed recursive identities; GCI11R-002D.2b.2 access-qualified promise publication"
     ),
     entry!(
+        "src/diagnostic.rs",
+        0,
+        0,
+        1,
+        "root-preserving diagnostic normalization publishes an inspected spec before releasing its bounded access",
+        "GCI11R-002D.2e.4 macro diagnostic handoff; GCI11R-002D.2g shared diagnostic closure"
+    ),
+    entry!(
         "src/eval/access_machine.rs",
         0,
         2,
@@ -225,8 +233,8 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/g_syntax/compiler_values.rs",
         0,
+        2,
         3,
-        0,
         "owned closed-evaluation results and complete runtime-cached compiler helper bundles",
         "I3E.2 rooted cache publication; I4F.1 durable roots; GCI11R-002C direct client-demand result ownership"
     ),
@@ -239,18 +247,42 @@ const INVENTORY: &[InventoryEntry] = &[
         "phase-9 macro effect ownership; GCI11R-002D.2b.2 scoped root publication inventory"
     ),
     entry!(
-        "src/g_syntax/module_lowering.rs",
+        "src/g_syntax/macro_expansion/runner.rs",
+        0,
         0,
         1,
-        1,
+        "macro explanation fields are rooted before their next demand boundary",
+        "GCI11R-002D.2e.4 rooted macro orchestration"
+    ),
+    entry!(
+        "src/g_syntax/module_lowering.rs",
+        0,
+        0,
+        2,
         "declaration-to-declaration definitions and directly owned reflection annotator",
         "I3E.2 bounded lowering regions; I4F.1 durable roots; GCI11R-002C owned closed-result handoff; W2R-001D.1 post-resolution publication"
     ),
     entry!(
+        "src/g_syntax/parser/source.rs",
+        0,
+        2,
+        1,
+        "embedded macro values, lookup results, and diagnostic updates cross orchestration only as runtime roots",
+        "GCI11R-002D.2e.4 rooted parser and macro orchestration"
+    ),
+    entry!(
+        "src/g_syntax/resolve/do_expr.rs",
+        1,
+        0,
+        0,
+        "test-only embedded semantic-data fixture root",
+        "GCI11R-002D.2e.4 rooted embedded parser data"
+    ),
+    entry!(
         "src/reflection/machine.rs",
         0,
-        10,
-        2,
+        7,
+        6,
         "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
         "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement; GCI11R-002D.2d.2 rooted effect-task construction"
     ),
@@ -265,7 +297,7 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/requests.rs",
         0,
-        2,
+        3,
         0,
         "task-new request effects rooted before reflection-task admission",
         "GCI11R-002D.2d.2 rooted reflection-task admission"
@@ -273,8 +305,8 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/reflection/store.rs",
         0,
-        4,
-        0,
+        6,
+        1,
         "reflection store publication and inspection boundaries",
         "I3D.4 bounded reflection-store access; GCI11R-002D.2b.2 scoped root publication inventory"
     ),
@@ -403,13 +435,19 @@ impl RootPublicationOccurrence {
                     RootPublicationDisposition::RootedTransportMigration
                 }
                 "src/api/assembly.rs::impl Assembler::load_local_binary"
+                | "src/g_syntax.rs::impl Diagnostic::into_emission"
+                | "src/g_syntax/compiler_values.rs::build_module"
                 | "src/g_syntax/compiler_values.rs::evaluate_closed"
                 | "src/g_syntax/compiler_values.rs::run_pure_match_resolved"
                 | "src/g_syntax/macro_expansion/effects.rs::hidden_effect"
+                | "src/g_syntax/parser/source.rs::apply_macro_context"
+                | "src/g_syntax/parser/source.rs::macro_compiler_diagnostic"
                 | "src/reflection/machine.rs::alternative_returns_root"
                 | "src/reflection/machine.rs::effect_api"
                 | "src/reflection/machine.rs::volume_effects"
-                | "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect" => {
+                | "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect"
+                | "src/reflection/requests.rs::task_status_public_value"
+                | "src/reflection/store.rs::complete_query_value" => {
                     RootPublicationDisposition::OuterConstructionBoundary
                 }
                 "src/api/value.rs::impl ScopedValues < '_ >::wrap"
@@ -431,9 +469,13 @@ impl RootPublicationOccurrence {
                 | "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value"
                 | "src/evaluation/pump.rs::poison_lazy_cycle"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
-                | "src/g_syntax.rs::impl Diagnostic::with_emission"
+                | "src/diagnostic.rs::diagnostic_object_root"
+                | "src/g_syntax/compiler_values.rs::build_effect_path_value"
+                | "src/g_syntax/compiler_values.rs::fail_effect_root"
                 | "src/g_syntax/compiler_values.rs::root_value"
+                | "src/g_syntax/macro_expansion/runner.rs::select_field_root"
                 | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration"
+                | "src/g_syntax/parser/source.rs::macro_lookup"
                 | "src/reflection/machine.rs::impl Branch < S >::new"
                 | "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities"
                 | "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation"
@@ -442,6 +484,8 @@ impl RootPublicationOccurrence {
                 | "src/reflection/machine.rs::lazy_value_path_root"
                 | "src/reflection/store.rs::apply_edit"
                 | "src/reflection/store.rs::apply_value_at_path"
+                | "src/reflection/store.rs::decode_query_state"
+                | "src/reflection/store.rs::impl ReflectionStore::retire_queries"
                 | "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation"
                 | "src/reflection/store.rs::impl StoreSnapshot::poll_query"
                 | "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values" => {
@@ -667,6 +711,7 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
     "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
+    "src/diagnostic.rs::diagnostic_object_root#1|surface=access-publication|scope=production",
     "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
     "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
     "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#1|surface=access-publication|scope=test",
@@ -812,31 +857,45 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/evaluation/whnf.rs::tests::task_owned_promise_self_observation_fails_outside_regional_access#1|surface=scoped-factory|scope=test",
     "src/evaluation/whnf.rs::tests::unassigned_resolver_promise_becomes_a_direct_dependency#1|surface=scoped-factory|scope=test",
     "src/evaluation/whnf.rs::tests::uncached_lazy_admission_occurs_after_regional_access_closes#1|surface=scoped-factory|scope=test",
-    "src/g_syntax.rs::impl Diagnostic::with_emission#1|surface=scoped-factory|scope=production",
+    "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/compiler_values.rs::build_effect_path_value#1|surface=access-publication|scope=production",
+    "src/g_syntax/compiler_values.rs::build_module#1|surface=scoped-factory|scope=production",
     "src/g_syntax/compiler_values.rs::evaluate_closed#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/compiler_values.rs::root_value#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/compiler_values.rs::run_pure_match_resolved#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/compiler_values.rs::fail_effect_root#1|surface=access-publication|scope=production",
+    "src/g_syntax/compiler_values.rs::root_value#1|surface=access-publication|scope=production",
     "src/g_syntax/macro_expansion/effects.rs::hidden_effect#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/macro_expansion/runner.rs::select_field_root#1|surface=access-publication|scope=production",
+    "src/g_syntax/macro_expansion/tests.rs::assembler_claimed_reflection_gate_is_unavailable_to_macro_session#1|surface=scoped-factory|scope=test",
+    "src/g_syntax/macro_expansion/tests.rs::assembler_claimed_reflection_gate_is_unavailable_to_macro_session#2|surface=scoped-factory|scope=test",
     "src/g_syntax/macro_expansion/tests.rs::environment_root#1|surface=compatibility-new|scope=test",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_gate_runs_inside_the_macro_session#1|surface=scoped-factory|scope=test",
+    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand#1|surface=scoped-factory|scope=test",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=access-publication|scope=production",
+    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#2|surface=access-publication|scope=production",
+    "src/g_syntax/parser/expression/tests.rs::embedded_data_is_an_ordinary_parser_atom#1|surface=compatibility-new|scope=test",
+    "src/g_syntax/parser/source.rs::apply_macro_context#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/parser/source.rs::macro_compiler_diagnostic#1|surface=scoped-factory|scope=production",
+    "src/g_syntax/parser/source.rs::macro_lookup#1|surface=access-publication|scope=production",
+    "src/g_syntax/resolve/do_expr.rs::tests::embedded_semantic_data_lowers_without_reconstruction#1|surface=compatibility-new|scope=test",
     "src/g_syntax/tests.rs::reflection_test_module#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine.rs::alternative_returns_root#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::alternative_returns_root#1|surface=access-publication|scope=production",
     "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=test",
     "src/reflection/machine.rs::impl Branch < S >::new#2|surface=access-publication|scope=test",
-    "src/reflection/machine.rs::impl Branch < S >::root_value#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl Branch < S >::root_value#1|surface=access-publication|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::new_in_context_with_capabilities#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::impl EffectTask < S >::new_exit_in_context#1|surface=scoped-factory|scope=test",
+    "src/reflection/machine.rs::impl EffectTask < S >::new_owned_in_context#1|surface=scoped-factory|scope=test",
     "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities#1|surface=scoped-factory|scope=production",
     "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::lazy_value_path_root#1|surface=scoped-factory|scope=production",
+    "src/reflection/machine.rs::lazy_value_path_root#1|surface=access-publication|scope=production",
+    "src/reflection/machine.rs::lazy_value_path_root#2|surface=access-publication|scope=production",
     "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",
     "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#2|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#3|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::captured_control_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
+    "src/reflection/machine/tests.rs::contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#2|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#3|surface=scoped-factory|scope=test",
@@ -867,14 +926,20 @@ const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#3|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#4|surface=scoped-factory|scope=test",
     "src/reflection/machine/tests.rs::resume_request_decodes_lazy_ids_once_in_source_order#1|surface=scoped-factory|scope=test",
+    "src/reflection/machine/tests.rs::root_value#1|surface=scoped-factory|scope=test",
     "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect#1|surface=scoped-factory|scope=production",
     "src/reflection/requests.rs::create_task#1|surface=scoped-factory|scope=production",
     "src/reflection/requests.rs::create_task#2|surface=scoped-factory|scope=production",
+    "src/reflection/requests.rs::task_status_public_value#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::apply_edit#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::apply_value_at_path#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::complete_query_value#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::decode_query_state#1|surface=access-publication|scope=production",
+    "src/reflection/store.rs::impl ReflectionStore::retire_queries#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation#1|surface=scoped-factory|scope=production",
     "src/reflection/store.rs::impl StoreSnapshot::poll_query#1|surface=scoped-factory|scope=production",
+    "src/reflection/store.rs::pending_query_value#1|surface=scoped-factory|scope=test",
     "src/reflection/store/tests.rs::query_state_is_transactional_and_retired_after_the_last_handle#1|surface=scoped-factory|scope=test",
+    "src/reflection/store/tests.rs::unforced_store_value#1|surface=scoped-factory|scope=test",
     "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values#1|surface=access-publication|scope=production",
     "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=access-publication|scope=test",
 ];
