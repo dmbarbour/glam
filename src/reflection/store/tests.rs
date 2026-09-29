@@ -54,10 +54,10 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
 }
 
 fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<EvaluationQueryState> {
-    let value = assembler.evaluate(&value).unwrap();
-    let values = assembler.values();
-    let value = values.clone_core(&value).unwrap();
-    decode_query_state(&values, &value)
+    let value = assembler.evaluator().eval(&value).unwrap();
+    value
+        .with_core_access(|value, access| decode_query_state(access, value))
+        .expect("query state belongs to the fixture runtime")
 }
 
 /// Compile-exhaustive ownership latch for I4F.1d.1's durable reflection-store
@@ -184,13 +184,14 @@ fn unforced_store_value(
     let weak = Arc::downgrade(&retained);
     let forced = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let forced_by_thunk = forced.clone();
-    let value = Value::Lazy(LazyValue::semantic_thunk(values, label, move |_| {
-        let _ = &retained;
-        forced_by_thunk.store(true, Ordering::Release);
-        panic!("reflection-store root retention must not force its value")
-    }));
     (
-        crate::api::Values::from_core_factory(values.clone()).wrap(value),
+        PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+            Value::Lazy(LazyValue::semantic_thunk_in(access, label, move |_| {
+                let _ = &retained;
+                forced_by_thunk.store(true, Ordering::Release);
+                panic!("reflection-store root retention must not force its value")
+            }))
+        })),
         weak,
         forced,
     )

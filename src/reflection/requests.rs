@@ -519,8 +519,9 @@ where
                 generation,
             }) => {
                 let state = demand_value(input, "resumed task query state")?;
-                let values = context.values();
-                let state = match state.with_core(|state| decode_query_state(&values, state))? {
+                let state = match state
+                    .with_core_access(|state, access| decode_query_state(access, state))?
+                {
                     Some(EvaluationQueryState::Pending) => None,
                     Some(EvaluationQueryState::Complete(result)) => Some(result),
                     None => return Err(TaskHalt::new("query handle has been retired")),

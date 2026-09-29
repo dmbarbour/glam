@@ -22,7 +22,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::api::{Value as PublicValue, Values};
-use crate::core::{Builtin, CoreValueFactory, Dict, Key, LazyValue, List, Value};
+use crate::core::{
+    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, RuntimeValueAccess, Value,
+};
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
 
@@ -641,7 +643,11 @@ impl ReflectionStore {
         self.revision = self.revision.wrapping_add(1);
         for id in retired {
             let path = ConflictPath::from_keys(query_path(id));
-            root = apply_value_at_path(&self.values, root, &path, Value::Dict(Dict::new_sync()));
+            root = PublicValue::from_runtime_root(self.values.construct_runtime_value_root(
+                |access| {
+                    apply_value_at_path_in(access, &root, &path, Value::Dict(Dict::new_sync()))
+                },
+            ));
             self.latest_changes.insert(
                 ConflictAddress::reflection(self.runtime_volume, path),
                 self.revision,
@@ -726,29 +732,29 @@ fn query_path(id: EvaluationQueryId) -> Vec<Key> {
 
 #[cfg(test)]
 fn pending_query_value(values: &CoreValueFactory) -> PublicValue {
-    Values::from_core_factory(values.clone()).wrap(Value::Dict(
-        Dict::new_sync().insert(QUERY_PENDING.clone(), values.unit()),
-    ))
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        Value::Dict(Dict::new_sync().insert(QUERY_PENDING.clone(), access.unit()))
+    }))
 }
 
 fn complete_query_value(values: &CoreValueFactory, result: PublicValue) -> PublicValue {
-    let public_values = Values::from_core_factory(values.clone());
-    let payload = Value::Dict(
-        Dict::new_sync()
-            .insert(QUERY_PRESENT.clone(), values.unit())
-            .insert(
-                QUERY_RESULT.clone(),
-                public_values
-                    .clone_core(&result)
-                    .expect("query result belongs to its store runtime"),
-            ),
-    );
-    public_values.wrap(Value::Dict(
-        Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload),
-    ))
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        let payload = Value::Dict(
+            Dict::new_sync()
+                .insert(QUERY_PRESENT.clone(), access.unit())
+                .insert(
+                    QUERY_RESULT.clone(),
+                    result.into_runtime_root().clone_core_with(access),
+                ),
+        );
+        Value::Dict(Dict::new_sync().insert(QUERY_COMPLETE.clone(), payload))
+    }))
 }
 
-pub(crate) fn decode_query_state(values: &Values, value: &Value) -> Option<EvaluationQueryState> {
+pub(crate) fn decode_query_state(
+    access: &RuntimeValueAccess<'_>,
+    value: &Value,
+) -> Option<EvaluationQueryState> {
     let Value::Dict(state) = value else {
         return None;
     };
@@ -763,79 +769,58 @@ pub(crate) fn decode_query_state(values: &Values, value: &Value) -> Option<Evalu
     };
     complete.get(&QUERY_PRESENT)?;
     Some(EvaluationQueryState::Complete(
-        values.wrap(
-            complete
-                .get(&QUERY_RESULT)
-                .cloned()
-                .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+        PublicValue::from_runtime_root(
+            access.root_runtime_value(
+                complete
+                    .get(&QUERY_RESULT)
+                    .map(|value| access.duplicate_value(value))
+                    .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
+            ),
         ),
     ))
 }
 
 fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
-    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-        let public_values = Values::from_core_factory(values.clone());
-        match edit {
-            StoreEdit::Set { address, value } => {
-                let (_, path) = address.reflection_parts();
-                apply_value_at_path_in(
-                    access,
-                    values,
-                    &root,
-                    path,
-                    public_values
-                        .clone_core(value)
-                        .expect("store edit belongs to its store runtime"),
-                )
-            }
-            StoreEdit::Rewrite { address, updater } => {
-                let (_, path) = address.reflection_parts();
-                let prior = lazy_core_value_path(
-                    access,
-                    public_values
-                        .clone_core(&root)
-                        .expect("store root belongs to its store runtime"),
-                    path.keys(),
-                );
-                let updated = Value::Lazy(LazyValue::from_application_in(
-                    access,
-                    public_values
-                        .clone_core(updater)
-                        .expect("store updater belongs to its store runtime"),
-                    Arc::from([prior]),
-                ));
-                apply_value_at_path_in(access, values, &root, path, updated)
-            }
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| match edit {
+        StoreEdit::Set { address, value } => {
+            let (_, path) = address.reflection_parts();
+            apply_value_at_path_in(
+                access,
+                &root,
+                path,
+                value.clone().into_runtime_root().clone_core_with(access),
+            )
+        }
+        StoreEdit::Rewrite { address, updater } => {
+            let (_, path) = address.reflection_parts();
+            let prior = lazy_core_value_path(
+                access,
+                root.clone().into_runtime_root().clone_core_with(access),
+                path.keys(),
+            );
+            let updated = Value::Lazy(LazyValue::from_application_in(
+                access,
+                updater.clone().into_runtime_root().clone_core_with(access),
+                Arc::from([prior]),
+            ));
+            apply_value_at_path_in(access, &root, path, updated)
         }
     }))
 }
 
-fn apply_value_at_path(
-    values: &CoreValueFactory,
-    root: PublicValue,
-    path: &ConflictPath,
-    value: Value,
-) -> PublicValue {
-    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-        apply_value_at_path_in(access, values, &root, path, value)
-    }))
-}
-
 fn apply_value_at_path_in(
-    access: &crate::core::RuntimeValueAccess<'_>,
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     root: &PublicValue,
     path: &ConflictPath,
     value: Value,
 ) -> Value {
-    let public_values = Values::from_core_factory(values.clone());
     if path.depth() == 0 {
         return value;
     }
     let path = Value::List(List::from_values(
         path.keys()
             .iter()
-            .map(|key| key.to_value_with(values))
+            .map(|key| access.value_from_key(key))
             .collect(),
     ));
     Value::builtin_call_in(
@@ -844,9 +829,7 @@ fn apply_value_at_path_in(
         vec![
             path,
             value,
-            public_values
-                .clone_core(root)
-                .expect("store root belongs to its store runtime"),
+            root.clone().into_runtime_root().clone_core_with(access),
         ],
     )
 }

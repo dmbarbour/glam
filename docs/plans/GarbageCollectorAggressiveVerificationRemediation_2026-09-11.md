@@ -1870,11 +1870,20 @@ also serve macro-effect execution:
    tokens and task-failure contexts reuse existing public/runtime roots. The
    obsolete authority-free context method and now-unused runtime-root
    projection helper were removed rather than retained as compatibility APIs.
-5. **D.2f.4 — store boundaries.** Consume raw edit/query values inside the
+5. **D.2f.4 — store boundaries. Complete (2026-09-29).** Consume raw edit/query values inside the
    transaction's bounded access; journals and query state retain public roots.
-6. **D.2f.5 — closure.** Require zero D.2f violations, reconcile reflection
+   Query decoding now roots the selected result before its evaluated-value
+   access closes. Store edits and retirement updates project their existing
+   public roots inside the single publication region; the authority-free
+   wrapper was removed.
+6. **D.2f.5 — closure. Complete (2026-09-29).** Require zero D.2f violations, reconcile reflection
    root/admission inventories, and run lifecycle, retry, rollback, blocked
-   resumption, and aggressive publication tests.
+   resumption, and aggressive publication tests. The executable inventory now
+   assigns zero violations to D.2f, with fourteen reflection helpers converted
+   to regional access and five rooted admission declarations removed. The
+   reflection-machine, request, lifecycle, store, and raw-inventory partitions
+   pass after preserving structured task-failure normalization at its
+   callback-capable boundary.
 
 ##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
 
