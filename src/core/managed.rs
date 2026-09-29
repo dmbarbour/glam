@@ -618,6 +618,10 @@ impl RuntimeValueObserver {
 }
 
 impl RuntimeValueAccess<'_> {
+    pub(crate) fn unit(&self) -> super::Value {
+        self.values.core_values().unit.clone_core_with(self)
+    }
+
     /// Returns the exact factory view which admitted this region.
     ///
     /// This includes compilation-local extensions; callers must not recover a

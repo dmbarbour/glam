@@ -11,7 +11,9 @@ use super::requests::{
 use super::search::IsolatedEffectSearch;
 use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{Diagnostic, Error as ApiError, EvaluatedValue, Value as PublicValue, Values};
-use crate::core::{CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, Value};
+use crate::core::{
+    CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, RuntimeValueAccess, Value,
+};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{EvalContext, EvaluationWaitToken};
@@ -573,6 +575,29 @@ impl TaskHalt {
                     TaskFailure::EdgeFree(_) => None,
                 };
                 let failure = Arc::new(failure.into_failure().with_context(context));
+                match observer {
+                    Some(observer) => {
+                        Self::rooted_failure(RuntimeFailureRoot::from_observer(&observer, failure))
+                    }
+                    None => Self::failure(failure),
+                }
+            }
+            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
+        }
+    }
+
+    pub(super) fn with_core_context_in(
+        self,
+        access: &RuntimeValueAccess<'_>,
+        context: Value,
+    ) -> Self {
+        match self.0 {
+            TaskHaltKind::Failure(failure) => {
+                let observer = match &failure {
+                    TaskFailure::Rooted(failure) => Some(failure.value_observer().clone()),
+                    TaskFailure::EdgeFree(_) => None,
+                };
+                let failure = Arc::new(failure.into_failure().with_context_in(access, context));
                 match observer {
                     Some(observer) => {
                         Self::rooted_failure(RuntimeFailureRoot::from_observer(&observer, failure))

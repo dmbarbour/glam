@@ -1852,10 +1852,16 @@ also serve macro-effect execution:
    admission declarations without introducing an intermediate root or a
    project-and-reroot cycle; fourteen D.2f declarations remain in the regional,
    protocol/request, and store checkpoints below.
-3. **D.2f.2 — regional machine helpers.** Access-qualify effect API assembly,
+3. **D.2f.2 — regional machine helpers. Complete (2026-09-29).** Access-qualify effect API assembly,
    request construction, branch delivery, diagnostic context construction,
    alternative aggregation, and lazy-path construction. A helper returning a
-   root must publish it before its access island closes.
+   root must publish it before its access island closes. Request/API builders,
+   branch delivery, unit delivery, dispatch contexts, and nested API edits now
+   share explicit caller access. Specialized alternatives reuse their public
+   roots, and heap/volume path reads project existing store roots only within
+   the access that publishes the lazy path result. All machine-local D.2f
+   violations are gone; the seven remaining entries are protocol/request/store
+   boundaries.
 4. **D.2f.3 — protocol and request helpers.** Access-qualify immediate request,
    status, severity, and task-context values without granting reflection code a
    general raw-value escape hatch.

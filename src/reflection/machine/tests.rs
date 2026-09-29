@@ -3391,7 +3391,8 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let branch = || Branch::<TestEffects>::new(&core, core.unit(), core.unit());
 
     let (value, retained) = retained_machine_value(&values, &domain);
-    let work = MachineWork::deliver(&core, value, branch(), 0);
+    let work =
+        core.with_runtime_value_access(|access| MachineWork::deliver(&access, value, branch(), 0));
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(work);
@@ -3400,7 +3401,9 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
 
     let (function, retained_function) = retained_machine_value(&values, &domain);
     let (argument, retained_argument) = retained_machine_value(&values, &domain);
-    let work = MachineWork::apply(&core, function, vec![argument], branch(), 0);
+    let work = core.with_runtime_value_access(|access| {
+        MachineWork::apply(&access, function, vec![argument], branch(), 0)
+    });
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_function.upgrade().is_some());
     assert!(retained_argument.upgrade().is_some());
@@ -7497,9 +7500,12 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     );
 
     let contexts = task_halt_contexts(&assembler, &halt);
+    let expected = assembler
+        .core_values()
+        .with_runtime_value_access(|access| effect_dispatch_context(&access, "function"));
     assert_eq!(
         contexts.first(),
-        Some(&effect_dispatch_context("function")),
+        Some(&expected),
         "the dispatch boundary should prepend its stage"
     );
     assert!(
@@ -7527,9 +7533,12 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
             "unexpected {stage} failure: {}",
             diagnostic.message()
         );
+        let expected = assembler
+            .core_values()
+            .with_runtime_value_access(|access| effect_dispatch_context(&access, stage));
         assert_eq!(
             task_halt_contexts(&assembler, &halt).first(),
-            Some(&effect_dispatch_context(stage)),
+            Some(&expected),
             "the {stage} boundary should prepend its structured dispatch context"
         );
     }

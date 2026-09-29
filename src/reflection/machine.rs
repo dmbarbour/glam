@@ -424,8 +424,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .work
             .branch_mut()
             .expect("a fresh effect task must contain its initial branch");
-        let diagnostic_context =
-            branch.root_value(&values, Value::binary_from_text(&diagnostic_context));
+        let diagnostic_context = values.with_runtime_value_access(|access| {
+            branch.root_value(&access, Value::binary_from_text(&diagnostic_context))
+        });
         branch
             .control
             .sequence
@@ -904,7 +905,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 RequestDecodePoll::Yielded => EffectDecodeStep::Yielded(decoding),
                 RequestDecodePoll::Failed(error) => {
-                    let error = decoding.contextualize(error);
+                    let error = decoding.contextualize(error, context, &self.eval_context);
                     EffectDecodeStep::Failed(decoding, error)
                 }
             };
@@ -930,13 +931,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             WhnfOwnerPoll::Yielded => EffectDecodeStep::Yielded(decoding),
             WhnfOwnerPoll::External(boundary) => {
-                let error = decoding.contextualize(TaskHalt::new(format!(
-                    "reflection effect decoding reached an unsupported {boundary:?} boundary"
-                )));
+                let error = decoding.contextualize(
+                    TaskHalt::new(format!(
+                        "reflection effect decoding reached an unsupported {boundary:?} boundary"
+                    )),
+                    context,
+                    &self.eval_context,
+                );
                 EffectDecodeStep::Failed(decoding, error)
             }
             WhnfOwnerPoll::Failed(failure) => {
-                let error = decoding.contextualize(TaskHalt::rooted_failure(failure));
+                let error = decoding.contextualize(
+                    TaskHalt::rooted_failure(failure),
+                    context,
+                    &self.eval_context,
+                );
                 EffectDecodeStep::Failed(decoding, error)
             }
             WhnfOwnerPoll::Ready(value) => {
@@ -1523,8 +1532,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             );
                         }
                     };
-                    let marker = branch
-                        .root_value(self.eval_context.values(), Value::Promised(handle.clone()));
+                    let marker = self
+                        .eval_context
+                        .values()
+                        .with_runtime_value_access(|access| {
+                            branch.root_value(&access, Value::Promised(handle.clone()))
+                        });
                     let outer_control = std::mem::take(&mut branch.control);
                     branch.state = state;
                     let handle = self
@@ -1832,12 +1845,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     if path.is_empty() {
                         pathing.branch.state = base;
-                        return StatePathStep::Complete(MachineWork::deliver(
-                            self.eval_context.values(),
-                            self.eval_context.values().unit(),
-                            pathing.branch,
-                            pathing.scope_depth,
-                        ));
+                        return StatePathStep::Complete(
+                            self.eval_context
+                                .values()
+                                .with_runtime_value_access(|access| {
+                                    MachineWork::deliver_unit(
+                                        &access,
+                                        pathing.branch,
+                                        pathing.scope_depth,
+                                    )
+                                }),
+                        );
                     }
                     let update = context.evaluate(&self.eval_context, |evaluator| {
                         evaluator.with_value_access(|access| {
@@ -1876,12 +1894,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
                     WhnfOwnerPoll::Ready(state) => {
                         pathing.branch.state = state;
-                        StatePathStep::Complete(MachineWork::deliver(
-                            self.eval_context.values(),
-                            self.eval_context.values().unit(),
-                            pathing.branch,
-                            pathing.scope_depth,
-                        ))
+                        StatePathStep::Complete(
+                            self.eval_context
+                                .values()
+                                .with_runtime_value_access(|access| {
+                                    MachineWork::deliver_unit(
+                                        &access,
+                                        pathing.branch,
+                                        pathing.scope_depth,
+                                    )
+                                }),
+                        )
                     }
                     WhnfOwnerPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
@@ -1914,30 +1937,24 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let result = match operation {
             StorePathOperation::HeapGet => {
                 let checkpoint = branch.retry_candidate();
-                let values =
-                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
                 let heap = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
                     let observed = transaction.store.observe_read(&path);
-                    let heap = values.clone_core(&transaction.store.view());
+                    let heap = transaction.store.view();
                     if observed {
                         branch.observe(checkpoint, generation);
                     }
                     heap
                 } else {
                     let snapshot = self.host.snapshot();
-                    values.clone_core(snapshot.store().root())
+                    snapshot.store().root().clone()
                 };
-                let heap = match heap {
-                    Ok(heap) => heap,
-                    Err(error) => {
-                        return StatePathStep::Failed(
-                            StatePathWork::poisoned(branch, scope_depth),
-                            TaskHalt::from(error),
-                        );
-                    }
-                };
-                let value = lazy_value_path_root(&self.eval_context, heap, &path);
+                let value = self
+                    .eval_context
+                    .values()
+                    .with_runtime_value_access(|access| {
+                        lazy_value_path_root(&access, &heap.clone().into_runtime_root(), &path)
+                    });
                 return StatePathStep::Complete(MachineWork::deliver_root(
                     value,
                     branch,
@@ -1949,12 +1966,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     transaction
                         .store
                         .write(path, PublicValue::from_runtime_root(value));
-                    return StatePathStep::Complete(MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    ));
+                    return StatePathStep::Complete(
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                MachineWork::deliver_unit(&access, branch, scope_depth)
+                            }),
+                    );
                 }
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
@@ -1970,12 +1988,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     transaction
                         .store
                         .rewrite(path, PublicValue::from_runtime_root(updater));
-                    return StatePathStep::Complete(MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    ));
+                    return StatePathStep::Complete(
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                MachineWork::deliver_unit(&access, branch, scope_depth)
+                            }),
+                    );
                 }
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
@@ -2001,21 +2020,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     snapshot.store().volume(volume).cloned()
                 };
                 let value = match root {
-                    Some(root) => {
-                        let values = crate::api::Values::from_core_factory(
-                            self.eval_context.values().clone(),
-                        );
-                        let root = match values.clone_core(&root) {
-                            Ok(root) => root,
-                            Err(error) => {
-                                return StatePathStep::Failed(
-                                    StatePathWork::poisoned(branch, scope_depth),
-                                    TaskHalt::from(error),
-                                );
-                            }
-                        };
-                        lazy_value_path_root(&self.eval_context, root, &path)
-                    }
+                    Some(root) => self
+                        .eval_context
+                        .values()
+                        .with_runtime_value_access(|access| {
+                            lazy_value_path_root(&access, &root.clone().into_runtime_root(), &path)
+                        }),
                     None => self
                         .eval_context
                         .values()
@@ -2039,12 +2049,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         path,
                         PublicValue::from_runtime_root(value),
                     );
-                    return StatePathStep::Complete(MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    ));
+                    return StatePathStep::Complete(
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                MachineWork::deliver_unit(&access, branch, scope_depth)
+                            }),
+                    );
                 }
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
@@ -2062,12 +2073,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         path,
                         PublicValue::from_runtime_root(updater),
                     );
-                    return StatePathStep::Complete(MachineWork::deliver(
-                        self.eval_context.values(),
-                        self.eval_context.values().unit(),
-                        branch,
-                        scope_depth,
-                    ));
+                    return StatePathStep::Complete(
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                MachineWork::deliver_unit(&access, branch, scope_depth)
+                            }),
+                    );
                 }
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
@@ -2082,12 +2094,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         StatePathStep::Complete(match result {
             CommitResult::Committed => {
                 branch.retry = None;
-                MachineWork::deliver(
-                    self.eval_context.values(),
-                    self.eval_context.values().unit(),
-                    branch,
-                    scope_depth,
-                )
+                self.eval_context
+                    .values()
+                    .with_runtime_value_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    })
             }
             CommitResult::Conflict => MachineWork::Drive {
                 branch,
@@ -2539,35 +2550,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
             RequestResult::Return(value) => {
                 MachineWork::deliver_root(value.into_runtime_root(), branch, scope_depth)
             }
-            RequestResult::Alternatives(values) => {
-                let public_values =
-                    crate::api::Values::from_core_factory(self.eval_context.values().clone());
-                let values = values
-                    .iter()
-                    .map(|value| public_values.clone_core(value))
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("validated specialized alternatives share the task runtime");
-                match values.as_slice() {
-                    [] => MachineWork::Outcome {
-                        outcome: branch.into_failure(),
-                        scope_depth,
-                    },
-                    [value] => MachineWork::deliver(
-                        self.eval_context.values(),
-                        value.clone(),
-                        branch,
-                        scope_depth,
+            RequestResult::Alternatives(values) => match values.as_slice() {
+                [] => MachineWork::Outcome {
+                    outcome: branch.into_failure(),
+                    scope_depth,
+                },
+                [value] => MachineWork::deliver_root(
+                    value.clone().into_runtime_root(),
+                    branch,
+                    scope_depth,
+                ),
+                _ => MachineWork::Drive {
+                    branch: branch.with_effect_root(
+                        self.eval_context
+                            .values()
+                            .with_runtime_value_access(|access| {
+                                alternative_returns_root(&access, &self.tags, &values)
+                            }),
                     ),
-                    _ => MachineWork::Drive {
-                        branch: branch.with_effect_root(alternative_returns_root(
-                            self.eval_context.values(),
-                            &self.tags,
-                            values,
-                        )),
-                        scope_depth,
-                    },
-                }
-            }
+                    scope_depth,
+                },
+            },
             RequestResult::Scoped { operation, close } => {
                 branch
                     .control
@@ -2578,12 +2581,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 }
             }
-            RequestResult::ReturnUnit => MachineWork::deliver(
-                self.eval_context.values(),
-                self.eval_context.values().unit(),
-                branch,
-                scope_depth,
-            ),
+            RequestResult::ReturnUnit => {
+                self.eval_context
+                    .values()
+                    .with_runtime_value_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    })
+            }
             RequestResult::Fail => MachineWork::Outcome {
                 outcome: branch.into_failure(),
                 scope_depth,
@@ -3459,7 +3463,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 }
 
-fn effect_dispatch_context(stage: &str) -> Value {
+fn effect_dispatch_context(_access: &RuntimeValueAccess<'_>, stage: &str) -> Value {
     let stage_key = Key::binary_from_text("stage");
     let stage = Value::Atom(Atom::from_key(&Key::binary_from_text(stage)));
     crate::diagnostic::evaluation_context_frame_with_args(
@@ -3666,9 +3670,9 @@ impl<S: TaskSpecialization> Branch<S> {
         self.effect = effect;
     }
 
-    fn root_value(&self, values: &CoreValueFactory, value: Value) -> RuntimeValueRoot {
-        debug_assert_eq!(values.runtime_id(), self.effect.runtime_id());
-        values.construct_runtime_value_root(|_| value)
+    fn root_value(&self, access: &RuntimeValueAccess<'_>, value: Value) -> RuntimeValueRoot {
+        debug_assert_eq!(access.runtime_id(), self.effect.runtime_id());
+        access.root_runtime_value(value)
     }
 
     fn retry_candidate(&self) -> Option<Box<Self>> {
@@ -3833,7 +3837,12 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
         }
     }
 
-    fn contextualize(&self, halt: TaskHalt) -> TaskHalt {
+    fn contextualize(
+        &self,
+        halt: TaskHalt,
+        poll_context: &EvaluationPollContext,
+        context: &EvalContext,
+    ) -> TaskHalt {
         let stage = match &self.operation {
             EffectDecodeOperation::Whnf {
                 purpose: EffectDecodePurpose::EffectObject,
@@ -3859,7 +3868,14 @@ impl<S: TaskSpecialization> EffectDecodeWork<S> {
             } => return halt,
             EffectDecodeOperation::Request(_) => "request",
         };
-        halt.with_core_context(effect_dispatch_context(stage))
+        poll_context.evaluate(context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                halt.with_core_context_in(
+                    access.values(),
+                    effect_dispatch_context(access.values(), stage),
+                )
+            })
+        })
     }
 }
 
@@ -4395,12 +4411,12 @@ enum MachineWork<S: TaskSpecialization> {
 
 impl<S: TaskSpecialization> MachineWork<S> {
     fn deliver(
-        values: &CoreValueFactory,
+        access: &RuntimeValueAccess<'_>,
         value: Value,
         branch: Branch<S>,
         scope_depth: usize,
     ) -> Self {
-        let value = branch.root_value(values, value);
+        let value = branch.root_value(access, value);
         Self::Deliver {
             value,
             branch,
@@ -4417,18 +4433,26 @@ impl<S: TaskSpecialization> MachineWork<S> {
         }
     }
 
+    fn deliver_unit(
+        access: &RuntimeValueAccess<'_>,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::deliver(access, access.unit(), branch, scope_depth)
+    }
+
     #[cfg(test)]
     fn apply(
-        values: &CoreValueFactory,
+        access: &RuntimeValueAccess<'_>,
         function: Value,
         arguments: Vec<Value>,
         branch: Branch<S>,
         scope_depth: usize,
     ) -> Self {
-        let function = branch.root_value(values, function);
+        let function = branch.root_value(access, function);
         let arguments = arguments
             .into_iter()
-            .map(|argument| branch.root_value(values, argument))
+            .map(|argument| branch.root_value(access, argument))
             .collect();
         Self::apply_roots(function, arguments, branch, scope_depth)
     }
@@ -4496,7 +4520,7 @@ enum BranchOutcome<S: TaskSpecialization> {
 impl<S: TaskSpecialization> BranchOutcome<S> {
     #[cfg(test)]
     fn complete(values: &CoreValueFactory, value: Value, branch: Branch<S>) -> Self {
-        let value = branch.root_value(values, value);
+        let value = values.with_runtime_value_access(|access| branch.root_value(&access, value));
         Self::Complete(value, branch)
     }
 
@@ -5369,7 +5393,7 @@ fn effect_api<R: Clone>(
                 "alt",
                 request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
             ),
-            entry("fail", nullary_request(tags.fail.clone())),
+            entry("fail", nullary_request(access, tags.fail.clone())),
             entry(
                 "cut",
                 request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
@@ -5403,7 +5427,10 @@ fn effect_api<R: Clone>(
                 "exit",
                 Value::Dict(
                     [
-                        entry("success", nullary_request(tags.exit_success.clone())),
+                        entry(
+                            "success",
+                            nullary_request(access, tags.exit_success.clone()),
+                        ),
                         entry(
                             "error",
                             request_function_in(
@@ -5444,11 +5471,12 @@ fn effect_api<R: Clone>(
             }
             if let Some(path) = &spec.api_path {
                 let value = if spec.arity == 0 {
-                    nullary_request(tag.clone())
+                    nullary_request(access, tag.clone())
                 } else {
                     request_function_in(access, tag.clone(), spec.arity, Vec::new(), false)
                 };
                 api = insert_effect_api_path(
+                    access,
                     api,
                     path,
                     value,
@@ -5469,6 +5497,7 @@ fn effect_api<R: Clone>(
 }
 
 fn insert_effect_api_path(
+    access: &RuntimeValueAccess<'_>,
     api: Dict,
     path: &[Arc<str>],
     value: Value,
@@ -5492,8 +5521,8 @@ fn insert_effect_api_path(
             break;
         }
 
-        let nested = match current.get(&key) {
-            Some(Value::Dict(nested)) => nested.clone(),
+        let nested = match current.get(&key).map(|value| access.duplicate_value(value)) {
+            Some(Value::Dict(nested)) => nested,
             Some(_) => {
                 return Err(TaskHalt::new(format!(
                     "effect API path `{display_path}` crosses non-dictionary `{name}`"
@@ -5538,25 +5567,33 @@ fn request_function_in(
     ))
 }
 
-fn nullary_request(tag: Key) -> Value {
+fn nullary_request(_access: &RuntimeValueAccess<'_>, tag: Key) -> Value {
     Value::Dict(Dict::new_sync().insert(tag, Value::List(List::empty())))
 }
 
 fn alternative_returns_root(
-    factory: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     tags: &Tags,
-    values: Vec<Value>,
+    values: &[PublicValue],
 ) -> RuntimeValueRoot {
-    factory.construct_runtime_value_root(|access| {
+    access.root_runtime_value(
         values
-            .into_iter()
+            .iter()
             .rev()
-            .map(|value| eval::constant_effect_in(access, request_value(&tags.r, vec![value])))
+            .map(|value| {
+                eval::constant_effect_in(
+                    access,
+                    request_value(
+                        &tags.r,
+                        vec![value.clone().into_runtime_root().clone_core_with(access)],
+                    ),
+                )
+            })
             .reduce(|right, left| {
                 eval::constant_effect_in(access, request_value(&tags.alt, vec![left, right]))
             })
-            .expect("alternative return construction requires at least two values")
-    })
+            .expect("alternative return construction requires at least two values"),
+    )
 }
 
 pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {
@@ -5573,22 +5610,25 @@ fn missing_volume_error(volume: VolumeId) -> TaskHalt {
     ))
 }
 
-fn lazy_value_path_root(context: &EvalContext, value: Value, path: &[Key]) -> RuntimeValueRoot {
-    context.values().construct_runtime_value_root(|access| {
-        if path.is_empty() {
-            return value;
-        }
-        Value::Lazy(LazyValue::from_access_in(
-            access,
-            Arc::from(
-                path.iter()
-                    .cloned()
-                    .map(CoreDataKey::Key)
-                    .collect::<Vec<_>>(),
-            ),
-            Arc::from([value]),
-        ))
-    })
+fn lazy_value_path_root(
+    access: &RuntimeValueAccess<'_>,
+    value: &RuntimeValueRoot,
+    path: &[Key],
+) -> RuntimeValueRoot {
+    let value = value.clone_core_with(access);
+    if path.is_empty() {
+        return access.root_runtime_value(value);
+    }
+    access.root_runtime_value(Value::Lazy(LazyValue::from_access_in(
+        access,
+        Arc::from(
+            path.iter()
+                .cloned()
+                .map(CoreDataKey::Key)
+                .collect::<Vec<_>>(),
+        ),
+        Arc::from([value]),
+    )))
 }
 
 fn reset_stack_root_in(
