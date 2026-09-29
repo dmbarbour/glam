@@ -330,6 +330,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
     access: &RuntimeValueAccess<'_>,
     base: &SyntaxExpr,
@@ -451,6 +452,7 @@ fn lower_using_expr_resolved(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_builtin_expr_resolved(
     access: &RuntimeValueAccess<'_>,
     builtin: Builtin,
@@ -477,6 +479,7 @@ pub(in crate::g_syntax) fn lower_effect_expr_resolved(
     ResolvedExpr::Embedded(compiler_values::effect_value(access, name))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_operator_section_resolved(
     access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,
@@ -529,6 +532,7 @@ pub(in crate::g_syntax) fn lower_operator_section_resolved(
     Ok(ResolvedExpr::lambda(vec![parameter], body))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_syntax_operator_expr_resolved(
     access: &RuntimeValueAccess<'_>,
     operator: SyntaxOperator,

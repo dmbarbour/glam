@@ -506,7 +506,7 @@ impl NameScope<Value> {
 
     pub(in crate::g_syntax) fn resolved_in(
         &self,
-        access: &RuntimeValueAccess<'_>,
+        _access: &RuntimeValueAccess<'_>,
     ) -> NameScope<ResolvedRoot> {
         NameScope {
             final_defs: ResolvedRoot::Provided(self.final_defs.clone()),
@@ -522,7 +522,7 @@ impl NameScope<Value> {
             parent: self
                 .parent
                 .as_deref()
-                .map(|parent| parent.resolved_in(access))
+                .map(|parent| parent.resolved_in(_access))
                 .map(Box::new),
         }
     }

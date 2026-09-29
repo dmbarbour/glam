@@ -281,6 +281,7 @@ pub(in crate::g_syntax) fn update_module_resolved(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn update_definition_target_resolved(
     access: &RuntimeValueAccess<'_>,
     definitions: &ResolvedRoot,

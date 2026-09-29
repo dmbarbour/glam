@@ -468,7 +468,7 @@ fn apply_macro_context(
     frames: &[OriginalMacroInvocation],
 ) -> RuntimeValueRoot {
     let updates = values.construct_runtime_value_root(|access| {
-        macro_context_updates(&access, frontier, cases, frames)
+        macro_context_updates(access, frontier, cases, frames)
     });
     crate::diagnostic::apply_emission_updates_root(values, message.clone(), updates)
         .unwrap_or(message)

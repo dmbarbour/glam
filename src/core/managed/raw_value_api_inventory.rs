@@ -1044,7 +1044,7 @@ fn raw_core_value_api_inventory_is_complete() {
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        2_176_227_449_762_833_779,
+        5_192_460_730_823_991_698,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );

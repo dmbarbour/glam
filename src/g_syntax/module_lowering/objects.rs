@@ -82,6 +82,7 @@ pub(in crate::g_syntax) fn object_instance_from_parts_resolved(
     apply_builtin_resolved(access, Builtin::ObjectInstanceFromParts, [name, deps, defs])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     access: &RuntimeValueAccess<'_>,
     object: &ObjectDecl,
@@ -171,6 +172,7 @@ pub(in crate::g_syntax) fn object_parents_resolved(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
     access: &RuntimeValueAccess<'_>,
     body: &[ObjectBodyDefinition],
@@ -451,6 +453,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extend_object_resolved_in_scope(
     access: &RuntimeValueAccess<'_>,
     extend: &ObjectExtendDecl,

@@ -342,6 +342,7 @@ fn resolve_match_outcome(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_prefix_steps(
     access: &RuntimeValueAccess<'_>,
     pattern: Option<(BindingId, &SyntaxPattern)>,
