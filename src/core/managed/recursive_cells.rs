@@ -1853,6 +1853,7 @@ mod tests {
                     "src/reflection/machine.rs::encode_reset_frames_in_state",
                     "src/reflection/machine.rs::lazy_value_path_root",
                     "src/reflection/store.rs::apply_edit",
+                    "src/reflection/store/tests.rs::unforced_store_value",
                 ],
             ),
             (

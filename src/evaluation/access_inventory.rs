@@ -464,7 +464,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/api/value.rs::impl PromiseResolver::fail_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl PromiseResolver::resolve#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl Value::clone_core_in_own_domain#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/value.rs::impl Values::clone_runtime_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl Values::with_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/compiler.rs::impl CompileContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/compiler.rs::impl CompileContext::import_binary#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -723,10 +722,6 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests.rs::task_owned_promise_lazy_cycle_fails_in_both_publication_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/evaluation/tests/w7c.rs::exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::project_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/diagnostic_formatter.rs::value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::definitions#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::finish#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#2|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -745,6 +740,64 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/runtime.rs::impl RuntimeValueRoot::clone_core_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::tests::runtime_failure_root_alone_retains_and_releases_its_managed_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/compiler.rs::impl CompileContext::emit_diagnostic_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::diagnostic_object_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::diagnostic_object_root#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax.rs::initialize_cached_compiler_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::builtin_list_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::effect_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::fail_effect_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::reflection_annotator_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::run_pure_open_match_test_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::tests::builtin_test_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::tests::effect_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::tests::macro_test_environment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/compiler_values.rs::tests::project_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/diagnostic_formatter.rs::tests::formatter_is_cached_after_exposing_its_function#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/diagnostic_formatter.rs::tests::formatter_is_cached_after_exposing_its_function#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/macro_expansion/runner.rs::render_macro_case#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/macro_expansion/runner.rs::render_macro_case#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/macro_expansion/runner.rs::run_macro_effect#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/macro_expansion/runner.rs::select_field_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/parser/source.rs::impl StagedSourceParser < 'source >::next_expanded_declarations#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/parser/source.rs::impl StagedSourceParser < 'source >::next_expanded_declarations#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/parser/source.rs::macro_lookup#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::effect_call_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::lower_effect_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::lower_guard_choices_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::lower_if_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::lower_match_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::lower_match_when_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/conditional.rs::tests::resolve_guard_choice#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/expression.rs::syntax_expr_to_resolved_in_scope#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/scope.rs::impl NameScope < Value >::module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/resolve/scope.rs::impl NameScope < Value >::resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/lifecycle.rs::combine_composed_result#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/lifecycle.rs::impl EffectRun < S >::schedule_with_capabilities#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl BranchOutcome < S >::complete#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::asserting_unit_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::complete_specialization_request#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::complete_specialization_request#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::control_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::state_path_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::state_path_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#3|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#4|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#5|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#6|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#7|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::effect_dispatch_preserves_application_and_request_stage_contexts#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::effect_dispatch_preserves_structured_failure_and_adds_stage_context#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#2|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/machine/tests.rs::request_value_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/protocol.rs::impl TaskHalt::with_context#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/requests.rs::contextual_demand_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/reflection/requests.rs::with_task_join_context#1|surface=runtime-access|scope=production|nested=0|carrier=none",
 ];
 
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
@@ -789,13 +842,13 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // D.2b.2 publishes imported bytes and the final module promise through
         // one explicit bounded value region.
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
-        ("src/api/tests.rs", GatewayCounts::new(0, 2)),
+        ("src/api/tests.rs", GatewayCounts::new(2, 2)),
         // D.2b.2 removes authority-free promise publication and public-root
         // reprojection. Resolver success, structured failure, textual failure,
         // and drop each use a local region; public projection explicitly
         // upgrades its weak observer.
-        ("src/api/value.rs", GatewayCounts::new(7, 0)),
-        ("src/compiler.rs", GatewayCounts::new(3, 0)),
+        ("src/api/value.rs", GatewayCounts::new(6, 0)),
+        ("src/compiler.rs", GatewayCounts::new(4, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
         // the same higher-ranked scope. GCI5R-002B's scoped gateway and
@@ -878,7 +931,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // access authority as topology inspection. P2C adds one explicit
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(17, 0)),
-        ("src/diagnostic.rs", GatewayCounts::new(2, 0)),
+        ("src/diagnostic.rs", GatewayCounts::new(4, 0)),
         // W6F.4d.3 gives test application construction the same short,
         // callback-free value region used by production lazy application.
         ("src/eval/application.rs", GatewayCounts::new(1, 0)),
@@ -995,9 +1048,19 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/evaluation/tests/w7c.rs", GatewayCounts::new(1, 0)),
         // GCI11R-002C returns the client-demand result root directly, removing
         // the projection/re-root access gap from closed compiler evaluation.
-        ("src/g_syntax/compiler_values.rs", GatewayCounts::new(1, 0)),
+        // D.2e roots public compiler inputs and fixtures before their values
+        // cross parser, formatter, or macro boundaries.
+        ("src/g_syntax/compiler_values.rs", GatewayCounts::new(9, 0)),
         (
             "src/g_syntax/diagnostic_formatter.rs",
+            GatewayCounts::new(3, 0),
+        ),
+        (
+            "src/g_syntax/macro_expansion/runner.rs",
+            GatewayCounts::new(4, 0),
+        ),
+        (
+            "src/g_syntax/macro_expansion/tests.rs",
             GatewayCounts::new(1, 0),
         ),
         // D.2b.2 roots diagnostic emission through the compiler domain's
@@ -1005,20 +1068,31 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/g_syntax.rs", GatewayCounts::new(1, 0)),
         ("src/g_syntax/module_lowering.rs", GatewayCounts::new(4, 0)),
         ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
+        ("src/g_syntax/parser/source.rs", GatewayCounts::new(3, 0)),
+        (
+            "src/g_syntax/resolve/conditional.rs",
+            GatewayCounts::new(7, 0),
+        ),
+        (
+            "src/g_syntax/resolve/expression.rs",
+            GatewayCounts::new(1, 0),
+        ),
+        ("src/g_syntax/resolve/scope.rs", GatewayCounts::new(2, 0)),
         // GCI5R-003D roots a freshly constructed reflection fixpoint before
         // publishing it into branch/coordinator state.
         // D.2b.2 adds access-qualified branch-root construction and reflection
         // fixpoint publication without carrying access across machine polls.
         // D.2c.1a projects a composed child failure through one short
         // diagnostic region after child settlement has completed.
-        ("src/reflection/lifecycle.rs", GatewayCounts::new(1, 0)),
-        ("src/reflection/machine.rs", GatewayCounts::new(2, 0)),
+        ("src/reflection/lifecycle.rs", GatewayCounts::new(3, 0)),
+        ("src/reflection/machine.rs", GatewayCounts::new(16, 0)),
         // W5C.4's control fixtures construct request effects and retain exact
         // reset-stack roots within three bounded test-only regions.
-        ("src/reflection/machine/tests.rs", GatewayCounts::new(3, 0)),
+        ("src/reflection/machine/tests.rs", GatewayCounts::new(8, 0)),
         // Structured halt fixtures and production conversion now construct
         // their raw payloads only within explicit regions.
-        ("src/reflection/protocol.rs", GatewayCounts::new(2, 0)),
+        ("src/reflection/protocol.rs", GatewayCounts::new(3, 0)),
+        ("src/reflection/requests.rs", GatewayCounts::new(2, 0)),
         // I6C's isolated failure-root lifecycle fixture constructs its managed
         // promise in one explicit region before publishing the durable root.
         // D.2b.2 replaces authority-free failure-root and test projection
@@ -1162,7 +1236,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),
-        9
+        4
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRegionalReuse),
@@ -1170,7 +1244,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        22
+        52
     );
 }
 

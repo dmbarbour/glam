@@ -34,14 +34,10 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
         SyntaxExpr::Atom(name) => ResolvedExpr::Embedded(Value::Atom(atom_from_str(name))),
-        SyntaxExpr::Effect(path) => {
-            ResolvedExpr::Embedded(context.values().with_runtime_value_access(|access| {
-                compiler_values::effect_path_value(
-                    &access,
-                    &path.iter().map(String::as_str).collect::<Vec<_>>(),
-                )
-            }))
-        }
+        SyntaxExpr::Effect(path) => ResolvedExpr::Embedded(compiler_values::effect_path_value(
+            access,
+            &path.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
         SyntaxExpr::AbstractGlobalPath {
             explicit_module,
             path,

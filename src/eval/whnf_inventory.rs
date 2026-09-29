@@ -1330,8 +1330,10 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // explicit. Those non-recursive status probes add one resolved orchestration
 // edge after the existing wait boundary; the cyclic-function ledger below
 // remains empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_139;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 3_510_536_925_544_053_384;
+// D.2e makes the already-open resolver access explicit at the effect-path
+// call site, adding one statically resolved edge without changing recursion.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_140;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 1_649_659_280_329_684_321;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",
