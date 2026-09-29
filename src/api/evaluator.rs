@@ -66,9 +66,11 @@ impl ReflectionInspector<'_> {
 
     /// Reports the current outer runtime representation without demanding it.
     pub fn kind(&self, value: &Value) -> Result<ValueKind, Error> {
-        self.assembler
-            .values()
-            .with_access(|values| values.with_core(value, ValueKind::from_core))
+        self.assembler.values().with_access(|values| {
+            values.with_core(value, |value| {
+                ValueKind::from_core(values.runtime_access(), value)
+            })
+        })
     }
 
     /// Returns a sealed carrier's associated metadata without evaluating it.

@@ -74,7 +74,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/api/value.rs",
         0,
         0,
-        1,
+        2,
         "constructors, composite validation, observers, extraction, and net data",
         "I3B.1 scoped construction/extraction; I4F.2 public facade switch; GCI5R-001B same-region root publication"
     ),
@@ -451,6 +451,7 @@ impl RootPublicationOccurrence {
                     RootPublicationDisposition::OuterConstructionBoundary
                 }
                 "src/api/value.rs::impl ScopedValues < '_ >::wrap"
+                | "src/api/value.rs::impl Values::wrap_in"
                 | "src/compiler.rs::impl CompileContext::new"
                 | "src/compiler.rs::impl CompileContext::with_compilation_trace"
                 | "src/core.rs::impl CoreValues::new"
@@ -686,7 +687,10 @@ fn collect_root_publication_occurrences(manifest: &Path) -> Vec<RootPublicationO
 
 const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
     "src/api/assembly.rs::impl Assembler::load_local_binary#1|surface=scoped-factory|scope=production",
+    "src/api/tests/diagnostic_tests.rs::diagnostic_enrichment_is_an_authoritative_object_mixin#1|surface=scoped-factory|scope=test",
+    "src/api/tests/diagnostic_tests.rs::viewers_can_inherit_one_diagnostic_independently#1|surface=scoped-factory|scope=test",
     "src/api/value.rs::impl ScopedValues < '_ >::wrap#1|surface=access-publication|scope=production",
+    "src/api/value.rs::impl Values::wrap_in#1|surface=access-publication|scope=production",
     "src/compiler.rs::impl CompileContext::new#1|surface=scoped-factory|scope=production",
     "src/compiler.rs::impl CompileContext::new#2|surface=scoped-factory|scope=production",
     "src/compiler.rs::impl CompileContext::new#3|surface=scoped-factory|scope=production",

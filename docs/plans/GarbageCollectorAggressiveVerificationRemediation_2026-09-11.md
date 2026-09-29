@@ -1917,7 +1917,7 @@ also serve macro-effect execution:
 
 ##### GCI11R-002D.2g — Public API, Compiler, and Diagnostics
 
-Migrate the currently inventoried 45 public-API, compiler, source, and diagnostic
+Migrate the currently inventoried public-API, compiler, source, and diagnostic
 violations. Public boundaries transport `api::Value`, `EvaluatedValue`, or
 another durable handle. Internal compiler and diagnostic transformations use
 one explicit regional access and root their output before callbacks, logging,
@@ -1949,15 +1949,22 @@ compiler/diagnostic regional functions.
    authoritative reflection environment within the assembler's existing
    scoped construction region. Change compiler diagnostic callbacks to carry
    a durable root rather than an unrooted core value.
-4. **D.2g.3 — source provenance and compilation trace.** Give source/digest
+4. **D.2g.3 — source provenance and compilation trace. Complete (2026-09-29).** Give source/digest
    and trace-to-value constructors explicit caller access. Keep these
    constructors structural and non-demanding; they must neither open a nested
-   region nor create a durable root on their own.
-5. **D.2g.4 — compiler context.** Expose prior/final definitions and origin as
+   region nor create a durable root on their own. Fourteen violations became
+   sixteen explicit regional operations across source, trace, and the callers
+   which project them; the remaining D.2g manifest contains 30 declarations.
+5. **D.2g.4 — compiler context. Complete (2026-09-29).** Expose prior/final definitions and origin as
    existing runtime roots or project them only through caller access. Thread
    one front-end region through abstract-path, unit, import-failure, and
    diagnostic construction. Invoke diagnostic callbacks only after rooting
-   their message and releasing regional access.
+   their message and releasing regional access. Compiler-context projections
+   now require the caller's access, while the diagnostic emitter accepts a
+   `RuntimeValueRoot`; callbacks consequently begin only after the compiler
+   region has closed. Ten violations became five regional operations and one
+   raw callback alias disappeared. The remaining D.2g manifest contains 20
+   declarations: six public boundaries and fourteen diagnostic helpers.
 6. **D.2g.5 — diagnostic transformations.** Split immediate structural
    construction/inspection into access-qualified helpers and demand-capable
    normalization into rooted operations. Remove the last production callers

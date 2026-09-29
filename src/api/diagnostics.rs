@@ -81,16 +81,19 @@ impl Diagnostic {
     ) -> Result<Self, Error> {
         let source = source.into();
         let identity = SourceIdentity::file(Path::new(source.as_ref()));
-        let origin = CoreValue::Dict(
-            Dict::new_sync().insert((*crate::core::keys::SOURCE).clone(), identity.value()),
-        );
-        Ok(Self::from_parts(
-            values.core(),
-            Some(source.clone()),
-            self.severity,
-            crate::diagnostic::text_message(Some(line), &self.message),
-            Some(origin),
-        ))
+        values.with_access(|access| {
+            let origin = CoreValue::Dict(Dict::new_sync().insert(
+                (*crate::core::keys::SOURCE).clone(),
+                identity.value(access.runtime_access()),
+            ));
+            Ok(Self::from_parts(
+                values.core(),
+                Some(source.clone()),
+                self.severity,
+                crate::diagnostic::text_message(Some(line), &self.message),
+                Some(origin),
+            ))
+        })
     }
 
     /// Returns the front-end or runtime value exactly as it was emitted.
@@ -144,6 +147,7 @@ impl Diagnostic {
                 .map(|origin| access.clone_core(origin))
                 .transpose()?;
             let updates = CoreValue::Dict(crate::diagnostic::assembler_metadata(
+                access.runtime_access(),
                 access.core(),
                 self.severity,
                 origin,
@@ -239,7 +243,7 @@ impl Diagnostic {
                 )
                 .insert(
                     Key::atom_from_text("severity"),
-                    self.severity.value(values.core()),
+                    self.severity.value(access.runtime_access(), values.core()),
                 );
             if let Some(origin) = &self.origin {
                 fields = fields.insert(Key::atom_from_text("origin"), access.clone_core(origin)?);
@@ -337,15 +341,17 @@ impl Diagnostic {
         values: &CoreValueFactory,
         trace: &CompilationTrace,
         severity: Severity,
-        message: CoreValue,
+        message: &crate::runtime::RuntimeValueRoot,
     ) -> Self {
-        Self::from_parts(
-            values,
-            Some(Arc::from(trace.source_label())),
-            severity,
-            message,
-            Some(trace.origin_value()),
-        )
+        values.with_runtime_value_access(|access| {
+            Self::from_parts(
+                values,
+                Some(Arc::from(trace.source_label())),
+                severity,
+                message.clone_core_with(&access),
+                Some(trace.origin_value(&access)),
+            )
+        })
     }
 
     pub(crate) fn from_parts(

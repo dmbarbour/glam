@@ -874,7 +874,11 @@ impl RegionalProvenanceMachine {
                 "origin inspection requires an opaque compilation origin",
             )));
         };
-        match crate::diagnostic::inspect_compilation_origin(access.values().values(), &origin) {
+        match crate::diagnostic::inspect_compilation_origin(
+            access.values(),
+            access.values().values(),
+            &origin,
+        ) {
             Some(origin) => RegionalBuiltinPoll::Ready(origin),
             None => RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                 "origin inspection requires an opaque compilation origin",

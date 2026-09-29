@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List,
-    OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, Value, keys,
+    OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, Value, keys,
 };
 use crate::number::Number;
 use crate::source::{ContentDigest, SourceArtifact, SourceIdentity};
@@ -24,7 +24,7 @@ impl CompilationInvocationId {
         Self(id)
     }
 
-    fn value(self) -> Value {
+    fn value(self, _access: &RuntimeValueAccess<'_>) -> Value {
         Value::Number(Number::from_u64(self.0))
     }
 }
@@ -98,9 +98,11 @@ unsafe impl OpaquePayloadFamily for CompilationOrigin {
 }
 
 pub(crate) fn opaque_compilation_origin(
+    access: &RuntimeValueAccess<'_>,
     values: &CoreValueFactory,
     trace: &CompilationTrace,
 ) -> Value {
+    debug_assert!(access.belongs_to(values));
     Value::Opaque(OpaqueValue::new(
         values,
         Arc::new(CompilationOrigin {
@@ -110,12 +112,13 @@ pub(crate) fn opaque_compilation_origin(
 }
 
 pub(crate) fn inspect_compilation_origin(
+    access: &RuntimeValueAccess<'_>,
     values: &CoreValueFactory,
     origin: &OpaqueValue,
 ) -> Option<Value> {
     origin
         .downcast::<CompilationOrigin>(values)
-        .map(|origin| origin.trace.origin_value())
+        .map(|origin| origin.trace.origin_value(access))
 }
 
 impl CompilationTrace {
@@ -158,14 +161,17 @@ impl CompilationTrace {
         self.source.label()
     }
 
-    pub(crate) fn origin_value(&self) -> Value {
-        let Value::Dict(origin) = self.frame_value() else {
+    pub(crate) fn origin_value(&self, access: &RuntimeValueAccess<'_>) -> Value {
+        let Value::Dict(origin) = self.frame_value(access) else {
             unreachable!()
         };
-        Value::Dict(origin.insert((*keys::IMPORT_CHAIN).clone(), self.import_chain_value()))
+        Value::Dict(origin.insert(
+            (*keys::IMPORT_CHAIN).clone(),
+            self.import_chain_value(access),
+        ))
     }
 
-    fn import_chain_value(&self) -> Value {
+    fn import_chain_value(&self, access: &RuntimeValueAccess<'_>) -> Value {
         let mut chain = Vec::new();
         let mut current = self;
         while let Some(import) = &current.imported_from {
@@ -176,38 +182,44 @@ impl CompilationTrace {
         Value::List(List::from_values(
             chain
                 .into_iter()
-                .map(|import| import.edge_value())
+                .map(|import| import.edge_value(access))
                 .collect(),
         ))
     }
 
-    fn frame_value(&self) -> Value {
+    fn frame_value(&self, access: &RuntimeValueAccess<'_>) -> Value {
         Value::Dict(
             Dict::new_sync()
-                .insert((*keys::INVOCATION).clone(), self.invocation.value())
-                .insert((*keys::SOURCE).clone(), self.source.value())
-                .insert((*keys::DIGEST).clone(), self.digest.value())
-                .insert((*keys::NAMESPACE).clone(), namespace_value(&self.namespace)),
+                .insert((*keys::INVOCATION).clone(), self.invocation.value(access))
+                .insert((*keys::SOURCE).clone(), self.source.value(access))
+                .insert((*keys::DIGEST).clone(), self.digest.value(access))
+                .insert(
+                    (*keys::NAMESPACE).clone(),
+                    namespace_value(access, &self.namespace),
+                ),
         )
     }
 }
 
 impl ImportOrigin {
-    fn edge_value(&self) -> Value {
+    fn edge_value(&self, access: &RuntimeValueAccess<'_>) -> Value {
         let request = Value::Dict(Dict::new_sync().insert(
             (*keys::FILE).clone(),
             Value::binary_from_text(&self.request),
         ));
         Value::Dict(
             Dict::new_sync()
-                .insert((*keys::IMPORTER).clone(), self.parent.frame_value())
+                .insert((*keys::IMPORTER).clone(), self.parent.frame_value(access))
                 .insert((*keys::REQUEST).clone(), request)
-                .insert((*keys::EXTENDS).clone(), namespace_value(&self.extends)),
+                .insert(
+                    (*keys::EXTENDS).clone(),
+                    namespace_value(access, &self.extends),
+                ),
         )
     }
 }
 
-fn namespace_value(namespace: &[String]) -> Value {
+fn namespace_value(_access: &RuntimeValueAccess<'_>, namespace: &[String]) -> Value {
     Value::List(List::from_values(
         namespace
             .iter()
@@ -227,7 +239,8 @@ impl fmt::Display for Severity {
 }
 
 impl Severity {
-    pub(crate) fn value(self, values: &CoreValueFactory) -> Value {
+    pub(crate) fn value(self, access: &RuntimeValueAccess<'_>, values: &CoreValueFactory) -> Value {
+        debug_assert!(access.belongs_to(values));
         match self {
             Self::Info => values.info(),
             Self::Warning => values.warn(),
@@ -322,11 +335,13 @@ fn fallback_failure_diagnostic(
 }
 
 pub(crate) fn assembler_metadata(
+    access: &RuntimeValueAccess<'_>,
     values: &CoreValueFactory,
     severity: Severity,
     origin: Option<Value>,
 ) -> Dict {
-    let mut message = Dict::new_sync().insert((*keys::SEVERITY).clone(), severity.value(values));
+    let mut message =
+        Dict::new_sync().insert((*keys::SEVERITY).clone(), severity.value(access, values));
     if let Some(origin) = origin {
         message = message.insert((*keys::ORIGIN).clone(), origin);
     }
@@ -451,11 +466,10 @@ pub(crate) fn enrich(
     origin: Option<Value>,
 ) -> Result<Value, crate::core::EvaluationHalt> {
     let message = diagnostic_object(values, message)?;
-    apply_updates(
-        values,
-        message,
-        Value::Dict(assembler_metadata(values, severity, origin)),
-    )
+    let updates = values.with_runtime_value_access(|access| {
+        Value::Dict(assembler_metadata(&access, values, severity, origin))
+    });
+    apply_updates(values, message, updates)
 }
 
 fn diagnostic_object(
@@ -602,6 +616,16 @@ mod tests {
         values
     }
 
+    fn trace_origin_value(trace: &CompilationTrace) -> Value {
+        let values = crate::compiler::test_value_factory();
+        values.with_runtime_value_access(|access| trace.origin_value(&access))
+    }
+
+    fn digest_value(digest: ContentDigest) -> Value {
+        let values = crate::compiler::test_value_factory();
+        values.with_runtime_value_access(|access| digest.value(&access))
+    }
+
     #[test]
     fn opaque_edge_free_families_have_no_runtime_or_managed_edge() {
         assert_compilation_origin_family_shape();
@@ -635,7 +659,7 @@ mod tests {
             Arc::from([]),
         );
 
-        let Value::Dict(origin) = leaf.origin_value() else {
+        let Value::Dict(origin) = trace_origin_value(&leaf) else {
             unreachable!()
         };
         assert_eq!(
@@ -651,7 +675,7 @@ mod tests {
         );
         assert_eq!(
             origin.get(&*keys::DIGEST),
-            Some(&ContentDigest::of(b"source").value())
+            Some(&digest_value(ContentDigest::of(b"source")))
         );
         let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
             panic!("origin should contain its global namespace");
@@ -711,7 +735,7 @@ mod tests {
             &source,
             Arc::from(["assembly".to_owned()]),
         );
-        let Value::Dict(origin) = trace.origin_value() else {
+        let Value::Dict(origin) = trace_origin_value(&trace) else {
             unreachable!()
         };
         let Some(Value::Dict(source)) = origin.get(&*keys::SOURCE) else {

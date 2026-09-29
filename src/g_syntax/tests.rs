@@ -20,18 +20,30 @@ fn test_eval_context() -> crate::evaluation::EvalContext {
     test_assembler().eval_context()
 }
 
+fn context_final_defs(context: &CompileContext) -> Value {
+    context
+        .values()
+        .with_runtime_value_access(|access| context.final_defs(&access))
+}
+
+fn context_abstract_global_path(context: &CompileContext, path: &str) -> Value {
+    context
+        .values()
+        .with_runtime_value_access(|access| context.abstract_global_path(&access, path))
+}
+
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
     lower_resolved_expr(
         context.values(),
         ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Provided(context.final_defs().clone())),
+            base: Box::new(ResolvedExpr::Provided(context_final_defs(context))),
             path: path.into_iter().map(ResolvedPathPart::Key).collect(),
         },
     )
 }
 
 fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> Value {
-    let Value::Promised(final_defs) = context.final_defs() else {
+    let Value::Promised(final_defs) = context_final_defs(context) else {
         panic!("final module binding should be a promised value");
     };
     crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
@@ -265,7 +277,7 @@ fn reflection_test_module(
     let prior = guards.iter().fold(Dict::new_sync(), |dict, (name, path)| {
         dict.insert(
             Key::atom_from_text(name),
-            context.abstract_global_path(path),
+            context_abstract_global_path(&context, path),
         )
     });
     let prior = prior.insert(
@@ -275,7 +287,7 @@ fn reflection_test_module(
     let context = context.with_prior_defs(Value::Dict(prior));
     let lowered = lower_parsed_source(parse(source), &context);
     assert_eq!(lowered.diagnostics, []);
-    let Value::Promised(final_defs) = context.final_defs() else {
+    let Value::Promised(final_defs) = context_final_defs(&context) else {
         panic!("final module binding should be promised");
     };
     crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
@@ -335,7 +347,7 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
             &context,
         );
         assert_eq!(lowered.diagnostics, []);
-        let Value::Promised(final_defs) = context.final_defs() else {
+        let Value::Promised(final_defs) = context_final_defs(&context) else {
             panic!("final module binding should be promised");
         };
         crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
@@ -6490,7 +6502,10 @@ fn compile_source_emits_relative_diagnostics_through_context() {
         .expect("diagnostic mutex should not be poisoned");
     assert_eq!(emitted.len(), 1);
     assert_eq!(emitted[0].0, Severity::Error);
-    let Value::Dict(message) = &emitted[0].1 else {
+    let message = context
+        .values()
+        .with_runtime_value_access(|access| emitted[0].1.clone_core_with(&access));
+    let Value::Dict(message) = &message else {
         panic!("diagnostic message must be a dictionary");
     };
     let Some(Value::Dict(interface)) = message.get(&*crate::core::keys::MSG) else {

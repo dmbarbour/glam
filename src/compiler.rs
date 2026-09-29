@@ -12,7 +12,7 @@ pub(crate) type ModuleLoader =
     Arc<dyn Fn(ModuleLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
 pub(crate) type BinaryFileLoader =
     Arc<dyn Fn(BinaryLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
-pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, Value) + Send + Sync>;
+pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, RuntimeValueRoot) + Send + Sync>;
 
 /// Validates a location-independent local source request. This is deliberately
 /// lexical and platform-independent: source code uses `/`, while filesystem
@@ -135,8 +135,8 @@ impl CompileContext {
     }
 
     pub(crate) fn with_compilation_trace(mut self, trace: Arc<CompilationTrace>) -> Self {
-        self.opaque_origin = Some(self.values.construct_runtime_value_root(|_| {
-            crate::diagnostic::opaque_compilation_origin(&self.values, &trace)
+        self.opaque_origin = Some(self.values.construct_runtime_value_root(|access| {
+            crate::diagnostic::opaque_compilation_origin(access, &self.values, &trace)
         }));
         self.compilation_trace = Some(trace);
         self
@@ -200,11 +200,12 @@ impl CompileContext {
 
     #[cfg(test)]
     pub(crate) fn prior_defs(&self) -> Value {
-        self.clone_root(&self.prior_defs)
+        self.values
+            .with_runtime_value_access(|access| self.prior_defs.clone_core_with(&access))
     }
 
-    pub(crate) fn final_defs(&self) -> Value {
-        self.clone_root(&self.final_defs)
+    pub(crate) fn final_defs(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
+        self.final_defs.clone_core_with(access)
     }
 
     pub(crate) fn prior_defs_root(&self) -> &RuntimeValueRoot {
@@ -223,19 +224,27 @@ impl CompileContext {
     ///
     /// The same opaque value is cloned for every annotation emitted from this
     /// source context. The front end owns any surrounding span representation.
-    pub(crate) fn opaque_origin(&self) -> Option<Value> {
+    pub(crate) fn opaque_origin(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+    ) -> Option<Value> {
         self.opaque_origin
             .as_ref()
-            .map(|origin| self.clone_root(origin))
+            .map(|origin| origin.clone_core_with(access))
     }
 
-    pub(crate) fn unavailable_origin(&self) -> Value {
-        self.clone_root(&self.unavailable_origin)
+    pub(crate) fn unavailable_origin(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
+        self.unavailable_origin.clone_core_with(access)
     }
 
     /// Returns the abstract global-path value for a path relative to the
     /// current module without revealing its absolute namespace.
-    pub(crate) fn abstract_global_path(&self, target: &str) -> Value {
+    pub(crate) fn abstract_global_path(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        target: &str,
+    ) -> Value {
+        debug_assert!(access.belongs_to(&self.values));
         // TODO: support expression-indexed paths, e.g. foo.bar.[42].baz
         let mut parts = self.module_path.iter().cloned().collect::<Vec<_>>();
         parts.extend(target.split('.').map(ToOwned::to_owned));
@@ -244,19 +253,15 @@ impl CompileContext {
         ))))
     }
 
-    pub(crate) fn emit_diagnostic(&self, severity: Severity, message: Value) {
+    pub(crate) fn emit_diagnostic(&self, severity: Severity, message: RuntimeValueRoot) {
+        debug_assert_eq!(message.runtime_id(), self.values.runtime_id());
         if let Some(emitter) = &self.diagnostic_emitter {
             emitter(severity, message);
         }
     }
 
-    pub(crate) fn emit_diagnostic_root(&self, severity: Severity, message: RuntimeValueRoot) {
-        self.values.with_runtime_value_access(|access| {
-            self.emit_diagnostic(severity, message.clone_core_with(&access));
-        });
-    }
-
-    pub(crate) fn unit_value(&self) -> Value {
+    pub(crate) fn unit_value(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
+        debug_assert!(access.belongs_to(&self.values));
         self.values.unit()
     }
 
@@ -335,6 +340,7 @@ impl CompileContext {
                 };
                 let Some(loader) = &loader else {
                     return Err(import_failure(
+                        None,
                         format!(
                             "local import `{}` cannot be loaded without a module loader",
                             args.request.as_str()
@@ -398,6 +404,7 @@ impl CompileContext {
                 );
                 let Some(loader) = &loader else {
                     return Err(import_failure(
+                        None,
                         format!(
                             "binary import `{}` cannot be loaded without a binary loader",
                             args.request.as_str()
@@ -426,14 +433,26 @@ impl CompileContext {
             Arc::from(extends.into_boxed_slice()),
         )
     }
-
-    fn clone_root(&self, root: &RuntimeValueRoot) -> Value {
-        self.values
-            .with_runtime_value_access(|access| root.clone_core_with(&access))
-    }
 }
 
 pub(crate) fn import_failure(
+    values: Option<&CoreValueFactory>,
+    message: impl AsRef<str>,
+    request: &str,
+    trace: Option<&CompilationTrace>,
+    importer_source: Option<&SourceArtifact>,
+) -> Arc<EvaluationFailure> {
+    let message = message.as_ref();
+    let Some(values) = values else {
+        return Arc::new(EvaluationFailure::message(message));
+    };
+    values.with_runtime_value_access(|access| {
+        import_failure_in(&access, message, request, trace, importer_source)
+    })
+}
+
+fn import_failure_in(
+    access: &crate::core::RuntimeValueAccess<'_>,
     message: impl AsRef<str>,
     request: &str,
     trace: Option<&CompilationTrace>,
@@ -444,9 +463,9 @@ pub(crate) fn import_failure(
     );
     let mut details = Dict::new_sync().insert((*keys::REQUEST).clone(), request);
     if let Some(trace) = trace {
-        details = details.insert((*keys::ORIGIN).clone(), trace.origin_value());
+        details = details.insert((*keys::ORIGIN).clone(), trace.origin_value(access));
     } else if let Some(source) = importer_source {
-        details = details.insert((*keys::SOURCE).clone(), source.identity().value());
+        details = details.insert((*keys::SOURCE).clone(), source.identity().value(access));
     }
     let context =
         Value::Dict(Dict::new_sync().insert((*keys::IMPORT).clone(), Value::Dict(details)));
@@ -460,7 +479,7 @@ fn invalid_import_request_in(
     trace: Option<&CompilationTrace>,
     importer_source: Option<&SourceArtifact>,
 ) -> Value {
-    let failure = import_failure(message, request, trace, importer_source);
+    let failure = import_failure_in(access, message, request, trace, importer_source);
     Value::Lazy(LazyValue::failure_in(
         access,
         Arc::from(format!("invalid import request {request}")),
@@ -764,7 +783,9 @@ mod tests {
         let context = CompileContext::from_module_path(["root", "module"]);
 
         assert_eq!(
-            context.abstract_global_path("nested.Name"),
+            context.values().with_runtime_value_access(|access| {
+                context.abstract_global_path(&access, "nested.Name")
+            }),
             Value::Atom(Atom::from_key(&Key::abstract_global_path([
                 "root", "module", "nested", "Name"
             ])))
@@ -781,7 +802,9 @@ mod tests {
     #[test]
     fn unit_value_uses_abstract_global_path_atom() {
         let context = CompileContext::default();
-        let unit = context.unit_value();
+        let unit = context
+            .values()
+            .with_runtime_value_access(|access| context.unit_value(&access));
         let forged = Value::Atom(Atom::from_key(&Key::List(Arc::from([
             Key::binary_from_text("builtin"),
             Key::binary_from_text("unit"),

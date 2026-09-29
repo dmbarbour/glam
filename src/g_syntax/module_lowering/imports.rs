@@ -85,7 +85,7 @@ pub(in crate::g_syntax) fn lower_local_import(
                 request,
                 None,
                 definitions.clone(),
-                context.final_defs().clone(),
+                context.final_defs(access),
             );
         }
         ImportPlacement::As(target) => {
@@ -144,7 +144,7 @@ fn scoped_local_import_value_in(
     prior_defs: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
-    let final_defs = path_value_in_definitions_in(access, target, context.final_defs().clone())?;
+    let final_defs = path_value_in_definitions_in(access, target, context.final_defs(access))?;
     Ok(context.import_module_in(access, request, Some(target), prior_defs, final_defs))
 }
 
@@ -170,7 +170,7 @@ fn inherited_import_env_object_value_in(
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
     let parent_env = path_value_in_definitions_in(access, "env", definitions)?;
-    let name = context.abstract_global_path(&format!("{target}.env"));
+    let name = context.abstract_global_path(access, &format!("{target}.env"));
     let deps = lower_resolved_expr_in(
         access,
         ResolvedExpr::List(vec![object_spec_resolved(
@@ -206,7 +206,7 @@ fn module_object_value_with_defs_in(
         access,
         object_instance_from_parts_resolved(
             access,
-            ResolvedExpr::Embedded(context.abstract_global_path(target)),
+            ResolvedExpr::Embedded(context.abstract_global_path(access, target)),
             ResolvedExpr::List(Vec::new()),
             ResolvedExpr::Provided(definitions),
         ),
@@ -230,7 +230,7 @@ pub(in crate::g_syntax) fn lower_unique(
     definitions: &mut Value,
 ) -> Result<(), Diagnostic> {
     for name in names {
-        let value = context.abstract_global_path(name);
+        let value = context.abstract_global_path(access, name);
         *definitions = update_module_value_in(access, definitions.clone(), name, value);
     }
     Ok(())

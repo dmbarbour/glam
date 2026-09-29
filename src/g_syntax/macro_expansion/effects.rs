@@ -244,17 +244,17 @@ impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
             }
             Self::LogMessage { severity } => {
                 let message = macro_demand(input, "log_message", context)?;
-                let interface = message.with_core(|value| {
+                let interface = message.with_core_access(|value, access| {
                     let CoreValue::Dict(message) = value else {
                         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
                     };
-                    Ok(message.get(&*crate::core::keys::MSG).cloned())
+                    Ok(message
+                        .get(&*crate::core::keys::MSG)
+                        .map(|interface| context.values().wrap_in(access, interface.clone())))
                 })??;
                 if let Some(interface) = interface {
                     *self = Self::LogMessageInterface { severity, message };
-                    Ok(SpecializationRequestPoll::Demand(
-                        context.values().wrap(interface),
-                    ))
+                    Ok(SpecializationRequestPoll::Demand(interface))
                 } else {
                     let result = emit_macro_log(context, severity, message.into_value())?;
                     Ok(SpecializationRequestPoll::Complete(result))
@@ -263,14 +263,17 @@ impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
             Self::LogMessageInterface { severity, message } => {
                 let interface = macro_demand(input, "log_message", context)?;
                 let values = context.values();
-                let message = message.with_core(|value| {
+                let message = message.with_core_access(|value, access| {
                     let CoreValue::Dict(message) = value else {
                         unreachable!("validated macro log message remains a dictionary")
                     };
-                    Ok::<_, TaskHalt>(values.wrap(CoreValue::Dict(message.insert(
-                        (*crate::core::keys::MSG).clone(),
-                        values.clone_core(interface.as_value())?,
-                    ))))
+                    Ok::<_, TaskHalt>(values.wrap_in(
+                        access,
+                        CoreValue::Dict(message.insert(
+                            (*crate::core::keys::MSG).clone(),
+                            values.clone_core_with(access, interface.as_value())?,
+                        )),
+                    ))
                 })??;
                 let result = emit_macro_log(context, severity, message)?;
                 Ok(SpecializationRequestPoll::Complete(result))

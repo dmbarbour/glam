@@ -463,11 +463,15 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/api/value.rs::impl PromiseResolver::fail#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl PromiseResolver::fail_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/api/value.rs::impl PromiseResolver::resolve#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/value.rs::impl Value::clone_core_in_own_domain#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/api/diagnostics.rs::impl Diagnostic::from_compile#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/api/tests.rs::opaque_compilation_origin_round_trips_only_through_its_reflection_cap#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/api/value.rs::impl Value::clone_core_in_own_domain#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/api/value.rs::impl Values::with_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/compiler.rs::impl CompileContext::clone_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/compiler.rs::impl CompileContext::import_binary#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/compiler.rs::impl CompileContext::import_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/compiler.rs::impl CompileContext::prior_defs#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/compiler.rs::import_failure#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/compiler.rs::tests::unit_value_uses_abstract_global_path_atom#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::cache_test_lazy#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/core.rs::impl CoreValueFactory::clone_cached_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/core.rs::impl CoreValueFactory::root_core_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -589,6 +593,9 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/diagnostic.rs::apply_updates#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/diagnostic.rs::diagnostic_object#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::enrich#1|surface=runtime-access|scope=production|nested=0|carrier=none",
+    "src/diagnostic.rs::tests::digest_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/diagnostic.rs::tests::trace_origin_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/application.rs::apply_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/builtins/net/tests/mod.rs::with_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
@@ -734,16 +741,19 @@ const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
     "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/machine/tests.rs::reset_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/machine/tests.rs::shift_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/reflection/protocol.rs::impl TaskHalt::from#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/reflection/protocol.rs::root_inventory_tests::public_context_roots_a_bounded_evaluation_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/reflection/protocol.rs::root_inventory_tests::structured_api_error_preserves_its_runtime_root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::impl RuntimeFailureRoot::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/runtime.rs::impl RuntimeValueRoot::clone_core_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/runtime.rs::tests::runtime_failure_root_alone_retains_and_releases_its_managed_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/compiler.rs::impl CompileContext::emit_diagnostic_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/diagnostic.rs::diagnostic_object_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/diagnostic.rs::diagnostic_object_root#2|surface=runtime-access|scope=production|nested=0|carrier=none",
     "src/g_syntax.rs::initialize_cached_compiler_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/tests.rs::compile_source_emits_relative_diagnostics_through_context#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/tests.rs::context_abstract_global_path#1|surface=runtime-access|scope=test|nested=0|carrier=none",
+    "src/g_syntax/tests.rs::context_final_defs#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::builtin_list_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::effect_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
     "src/g_syntax/compiler_values.rs::fail_effect_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
@@ -842,13 +852,14 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // D.2b.2 publishes imported bytes and the final module promise through
         // one explicit bounded value region.
         ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
-        ("src/api/tests.rs", GatewayCounts::new(2, 2)),
+        ("src/api/diagnostics.rs", GatewayCounts::new(1, 0)),
+        ("src/api/tests.rs", GatewayCounts::new(3, 2)),
         // D.2b.2 removes authority-free promise publication and public-root
         // reprojection. Resolver success, structured failure, textual failure,
         // and drop each use a local region; public projection explicitly
         // upgrades its weak observer.
         ("src/api/value.rs", GatewayCounts::new(6, 0)),
-        ("src/compiler.rs", GatewayCounts::new(4, 0)),
+        ("src/compiler.rs", GatewayCounts::new(6, 0)),
         // I4.0's owner-local destruction fixtures exercise the admitted
         // construction gateway; production allocation still enters through
         // the same higher-ranked scope. GCI5R-002B's scoped gateway and
@@ -931,7 +942,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         // access authority as topology inspection. P2C adds one explicit
         // test-only duplicate gateway and roots a net before a worker handoff.
         ("src/core_net.rs", GatewayCounts::new(17, 0)),
-        ("src/diagnostic.rs", GatewayCounts::new(4, 0)),
+        ("src/diagnostic.rs", GatewayCounts::new(7, 0)),
         // W6F.4d.3 gives test application construction the same short,
         // callback-free value region used by production lazy application.
         ("src/eval/application.rs", GatewayCounts::new(1, 0)),
@@ -1078,6 +1089,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             GatewayCounts::new(1, 0),
         ),
         ("src/g_syntax/resolve/scope.rs", GatewayCounts::new(2, 0)),
+        ("src/g_syntax/tests.rs", GatewayCounts::new(3, 0)),
         // GCI5R-003D roots a freshly constructed reflection fixpoint before
         // publishing it into branch/coordinator state.
         // D.2b.2 adds access-qualified branch-root construction and reflection
@@ -1091,7 +1103,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         ("src/reflection/machine/tests.rs", GatewayCounts::new(8, 0)),
         // Structured halt fixtures and production conversion now construct
         // their raw payloads only within explicit regions.
-        ("src/reflection/protocol.rs", GatewayCounts::new(3, 0)),
+        ("src/reflection/protocol.rs", GatewayCounts::new(4, 0)),
         ("src/reflection/requests.rs", GatewayCounts::new(2, 0)),
         // I6C's isolated failure-root lifecycle fixture constructs its managed
         // promise in one explicit region before publishing the durable root.
@@ -1236,7 +1248,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),
-        4
+        2
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRegionalReuse),
@@ -1244,7 +1256,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        52
+        55
     );
 }
 

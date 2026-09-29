@@ -61,7 +61,7 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Runtime
     } = lower_source(source, context);
     for diagnostic in diagnostics {
         let severity = diagnostic.severity;
-        context.emit_diagnostic_root(severity, diagnostic.into_emission(context.values()));
+        context.emit_diagnostic(severity, diagnostic.into_emission(context.values()));
     }
     definitions_root
 }

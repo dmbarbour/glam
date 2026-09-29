@@ -41,8 +41,8 @@ impl<'context> ModuleLowerer<'context> {
         let module_reflection = context.values().with_runtime_value_access(|access| {
             compiler_values::reflection_annotator_root(
                 &access,
-                context.abstract_global_path("refl"),
-                context.final_defs(),
+                context.abstract_global_path(&access, "refl"),
+                context.final_defs(&access),
             )
         });
         Self {

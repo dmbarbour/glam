@@ -343,7 +343,7 @@ impl<'source> StagedSourceParser<'source> {
                         &[],
                         std::slice::from_ref(&original),
                     );
-                    context.emit_diagnostic_root(diagnostic.severity(), emission);
+                    context.emit_diagnostic(diagnostic.severity(), emission);
                 }
             }
         } else {

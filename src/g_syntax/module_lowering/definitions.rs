@@ -357,7 +357,7 @@ pub(in crate::g_syntax) fn annotate_definition_context(
     line: usize,
     context: &CompileContext,
 ) -> ResolvedExpr<Value> {
-    let Some(origin) = context.opaque_origin() else {
+    let Some(origin) = context.opaque_origin(access) else {
         return value;
     };
     let compiler_context = Value::Dict(

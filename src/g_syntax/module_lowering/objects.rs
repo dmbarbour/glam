@@ -12,7 +12,7 @@ pub(in crate::g_syntax) fn lower_object(
     let mut locals = ResolverContext::default();
     let scope = module_scope.resolved_in(access);
     let definitions_root = ResolvedRoot::Provided(definitions);
-    let name = ResolvedExpr::Embedded(context.abstract_global_path(&object.target));
+    let name = ResolvedExpr::Embedded(context.abstract_global_path(access, &object.target));
     let object_value = object_decl_resolved_in_scope(
         access,
         object,

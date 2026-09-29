@@ -473,28 +473,28 @@ impl NameScope<Value> {
         visible_definitions: Value,
     ) -> Self {
         compiler_values::prepare(context.values());
-        let reflection = ReflectionBoundary {
-            annotator: compiler_values::reflection_annotator_value(
-                context.values(),
-                context.abstract_global_path("refl"),
-                context.final_defs().clone(),
-            ),
-        };
         context.values().with_runtime_value_access(|access| {
+            let reflection = ReflectionBoundary {
+                annotator: compiler_values::reflection_annotator_value(
+                    context.values(),
+                    context.abstract_global_path(&access, "refl"),
+                    context.final_defs(&access),
+                ),
+            };
             Self::module_with_reflection(&access, context, visible_definitions, reflection)
         })
     }
 
     pub(in crate::g_syntax) fn module_with_reflection(
-        _access: &RuntimeValueAccess<'_>,
+        access: &RuntimeValueAccess<'_>,
         context: &CompileContext,
         visible_definitions: Value,
         reflection: ReflectionBoundary<Value>,
     ) -> Self {
         Self {
-            final_defs: context.final_defs().clone(),
+            final_defs: context.final_defs(access),
             prior_defs: visible_definitions.clone(),
-            module_final_defs: context.final_defs().clone(),
+            module_final_defs: context.final_defs(access),
             module_prior_defs: visible_definitions,
             object_alias: None,
             object_final_defs: None,

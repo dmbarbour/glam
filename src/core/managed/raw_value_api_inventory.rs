@@ -1038,13 +1038,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        553,
+        549,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        5_192_460_730_823_991_698,
+        3_979_508_304_391_981_044,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,12 +1073,12 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 437),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 458),
         ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 76),
+        ((ApiKind::Function, ApiDisposition::Violation), 52),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
-            7,
+            6,
         ),
         ((ApiKind::DerivedTrait, ApiDisposition::Violation), 3),
     ]);
@@ -1104,9 +1104,8 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         ApiDisposition::Violation
     );
 
-    assert!(actual.iter().any(|occurrence| {
-        occurrence.declaration == "src/api/assembly.rs::Assembler::compile_diagnostic_emitter"
-            && occurrence.disposition() == ApiDisposition::Violation
+    assert!(actual.iter().all(|occurrence| {
+        occurrence.declaration != "src/api/assembly.rs::Assembler::compile_diagnostic_emitter"
     }));
     assert!(actual.iter().any(|occurrence| {
         occurrence.declaration == "src/g_syntax/resolve/scope.rs::NameScope::resolved_in"
@@ -1158,14 +1157,14 @@ fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
                 RemediationOwner::D2gPublicCompilerDiagnostics,
                 ReplacementShape::PublicDurableBoundary,
             ),
-            10,
+            6,
         ),
         (
             (
                 RemediationOwner::D2gPublicCompilerDiagnostics,
                 ReplacementShape::CompilerDiagnosticRegion,
             ),
-            34,
+            14,
         ),
     ]);
 
@@ -1297,33 +1296,14 @@ fn d2g_public_compiler_diagnostic_declarations_are_exact() {
         .map(|occurrence| occurrence.declaration)
         .collect::<BTreeSet<_>>();
     let expected = [
-        "src/api/assembly.rs::Assembler::compile_diagnostic_emitter",
         "src/api/assembly.rs::authoritative_glam_environment",
-        "src/api/diagnostics.rs::Diagnostic::from_compile",
         "src/api/diagnostics.rs::Diagnostic::from_parts",
         "src/api/error.rs::Error::from_eval_parts",
         "src/api/value.rs::EvaluatedValue::with_core",
-        "src/api/value.rs::Value::clone_core_in_own_domain",
-        "src/api/value.rs::ValueKind::from_core",
         "src/api/value.rs::Values::clone_core",
         "src/api/value.rs::Values::wrap",
-        "src/compiler.rs::CompileContext::abstract_global_path",
-        "src/compiler.rs::CompileContext::clone_root",
-        "src/compiler.rs::CompileContext::emit_diagnostic",
-        "src/compiler.rs::CompileContext::final_defs",
-        "src/compiler.rs::CompileContext::opaque_origin",
-        "src/compiler.rs::CompileContext::unavailable_origin",
-        "src/compiler.rs::CompileContext::unit_value",
-        "src/compiler.rs::CompileContext::with_diagnostic_emitter",
-        "src/diagnostic.rs::CompilationInvocationId::value",
-        "src/diagnostic.rs::CompilationTrace::frame_value",
-        "src/diagnostic.rs::CompilationTrace::import_chain_value",
-        "src/diagnostic.rs::CompilationTrace::origin_value",
-        "src/diagnostic.rs::ImportOrigin::edge_value",
-        "src/diagnostic.rs::Severity::value",
         "src/diagnostic.rs::apply_emission_updates",
         "src/diagnostic.rs::apply_updates",
-        "src/diagnostic.rs::assembler_metadata",
         "src/diagnostic.rs::conventional_summary",
         "src/diagnostic.rs::conventional_summary_with",
         "src/diagnostic.rs::diagnostic_object",
@@ -1333,14 +1313,9 @@ fn d2g_public_compiler_diagnostic_declarations_are_exact() {
         "src/diagnostic.rs::failure_diagnostic_value_with",
         "src/diagnostic.rs::fallback_failure_diagnostic",
         "src/diagnostic.rs::halt_diagnostic_value_with",
-        "src/diagnostic.rs::inspect_compilation_origin",
-        "src/diagnostic.rs::namespace_value",
-        "src/diagnostic.rs::opaque_compilation_origin",
         "src/diagnostic.rs::prepend_contexts",
         "src/diagnostic.rs::prepend_contexts_with",
         "src/diagnostic.rs::text_message",
-        "src/source.rs::ContentDigest::value",
-        "src/source.rs::SourceIdentity::value",
     ]
     .into_iter()
     .map(str::to_owned)

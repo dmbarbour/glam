@@ -29,7 +29,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(match expr {
-        SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value()),
+        SyntaxExpr::Unit => ResolvedExpr::Embedded(context.unit_value(access)),
         SyntaxExpr::Embedded(value) => ResolvedExpr::Embedded(value.clone_core_with(access)),
         SyntaxExpr::Number(number) => ResolvedExpr::Embedded(Value::Number(number.clone())),
         SyntaxExpr::Text(text) => ResolvedExpr::Embedded(Value::binary_from_text(text)),
@@ -955,7 +955,7 @@ pub(in crate::g_syntax) fn lower_application_expr_resolved(
 }
 
 fn lower_abstract_global_path_resolved(
-    _access: &RuntimeValueAccess<'_>,
+    access: &RuntimeValueAccess<'_>,
     explicit_module: bool,
     path: &[String],
     line: usize,
@@ -966,7 +966,7 @@ fn lower_abstract_global_path_resolved(
     let target = path.join(".");
     if explicit_module {
         return Ok(ResolvedExpr::Embedded(
-            context.abstract_global_path(&target),
+            context.abstract_global_path(access, &target),
         ));
     }
 
@@ -1003,7 +1003,7 @@ fn lower_abstract_global_path_resolved(
     }
 
     Ok(ResolvedExpr::Embedded(
-        context.abstract_global_path(&target),
+        context.abstract_global_path(access, &target),
     ))
 }
 
@@ -1054,8 +1054,8 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
         "module_origin" => {
             return ResolvedExpr::Embedded(
                 context
-                    .opaque_origin()
-                    .unwrap_or_else(|| context.unavailable_origin()),
+                    .opaque_origin(access)
+                    .unwrap_or_else(|| context.unavailable_origin(access)),
             );
         }
         "self" => {

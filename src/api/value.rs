@@ -169,7 +169,7 @@ pub struct Values {
 /// This carrier is private and lifetime-bound: public constructors may batch
 /// nested semantic helpers through it, but callbacks and durable public state
 /// retain only [`Values`] or rooted [`Value`] handles.
-pub(super) struct ScopedValues<'scope> {
+pub(crate) struct ScopedValues<'scope> {
     owner: &'scope Values,
     access: RuntimeValueAccess<'scope>,
 }
@@ -257,14 +257,15 @@ where
             .expect("effect token domain mutex should not be poisoned")
             .insert(id, Arc::new(payload));
         assert!(replaced.is_none(), "effect token IDs remain unique");
-        self.values
-            .wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(
+        self.values.with_access(|access| {
+            access.wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(
                 self.values.core(),
                 Arc::new(EffectToken {
                     id,
                     domain: Arc::downgrade(&self.state),
                 }),
             )))
+        })
     }
 
     /// Collects unreachable managed value shells before draining any external
@@ -284,7 +285,7 @@ where
     /// successful miss. A value from another runtime is rejected.
     pub fn resolve(&self, token: &EvaluatedValue) -> Result<Option<Arc<T>>, Error> {
         token.require_observer(&self.values)?;
-        token.with_core(|value| {
+        token.with_core_access(|value, _| {
             let CoreValue::Opaque(token) = value else {
                 return None;
             };
@@ -336,7 +337,7 @@ impl Values {
         &self.core
     }
 
-    pub(super) fn with_access<R>(
+    pub(crate) fn with_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R,
     ) -> R {
@@ -347,6 +348,11 @@ impl Values {
                 access,
             })
         })
+    }
+
+    pub(crate) fn wrap_in(&self, access: &RuntimeValueAccess<'_>, value: CoreValue) -> Value {
+        debug_assert!(access.belongs_to(&self.core));
+        Value(access.root_runtime_value(value))
     }
 
     pub(crate) fn wrap(&self, value: CoreValue) -> Value {
@@ -362,6 +368,15 @@ impl Values {
 
     pub(crate) fn require(&self, value: &Value) -> Result<(), Error> {
         value.require_runtime(self.runtime)
+    }
+
+    pub(crate) fn clone_core_with(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        value: &Value,
+    ) -> Result<CoreValue, Error> {
+        self.require(value)?;
+        value.clone_core_with(access)
     }
 
     pub(crate) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
@@ -678,15 +693,15 @@ impl Values {
 }
 
 impl ScopedValues<'_> {
-    pub(super) fn core(&self) -> &CoreValueFactory {
+    pub(crate) fn core(&self) -> &CoreValueFactory {
         self.owner.core()
     }
 
-    pub(super) fn runtime_access(&self) -> &RuntimeValueAccess<'_> {
+    pub(crate) fn runtime_access(&self) -> &RuntimeValueAccess<'_> {
         &self.access
     }
 
-    pub(super) fn wrap(&self, value: CoreValue) -> Value {
+    pub(crate) fn wrap(&self, value: CoreValue) -> Value {
         debug_assert_eq!(self.owner.runtime, self.core().runtime_id());
         debug_assert!(self.access.belongs_to(self.core()));
         Value(self.access.root_runtime_value(value))
@@ -696,7 +711,7 @@ impl ScopedValues<'_> {
         self.owner.require(value)
     }
 
-    pub(super) fn with_core<R>(
+    pub(crate) fn with_core<R>(
         &self,
         value: &Value,
         operation: impl FnOnce(&CoreValue) -> R,
@@ -708,7 +723,7 @@ impl ScopedValues<'_> {
             .ok_or_else(|| Error::new("value belongs to another value domain"))
     }
 
-    pub(super) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
+    pub(crate) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
         self.with_core(value, Clone::clone)
     }
 
@@ -777,6 +792,16 @@ impl Value {
         Self(value)
     }
 
+    pub(crate) fn clone_core_with(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> Result<CoreValue, Error> {
+        self.0
+            .with_core(access, Clone::clone)
+            .ok_or_else(|| Error::new("value belongs to another value domain"))
+    }
+
+    #[cfg(test)]
     pub(crate) fn clone_core_in_own_domain(&self) -> Result<CoreValue, Error> {
         let observer = self.0.value_observer();
         let values = observer.upgrade().ok_or_else(|| {
@@ -803,7 +828,7 @@ impl Value {
 }
 
 impl ValueKind {
-    pub(super) fn from_core(value: &CoreValue) -> Self {
+    pub(super) fn from_core(_access: &RuntimeValueAccess<'_>, value: &CoreValue) -> Self {
         match value {
             CoreValue::Atom(_) => ValueKind::Atom,
             CoreValue::Number(_) => ValueKind::Number,
@@ -872,8 +897,7 @@ impl EvaluatedValue {
         &self,
         operation: impl for<'scope> FnOnce(&'scope CoreValue) -> R,
     ) -> Result<R, Error> {
-        let values = self.observation_values()?;
-        values.with_access(|access| access.with_core(self.as_value(), operation))
+        self.with_core_access(|value, _| operation(value))
     }
 
     pub(crate) fn with_core_access<R>(
@@ -908,28 +932,28 @@ impl EvaluatedValue {
     /// Extracts owned compact binary data under matching live runtime
     /// authority. The returned bytes do not borrow the value domain.
     pub fn as_bytes(&self) -> Result<Option<Bytes>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Binary(bytes) => Some(bytes.clone()),
             _ => None,
         })
     }
 
     pub fn as_i64(&self) -> Result<Option<i64>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Number(number) => number.to_i64_if_integer(),
             _ => None,
         })
     }
 
     pub fn as_u64(&self) -> Result<Option<u64>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Number(number) => number.to_u64_if_integer(),
             _ => None,
         })
     }
 
     pub fn as_rational_i64(&self) -> Result<Option<(i64, i64)>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Number(number) => number.to_ratio_i64(),
             _ => None,
         })
@@ -937,7 +961,7 @@ impl EvaluatedValue {
 
     /// Converts a number lossily to a finite `f64`.
     pub fn as_f64(&self) -> Result<Option<f64>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Number(number) => number.to_f64(),
             _ => None,
         })
@@ -945,7 +969,7 @@ impl EvaluatedValue {
 
     /// Returns canonical exact integer or `numerator/denominator` text.
     pub fn number_text(&self) -> Result<Option<String>, Error> {
-        self.with_core(|value| match value {
+        self.with_core_access(|value, _| match value {
             CoreValue::Number(number) => Some(number.to_string()),
             _ => None,
         })

@@ -407,7 +407,7 @@ impl DoEmitter<'_> {
             list_at_resolved(self.access, 1, ResolvedExpr::Local(fixed_result_binding));
         let resumed = ResolvedExpr::apply(
             continuation,
-            [ResolvedExpr::Embedded(self.context.unit_value())],
+            [ResolvedExpr::Embedded(self.context.unit_value(self.access))],
         );
         effect_call_resolved(
             self.access,

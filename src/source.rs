@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-use crate::core::{Dict, Key, Value};
+use crate::core::{Dict, Key, RuntimeValueAccess, Value};
 
 pub const CONTENT_DIGEST_ALGORITHM: &str = "sha256";
 const LOCAL_MANIFEST_HEADER: &str = "# glam local-file manifest v2";
@@ -38,7 +38,7 @@ impl ContentDigest {
         hex(&self.0)
     }
 
-    pub(crate) fn value(self) -> Value {
+    pub(crate) fn value(self, _access: &RuntimeValueAccess<'_>) -> Value {
         Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text(self.algorithm()),
             Value::Binary(Bytes::copy_from_slice(&self.0)),
@@ -91,7 +91,7 @@ impl SourceIdentity {
         &self.label
     }
 
-    pub(crate) fn value(&self) -> Value {
+    pub(crate) fn value(&self, _access: &RuntimeValueAccess<'_>) -> Value {
         Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text(&self.kind),
             Value::Binary(self.data.clone()),

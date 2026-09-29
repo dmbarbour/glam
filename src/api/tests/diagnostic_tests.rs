@@ -744,7 +744,8 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
 
     let values = EvaluationRuntime::new(0).unwrap().values();
     let trace = test_compilation_trace("test.g");
-    let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Warning, message);
+    let message = values.core().construct_runtime_value_root(|_| message);
+    let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Warning, &message);
     assert_eq!(diagnostic.severity(), Severity::Warning);
 
     let emission = diagnostic.emission().clone_core_for_test();
@@ -824,12 +825,10 @@ fn prepared_diagnostic_enrichment_defers_work_and_matches_eager_enrichment() {
 fn viewers_can_inherit_one_diagnostic_independently() {
     let trace = test_compilation_trace("test.g");
     let values = EvaluationRuntime::new(0).unwrap().values();
-    let diagnostic = Diagnostic::from_compile(
-        values.core(),
-        &trace,
-        Severity::Info,
-        crate::diagnostic::text_message(Some(3), "hello"),
-    );
+    let message = values
+        .core()
+        .construct_runtime_value_root(|_| crate::diagnostic::text_message(Some(3), "hello"));
+    let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Info, &message);
     let viewer_key = Key::atom_from_text("viewer");
     let inherit = |name: &str| {
         diagnostic

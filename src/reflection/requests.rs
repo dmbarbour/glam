@@ -390,14 +390,15 @@ where
             }
             ReflectionRequestOperation::Log(LogRequestWork::Message { severity }) => {
                 let message = contextual_demand_value(input, "log_message", context)?;
-                let interface = message.with_core(|value| {
+                let interface = message.with_core_access(|value, access| {
                     let CoreValue::Dict(message) = value else {
                         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
                     };
-                    Ok(message.get(&*keys::MSG).cloned())
+                    Ok(message
+                        .get(&*keys::MSG)
+                        .map(|interface| context.values().wrap_in(access, interface.clone())))
                 })??;
                 if let Some(interface) = interface {
-                    let interface = context.values().wrap(interface);
                     self.operation =
                         ReflectionRequestOperation::Log(LogRequestWork::MessageInterface {
                             severity,
@@ -417,14 +418,17 @@ where
             }) => {
                 let interface = contextual_demand_value(input, "log_message", context)?;
                 let values = context.values();
-                let message = message.with_core(|value| {
+                let message = message.with_core_access(|value, access| {
                     let CoreValue::Dict(message) = value else {
                         unreachable!("validated log message must remain a dictionary")
                     };
-                    Ok::<_, TaskHalt>(values.wrap(CoreValue::Dict(message.insert(
-                        (*keys::MSG).clone(),
-                        values.clone_core(interface.as_value())?,
-                    ))))
+                    Ok::<_, TaskHalt>(values.wrap_in(
+                        access,
+                        CoreValue::Dict(message.insert(
+                            (*keys::MSG).clone(),
+                            values.clone_core_with(access, interface.as_value())?,
+                        )),
+                    ))
                 })??;
                 self.operation =
                     ReflectionRequestOperation::Log(LogRequestWork::Severity { message });

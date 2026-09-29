@@ -1794,12 +1794,15 @@ fn semantic_binary_conversion_preserves_structured_failures() {
 fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
     let assembler = Assembler::new();
     let trace = test_compilation_trace("/workspace/source.g");
-    let origin = crate::diagnostic::opaque_compilation_origin(&assembler.core_values(), &trace);
+    let origin = assembler.values().with_access(|access| {
+        access.wrap(crate::diagnostic::opaque_compilation_origin(
+            access.runtime_access(),
+            &assembler.core_values(),
+            &trace,
+        ))
+    });
     assert_eq!(
-        assembler
-            .reflection()
-            .kind(&public_value(&assembler.core_values(), origin.clone()))
-            .unwrap(),
+        assembler.reflection().kind(&origin).unwrap(),
         ValueKind::Opaque
     );
 
@@ -1807,11 +1810,14 @@ fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
         .get(&assembler.reflection_environment(), "glam.origin.inspect")
         .expect("the reflection environment should expose origin inspection");
     let projected = assembler
-        .apply(&inspect, [public_value(&assembler.core_values(), origin)])
+        .apply(&inspect, [origin])
         .and_then(|value| assembler.evaluate(&value))
         .expect("the origin capability should inspect compilation origins");
 
-    assert_eq!(projected.clone_core_for_test(), trace.origin_value());
+    let expected = assembler
+        .core_values()
+        .with_runtime_value_access(|access| trace.origin_value(&access));
+    assert_eq!(projected.clone_core_for_test(), expected);
 }
 
 #[test]

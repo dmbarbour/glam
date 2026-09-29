@@ -1295,6 +1295,7 @@ impl Assembler {
         Arc::new(move |args| {
             let Some(assembler) = assembler.upgrade() else {
                 return Err(import_failure(
+                    None,
                     format!(
                         "local import `{}` cannot run after its assembler was dropped",
                         args.request.as_str()
@@ -1311,6 +1312,7 @@ impl Assembler {
                         CompilationExecution::new(&assembler.reasoning, session.clone()).map_err(
                             |error| {
                                 import_failure(
+                                    Some(&assembler.core_values()),
                                     format!(
                                         "local import `{}` could not create its compilation execution: {error}",
                                         args.request.as_str()
@@ -1331,6 +1333,7 @@ impl Assembler {
             let result = assembler.load_local_module(args, session.clone(), execution.clone());
             if revived && execution.drain() {
                 return Err(import_failure(
+                    Some(&assembler.core_values()),
                     format!(
                         "local import `{}` encountered a macro reasoning failure",
                         request.as_str()
@@ -1349,6 +1352,7 @@ impl Assembler {
         Arc::new(move |args| {
             let Some(assembler) = assembler.upgrade() else {
                 return Err(import_failure(
+                    None,
                     format!(
                         "binary import `{}` cannot run after its assembler was dropped",
                         args.request.as_str()
@@ -1370,6 +1374,7 @@ impl Assembler {
     ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
             import_failure(
+                Some(&self.core_values()),
                 format!(
                     "local import `{}` cannot be loaded from a source without an import resolver",
                     args.request.as_str()
@@ -1381,6 +1386,7 @@ impl Assembler {
         })?;
         let source = Arc::new(importer.load_relative(&args.request).map_err(|error| {
             import_failure(
+                Some(&self.core_values()),
                 format!(
                     "local import `{}` could not be loaded: {error}",
                     args.request.as_str()
@@ -1428,6 +1434,7 @@ impl Assembler {
 
         if had_errors.load(Ordering::Relaxed) {
             Err(import_failure(
+                Some(&self.core_values()),
                 format!(
                     "local import `{}` failed to compile",
                     source.identity().label()
@@ -1447,6 +1454,7 @@ impl Assembler {
     ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         let importer = args.importer_source.as_ref().ok_or_else(|| {
             import_failure(
+                Some(&self.core_values()),
                 format!(
                     "binary import `{}` cannot be loaded from a source without an import resolver",
                     args.request.as_str()
@@ -1464,6 +1472,7 @@ impl Assembler {
             })
             .map_err(|error| {
                 import_failure(
+                    Some(&self.core_values()),
                     format!(
                         "binary import `{}` could not be loaded: {error}",
                         args.request.as_str()
@@ -1481,7 +1490,7 @@ impl Assembler {
         definitions: &RuntimeValueRoot,
     ) -> Result<RuntimeValueRoot, Error> {
         let published = self.core_values().with_runtime_value_access(|access| {
-            let CoreValue::Promised(final_defs) = context.final_defs() else {
+            let CoreValue::Promised(final_defs) = context.final_defs(&access) else {
                 panic!("CompileContext.final_defs must be a promised value");
             };
             let final_defs = final_defs.root_in(&access);
@@ -1506,7 +1515,7 @@ impl Assembler {
                 had_errors.store(true, Ordering::Relaxed);
             }
             let diagnostic =
-                Diagnostic::from_compile(assembler.values().core(), &trace, severity, message);
+                Diagnostic::from_compile(assembler.values().core(), &trace, severity, &message);
             session
                 .lock()
                 .expect("build diagnostic mutex should not be poisoned")
