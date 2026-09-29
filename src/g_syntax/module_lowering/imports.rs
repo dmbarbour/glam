@@ -49,11 +49,11 @@ pub(in crate::g_syntax) fn lower_builtin_import(
 
     *definitions = match placement {
         ImportPlacement::Inline => {
-            update_module_dict_value_in(access, definitions.clone(), module.value)
+            update_module_dict_value_in(access, access.duplicate_value(definitions), module.value)
         }
         ImportPlacement::As(target) => update_module_value_in(
             access,
-            definitions.clone(),
+            access.duplicate_value(definitions),
             target,
             module_object_value_with_defs_in(access, target, module.definitions, context),
         ),
@@ -62,9 +62,9 @@ pub(in crate::g_syntax) fn lower_builtin_import(
                 access,
                 target,
                 module.definitions,
-                definitions.clone(),
+                access.duplicate_value(definitions),
             )?;
-            update_module_value_in(access, definitions.clone(), target, object)
+            update_module_value_in(access, access.duplicate_value(definitions), target, object)
         }
     };
 
@@ -84,23 +84,29 @@ pub(in crate::g_syntax) fn lower_local_import(
                 access,
                 request,
                 None,
-                definitions.clone(),
+                access.duplicate_value(definitions),
                 context.final_defs(access),
             );
         }
         ImportPlacement::As(target) => {
-            let prior_defs = import_as_prior_defs_in(access, target, definitions.clone(), context)?;
+            let prior_defs = import_as_prior_defs_in(
+                access,
+                target,
+                access.duplicate_value(definitions),
+                context,
+            )?;
             let loaded =
                 scoped_local_import_value_in(access, request, target, prior_defs, context)?;
             *definitions = update_module_value_in(
                 access,
-                definitions.clone(),
+                access.duplicate_value(definitions),
                 target,
                 module_object_value_in(access, target, loaded, context),
             );
         }
         ImportPlacement::At(target) => {
-            let scoped_prior = path_value_in_definitions_in(access, target, definitions.clone())?;
+            let scoped_prior =
+                path_value_in_definitions_in(access, target, access.duplicate_value(definitions))?;
             let loaded =
                 scoped_local_import_value_in(access, request, target, scoped_prior, context)?;
             let loaded_defs = constant_object_defs(access, context, loaded);
@@ -108,9 +114,10 @@ pub(in crate::g_syntax) fn lower_local_import(
                 access,
                 target,
                 loaded_defs.clone_core_with(access),
-                definitions.clone(),
+                access.duplicate_value(definitions),
             )?;
-            *definitions = update_module_value_in(access, definitions.clone(), target, object);
+            *definitions =
+                update_module_value_in(access, access.duplicate_value(definitions), target, object);
         }
     };
 
@@ -133,7 +140,8 @@ pub(in crate::g_syntax) fn lower_local_binary_import(
     };
 
     let loaded = context.import_binary_in(access, request);
-    *definitions = update_module_value_in(access, definitions.clone(), target, loaded);
+    *definitions =
+        update_module_value_in(access, access.duplicate_value(definitions), target, loaded);
     Ok(())
 }
 
@@ -231,7 +239,8 @@ pub(in crate::g_syntax) fn lower_unique(
 ) -> Result<(), Diagnostic> {
     for name in names {
         let value = context.abstract_global_path(access, name);
-        *definitions = update_module_value_in(access, definitions.clone(), name, value);
+        *definitions =
+            update_module_value_in(access, access.duplicate_value(definitions), name, value);
     }
     Ok(())
 }

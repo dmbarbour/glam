@@ -71,7 +71,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         inputs.extend(parameters.iter().copied());
         let template = Self::lower_template_in(values, inputs, body);
         let runtime = values
-            .construct_managed_core_net(template.instantiate())
+            .construct_managed_core_net(template.instantiate_with(values))
             .expect("managed core-net representation must fit one collector run");
         (
             FunctionCode::new(runtime, parameters.len(), captures.len()),

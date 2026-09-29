@@ -77,7 +77,7 @@ impl StrategyDemandMachine {
                 EvaluatedValue::try_from(access.clone_root(&ready))
                     .expect("strategy demand must produce WHNF")
                     .into_value()
-                    .associated_metadata()
+                    .associated_metadata(access.values())
                     .map(|value| access.values().root_runtime_value(value))
             });
             if let Some(metadata) = metadata {

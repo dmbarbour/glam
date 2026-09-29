@@ -18,7 +18,7 @@ pub(in crate::g_syntax) fn lower_object(
         object,
         line,
         context,
-        scope.clone(),
+        scope.duplicate_in(access),
         &mut locals,
         name,
         declared_target_has_reflection(&object.target),
@@ -100,7 +100,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
         object.alias.as_deref(),
         line,
         context,
-        parent_scope.clone(),
+        parent_scope.duplicate_in(access),
         locals,
         declared_reflection,
     )?;
@@ -219,10 +219,12 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         let scope = object_body_scope_resolved(
             access,
             alias,
-            object_final_defs.clone(),
-            definitions.clone(),
-            parent_scope.clone(),
-            reflection_annotator.clone(),
+            object_final_defs.duplicate_in(access),
+            definitions.duplicate_in(access),
+            parent_scope.duplicate_in(access),
+            reflection_annotator
+                .as_ref()
+                .map(|root| root.duplicate_in(access)),
         );
         let updated = lower_object_body_item_resolved(
             access,
@@ -299,7 +301,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         object,
         line,
         context,
-        scope.clone(),
+        scope.duplicate_in(access),
         locals,
         name,
         scope.reflection.is_some() && declared_target_has_reflection(&object.target),
@@ -380,7 +382,7 @@ fn declared_target_has_reflection(target: &str) -> bool {
 }
 
 pub(in crate::g_syntax) fn object_body_scope_resolved(
-    _access: &RuntimeValueAccess<'_>,
+    access: &RuntimeValueAccess<'_>,
     alias: Option<&str>,
     object_final_defs: ResolvedRoot,
     object_prior_defs: ResolvedRoot,
@@ -391,18 +393,24 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         .map(local_name_metadata)
         .and_then(|alias| alias.canonical);
     let (final_defs, prior_defs) = if object_alias.is_some() {
-        (parent.final_defs.clone(), parent.prior_defs.clone())
+        (
+            parent.final_defs.duplicate_in(access),
+            parent.prior_defs.duplicate_in(access),
+        )
     } else {
-        (object_final_defs.clone(), object_prior_defs.clone())
+        (
+            object_final_defs.duplicate_in(access),
+            object_prior_defs.duplicate_in(access),
+        )
     };
 
     NameScope {
         final_defs,
         prior_defs,
-        module_final_defs: parent.module_final_defs.clone(),
-        module_prior_defs: parent.module_prior_defs.clone(),
+        module_final_defs: parent.module_final_defs.duplicate_in(access),
+        module_prior_defs: parent.module_prior_defs.duplicate_in(access),
         object_alias,
-        object_final_defs: Some(object_final_defs.clone()),
+        object_final_defs: Some(object_final_defs.duplicate_in(access)),
         object_prior_defs: Some(object_prior_defs),
         reflection: reflection_annotator.map(|annotator| ReflectionBoundary { annotator }),
         parent: Some(Box::new(parent)),
@@ -470,7 +478,7 @@ fn extend_object_resolved_in_scope(
         extend.alias.as_deref(),
         line,
         context,
-        scope.clone(),
+        scope.duplicate_in(access),
         locals,
         declared_reflection,
     )?;

@@ -1494,17 +1494,19 @@ fn decode_sequence_stack(
     super::netlist::strict_record(access, sequence, "builder sequence stack")?
         .into_iter()
         .map(|frame| {
-            let fields = super::netlist::strict_record(access, &frame, "builder sequence frame")?;
-            let Some((tag, fields)) = fields.split_first() else {
+            let mut fields =
+                super::netlist::strict_record(access, &frame, "builder sequence frame")?;
+            if fields.is_empty() {
                 return Err(EvaluationHalt::new("builder sequence frame is empty"));
-            };
+            }
+            let tag = fields.remove(0);
             let Value::Atom(tag) = tag else {
                 return Err(EvaluationHalt::new(
                     "builder sequence frame tag must be an atom",
                 ));
             };
             if tag.key() == &*SEQUENCE_TAG {
-                let [continuation]: [Value; 1] = fields.to_vec().try_into().map_err(|_| {
+                let [continuation]: [Value; 1] = fields.try_into().map_err(|_| {
                     EvaluationHalt::new("builder sequence frame has the wrong number of fields")
                 })?;
                 Ok(BuilderSequenceFrame::Continue(continuation))
@@ -1546,17 +1548,18 @@ fn decode_reset_stack_value(
     super::netlist::strict_record(access, stack, "builder reset stack")?
         .into_iter()
         .map(|frame| {
-            let fields = super::netlist::strict_record(access, &frame, "builder reset frame")?;
-            let Some((tag, fields)) = fields.split_first() else {
+            let mut fields = super::netlist::strict_record(access, &frame, "builder reset frame")?;
+            if fields.is_empty() {
                 return Err(EvaluationHalt::new("builder reset frame is empty"));
-            };
+            }
+            let tag = fields.remove(0);
             let Value::Atom(tag) = tag else {
                 return Err(EvaluationHalt::new(
                     "builder reset frame tag must be an atom",
                 ));
             };
             if tag.key() == &*RESET_TAG {
-                let [key, sequence]: [Value; 2] = fields.to_vec().try_into().map_err(|_| {
+                let [key, sequence]: [Value; 2] = fields.try_into().map_err(|_| {
                     EvaluationHalt::new("builder reset frame has the wrong number of fields")
                 })?;
                 let key = Key::from_value(&key)
@@ -1564,7 +1567,7 @@ fn decode_reset_stack_value(
                 decode_sequence_stack(access, &sequence)?;
                 Ok(BuilderResetFrame::Reset { key, sequence })
             } else if tag.key() == &*RESUME_TAG {
-                let [sequence]: [Value; 1] = fields.to_vec().try_into().map_err(|_| {
+                let [sequence]: [Value; 1] = fields.try_into().map_err(|_| {
                     EvaluationHalt::new("builder resume frame has the wrong number of fields")
                 })?;
                 decode_sequence_stack(access, &sequence)?;

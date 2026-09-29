@@ -418,20 +418,64 @@ pub(in crate::g_syntax) struct ReflectionBoundary<V> {
 /// A name root is deliberately atomic. Reusing it creates another local
 /// reference or closed value occurrence, never a second copy of an expression
 /// tree that the net emitter would lower again.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::g_syntax) enum ResolvedRoot {
     Provided(Value),
     Local(BindingId),
 }
 
 impl ResolvedRoot {
-    pub(in crate::g_syntax) fn expr(
-        &self,
-        _access: &RuntimeValueAccess<'_>,
-    ) -> ResolvedExpr<Value> {
+    pub(in crate::g_syntax) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         match self {
-            Self::Provided(value) => ResolvedExpr::Provided(value.clone()),
+            Self::Provided(value) => Self::Provided(access.duplicate_value(value)),
+            Self::Local(binding) => Self::Local(*binding),
+        }
+    }
+
+    pub(in crate::g_syntax) fn same_representation_in(
+        &self,
+        other: &Self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        match (self, other) {
+            (Self::Provided(left), Self::Provided(right)) => {
+                access.same_representation(left, right)
+            }
+            (Self::Local(left), Self::Local(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    pub(in crate::g_syntax) fn expr(&self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        match self {
+            Self::Provided(value) => ResolvedExpr::Provided(access.duplicate_value(value)),
             Self::Local(binding) => ResolvedExpr::Local(*binding),
+        }
+    }
+}
+
+impl NameScope<ResolvedRoot> {
+    pub(in crate::g_syntax) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            final_defs: self.final_defs.duplicate_in(access),
+            prior_defs: self.prior_defs.duplicate_in(access),
+            module_final_defs: self.module_final_defs.duplicate_in(access),
+            module_prior_defs: self.module_prior_defs.duplicate_in(access),
+            object_alias: self.object_alias.clone(),
+            object_final_defs: self
+                .object_final_defs
+                .as_ref()
+                .map(|root| root.duplicate_in(access)),
+            object_prior_defs: self
+                .object_prior_defs
+                .as_ref()
+                .map(|root| root.duplicate_in(access)),
+            reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
+                annotator: boundary.annotator.duplicate_in(access),
+            }),
+            parent: self
+                .parent
+                .as_deref()
+                .map(|parent| Box::new(parent.duplicate_in(access))),
         }
     }
 }
@@ -493,7 +537,7 @@ impl NameScope<Value> {
     ) -> Self {
         Self {
             final_defs: context.final_defs(access),
-            prior_defs: visible_definitions.clone(),
+            prior_defs: access.duplicate_value(&visible_definitions),
             module_final_defs: context.final_defs(access),
             module_prior_defs: visible_definitions,
             object_alias: None,
@@ -506,23 +550,33 @@ impl NameScope<Value> {
 
     pub(in crate::g_syntax) fn resolved_in(
         &self,
-        _access: &RuntimeValueAccess<'_>,
+        access: &RuntimeValueAccess<'_>,
     ) -> NameScope<ResolvedRoot> {
         NameScope {
-            final_defs: ResolvedRoot::Provided(self.final_defs.clone()),
-            prior_defs: ResolvedRoot::Provided(self.prior_defs.clone()),
-            module_final_defs: ResolvedRoot::Provided(self.module_final_defs.clone()),
-            module_prior_defs: ResolvedRoot::Provided(self.module_prior_defs.clone()),
+            final_defs: ResolvedRoot::Provided(access.duplicate_value(&self.final_defs)),
+            prior_defs: ResolvedRoot::Provided(access.duplicate_value(&self.prior_defs)),
+            module_final_defs: ResolvedRoot::Provided(
+                access.duplicate_value(&self.module_final_defs),
+            ),
+            module_prior_defs: ResolvedRoot::Provided(
+                access.duplicate_value(&self.module_prior_defs),
+            ),
             object_alias: self.object_alias.clone(),
-            object_final_defs: self.object_final_defs.clone().map(ResolvedRoot::Provided),
-            object_prior_defs: self.object_prior_defs.clone().map(ResolvedRoot::Provided),
+            object_final_defs: self
+                .object_final_defs
+                .as_ref()
+                .map(|value| ResolvedRoot::Provided(access.duplicate_value(value))),
+            object_prior_defs: self
+                .object_prior_defs
+                .as_ref()
+                .map(|value| ResolvedRoot::Provided(access.duplicate_value(value))),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
-                annotator: ResolvedRoot::Provided(boundary.annotator.clone()),
+                annotator: ResolvedRoot::Provided(access.duplicate_value(&boundary.annotator)),
             }),
             parent: self
                 .parent
                 .as_deref()
-                .map(|parent| parent.resolved_in(_access))
+                .map(|parent| parent.resolved_in(access))
                 .map(Box::new),
         }
     }

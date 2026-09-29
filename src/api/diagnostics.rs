@@ -273,7 +273,7 @@ impl Diagnostic {
                 };
                 let field = |name: &str| fields.get(&Key::atom_from_text(name));
                 let emission = field("emission")
-                    .cloned()
+                    .map(|value| access.runtime_access().duplicate_value(value))
                     .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
                 let severity = match field("severity").and_then(Key::from_value) {
                     Some(value) if value == *crate::core::keys::INFO => Severity::Info,
@@ -305,7 +305,8 @@ impl Diagnostic {
                             })
                     })
                     .transpose()?;
-                let origin = field("origin").cloned().map(|origin| access.wrap(origin));
+                let origin = field("origin")
+                    .map(|origin| access.wrap(access.runtime_access().duplicate_value(origin)));
                 let (projected_line, message) =
                     crate::diagnostic::conventional_summary(access.runtime_access(), &emission);
                 Ok(Self {

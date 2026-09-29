@@ -402,9 +402,11 @@ where
                     let CoreValue::Dict(message) = value else {
                         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
                     };
-                    Ok(message
-                        .get(&*keys::MSG)
-                        .map(|interface| context.values().wrap_in(access, interface.clone())))
+                    Ok(message.get(&*keys::MSG).map(|interface| {
+                        context
+                            .values()
+                            .wrap_in(access, access.duplicate_value(interface))
+                    }))
                 })??;
                 if let Some(interface) = interface {
                     self.operation =
@@ -1235,7 +1237,7 @@ fn inspect_dict_items<S: TaskSpecialization>(
                         CoreValue::Dict(
                             Dict::new_sync()
                                 .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
-                                .insert((*keys::VALUE).clone(), value.clone()),
+                                .insert((*keys::VALUE).clone(), access.duplicate_value(value)),
                         )
                     })
                     .collect(),
@@ -1250,7 +1252,7 @@ fn inspect_metadata<S: TaskSpecialization>(
     value: &crate::api::EvaluatedValue,
 ) -> Result<RequestResult, TaskHalt> {
     let Some(metadata) = value.with_core_access(|value, access| {
-        CoreValue::associated_metadata(value)
+        CoreValue::associated_metadata(value, access)
             .map(|metadata| context.values().wrap_in(access, metadata))
     })?
     else {
@@ -1646,22 +1648,40 @@ enum TaggedTaskState {
 fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, TaskHalt> {
     values.with_access(|access| {
         let value = access.clone_core(value)?;
-        if value == values.core().key_value(&keys::LAUNCHED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::LAUNCHED))
+        {
             return Ok(TaggedTaskState::Launched);
         }
-        if value == values.core().key_value(&keys::BLOCKED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::BLOCKED))
+        {
             return Ok(TaggedTaskState::Blocked);
         }
-        if value == values.core().key_value(&keys::CANCELED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::CANCELED))
+        {
             return Ok(TaggedTaskState::Cancelled);
         }
-        if value == values.core().key_value(&keys::ABANDONED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::ABANDONED))
+        {
             return Ok(TaggedTaskState::Abandoned);
         }
-        if value == values.core().key_value(&keys::EXITED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::EXITED))
+        {
             return Ok(TaggedTaskState::Exited);
         }
-        if value == values.core().key_value(&keys::KILLED) {
+        if access
+            .runtime_access()
+            .same_representation(&value, &values.core().key_value(&keys::KILLED))
+        {
             return Ok(TaggedTaskState::Killed);
         }
         let CoreValue::Dict(state) = value else {
@@ -1716,7 +1736,10 @@ fn severity_matches(
     canonical: &Key,
 ) -> bool {
     access.key_from_value(value).as_ref() == Some(canonical)
-        || value == &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name)))
+        || access.same_representation(
+            value,
+            &CoreValue::Atom(Atom::from_key(&Key::binary_from_text(name))),
+        )
 }
 
 #[cfg(test)]

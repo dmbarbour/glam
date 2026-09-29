@@ -19,6 +19,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     pub(in crate::interaction_net::runtime) fn duplicate_data(
         &mut self,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
         fan: NodeId,
         data: NodeId,
     ) {
@@ -29,7 +30,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         };
         self.remove_node(fan);
         for target in targets {
-            let clone = self.add_node(RuntimeNode::Data(payload.clone()));
+            let clone = self.add_node(RuntimeNode::Data(duplicator.duplicate_data(&payload)));
             self.connect(Port::principal(clone), target);
         }
     }
@@ -70,6 +71,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     pub(in crate::interaction_net::runtime) fn duplicate_operator(
         &mut self,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
         fan: NodeId,
         identity: &FanIdentity,
         operator: NodeId,
@@ -85,7 +87,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let operators = fan_targets
             .into_iter()
             .map(|target| {
-                let node = self.add_node(RuntimeNode::Operator(operator.clone()));
+                let node = self.add_node(RuntimeNode::Operator(
+                    duplicator.duplicate_operator(&operator),
+                ));
                 self.connect(Port::principal(node), target);
                 node
             })

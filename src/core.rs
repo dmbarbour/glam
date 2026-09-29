@@ -108,12 +108,16 @@ impl Ord for DeferredValueId {
 ///
 /// Containers may still contain lazy fields. The wrapper prevents a computed
 /// lazy result cache from storing another deferred outer shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct EvaluatedValue(Value);
 
 impl EvaluatedValue {
     pub(crate) fn into_value(self) -> Value {
         self.0
+    }
+
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self(access.duplicate_value(&self.0))
     }
 }
 
@@ -131,13 +135,13 @@ impl TryFrom<Value> for EvaluatedValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct EvaluationFailure {
     kind: EvaluationFailureKind,
     contexts: Arc<[Value]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 enum EvaluationFailureKind {
     Emission(Value),
     DependencyCycle(Arc<LazyCycle>),
@@ -159,16 +163,6 @@ impl EvaluationFailure {
         Self {
             kind: EvaluationFailureKind::DependencyCycle(cycle),
             contexts: Arc::from([]),
-        }
-    }
-
-    pub(crate) fn with_context(&self, context: Value) -> Self {
-        let mut contexts = Vec::with_capacity(self.contexts.len() + 1);
-        contexts.push(context);
-        contexts.extend(self.contexts.iter().cloned());
-        Self {
-            kind: self.kind.clone(),
-            contexts: contexts.into(),
         }
     }
 
@@ -221,6 +215,24 @@ impl EvaluationFailure {
             kind,
             contexts: contexts.into(),
         }
+    }
+
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        let kind = match &self.kind {
+            EvaluationFailureKind::Emission(emission) => {
+                EvaluationFailureKind::Emission(access.duplicate_value(emission))
+            }
+            EvaluationFailureKind::DependencyCycle(cycle) => {
+                EvaluationFailureKind::DependencyCycle(Arc::clone(cycle))
+            }
+        };
+        let contexts = self
+            .contexts
+            .iter()
+            .map(|context| access.duplicate_value(context))
+            .collect::<Vec<_>>()
+            .into();
+        Self { kind, contexts }
     }
 
     /// Borrows the immediate emission only while matching value access is
@@ -328,7 +340,6 @@ pub(crate) struct LazyCycleMember {
     pub(crate) label: Arc<str>,
 }
 
-#[derive(Clone)]
 pub struct LazyValue {
     edge: managed::ManagedLazyEdge,
 }
@@ -340,7 +351,6 @@ pub struct LazyValue {
 /// enter this cell.
 pub(crate) type PromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 
-#[derive(Clone)]
 pub(crate) struct PromisedValue {
     edge: managed::ManagedPromiseEdge,
 }
@@ -1167,34 +1177,6 @@ impl PromisedValue {
     }
 }
 
-impl PartialEq for LazyValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.edge == other.edge
-    }
-}
-
-impl Eq for LazyValue {}
-
-impl fmt::Debug for LazyValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LazyValue(..)")
-    }
-}
-
-impl PartialEq for PromisedValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.edge == other.edge
-    }
-}
-
-impl Eq for PromisedValue {}
-
-impl fmt::Debug for PromisedValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PromisedValue(..)")
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Atom {
     // Atom is optimized tagged data `[Key]:()`
@@ -1322,7 +1304,6 @@ impl fmt::Debug for Key {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
 pub enum Value {
     Atom(Atom),
     Number(Number),
@@ -1348,34 +1329,10 @@ pub enum Value {
     Opaque(OpaqueValue),
 }
 
-impl fmt::Debug for Value {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Atom(value) => formatter.debug_tuple("Atom").field(value).finish(),
-            Self::Number(value) => formatter.debug_tuple("Number").field(value).finish(),
-            Self::Binary(value) => formatter.debug_tuple("Binary").field(value).finish(),
-            Self::List(value) => formatter.debug_tuple("List").field(value).finish(),
-            Self::Dict(value) => formatter.debug_tuple("Dict").field(value).finish(),
-            Self::Builtin(value) => formatter.debug_tuple("Builtin").field(value).finish(),
-            Self::PartialBuiltin(value) => formatter
-                .debug_tuple("PartialBuiltin")
-                .field(value)
-                .finish(),
-            Self::Function(value) => formatter.debug_tuple("Function").field(value).finish(),
-            Self::Net(value) => formatter.debug_tuple("Net").field(value).finish(),
-            Self::Lazy(value) => formatter.debug_tuple("Lazy").field(value).finish(),
-            Self::Promised(value) => formatter.debug_tuple("Promised").field(value).finish(),
-            Self::Metadata(_) => formatter.write_str("Sealed(..)"),
-            Self::Opaque(value) => formatter.debug_tuple("Opaque").field(value).finish(),
-        }
-    }
-}
-
 /// A sealed unit carrier with reflection-only associated Glam metadata.
 ///
 /// Pointer equality exists only to support Rust's internal value containers.
 /// Ordinary Glam comparison rejects the carrier rather than exposing identity.
-#[derive(Clone)]
 pub struct MetadataCarrier {
     metadata: Arc<Value>,
 }
@@ -1387,24 +1344,10 @@ impl MetadataCarrier {
         }
     }
 
-    fn associated_metadata(&self) -> Value {
-        self.metadata.as_ref().clone()
+    fn associated_metadata(&self, access: &RuntimeValueAccess<'_>) -> Value {
+        access.duplicate_value(self.metadata.as_ref())
     }
 }
-
-impl fmt::Debug for MetadataCarrier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("MetadataCarrier(..)")
-    }
-}
-
-impl PartialEq for MetadataCarrier {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.metadata, &other.metadata)
-    }
-}
-
-impl Eq for MetadataCarrier {}
 
 /// Type-erased storage for internal handles that must participate in ordinary
 /// [`Value`] ownership without exposing forgeable identifiers to Glam code.
@@ -1445,7 +1388,7 @@ impl PartialEq for OpaqueValue {
 
 impl Eq for OpaqueValue {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct NetValue {
     runtime: CoreRuntimeNet,
 }
@@ -1529,7 +1472,7 @@ impl FunctionCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FunctionValue {
     stage: NetValue,
     remaining_arity: usize,
@@ -1579,7 +1522,7 @@ impl FunctionValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct BuiltinCall {
     pub builtin: Builtin,
     pub arguments: Arc<[Value]>,
@@ -1613,7 +1556,6 @@ impl BuiltinCall {
     }
 }
 
-#[derive(Clone)]
 pub(crate) enum LazySource {
     Error,
     ComputedFixpoint(Arc<FixpointComputation>),
@@ -1637,6 +1579,40 @@ pub(crate) enum LazySource {
     },
 }
 
+impl LazySource {
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        match self {
+            Self::Error => Self::Error,
+            Self::ComputedFixpoint(computation) => Self::ComputedFixpoint(Arc::clone(computation)),
+            #[cfg(test)]
+            Self::SemanticComputation(computation) => {
+                Self::SemanticComputation(Arc::clone(computation))
+            }
+            Self::ListEffectComputation(computation) => {
+                Self::ListEffectComputation(Arc::clone(computation))
+            }
+            #[cfg(test)]
+            Self::SemanticThunk(thunk) => Self::SemanticThunk(Arc::clone(thunk)),
+            Self::HostCall(call) => Self::HostCall(Arc::clone(call)),
+            Self::ReflectionTask(task) => Self::ReflectionTask(Arc::clone(task)),
+            Self::Access { path, arguments } => Self::Access {
+                path: Arc::clone(path),
+                arguments: Arc::clone(arguments),
+            },
+            Self::Application(application) => Self::Application(Arc::clone(application)),
+            Self::Builtin(call) => Self::Builtin(call.duplicate_in(access)),
+            Self::NetComputation(net) => Self::NetComputation(net.duplicate_in(access)),
+            Self::FunctionCall {
+                function,
+                arguments,
+            } => Self::FunctionCall {
+                function: function.duplicate_in(access),
+                arguments: Arc::clone(arguments),
+            },
+        }
+    }
+}
+
 pub(crate) struct LazyApplication {
     function: Value,
     arguments: Arc<[Value]>,
@@ -1652,7 +1628,6 @@ impl LazyApplication {
     }
 }
 
-#[derive(Clone)]
 pub(crate) enum FixpointComputation {
     Function(Value),
     ObjectInstance(Value),
@@ -1679,7 +1654,6 @@ impl SemanticComputation {
     }
 }
 
-#[derive(Clone)]
 pub(crate) enum ListEffectComputation {
     Run {
         effect: Value,
@@ -1733,8 +1707,7 @@ impl HostCallRootBundle {
         let roots = values.with_runtime_value_access(|access| {
             captures
                 .iter()
-                .cloned()
-                .map(|capture| access.root_runtime_value(capture))
+                .map(|capture| access.root_runtime_value(access.duplicate_value(capture)))
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
         });
@@ -2544,9 +2517,9 @@ impl Value {
     }
 
     /// Returns a sealed carrier's associated metadata for privileged clients.
-    pub(crate) fn associated_metadata(&self) -> Option<Value> {
+    pub(crate) fn associated_metadata(&self, access: &RuntimeValueAccess<'_>) -> Option<Value> {
         match self {
-            Self::Metadata(carrier) => Some(carrier.associated_metadata()),
+            Self::Metadata(carrier) => Some(carrier.associated_metadata(access)),
             _ => None,
         }
     }
@@ -4391,3 +4364,67 @@ mod tests {
         assert_eq!(bytes.into_inner(), b"c");
     }
 }
+impl PartialEq for LazyValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.edge == other.edge
+    }
+}
+
+impl Eq for LazyValue {}
+
+impl fmt::Debug for LazyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LazyValue(..)")
+    }
+}
+
+impl PartialEq for PromisedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.edge == other.edge
+    }
+}
+
+impl Eq for PromisedValue {}
+
+impl fmt::Debug for PromisedValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PromisedValue(..)")
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Atom(value) => formatter.debug_tuple("Atom").field(value).finish(),
+            Self::Number(value) => formatter.debug_tuple("Number").field(value).finish(),
+            Self::Binary(value) => formatter.debug_tuple("Binary").field(value).finish(),
+            Self::List(value) => formatter.debug_tuple("List").field(value).finish(),
+            Self::Dict(value) => formatter.debug_tuple("Dict").field(value).finish(),
+            Self::Builtin(value) => formatter.debug_tuple("Builtin").field(value).finish(),
+            Self::PartialBuiltin(value) => formatter
+                .debug_tuple("PartialBuiltin")
+                .field(value)
+                .finish(),
+            Self::Function(value) => formatter.debug_tuple("Function").field(value).finish(),
+            Self::Net(value) => formatter.debug_tuple("Net").field(value).finish(),
+            Self::Lazy(value) => formatter.debug_tuple("Lazy").field(value).finish(),
+            Self::Promised(value) => formatter.debug_tuple("Promised").field(value).finish(),
+            Self::Metadata(_) => formatter.write_str("Sealed(..)"),
+            Self::Opaque(value) => formatter.debug_tuple("Opaque").field(value).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for MetadataCarrier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MetadataCarrier(..)")
+    }
+}
+
+impl PartialEq for MetadataCarrier {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.metadata, &other.metadata)
+    }
+}
+
+impl Eq for MetadataCarrier {}

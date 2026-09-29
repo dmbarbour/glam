@@ -1124,7 +1124,7 @@ impl Assembler {
         Ok(values.with_access(|values| {
             let runtime = values
                 .runtime_access()
-                .construct_managed_core_net(template.instantiate())
+                .construct_managed_core_net(template.instantiate_with(values.runtime_access()))
                 .expect("managed core-net representation must fit one collector run");
             values.wrap(CoreValue::Net(NetValue::new(runtime)))
         }))

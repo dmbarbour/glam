@@ -99,8 +99,12 @@ impl FanIdentity {
 /// callable-data interpretation and operator execution happen outside the
 /// runtime-net mutex.
 pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'static {
-    type Data: Clone + fmt::Debug + PartialEq + Eq + 'static;
-    type Operator: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    /// Semantic payloads are duplicated only through a runtime payload
+    /// duplicator. They need no ambient `Clone`, formatting, or equality
+    /// contract: managed specializations require matching access authority for
+    /// all three observations.
+    type Data: 'static;
+    type Operator: 'static;
     /// Opaque identity retained when one runtime net refers to another.
     ///
     /// Generic topology clones, compares, and reports this identity, but does
@@ -254,15 +258,18 @@ impl<S: NetSpecialization> RuntimeNode<S> {
 
     /// Clones only the ordinary topology/data vocabulary. Runtime evaluator
     /// checkpoints are deliberately linear and have no generic copy path.
-    pub(super) fn clone_copyable(&self) -> Option<Self> {
+    pub(super) fn duplicate_copyable(
+        &self,
+        duplicator: &impl super::runtime::RuntimeNetPayloadDuplicator<S>,
+    ) -> Option<Self> {
         Some(match self {
             Self::Bind => Self::Bind,
             Self::Fan { identity } => Self::Fan {
                 identity: identity.clone(),
             },
             Self::Erase => Self::Erase,
-            Self::Data(data) => Self::Data(data.clone()),
-            Self::Operator(operator) => Self::Operator(operator.clone()),
+            Self::Data(data) => Self::Data(duplicator.duplicate_data(data)),
+            Self::Operator(operator) => Self::Operator(duplicator.duplicate_operator(operator)),
             Self::Interface => Self::Interface,
             Self::RemoteCursor { copy, remote } => Self::RemoteCursor {
                 copy: *copy,
@@ -282,8 +289,8 @@ impl<S: NetSpecialization> fmt::Debug for RuntimeNode<S> {
                 .field("identity", identity)
                 .finish(),
             Self::Erase => formatter.write_str("Erase"),
-            Self::Data(data) => formatter.debug_tuple("Data").field(data).finish(),
-            Self::Operator(operator) => formatter.debug_tuple("Operator").field(operator).finish(),
+            Self::Data(_) => formatter.write_str("Data(..)"),
+            Self::Operator(_) => formatter.write_str("Operator(..)"),
             Self::CallableCheckpoint(_) => formatter.write_str("CallableCheckpoint(..)"),
             Self::Interface => formatter.write_str("Interface"),
             Self::RemoteCursor { copy, remote } => formatter
@@ -322,7 +329,7 @@ impl ActivePairKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct InteractionNet<S: NetSpecialization> {
     pub(super) nodes: Arc<[Node<S>]>, // nodes identified by index
     pub(super) wires: Arc<[Wire]>,    // all wires between ports

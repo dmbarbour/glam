@@ -726,7 +726,7 @@ impl ScopedValues<'_> {
     }
 
     pub(crate) fn clone_core(&self, value: &Value) -> Result<CoreValue, Error> {
-        self.with_core(value, Clone::clone)
+        self.with_core(value, |value| self.runtime_access().duplicate_value(value))
     }
 
     fn atom_from_text(&self, text: &str) -> Value {
@@ -799,7 +799,7 @@ impl Value {
         access: &RuntimeValueAccess<'_>,
     ) -> Result<CoreValue, Error> {
         self.0
-            .with_core(access, Clone::clone)
+            .with_core(access, |value| access.duplicate_value(value))
             .ok_or_else(|| Error::new("value belongs to another value domain"))
     }
 
@@ -986,8 +986,7 @@ impl EvaluatedValue {
                 list.value_slice().map(|items| {
                     items
                         .iter()
-                        .cloned()
-                        .map(|item| access.wrap(item))
+                        .map(|item| access.wrap(access.runtime_access().duplicate_value(item)))
                         .collect()
                 })
             })

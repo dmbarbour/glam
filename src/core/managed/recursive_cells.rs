@@ -17,7 +17,7 @@ use crate::core::{
     EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId, PromisedValue,
     RuntimeValueAccess, Value,
 };
-use crate::core_net::{CoreRuntimeNet, CoreSpecialization};
+use crate::core_net::{CoreOperator, CoreRuntimeNet, CoreSpecialization};
 use crate::eval::lazy_checkpoint::ManagedLazyCheckpointEdge;
 use crate::evaluation::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
@@ -26,7 +26,7 @@ use crate::evaluation::{
 };
 use crate::interaction_net::{
     RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutationGateway,
-    RuntimeNetPayload,
+    RuntimeNetPayload, RuntimeNetPayloadDuplicator,
 };
 use crate::runtime::RuntimeMutationAuthority;
 
@@ -721,7 +721,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .as_ref()
             .expect("an unresolved managed lazy must retain producer state")
         {
-            ManagedLazyProducerState::Source(source) => Some(source.clone()),
+            ManagedLazyProducerState::Source(source) => Some(source.duplicate_in(self.authority)),
             ManagedLazyProducerState::Checkpoint(_) => None,
         }
     }
@@ -874,7 +874,10 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     }
 
     pub(crate) fn cached(&self) -> Option<LazyResult> {
-        self.cell.result.get().cloned()
+        self.cell.result.get().map(|result| match result {
+            Ok(value) => Ok(value.duplicate_in(self.authority)),
+            Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+        })
     }
 
     fn cache(&self, result: LazyResult) -> LazyResult {
@@ -907,8 +910,11 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
                         .cell
                         .result
                         .get()
-                        .expect("managed lazy cache must contain a value after set")
-                        .clone();
+                        .expect("managed lazy cache must contain a value after set");
+                    let result = match result {
+                        Ok(value) => Ok(value.duplicate_in(self.authority)),
+                        Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+                    };
                     let producer = self
                         .cell
                         .producer
@@ -947,7 +953,13 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
     }
 
     pub(crate) fn assignment(&self) -> Option<ManagedPromiseAssignment> {
-        self.cell.assignment.get().cloned()
+        self.cell
+            .assignment
+            .get()
+            .map(|assignment| match assignment {
+                Ok(value) => Ok(self.authority.duplicate_value(value)),
+                Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+            })
     }
 
     /// Publishes one terminal assignment through an already-traced promise
@@ -1112,6 +1124,30 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
     }
 }
 
+impl RuntimeNetPayloadDuplicator<CoreSpecialization> for RuntimeValueAccess<'_> {
+    #[inline(always)]
+    fn duplicate_data(&self, data: &Value) -> Value {
+        self.duplicate_value(data)
+    }
+
+    #[inline(always)]
+    fn duplicate_operator(&self, operator: &CoreOperator) -> CoreOperator {
+        operator.duplicate_in(self)
+    }
+}
+
+impl RuntimeNetPayloadDuplicator<CoreSpecialization> for ManagedCoreNetAccess<'_, '_> {
+    #[inline(always)]
+    fn duplicate_data(&self, data: &Value) -> Value {
+        self.authority.duplicate_value(data)
+    }
+
+    #[inline(always)]
+    fn duplicate_operator(&self, operator: &CoreOperator) -> CoreOperator {
+        operator.duplicate_in(self.authority)
+    }
+}
+
 impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, '_> {
     #[inline(always)]
     fn duplicate_runtime_source(&self, source: &CoreRuntimeNet) -> CoreRuntimeNet {
@@ -1193,7 +1229,7 @@ unsafe impl Trace for ManagedLazyCell {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(super::managed_slot_extent::<Self>());
 
     fn trace(&self, visitor: &mut Visitor<'_>) {
-        if let Some(result) = self.result.get().cloned() {
+        if let Some(result) = self.result.get() {
             trace_lazy_result(&result, visitor);
             return;
         }
@@ -1201,7 +1237,7 @@ unsafe impl Trace for ManagedLazyCell {
             .producer
             .try_lock()
             .expect("managed lazy must be quiescent during tracing");
-        if let Some(result) = self.result.get().cloned() {
+        if let Some(result) = self.result.get() {
             drop(producer);
             trace_lazy_result(&result, visitor);
             return;

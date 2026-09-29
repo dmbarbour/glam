@@ -103,7 +103,10 @@ pub(super) fn apply_core_operator(
     let operand = access.values().duplicate_value(data);
     match operator {
         CoreOperator::ApplyArity { arity, supplied } => {
-            let mut operands = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut operands = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             operands.push(operand);
             if operands.len() < *arity + 1 {
                 return Ok(OperatorYield::Operator(apply_arity_operator(
@@ -128,7 +131,10 @@ pub(super) fn apply_core_operator(
             )))
         }
         CoreOperator::FunctionCaptures { code, supplied } => {
-            let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut captures = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
                 return Ok(OperatorYield::Operator(function_capture_operator(
@@ -148,7 +154,10 @@ pub(super) fn apply_core_operator(
             ))))
         }
         CoreOperator::ComputationCaptures { code, supplied } => {
-            let mut captures = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut captures = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             captures.push(operand);
             if captures.len() < code.capture_count() {
                 return Ok(OperatorYield::Operator(computation_capture_operator(
@@ -164,7 +173,10 @@ pub(super) fn apply_core_operator(
             )))
         }
         CoreOperator::Dict { keys, supplied } => {
-            let mut values = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut values = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             values.push(operand);
             if values.len() < keys.len() {
                 return Ok(OperatorYield::Operator(dict_operator(
@@ -183,7 +195,11 @@ pub(super) fn apply_core_operator(
             Ok(OperatorYield::Data(Value::Dict(dict)))
         }
         CoreOperator::Builtin(call) => {
-            let mut arguments = call.arguments.iter().cloned().collect::<Vec<_>>();
+            let mut arguments = call
+                .arguments
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < call.builtin.arity() {
                 return Ok(OperatorYield::Operator(builtin_operator(
@@ -217,7 +233,10 @@ pub(super) fn apply_core_operator(
             ),
         ))),
         CoreOperator::List { arity, supplied } => {
-            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut arguments = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
                 return Ok(OperatorYield::Operator(list_operator(
@@ -236,7 +255,10 @@ pub(super) fn apply_core_operator(
                 .iter()
                 .filter(|key| !matches!(key, CoreDataKey::Key(_)))
                 .count();
-            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut arguments = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < arity {
                 return Ok(OperatorYield::Operator(access_operator(
@@ -257,7 +279,10 @@ pub(super) fn apply_core_operator(
             supplied,
             wrap_effect,
         } => {
-            let mut arguments = supplied.iter().cloned().collect::<Vec<_>>();
+            let mut arguments = supplied
+                .iter()
+                .map(|value| access.values().duplicate_value(value))
+                .collect::<Vec<_>>();
             arguments.push(operand);
             if arguments.len() < *arity {
                 return Ok(OperatorYield::Operator(request_operator(
@@ -302,7 +327,7 @@ pub(crate) fn constant_effect_in(
     let function = Value::Function(FunctionValue::new(
         NetValue::new(
             access
-                .construct_managed_core_net(template.instantiate())
+                .construct_managed_core_net(template.instantiate_with(access))
                 .expect("managed core-net representation must fit one collector run"),
         ),
         1,

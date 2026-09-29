@@ -248,9 +248,11 @@ impl SpecializationRequestWork<MacroEffects> for MacroRequestWork {
                     let CoreValue::Dict(message) = value else {
                         return Err(TaskHalt::new("`.log` message must evaluate to an object"));
                     };
-                    Ok(message
-                        .get(&*crate::core::keys::MSG)
-                        .map(|interface| context.values().wrap_in(access, interface.clone())))
+                    Ok(message.get(&*crate::core::keys::MSG).map(|interface| {
+                        context
+                            .values()
+                            .wrap_in(access, access.duplicate_value(interface))
+                    }))
                 })??;
                 if let Some(interface) = interface {
                     *self = Self::LogMessageInterface { severity, message };

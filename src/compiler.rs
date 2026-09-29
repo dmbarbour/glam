@@ -469,7 +469,7 @@ fn import_failure_in(
     }
     let context =
         Value::Dict(Dict::new_sync().insert((*keys::IMPORT).clone(), Value::Dict(details)));
-    Arc::new(EvaluationFailure::message(message).with_context(context))
+    Arc::new(EvaluationFailure::message(message).with_context_in(access, context))
 }
 
 fn invalid_import_request_in(

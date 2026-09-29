@@ -186,7 +186,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
         value
             .with_core(&access, |value| {
                 (
-                    value == &access.values().unit(),
+                    access.same_representation(value, &access.values().unit()),
                     access.diagnostic_kind_name(value),
                 )
             })
@@ -336,7 +336,9 @@ fn unique_values(
                 let prior = access
                     .clone_core(prior)
                     .expect("macro case values belong to the compilation runtime");
-                core_value == prior
+                access
+                    .runtime_access()
+                    .same_representation(&core_value, &prior)
             })
         });
         if !duplicate {

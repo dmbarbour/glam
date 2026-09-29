@@ -84,7 +84,9 @@ impl ReflectionInspector<'_> {
         values.with_access(|access| {
             value
                 .with_core(access.runtime_access(), |value| {
-                    value.associated_metadata().map(|value| access.wrap(value))
+                    value
+                        .associated_metadata(access.runtime_access())
+                        .map(|value| access.wrap(value))
                 })
                 .ok_or_else(|| Error::new("evaluated value belongs to another value domain"))
         })
@@ -109,7 +111,7 @@ impl ReflectionInspector<'_> {
                         .map(|(key, value)| {
                             (
                                 access.wrap(key.to_value_with(access.core())),
-                                access.wrap(value.clone()),
+                                access.wrap(access.runtime_access().duplicate_value(value)),
                             )
                         })
                         .collect())

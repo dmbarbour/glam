@@ -493,7 +493,10 @@ impl<S: TaskSpecialization> EffectRun<S> {
                         let failure = error.into_failure();
                         match &failure_context {
                             Some(context) => values.core().with_runtime_value_access(|access| {
-                                Arc::new(failure.with_context(context.clone_core_with(&access)))
+                                Arc::new(
+                                    failure
+                                        .with_context_in(&access, context.clone_core_with(&access)),
+                                )
                             }),
                             None => failure,
                         }

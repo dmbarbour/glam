@@ -515,7 +515,7 @@ pub(crate) fn prepend_contexts_root(
         message.with_core(&access, |message| match message {
             Value::Dict(message) => message
                 .get(&*keys::MSG)
-                .map(|interface| access.root_runtime_value(interface.clone())),
+                .map(|interface| access.root_runtime_value(access.duplicate_value(interface))),
             _ => None,
         })
     });
@@ -534,7 +534,9 @@ pub(crate) fn prepend_contexts_root(
             .as_ref()
             .and_then(|interface| {
                 interface.with_core(access, |interface| match interface {
-                    Value::Dict(interface) => interface.get(&*keys::CONTEXT).cloned(),
+                    Value::Dict(interface) => interface
+                        .get(&*keys::CONTEXT)
+                        .map(|context| access.duplicate_value(context)),
                     _ => None,
                 })
             })
@@ -579,7 +581,7 @@ fn diagnostic_object_root(
             .with_core(&access, |message| match message {
                 Value::Dict(message) => message
                     .get(&*keys::SPEC)
-                    .map(|spec| access.root_runtime_value(spec.clone())),
+                    .map(|spec| access.root_runtime_value(access.duplicate_value(spec))),
                 _ => None,
             })
             .flatten()
@@ -617,7 +619,7 @@ pub(crate) fn conventional_summary_root(
         message.with_core(&access, |message| match message {
             Value::Dict(message) => message
                 .get(&*keys::MSG)
-                .map(|interface| access.root_runtime_value(interface.clone())),
+                .map(|interface| access.root_runtime_value(access.duplicate_value(interface))),
             _ => None,
         })
     });
@@ -633,10 +635,10 @@ pub(crate) fn conventional_summary_root(
                 Value::Dict(interface) => (
                     interface
                         .get(&*keys::TEXT)
-                        .map(|text| access.root_runtime_value(text.clone())),
-                    interface
-                        .get(&*keys::LOCATION)
-                        .map(|location| access.root_runtime_value(location.clone())),
+                        .map(|text| access.root_runtime_value(access.duplicate_value(text))),
+                    interface.get(&*keys::LOCATION).map(|location| {
+                        access.root_runtime_value(access.duplicate_value(location))
+                    }),
                 ),
                 _ => (None, None),
             })
@@ -662,7 +664,7 @@ pub(crate) fn conventional_summary_root(
                 location.with_core(&access, |location| match location {
                     Value::Dict(location) => location
                         .get(&*keys::LINE)
-                        .map(|line| access.root_runtime_value(line.clone())),
+                        .map(|line| access.root_runtime_value(access.duplicate_value(line))),
                     _ => None,
                 })
             })

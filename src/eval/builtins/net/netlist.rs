@@ -180,7 +180,7 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
         .try_finish(exposed)
         .map_err(|error| malformed(error.to_string()))?;
     let runtime = access
-        .construct_managed_core_net(template.instantiate())
+        .construct_managed_core_net(template.instantiate_with(access))
         .expect("managed core-net representation must fit one collector run");
     Ok(Value::Net(NetValue::new(runtime)))
 }
@@ -198,18 +198,18 @@ fn replay_constructor(
         return Ok(());
     }
 
-    let descriptor = strict_record(access, constructor, "constructor descriptor")?;
-    let Some((tag, fields)) = descriptor.split_first() else {
+    let mut fields = strict_record(access, constructor, "constructor descriptor")?;
+    if fields.is_empty() {
         return Err(malformed("constructor descriptor is empty"));
-    };
+    }
+    let tag = fields.remove(0);
     let Value::Atom(tag) = tag else {
         return Err(malformed("constructor descriptor tag must be an atom"));
     };
 
     match tag.key() {
         key if key == &*COPY_TAG => {
-            let [output_count]: [Value; 1] =
-                exact_record(access, fields.to_vec(), "copy descriptor")?;
+            let [output_count]: [Value; 1] = exact_record(access, fields, "copy descriptor")?;
             let Value::Number(output_count) = output_count else {
                 return Err(malformed("copy output count must be a number"));
             };
@@ -225,7 +225,7 @@ fn replay_constructor(
             Ok(())
         }
         key if key == &*DATA_TAG => {
-            let [value]: [Value; 1] = exact_record(access, fields.to_vec(), "data descriptor")?;
+            let [value]: [Value; 1] = exact_record(access, fields, "data descriptor")?;
             validate_constructor_capacity(mapped.len(), 1, capacity)?;
             mapped.push(builder.data(access.duplicate_value(&value)));
             Ok(())

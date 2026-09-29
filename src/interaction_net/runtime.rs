@@ -17,8 +17,20 @@ pub(crate) use cursor::PreparedCopySource;
 mod tests;
 
 impl<S: NetSpecialization> InteractionNet<S> {
-    pub fn instantiate(&self) -> RuntimeNet<S> {
-        RuntimeNet::new(self)
+    pub fn instantiate(&self) -> RuntimeNet<S>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+        S::Operator: Clone,
+    {
+        RuntimeNet::new(self, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+    }
+
+    pub(crate) fn instantiate_with(
+        &self,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
+    ) -> RuntimeNet<S> {
+        RuntimeNet::new(self, duplicator)
     }
 
     #[cfg(test)]
@@ -550,7 +562,15 @@ pub(crate) struct NormalizationBatchGuard<'cell, S: NetSpecialization> {
 /// The generic runtime supplies a no-op implementation. Managed
 /// specializations use this seam to keep collector edge accounting inside the
 /// same net mutex which authorizes the topology or payload edit.
-pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization> {
+pub(crate) trait RuntimeNetPayloadDuplicator<S: NetSpecialization> {
+    fn duplicate_data(&self, data: &S::Data) -> S::Data;
+
+    fn duplicate_operator(&self, operator: &S::Operator) -> S::Operator;
+}
+
+pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization>:
+    RuntimeNetPayloadDuplicator<S>
+{
     /// Duplicates a runtime-source edge while the specialization's mutation
     /// authority is active.
     ///
@@ -753,7 +773,30 @@ impl RuntimeNetEdgeTransition {
 )]
 struct DirectRuntimeNetMutationGateway;
 
-impl<S: NetSpecialization> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway {
+impl<S> RuntimeNetPayloadDuplicator<S> for DirectRuntimeNetMutationGateway
+where
+    S: NetSpecialization,
+    S::Data: Clone,
+    S::Operator: Clone,
+{
+    #[inline(always)]
+    fn duplicate_data(&self, data: &S::Data) -> S::Data {
+        data.clone()
+    }
+
+    #[inline(always)]
+    fn duplicate_operator(&self, operator: &S::Operator) -> S::Operator {
+        operator.clone()
+    }
+}
+
+impl<S> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway
+where
+    S: NetSpecialization,
+    S::Data: Clone,
+    S::Operator: Clone,
+    S::RuntimeSource: Clone,
+{
     #[inline(always)]
     fn duplicate_runtime_source(&self, source: &S::RuntimeSource) -> S::RuntimeSource {
         source.clone()
@@ -1034,7 +1077,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         dead_code,
         reason = "the direct gateway serves the generic non-core test specialization"
     )]
-    pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R {
+    pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.with_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
 
@@ -1102,7 +1149,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     pub(crate) fn with_conditional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
-    ) -> R {
+    ) -> R
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.with_conditional_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
 
@@ -1177,7 +1228,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         dead_code,
         reason = "the direct gateway serves the generic non-core test specialization"
     )]
-    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
     }
 
@@ -1190,7 +1245,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         cursor: NodeId,
         expected: &CursorDependency<S>,
         disposition: CursorDependencyDisposition,
-    ) -> CursorDependencyResolution {
+    ) -> CursorDependencyResolution
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.with_conditional_edge_mut_via(
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
             |runtime| runtime.resolve_cursor_dependency_edge_transition(cursor, expected),
@@ -1231,7 +1290,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
-    ) -> ActivePairStep<S> {
+    ) -> ActivePairStep<S>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.step_active_pair_with_gateway(
             pair,
             expected_topology_revision,
@@ -1276,7 +1339,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                             let edges = state.runtime.reduce_pair_edge_transition(pair);
                             let reduction = gateway
                                 .transition_edges(&mut state.runtime, edges, |runtime| {
-                                    runtime.reduce_pair(pair)
+                                    runtime.reduce_pair_with_gateway(pair, gateway)
                                 })
                                 .expect("ready pair must produce one reduction");
                             if let ReductionKind::RemoteCursor {
@@ -1359,7 +1422,11 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
-    ) -> CursorStep<S> {
+    ) -> CursorStep<S>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.step_cursor_with_gateway(
             cursor,
             expected_topology_revision,
@@ -1899,7 +1966,7 @@ pub struct RuntimeNet<S: NetSpecialization> {
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {
-    fn new(net: &InteractionNet<S>) -> Self {
+    fn new(net: &InteractionNet<S>, duplicator: &impl RuntimeNetPayloadDuplicator<S>) -> Self {
         let nodes = net
             .nodes
             .iter()
@@ -1912,8 +1979,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                         identity: FanIdentity::root(*site),
                     },
                     Node::Erase => RuntimeNode::Erase,
-                    Node::Data(data) => RuntimeNode::Data(data.clone()),
-                    Node::Operator(operator) => RuntimeNode::Operator(operator.clone()),
+                    Node::Data(data) => RuntimeNode::Data(duplicator.duplicate_data(data)),
+                    Node::Operator(operator) => {
+                        RuntimeNode::Operator(duplicator.duplicate_operator(operator))
+                    }
                 };
                 (id, RuntimeEntry::new(node))
             })
@@ -2880,7 +2949,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Reads callable data from an active pair already claimed by reduction.
-    pub fn claim_call(&self, call: Call) -> Option<S::Data> {
+    pub fn claim_call(
+        &self,
+        call: Call,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
+    ) -> Option<S::Data> {
         if !self
             .active
             .get(&call.pair)
@@ -2889,7 +2962,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return None;
         }
         let callable = match self.node(call.data) {
-            Some(RuntimeNode::Data(data)) => data.clone(),
+            Some(RuntimeNode::Data(data)) => duplicator.duplicate_data(data),
             _ => panic!("claimed call data node must exist"),
         };
         Some(callable)
@@ -2964,7 +3037,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Clones a claimed operator transition so specialization code can run
     /// without holding the shared runtime-net mutex.
-    pub fn claim_operator_call(&self, call: OperatorCall) -> Option<(S::Operator, S::Data)> {
+    pub fn claim_operator_call(
+        &self,
+        call: OperatorCall,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
+    ) -> Option<(S::Operator, S::Data)> {
         if !self
             .active
             .get(&call.pair)
@@ -2973,11 +3050,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return None;
         }
         let operator = match self.node(call.operator) {
-            Some(RuntimeNode::Operator(operator)) => operator.clone(),
+            Some(RuntimeNode::Operator(operator)) => duplicator.duplicate_operator(operator),
             _ => panic!("pending operator call agent must exist"),
         };
         let data = match self.node(call.data) {
-            Some(RuntimeNode::Data(data)) => data.clone(),
+            Some(RuntimeNode::Data(data)) => duplicator.duplicate_data(data),
             _ => panic!("pending operator call data must exist"),
         };
         Some((operator, data))
@@ -2987,7 +3064,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// claimed. This compatibility helper does not acquire ownership.
     #[cfg(test)]
     pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
-        self.claim_operator_call(call)
+        self.claim_operator_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
             .expect("pending operator call must remain claimed")
     }
 
@@ -3285,7 +3362,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// uses exact demand endpoints instead; this remains the generic runtime's
     /// ordinary reducer and a low-level test utility.
     #[allow(dead_code)]
-    pub fn reduce_next(&mut self) -> Option<Reduction> {
+    pub fn reduce_next(&mut self) -> Option<Reduction>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         let pair = self
             .active
             .iter()
@@ -3295,7 +3376,19 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Reduces one exact ready pair. Cursor demand uses this to make progress
     /// in the source runtime without searching or sweeping unrelated work.
-    pub fn reduce_pair(&mut self, pair: ActivePairKey) -> Option<Reduction> {
+    pub fn reduce_pair(&mut self, pair: ActivePairKey) -> Option<Reduction>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
+        self.reduce_pair_with_gateway(pair, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+    }
+
+    pub(crate) fn reduce_pair_with_gateway(
+        &mut self,
+        pair: ActivePairKey,
+        gateway: &impl RuntimeNetPayloadDuplicator<S>,
+    ) -> Option<Reduction> {
         if !self
             .active
             .get(&pair)
@@ -3346,10 +3439,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             });
         }
         let left = left
-            .clone_copyable()
+            .duplicate_copyable(gateway)
             .expect("non-checkpoint node must remain generically copyable");
         let right = right
-            .clone_copyable()
+            .duplicate_copyable(gateway)
             .expect("non-checkpoint node must remain generically copyable");
         let kind = match (&left, &right) {
             (RuntimeNode::Bind, RuntimeNode::Bind) => {
@@ -3371,13 +3464,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 }
             }
             (RuntimeNode::Fan { identity }, RuntimeNode::Data(_)) => {
-                self.duplicate_data(left_id, right_id);
+                self.duplicate_data(gateway, left_id, right_id);
                 ReductionKind::FanData {
                     identity: identity.clone(),
                 }
             }
             (RuntimeNode::Data(_), RuntimeNode::Fan { identity }) => {
-                self.duplicate_data(right_id, left_id);
+                self.duplicate_data(gateway, right_id, left_id);
                 ReductionKind::FanData {
                     identity: identity.clone(),
                 }
@@ -3395,13 +3488,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 }
             }
             (RuntimeNode::Fan { identity }, RuntimeNode::Operator(_)) => {
-                self.duplicate_operator(left_id, identity, right_id);
+                self.duplicate_operator(gateway, left_id, identity, right_id);
                 ReductionKind::FanOperator {
                     identity: identity.clone(),
                 }
             }
             (RuntimeNode::Operator(_), RuntimeNode::Fan { identity }) => {
-                self.duplicate_operator(right_id, identity, left_id);
+                self.duplicate_operator(gateway, right_id, identity, left_id);
                 ReductionKind::FanOperator {
                     identity: identity.clone(),
                 }

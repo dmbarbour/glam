@@ -947,7 +947,7 @@ impl RegionalStrategyMachine {
             let metadata = EvaluatedValue::try_from(ready)
                 .expect("strategy demand must produce WHNF")
                 .into_value()
-                .associated_metadata();
+                .associated_metadata(access.values());
             if let Some(metadata) = metadata {
                 self.demand = Some(
                     RegionalWhnfWork::from_focus(access, metadata)

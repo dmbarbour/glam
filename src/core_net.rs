@@ -19,7 +19,7 @@ use crate::interaction_net::{
     CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
     DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
     OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
-    SourceFrontier,
+    RuntimeNetPayloadDuplicator, SourceFrontier,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +29,6 @@ pub enum CoreDataKey {
     PathIndex,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreOperator {
     ApplyArity {
         arity: usize,
@@ -65,6 +64,50 @@ pub enum CoreOperator {
         supplied: Arc<[Value]>,
         wrap_effect: bool,
     },
+}
+
+impl CoreOperator {
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        match self {
+            Self::ApplyArity { arity, supplied } => Self::ApplyArity {
+                arity: *arity,
+                supplied: Arc::clone(supplied),
+            },
+            Self::FunctionCaptures { code, supplied } => Self::FunctionCaptures {
+                code: Arc::clone(code),
+                supplied: Arc::clone(supplied),
+            },
+            Self::ComputationCaptures { code, supplied } => Self::ComputationCaptures {
+                code: Arc::clone(code),
+                supplied: Arc::clone(supplied),
+            },
+            Self::Dict { keys, supplied } => Self::Dict {
+                keys: Arc::clone(keys),
+                supplied: Arc::clone(supplied),
+            },
+            Self::Builtin(call) => Self::Builtin(call.duplicate_in(access)),
+            Self::Applicable(value) => Self::Applicable(access.duplicate_value(value)),
+            Self::List { arity, supplied } => Self::List {
+                arity: *arity,
+                supplied: Arc::clone(supplied),
+            },
+            Self::Access { path, supplied } => Self::Access {
+                path: Arc::clone(path),
+                supplied: Arc::clone(supplied),
+            },
+            Self::Request {
+                tag,
+                arity,
+                supplied,
+                wrap_effect,
+            } => Self::Request {
+                tag: tag.clone(),
+                arity: *arity,
+                supplied: Arc::clone(supplied),
+                wrap_effect: *wrap_effect,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +155,18 @@ pub(crate) struct CoreRuntimeNetAccess<'access, 'scope> {
     values: &'access RuntimeValueAccess<'scope>,
 }
 
+impl RuntimeNetPayloadDuplicator<CoreSpecialization> for CoreRuntimeNetAccess<'_, '_> {
+    #[inline(always)]
+    fn duplicate_data(&self, data: &Value) -> Value {
+        self.values.duplicate_value(data)
+    }
+
+    #[inline(always)]
+    fn duplicate_operator(&self, operator: &CoreOperator) -> CoreOperator {
+        operator.duplicate_in(self.values)
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static CORE_NORMALIZATION_SCOPE_DEPTH: std::cell::Cell<usize> = const {
@@ -155,7 +210,7 @@ impl CoreValueFactory {
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
         self.with_runtime_value_access(|access| {
             access
-                .construct_managed_core_net(template.instantiate())
+                .construct_managed_core_net(template.instantiate_with(&access))
                 .expect("managed core-net representation must fit one collector run")
         })
     }
@@ -571,10 +626,11 @@ impl CoreRuntimeNetAccess<'_, '_> {
         anchor: Port,
     ) -> SourceFrontier<CoreSpecialization> {
         let source = source.access(self.values);
-        source
-            .runtime
-            .cell()
-            .inspect_source_frontier(source.owner.duplicate_in(self.values), anchor)
+        source.runtime.cell().inspect_source_frontier(
+            source.owner.duplicate_in(self.values),
+            anchor,
+            &source,
+        )
     }
 
     fn step_cursor_if_current(
@@ -645,7 +701,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
     }
 
     pub(crate) fn claim_call(&self, call: crate::interaction_net::Call) -> Option<Value> {
-        self.runtime.cell().with(|runtime| runtime.claim_call(call))
+        self.runtime
+            .cell()
+            .with(|runtime| runtime.claim_call(call, self))
     }
 
     pub(crate) fn install_claimed_call_checkpoint(
@@ -967,7 +1025,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     return RuntimeNetMutation::Unchanged(None);
                 }
                 let callable = runtime
-                    .claim_call(call)
+                    .claim_call(call, self)
                     .expect("reclaimed call must expose its callable data");
                 RuntimeNetMutation::Changed(Some((call, callable)))
             })
@@ -1036,7 +1094,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> Option<(CoreOperator, Value)> {
         self.runtime
             .cell()
-            .with(|runtime| runtime.claim_operator_call(call))
+            .with(|runtime| runtime.claim_operator_call(call, self))
     }
 
     pub(crate) fn reclaim_blocked_operator_call(
@@ -1053,7 +1111,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     return RuntimeNetMutation::Unchanged(None);
                 }
                 let (operator, data) = runtime
-                    .claim_operator_call(call)
+                    .claim_operator_call(call, self)
                     .expect("reclaimed operator call must expose its payloads");
                 RuntimeNetMutation::Changed(Some((call, operator, data)))
             })
@@ -1137,23 +1195,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
             })
     }
 }
-
-impl std::fmt::Debug for CoreRuntimeNet {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_tuple("CoreRuntimeNet")
-            .field(&self.edge)
-            .finish()
-    }
-}
-
-impl PartialEq for CoreRuntimeNet {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr_eq(other)
-    }
-}
-
-impl Eq for CoreRuntimeNet {}
 
 pub(crate) struct CorePreparedCopySource {
     root: ManagedCoreNetRoot,
@@ -2765,3 +2806,19 @@ mod tests {
         );
     }
 }
+impl std::fmt::Debug for CoreRuntimeNet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CoreRuntimeNet")
+            .field(&self.edge)
+            .finish()
+    }
+}
+
+impl PartialEq for CoreRuntimeNet {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr_eq(other)
+    }
+}
+
+impl Eq for CoreRuntimeNet {}

@@ -597,7 +597,8 @@ impl RegionalAnnotationMachine {
                             }
                         };
                         let received = carrier.diagnostic_kind_name();
-                        let extracted = carrier.associated_metadata().ok_or(received);
+                        let extracted =
+                            carrier.associated_metadata(access.values()).ok_or(received);
                         let extracted = match extracted {
                             Ok(extracted) => extracted,
                             Err(received) => {

@@ -13,7 +13,6 @@ use crate::runtime::RuntimeValueRoot;
 
 use super::*;
 
-#[derive(Clone)]
 pub(in crate::g_syntax) struct BuiltinModule {
     pub(in crate::g_syntax) value: Value,
     pub(in crate::g_syntax) definitions: Value,
@@ -696,7 +695,7 @@ fn build_could(values: &CoreValueFactory, not: &RuntimeValueRoot) -> RuntimeValu
         let mut locals = ResolverContext::default();
         let condition = locals.push_internal_binding("<could-condition>");
         let inner = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(not.clone()),
+            ResolvedExpr::Embedded(access.duplicate_value(&not)),
             [ResolvedExpr::Local(condition)],
         );
         ResolvedExpr::lambda(

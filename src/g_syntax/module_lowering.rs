@@ -83,7 +83,7 @@ impl<'context> ModuleLowerer<'context> {
                     let scope = NameScope::module_with_reflection(
                         &access,
                         self.context,
-                        definitions.clone(),
+                        access.duplicate_value(&definitions),
                         ReflectionBoundary {
                             annotator: self.module_reflection.clone_core_with(&access),
                         },

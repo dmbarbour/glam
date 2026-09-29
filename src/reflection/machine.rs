@@ -1117,8 +1117,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             ScalarDemandPurpose::RequireUnit => {
                 let checked = context.evaluate(&self.eval_context, |evaluator| {
-                    evaluator.project_root(&value, |_, value| {
-                        if value != self.eval_context.values().unit() {
+                    evaluator.project_root(&value, |access, value| {
+                        if !access
+                            .values()
+                            .same_representation(&value, &self.eval_context.values().unit())
+                        {
                             return Err(TaskHalt::new(format!(
                                 "effect task returned {}; expected unit",
                                 value.diagnostic_kind_name()
@@ -1147,8 +1150,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             ScalarDemandPurpose::RestoreScopedValue { scoped_value } => {
                 let checked = context.evaluate(&self.eval_context, |evaluator| {
-                    evaluator.project_root(&value, |_, value| {
-                        if value != self.eval_context.values().unit() {
+                    evaluator.project_root(&value, |access, value| {
+                        if !access
+                            .values()
+                            .same_representation(&value, &self.eval_context.values().unit())
+                        {
                             return Err(TaskHalt::new(format!(
                                 "scoped effect close must return unit, got {value:?}"
                             )));
@@ -1536,7 +1542,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .eval_context
                         .values()
                         .with_runtime_value_access(|access| {
-                            branch.root_value(&access, Value::Promised(handle.clone()))
+                            branch
+                                .root_value(&access, Value::Promised(handle.duplicate_in(&access)))
                         });
                     let outer_control = std::mem::take(&mut branch.control);
                     branch.state = state;
@@ -2140,7 +2147,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         };
                         effect
                             .get(&*keys::EFF)
-                            .cloned()
+                            .map(|function| access.values().duplicate_value(function))
                             .map(|function| access.root_value(function))
                             .ok_or_else(|| TaskHalt::new("reflection effect has no `eff` member"))
                     })
@@ -3515,8 +3522,11 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
         match poll_value_effect_task(&mut self.task, context, step_budget) {
             EvaluationMachinePoll::Failed(error) => {
                 let failure = context.evaluate(&self.task.eval_context, |evaluator| {
-                    evaluator.project_root(&self.context, |_, context| {
-                        error.as_failure().with_context(context)
+                    evaluator.project_root(&self.context, |access, context| {
+                        error.as_failure().with_context_in(
+                            access.values(),
+                            access.values().duplicate_value(&context),
+                        )
                     })
                 });
                 EvaluationMachinePoll::Failed(context.root_failure(Arc::new(failure)))
@@ -3595,9 +3605,11 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Complete(value) => {
                 let value = value.into_runtime_root();
                 let (is_unit, kind) = context.evaluate(&self.0.eval_context, |evaluator| {
-                    evaluator.project_root(&value, |_, value| {
+                    evaluator.project_root(&value, |access, value| {
                         (
-                            value == self.0.eval_context.values().unit(),
+                            access
+                                .values()
+                                .same_representation(&value, &self.0.eval_context.values().unit()),
                             value.diagnostic_kind_name(),
                         )
                     })
@@ -4358,7 +4370,7 @@ impl ValuePathMachine {
                 };
                 Ok(access.root_value(
                     dict.get(key)
-                        .cloned()
+                        .map(|value| access.values().duplicate_value(value))
                         .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
                 ))
             })
@@ -5233,7 +5245,12 @@ fn select_request_from_whnf<R: Clone>(
     let Value::Dict(dict) = value else {
         return Err(TaskHalt::new("effect API returned a non-request value"));
     };
-    let selected = |selection, payload: &Value| Ok((selection, access.root_value(payload.clone())));
+    let selected = |selection, payload: &Value| {
+        Ok((
+            selection,
+            access.root_value(access.values().duplicate_value(payload)),
+        ))
+    };
     macro_rules! select {
         ($tag:expr, $selection:expr) => {
             if let Some(payload) = dict.get($tag) {
@@ -5561,7 +5578,7 @@ fn request_function_in(
     Value::Function(FunctionValue::new(
         NetValue::new(
             access
-                .construct_managed_core_net(template.instantiate())
+                .construct_managed_core_net(template.instantiate_with(access))
                 .expect("managed core-net representation must fit one collector run"),
         ),
         remaining,
@@ -5648,7 +5665,7 @@ fn reset_stack_root_in(
         Ok(access.root_value(
             state
                 .get(continuation_state)
-                .cloned()
+                .map(|value| access.values().duplicate_value(value))
                 .unwrap_or_else(|| Value::List(List::empty())),
         ))
     })

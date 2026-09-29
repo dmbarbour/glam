@@ -227,7 +227,9 @@ impl<'source> StagedSourceParser<'source> {
                 Ok(effect)
                     if !context.values().with_runtime_value_access(|access| {
                         effect
-                            .with_core(&access, |value| value == &Value::Dict(Dict::new_sync()))
+                            .with_core(&access, |value| {
+                                access.same_representation(value, &Value::Dict(Dict::new_sync()))
+                            })
                             .expect("selected macro belongs to the compilation runtime")
                     }) =>
                 {

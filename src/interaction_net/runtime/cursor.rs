@@ -39,7 +39,11 @@ where
         &self,
         anchor: Port,
     ) -> SourceFrontier<S> {
-        self.cell().inspect_source_frontier(self.clone(), anchor)
+        self.cell().inspect_source_frontier(
+            self.clone(),
+            anchor,
+            &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+        )
     }
 }
 
@@ -51,9 +55,10 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         &self,
         source: S::RuntimeSource,
         anchor: Port,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
     ) -> SourceFrontier<S> {
-        let (shape, observed_revisions) =
-            self.with_revisions(|runtime| runtime.inspect_source_frontier_shape(anchor));
+        let (shape, observed_revisions) = self
+            .with_revisions(|runtime| runtime.inspect_source_frontier_shape(anchor, duplicator));
         let observation = shape.endpoint().map(|endpoint| FrontierObservation {
             source,
             observed_topology: observed_revisions.topology_revision(),
@@ -415,6 +420,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn inspect_source_frontier_shape(
         &self,
         remote: Port,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
     ) -> SourceFrontierShape<S> {
         let port = self
             .neighbor(remote)
@@ -423,7 +429,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             let node = self
                 .node(port.node())
                 .expect("remote cursor neighbor must exist");
-            let node = match node.clone_copyable() {
+            let node = match node.duplicate_copyable(duplicator) {
                 Some(node) => SourcePrincipalNode::Copyable(node),
                 None => SourcePrincipalNode::CallableCheckpoint,
             };
@@ -654,7 +660,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 identity: self.translate_fan_identity(&mut state, &identity),
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
-            RuntimeNode::Data(data) => RuntimeNode::Data(data.clone()),
+            RuntimeNode::Data(data) => RuntimeNode::Data(data),
             RuntimeNode::Operator(operator) => RuntimeNode::Operator(operator),
             RuntimeNode::CallableCheckpoint(_) => {
                 self.copies.insert(copy, state);

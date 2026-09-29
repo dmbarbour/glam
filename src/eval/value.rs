@@ -1129,7 +1129,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             let installed = context.with_value_access(|access| {
                                 let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
                                     &access,
-                                    application.function().clone(),
+                                    access.values().duplicate_value(application.function()),
                                     application.arguments(),
                                     None,
                                 );
@@ -1153,7 +1153,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                         ));
                                         let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
                                             &access,
-                                            function.clone(),
+                                            access.values().duplicate_value(function),
                                             std::slice::from_ref(&marker),
                                             None,
                                         );
@@ -1300,11 +1300,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
                                 })
                                 .collect::<Vec<_>>();
-                            let base = arguments
-                                .first()
-                                .cloned()
-                                .expect("value access must retain its base value");
                             let installed = context.with_value_access(|access| {
+                                let base = access.values().duplicate_value(
+                                    arguments
+                                        .first()
+                                        .expect("value access must retain its base value"),
+                                );
                                 let work = super::whnf::RegionalWhnfWork::from_static_access_checkpoint_in(
                                     &access,
                                     base,
@@ -1377,8 +1378,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         }
                         LazySource::Builtin(call) => {
                             let result = context.with_value_access(|access| {
-                                let mut arguments =
-                                    call.arguments.iter().cloned().collect::<Vec<_>>();
+                                let mut arguments = call
+                                    .arguments
+                                    .iter()
+                                    .map(|argument| access.values().duplicate_value(argument))
+                                    .collect::<Vec<_>>();
                                 let argument = arguments
                                     .pop()
                                     .expect("saturated builtin source must contain an argument");

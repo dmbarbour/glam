@@ -62,7 +62,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Name(name) => lower_name_expr_resolved(access, name, context, scope, locals),
         SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(access, name, line, scope)?,
         SyntaxExpr::Escape(depth, expr) => {
-            let escaped_scope = escaped_name_scope(scope, *depth, line)?;
+            let escaped_scope = escaped_name_scope(access, scope, *depth, line)?;
             syntax_expr_to_resolved_in_semantic_scope(
                 access,
                 expr,
@@ -313,7 +313,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
         object.alias.as_deref(),
         line,
         context,
-        scope.clone(),
+        scope.duplicate_in(access),
         locals,
         false,
     )?;
@@ -348,10 +348,11 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
 
     for body_definition in body {
         let body_scope = dict_with_body_scope(
+            access,
             alias,
-            final_defs.clone(),
-            definitions.clone(),
-            scope.clone(),
+            final_defs.duplicate_in(access),
+            definitions.duplicate_in(access),
+            scope.duplicate_in(access),
         );
         let updated = lower_object_body_item_resolved(
             access,
@@ -375,6 +376,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
 }
 
 pub(in crate::g_syntax) fn dict_with_body_scope(
+    access: &RuntimeValueAccess<'_>,
     alias: Option<&str>,
     dict_final_defs: ResolvedRoot,
     dict_prior_defs: ResolvedRoot,
@@ -383,19 +385,22 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
     let object_alias = alias
         .map(local_name_metadata)
         .and_then(|alias| alias.canonical);
-    let object_final_defs = Some(dict_final_defs.clone());
-    let object_prior_defs = Some(dict_prior_defs.clone());
+    let object_final_defs = Some(dict_final_defs.duplicate_in(access));
+    let object_prior_defs = Some(dict_prior_defs.duplicate_in(access));
     let (final_defs, prior_defs) = if object_alias.as_deref() == Some("self") {
         (dict_final_defs, dict_prior_defs)
     } else {
-        (parent.final_defs.clone(), parent.prior_defs.clone())
+        (
+            parent.final_defs.duplicate_in(access),
+            parent.prior_defs.duplicate_in(access),
+        )
     };
 
     NameScope {
         final_defs,
         prior_defs,
-        module_final_defs: parent.module_final_defs.clone(),
-        module_prior_defs: parent.module_prior_defs.clone(),
+        module_final_defs: parent.module_final_defs.duplicate_in(access),
+        module_prior_defs: parent.module_prior_defs.duplicate_in(access),
         object_alias,
         object_final_defs,
         object_prior_defs,
@@ -429,7 +434,7 @@ fn lower_using_expr_resolved(
         None,
         namespace_root,
         ResolvedRoot::Provided(Value::Dict(Dict::new_sync())),
-        parent_scope.clone(),
+        parent_scope.duplicate_in(access),
         None,
     );
     let body = syntax_expr_to_resolved_in_semantic_scope(
@@ -993,7 +998,10 @@ fn lower_abstract_global_path_resolved(
             ),
         ));
     }
-    if scope.final_defs != scope.module_final_defs {
+    if !scope
+        .final_defs
+        .same_representation_in(&scope.module_final_defs, access)
+    {
         return Err(Diagnostic::error(
             line,
             format!(
@@ -1129,12 +1137,13 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     })
 }
 
-pub(in crate::g_syntax) fn escaped_name_scope<V: Clone>(
-    scope: &NameScope<V>,
+pub(in crate::g_syntax) fn escaped_name_scope(
+    access: &RuntimeValueAccess<'_>,
+    scope: &NameScope<ResolvedRoot>,
     depth: usize,
     line: usize,
-) -> Result<NameScope<V>, Diagnostic> {
-    let mut escaped = scope.clone();
+) -> Result<NameScope<ResolvedRoot>, Diagnostic> {
+    let mut escaped = scope.duplicate_in(access);
     for level in 0..depth {
         let Some(parent) = escaped.parent.as_deref() else {
             return Err(Diagnostic::error(
@@ -1145,7 +1154,7 @@ pub(in crate::g_syntax) fn escaped_name_scope<V: Clone>(
                 ),
             ));
         };
-        escaped = parent.clone();
+        escaped = parent.duplicate_in(access);
     }
     Ok(escaped)
 }

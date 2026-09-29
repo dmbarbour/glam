@@ -2023,6 +2023,21 @@ inventory relatch:
   the parent carrier traits, the managed-facade traits, and the five `Gc<T>`
   traits. Keep access-qualified diagnostics and collector-private `ErasedGc`
   distinct from the removed surface.
+  - **D.2h.2a — production data-duplication seam: complete 2026-09-29.**
+    Remove ambient `Clone` and representation equality from raw `Value`, its
+    evaluation/failure/function shells, and `CoreOperator`. Route interaction-
+    net payload duplication through an explicit mutation gateway and migrate
+    compiler, evaluator, diagnostics, metadata, and reflection production
+    callers to matching runtime access. The production library compiles at
+    this boundary; test fixtures and the remaining runtime-source/facade/GC
+    traits are deliberately owned by the following cutover checkpoints.
+  - **D.2h.2b — fixture and runtime-source cutover:** migrate tests away from
+    ambient raw-value traits, then remove the cursor/frontier/runtime-source
+    compatibility traits through access-qualified duplication, comparison,
+    and diagnostics.
+  - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
+    managed-facade traits/identity shims and the five `Gc<T>` traits, add the
+    negative compile/source gates, and make the full workspace compile.
 - **D.2h.3 — ledger closure:** require zero raw violations, zero persistent
   typed-edge defects, no pending production root/admission disposition, and no
   unreviewed fixture exception. Update exact counts and fingerprints only from

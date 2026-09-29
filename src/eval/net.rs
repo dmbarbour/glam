@@ -25,7 +25,7 @@ pub(super) fn attach_net_many_in(
 }
 
 pub(super) fn attached_net_runtime(
-    _access: &RuntimeValueAccess<'_>,
+    access: &RuntimeValueAccess<'_>,
     function: NetValue,
     arguments: Vec<Value>,
 ) -> RuntimeNet<CoreSpecialization> {
@@ -39,7 +39,7 @@ pub(super) fn attached_net_runtime(
         net.wire(argument_port, argument);
     }
     let template = net.finish(spine.result);
-    template.instantiate()
+    template.instantiate_with(access)
 }
 
 pub(super) struct NetWhnfMachine {
@@ -101,7 +101,14 @@ impl NetWhnfMachine {
         arguments: &[Value],
     ) -> Self {
         let stage = function.duplicate_stage_in(access.values());
-        let net = attach_net_many_in(access.values(), stage, arguments.to_vec());
+        let net = attach_net_many_in(
+            access.values(),
+            stage,
+            arguments
+                .iter()
+                .map(|argument| access.values().duplicate_value(argument))
+                .collect(),
+        );
         let runtime = net.into_runtime();
         let exposed = access.net(&runtime).with(|runtime| runtime.exposed());
         Self::new_in(access, runtime, exposed, Arc::from("function call"))
@@ -177,7 +184,7 @@ impl NetWhnfMachine {
                 let value = access.net(&runtime).with(|runtime| {
                     runtime
                         .interface_data(self.driver.request.root_interface)
-                        .cloned()
+                        .map(|value| access.values().duplicate_value(value))
                 });
                 Ok(NetWhnfAccessPoll::Ready(value.expect(
                     "evaluated interaction-net interface must contain data",

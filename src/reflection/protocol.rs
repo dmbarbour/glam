@@ -506,20 +506,6 @@ impl TaskFailure {
     }
 }
 
-impl PartialEq for TaskHalt {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (TaskHaltKind::Failure(left), TaskHaltKind::Failure(right)) => {
-                left.as_failure() == right.as_failure()
-            }
-            (TaskHaltKind::Blocked(left), TaskHaltKind::Blocked(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for TaskHalt {}
-
 impl TaskHalt {
     pub fn new(message: impl Into<Arc<str>>) -> Self {
         let message = message.into();

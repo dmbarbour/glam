@@ -173,7 +173,8 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
         return Ok(definitions.expr(access));
     };
 
-    let target_scope = definition_target_scope_resolved(scope, definitions.clone());
+    let target_scope =
+        definition_target_scope_resolved(access, scope, definitions.duplicate_in(access));
     let target_context =
         DefinitionTargetContext::new(access, definitions, line, context, &target_scope);
     let (assertion, value) = match definition.kind {
@@ -253,17 +254,18 @@ fn apply_reflection_boundary(
 }
 
 pub(in crate::g_syntax) fn definition_target_scope_resolved(
+    access: &RuntimeValueAccess<'_>,
     scope: &NameScope<ResolvedRoot>,
     visible_definitions: ResolvedRoot,
 ) -> NameScope<ResolvedRoot> {
     if scope.object_final_defs.is_some() {
-        return scope.clone();
+        return scope.duplicate_in(access);
     }
 
-    let mut scope = scope.clone();
-    scope.final_defs = visible_definitions.clone();
-    scope.prior_defs = visible_definitions.clone();
-    scope.module_final_defs = visible_definitions.clone();
+    let mut scope = scope.duplicate_in(access);
+    scope.final_defs = visible_definitions.duplicate_in(access);
+    scope.prior_defs = visible_definitions.duplicate_in(access);
+    scope.module_final_defs = visible_definitions.duplicate_in(access);
     scope.module_prior_defs = visible_definitions;
     scope
 }
@@ -447,7 +449,10 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
     dict: &Dict,
 ) -> Value {
     dict.iter().fold(definitions, |definitions, (key, value)| {
-        let mut path = prefix.clone();
+        let mut path = prefix
+            .iter()
+            .map(|part| access.duplicate_value(part))
+            .collect::<Vec<_>>();
         path.push(key.to_value_with(access.values()));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
@@ -460,7 +465,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
                     Builtin::DictUpdate,
                     [
                         ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
-                        ResolvedExpr::Provided(value.clone()),
+                        ResolvedExpr::Provided(access.duplicate_value(value)),
                         ResolvedExpr::Provided(definitions),
                     ],
                 ),

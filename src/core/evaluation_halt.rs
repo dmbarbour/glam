@@ -9,7 +9,7 @@ use super::{EvaluationFailure, ManagedPromiseRoot, RuntimeValueAccess, Value};
 ///
 /// A permanent failure may enter a terminal cache. Blocked waits and
 /// unassigned promises are retryable scheduler state and must not.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct EvaluationHalt {
     kind: EvaluationHaltKind,
 }
@@ -31,21 +31,6 @@ enum EvaluationHaltKind {
         root: Box<ManagedPromiseRoot>,
     },
 }
-
-impl PartialEq for EvaluationHaltKind {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Failure(left), Self::Failure(right)) => left == right,
-            (Self::Blocked(left), Self::Blocked(right)) => left == right,
-            (Self::UnassignedPromise { root: left }, Self::UnassignedPromise { root: right }) => {
-                left.same_promise(right)
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for EvaluationHaltKind {}
 
 /// Direct semantic payload retained by one halted evaluation.
 ///
