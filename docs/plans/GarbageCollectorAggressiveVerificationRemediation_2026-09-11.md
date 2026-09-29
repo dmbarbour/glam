@@ -2006,14 +2006,22 @@ compiler/diagnostic regional functions.
 ##### GCI11R-002D.2h — Zero-Violation and Ownership Closure
 
 0. Repair the aggressive admission witnesses exposed by closure verification:
-   - `source_macro_layout_dedents_resume_inside_delimiter_groups` and
+   - **List-effect admission: complete 2026-09-29.**
+     `source_macro_layout_dedents_resume_inside_delimiter_groups` and
      `source_macros_write_nested_and_same_anchor_layouts`: macro compilation is
-     already complete when these fail. Opening the next evaluator access may
-     collect a lazy edge carried only by the regional `RegionalListEffect`
-     state before `ManagedListEffectCheckpointCell` becomes its traced durable
-     owner. Preserve that state through admission without placing roots inside
-     the managed value graph, and add an exact aggressive handoff test
-     independent of the source-macro fixtures.
+     already complete when these fail. The exact defect was earlier than the
+     provisional checkpoint-admission diagnosis: a source-owned
+     `ListEffectComputation::{Sequence, FlatMapResults, FirstResult}` walked
+     strict list values but omitted the list's direct managed thunk edges.
+     Consequently a deferred list-effect child could be reclaimed while its
+     owning lazy still retained the recipe, and a later checkpoint merely made
+     that already-stale edge visible. `ListEffectComputation` now reports those
+     thunk identities through its direct compatibility channel, and
+     `LazySource` composes that channel into the managed lazy-cell trace. The
+     independent fixture forces collection while the recipe is still the sole
+     durable owner, then admits the checkpoint and collects again. It and both
+     macro witnesses pass ordinarily and aggressively without placing a root
+     inside the managed graph.
    - `compiler::tests::invalid_local_request_never_reaches_the_loader` passed
      in an isolated aggressive process but failed in the parallel aggressive
      compiler partition while rooting a pointer already pending finalization.

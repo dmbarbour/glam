@@ -149,6 +149,17 @@ impl CompatibilityValueEdges for ListEffectComputation {
             Self::FirstResult { results } => results.visit_compatibility_value_edges(visit),
         }
     }
+
+    fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        match self {
+            Self::Sequence { results, .. }
+            | Self::FlatMapResults { results, .. }
+            | Self::FirstResult { results } => {
+                results.trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::Run { .. } | Self::Cut { .. } | Self::FixFunction { .. } => {}
+        }
+    }
 }
 
 impl CompatibilityValueEdges for ReflectionComputation {
@@ -210,8 +221,23 @@ impl CompatibilityValueEdges for LazySource {
     }
 
     fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
-        if let Self::ReflectionTask(computation) = self {
-            computation.trace_direct_compatibility_managed_edges(visitor);
+        match self {
+            Self::ReflectionTask(computation) => {
+                computation.trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::ListEffectComputation(computation) => {
+                computation.trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::Error
+            | Self::HostCall(_)
+            | Self::NetComputation(_)
+            | Self::ComputedFixpoint(_)
+            | Self::Access { .. }
+            | Self::Application(_)
+            | Self::Builtin(_)
+            | Self::FunctionCall { .. } => {}
+            #[cfg(test)]
+            Self::SemanticComputation(_) | Self::SemanticThunk(_) => {}
         }
     }
 }

@@ -171,6 +171,36 @@ fn retained_list_effect_machine(
     (retained, machine)
 }
 
+#[test]
+fn list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk() {
+    let context = isolated_context();
+    let retained = context.values().with_runtime_value_access(|access| {
+        let deferred = LazyValue::error_in(&access, "source-owned deferred list chunk");
+        LazyValue::list_effect_computation_in(
+            &access,
+            "list-effect admission owner",
+            ListEffectComputation::Sequence {
+                results: List::from_thunk(deferred.into()),
+                continuation: Value::Builtin(Builtin::Add),
+            },
+        )
+        .root_in(&access)
+    });
+    collect_between_handoffs(&context);
+    let lazy = context
+        .values()
+        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+    let mut machine = lazy_machine(&context, lazy);
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+    assert!(matches!(
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(0)),
+        EvaluationMachinePoll::Yielded
+    ));
+    assert_list_effect_checkpoint(&context, &machine);
+    collect_between_handoffs(&context);
+}
+
 fn poll_list_effect_until_blocked(
     context: &EvalContext,
     retained: &ManagedLazyRoot,
