@@ -2035,6 +2035,12 @@ inventory relatch:
     ambient raw-value traits, then remove the cursor/frontier/runtime-source
     compatibility traits through access-qualified duplication, comparison,
     and diagnostics.
+    - **Runtime-source production seam: complete 2026-09-29.** Generic runtime
+      sources no longer carry ambient `Clone`, `Debug`, or equality bounds.
+      Cursor dependency duplication and exact comparison are gateway
+      operations; the core driver and its worklist duplicate source-bearing
+      descriptors only through matching runtime access. Fixture migration and
+      removal of the remaining core diagnostic facades remain open here.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

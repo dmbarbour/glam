@@ -134,7 +134,6 @@ pub type CoreInteractionNet = InteractionNet<CoreSpecialization>;
 /// requires explicit matching `RuntimeValueAccess`. Runtime provenance is
 /// established at public construction boundaries and rechecked by registered
 /// roots or collector debug validation rather than cached on every net edge.
-#[derive(Clone)]
 pub struct CoreRuntimeNet {
     edge: ManagedCoreNetEdge,
 }
@@ -585,16 +584,18 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.runtime.cell().with_conditional_edge_mut_via(
             &self.runtime,
             |runtime| {
-                runtime.resolve_cursor_dependency_edge_transition(
+                runtime.resolve_cursor_dependency_edge_transition_with_gateway(
                     cursor,
                     &expected.to_generic(self.values),
+                    &self.runtime,
                 )
             },
             |runtime| {
-                let resolution = runtime.resolve_cursor_dependency(
+                let resolution = runtime.resolve_cursor_dependency_with_gateway(
                     cursor,
                     &expected.to_generic(self.values),
                     disposition,
+                    &self.runtime,
                 );
                 if resolution == CursorDependencyResolution::Resolved {
                     RuntimeNetMutation::Changed(resolution)
@@ -1249,7 +1250,6 @@ impl std::fmt::Debug for CoreNetContention {
     }
 }
 
-#[derive(Clone, Debug)]
 pub(crate) struct CoreFrontierObservation {
     source: CoreRuntimeNet,
     observed_topology: u64,
@@ -1257,6 +1257,14 @@ pub(crate) struct CoreFrontierObservation {
 }
 
 impl CoreFrontierObservation {
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            source: self.source.duplicate_in(access),
+            observed_topology: self.observed_topology,
+            endpoint: self.endpoint,
+        }
+    }
+
     fn from_generic(
         inner: FrontierObservation<CoreSpecialization>,
         access: &RuntimeValueAccess<'_>,
@@ -1322,14 +1330,41 @@ impl CoreFrontierObservation {
     }
 }
 
-#[derive(Clone, Debug)]
 pub(crate) enum CoreCursorDependency {
     LocalCursor(NodeId),
     SourceCursor(CoreFrontierObservation),
     SourceFrontier(CoreFrontierObservation),
 }
 
+impl std::fmt::Debug for CoreCursorDependency {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalCursor(cursor) => {
+                formatter.debug_tuple("LocalCursor").field(cursor).finish()
+            }
+            Self::SourceCursor(observation) => formatter
+                .debug_tuple("SourceCursor")
+                .field(&observation.endpoint())
+                .finish(),
+            Self::SourceFrontier(observation) => formatter
+                .debug_tuple("SourceFrontier")
+                .field(&observation.endpoint())
+                .finish(),
+        }
+    }
+}
+
 impl CoreCursorDependency {
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        match self {
+            Self::LocalCursor(cursor) => Self::LocalCursor(*cursor),
+            Self::SourceCursor(observation) => Self::SourceCursor(observation.duplicate_in(access)),
+            Self::SourceFrontier(observation) => {
+                Self::SourceFrontier(observation.duplicate_in(access))
+            }
+        }
+    }
+
     fn from_generic(
         dependency: CursorDependency<CoreSpecialization>,
         access: &RuntimeValueAccess<'_>,

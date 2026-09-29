@@ -87,7 +87,7 @@ impl NetWhnfMachine {
         operation: Arc<str>,
     ) -> Self {
         let request = NormalizationRequest::cursor_whnf_in(&runtime, interface, access);
-        let driver = NetDriver::new(&request);
+        let driver = NetDriver::new(&request, access.values());
         Self {
             driver,
             operation,
@@ -173,7 +173,7 @@ impl NetWhnfMachine {
                 context.context().values().record_net_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
                 );
-                self.driver.restart_from_request_root();
+                self.driver.restart_from_request_root(access.values());
                 Ok(NetWhnfAccessPoll::Yielded)
             }
             #[cfg(all(test, feature = "interaction-net-profiling"))]
@@ -237,13 +237,19 @@ enum NetInterfaceOutcome {
 /// Evaluator-owned description of one demanded interaction-net frontier.
 /// Shared progress remains in the net's cursor obligations; cloning or
 /// dropping this descriptor has no runtime lifecycle effect.
-#[derive(Clone)]
 struct NormalizationRequest {
     root: CoreRuntimeNet,
     root_interface: Port,
 }
 
 impl NormalizationRequest {
+    fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            root: self.root.duplicate_in(access),
+            root_interface: self.root_interface,
+        }
+    }
+
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         self.root.trace_managed_edge(visitor);
     }
@@ -255,7 +261,6 @@ const _: () = assert!(std::mem::size_of::<NormalizationRequest>() == 16);
 /// One evaluator-owned unit of cursor-WHNF work. These descriptors carry no
 /// claim or lifecycle ownership; authoritative progress remains in the shared
 /// runtime nets and can be reconstructed from `RequestRoot` after a retry.
-#[derive(Clone)]
 enum NetDriverWork {
     RequestRoot {
         root: CoreRuntimeNet,
@@ -301,14 +306,15 @@ impl NetDriverWorklist {
 
     fn follow_cursor_dependency(
         &mut self,
+        access: &RuntimeValueAccess<'_>,
         root: CoreRuntimeNet,
         cursor: crate::interaction_net::NodeId,
         dependency: CursorDependency,
     ) {
         self.push(NetDriverWork::ResumeCursorDependency {
-            root: root.clone(),
+            root: root.duplicate_in(access),
             cursor,
-            expected_dependency: dependency.clone(),
+            expected_dependency: dependency.duplicate_in(access),
             disposition: CursorDependencyDisposition::Progressed,
         });
         self.push(match dependency {
@@ -353,6 +359,45 @@ impl NetDriverWorklist {
 }
 
 impl NetDriverWork {
+    fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        match self {
+            Self::RequestRoot { root, interface } => Self::RequestRoot {
+                root: root.duplicate_in(access),
+                interface: *interface,
+            },
+            Self::Cursor { root, cursor } => Self::Cursor {
+                root: root.duplicate_in(access),
+                cursor: *cursor,
+            },
+            Self::ObservedCursor {
+                observation,
+                cursor,
+            } => Self::ObservedCursor {
+                observation: observation.duplicate_in(access),
+                cursor: *cursor,
+            },
+            Self::ActivePair { root, pair } => Self::ActivePair {
+                root: root.duplicate_in(access),
+                pair: *pair,
+            },
+            Self::ObservedActivePair { observation, pair } => Self::ObservedActivePair {
+                observation: observation.duplicate_in(access),
+                pair: *pair,
+            },
+            Self::ResumeCursorDependency {
+                root,
+                cursor,
+                expected_dependency,
+                disposition,
+            } => Self::ResumeCursorDependency {
+                root: root.duplicate_in(access),
+                cursor: *cursor,
+                expected_dependency: expected_dependency.duplicate_in(access),
+                disposition: *disposition,
+            },
+        }
+    }
+
     fn runtime(&self, access: &RuntimeValueAccess<'_>) -> crate::core_net::CoreRuntimeNet {
         match self {
             Self::RequestRoot { root, .. }
@@ -402,10 +447,10 @@ struct NetDriver {
 }
 
 impl NetDriver {
-    fn new(request: &NormalizationRequest) -> Self {
-        let request = request.clone();
+    fn new(request: &NormalizationRequest, access: &RuntimeValueAccess<'_>) -> Self {
+        let request = request.duplicate_in(access);
         let mut worklist = NetDriverWorklist::default();
-        worklist.push(request.root_work());
+        worklist.push(request.root_work(access));
         Self {
             request,
             worklist,
@@ -413,8 +458,8 @@ impl NetDriver {
         }
     }
 
-    fn restart_from_request_root(&mut self) {
-        self.worklist.reset(self.request.root_work());
+    fn restart_from_request_root(&mut self, access: &RuntimeValueAccess<'_>) {
+        self.worklist.reset(self.request.root_work(access));
         self.progressed = false;
     }
 
@@ -431,7 +476,7 @@ fn drive_net_work_in(
     context: &EvaluatorStepContext<'_>,
     request: &NormalizationRequest,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
-    let mut driver = NetDriver::new(request);
+    let mut driver = context.with_value_access(|access| NetDriver::new(request, access.values()));
     drive_net_driver_work_in(context, &mut driver)
 }
 
@@ -471,7 +516,7 @@ fn drive_net_driver_work_with_budget_access(
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
-        let retained_work = work.clone();
+        let retained_work = work.duplicate_in(values.values());
         let work_runtime = work.runtime(values.values());
         let access = values.net(&work_runtime);
         let outcome = access.with_normalization_batch(|access| {
@@ -643,14 +688,14 @@ fn drive_net_work_item(
                 }
                 InterfaceDemand::Cursor(cursor) => {
                     driver.worklist.push(NetDriverWork::RequestRoot {
-                        root: root.clone(),
+                        root: root.duplicate_in(access.values()),
                         interface,
                     });
                     driver.worklist.push(NetDriverWork::Cursor { root, cursor });
                 }
                 InterfaceDemand::ActivePair(pair) => {
                     driver.worklist.push(NetDriverWork::RequestRoot {
-                        root: root.clone(),
+                        root: root.duplicate_in(access.values()),
                         interface,
                     });
                     driver
@@ -678,9 +723,12 @@ fn drive_net_work_item(
                     access.record_driver(
                         crate::interaction_net::profiling::DriverEvent::CursorDependency,
                     );
-                    driver
-                        .worklist
-                        .follow_cursor_dependency(root, cursor, dependency);
+                    driver.worklist.follow_cursor_dependency(
+                        access.values(),
+                        root,
+                        cursor,
+                        dependency,
+                    );
                 }
                 CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
                 CursorStep::Contended(contention) => {
@@ -717,7 +765,8 @@ fn drive_net_work_item(
                         crate::interaction_net::profiling::DriverEvent::CursorDependency,
                     );
                     driver.worklist.follow_cursor_dependency(
-                        observation.retained_source().clone(),
+                        access.values(),
+                        observation.retained_source().duplicate_in(access.values()),
                         cursor,
                         dependency,
                     );
@@ -755,7 +804,7 @@ fn drive_net_work_item(
             return prepare_active_pair_step(
                 driver,
                 access,
-                observation.retained_source().clone(),
+                observation.retained_source().duplicate_in(access.values()),
                 pair,
                 step,
             );
@@ -780,7 +829,7 @@ fn drive_net_work_item(
                 access.record_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
                 );
-                driver.restart_from_request_root();
+                driver.restart_from_request_root(access.values());
             }
         },
     }
@@ -1028,9 +1077,9 @@ impl NormalizationRequest {
         }
     }
 
-    fn root_work(&self) -> NetDriverWork {
+    fn root_work(&self, access: &RuntimeValueAccess<'_>) -> NetDriverWork {
         NetDriverWork::RequestRoot {
-            root: self.root.clone(),
+            root: self.root.duplicate_in(access),
             interface: self.root_interface,
         }
     }

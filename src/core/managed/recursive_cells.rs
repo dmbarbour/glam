@@ -1155,6 +1155,11 @@ impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, 
     }
 
     #[inline(always)]
+    fn same_runtime_source(&self, left: &CoreRuntimeNet, right: &CoreRuntimeNet) -> bool {
+        left.same_net_in(right, self.authority)
+    }
+
+    #[inline(always)]
     fn transition_edges<Result>(
         &self,
         runtime: &mut RuntimeNet<CoreSpecialization>,

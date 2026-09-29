@@ -111,7 +111,7 @@ pub trait NetSpecialization: Clone + fmt::Debug + PartialEq + Eq + Sized + 'stat
     /// not assume how it owns or accesses the referenced net. The ordinary
     /// shared runtime uses `SharedRuntimeNet<Self>`; the core specialization
     /// may instead select a managed identity without changing `RuntimeNet`.
-    type RuntimeSource: Clone + fmt::Debug + PartialEq + Eq + 'static;
+    type RuntimeSource: 'static;
     /// Opaque identity for one externally blocked operation.
     ///
     /// Equality lets an evaluator reject a stale wakeup after a pair has been

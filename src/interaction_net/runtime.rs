@@ -21,6 +21,7 @@ impl<S: NetSpecialization> InteractionNet<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
         S::Operator: Clone,
     {
         RuntimeNet::new(self, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
@@ -189,7 +190,7 @@ impl fmt::Debug for NetContention {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum CursorStep<S: NetSpecialization> {
     Progressed(CursorProgress),
     Dependency(CursorDependency<S>),
@@ -199,7 +200,7 @@ pub enum CursorStep<S: NetSpecialization> {
     Gone,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ActivePairStep<S: NetSpecialization> {
     Reduction(Reduction),
     Cursor(NodeId),
@@ -216,7 +217,6 @@ pub enum ActivePairStep<S: NetSpecialization> {
 /// frontier. The complete auxiliary/principal spine is deliberately not
 /// retained; a disturbed observation is reconstructed from the authoritative
 /// parent cursor and evaluator request root.
-#[derive(Clone, PartialEq, Eq)]
 pub struct FrontierObservation<S: NetSpecialization> {
     source: S::RuntimeSource,
     observed_topology: u64,
@@ -224,6 +224,20 @@ pub struct FrontierObservation<S: NetSpecialization> {
 }
 
 impl<S: NetSpecialization> FrontierObservation<S> {
+    fn duplicate_with(&self, gateway: &impl RuntimeNetMutationGateway<S>) -> Self {
+        Self {
+            source: gateway.duplicate_runtime_source(&self.source),
+            observed_topology: self.observed_topology,
+            endpoint: self.endpoint,
+        }
+    }
+
+    fn same_with(&self, other: &Self, gateway: &impl RuntimeNetMutationGateway<S>) -> bool {
+        self.observed_topology == other.observed_topology
+            && self.endpoint == other.endpoint
+            && gateway.same_runtime_source(&self.source, &other.source)
+    }
+
     pub(crate) fn from_snapshot(
         source: S::RuntimeSource,
         observed_topology: u64,
@@ -275,14 +289,13 @@ impl<S: NetSpecialization> fmt::Debug for FrontierObservation<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FrontierObservation")
-            .field("source", &self.source)
+            .field("source", &"..")
             .field("observed_topology", &self.observed_topology)
             .field("endpoint", &self.endpoint)
             .finish()
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
 pub enum CursorDependency<S: NetSpecialization> {
     LocalCursor(NodeId),
     /// Versioned observation of a source cursor. Work is claimed through that
@@ -312,6 +325,29 @@ impl<S: NetSpecialization> fmt::Debug for CursorDependency<S> {
 }
 
 impl<S: NetSpecialization> CursorDependency<S> {
+    fn duplicate_with(&self, gateway: &impl RuntimeNetMutationGateway<S>) -> Self {
+        match self {
+            Self::LocalCursor(cursor) => Self::LocalCursor(*cursor),
+            Self::SourceCursor(observation) => {
+                Self::SourceCursor(observation.duplicate_with(gateway))
+            }
+            Self::SourceFrontier(observation) => {
+                Self::SourceFrontier(observation.duplicate_with(gateway))
+            }
+        }
+    }
+
+    fn same_with(&self, other: &Self, gateway: &impl RuntimeNetMutationGateway<S>) -> bool {
+        match (self, other) {
+            (Self::LocalCursor(left), Self::LocalCursor(right)) => left == right,
+            (Self::SourceCursor(left), Self::SourceCursor(right))
+            | (Self::SourceFrontier(left), Self::SourceFrontier(right)) => {
+                left.same_with(right, gateway)
+            }
+            _ => false,
+        }
+    }
+
     #[allow(
         dead_code,
         reason = "I4E source visitation is consumed by the I5D production core-net trace and I8 audit"
@@ -326,7 +362,7 @@ impl<S: NetSpecialization> CursorDependency<S> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum PairlessCursorState<S: NetSpecialization> {
     Ready,
     Claimed,
@@ -350,7 +386,7 @@ pub(crate) struct CursorObligationSnapshot {
     pub status: CursorObligationStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum CursorBlockage<S: NetSpecialization> {
     Dependency(CursorDependency<S>),
     Stable,
@@ -362,7 +398,7 @@ impl<S: NetSpecialization> PairlessCursorState<S> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PairlessCursorObligation<S: NetSpecialization> {
     cursor: NodeId,
     state: PairlessCursorState<S>,
@@ -447,7 +483,7 @@ pub struct BlockedCursor {
     pub cursor: NodeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
@@ -579,6 +615,8 @@ pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization>:
     /// temporary edge through their value-access region; the generic direct
     /// specialization retains ordinary owner cloning.
     fn duplicate_runtime_source(&self, source: &S::RuntimeSource) -> S::RuntimeSource;
+
+    fn same_runtime_source(&self, left: &S::RuntimeSource, right: &S::RuntimeSource) -> bool;
 
     /// Performs an edge-free topology or coordination transition.
     ///
@@ -795,11 +833,16 @@ where
     S: NetSpecialization,
     S::Data: Clone,
     S::Operator: Clone,
-    S::RuntimeSource: Clone,
+    S::RuntimeSource: Clone + PartialEq,
 {
     #[inline(always)]
     fn duplicate_runtime_source(&self, source: &S::RuntimeSource) -> S::RuntimeSource {
         source.clone()
+    }
+
+    #[inline(always)]
+    fn same_runtime_source(&self, left: &S::RuntimeSource, right: &S::RuntimeSource) -> bool {
+        left == right
     }
 
     #[inline(always)]
@@ -1081,6 +1124,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.with_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
@@ -1153,6 +1197,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.with_conditional_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
@@ -1232,6 +1277,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
     }
@@ -1249,12 +1295,24 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.with_conditional_edge_mut_via(
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
-            |runtime| runtime.resolve_cursor_dependency_edge_transition(cursor, expected),
             |runtime| {
-                let resolution = runtime.resolve_cursor_dependency(cursor, expected, disposition);
+                runtime.resolve_cursor_dependency_edge_transition_with_gateway(
+                    cursor,
+                    expected,
+                    &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+                )
+            },
+            |runtime| {
+                let resolution = runtime.resolve_cursor_dependency_with_gateway(
+                    cursor,
+                    expected,
+                    disposition,
+                    &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+                );
                 if resolution == CursorDependencyResolution::Resolved {
                     RuntimeNetMutation::Changed(resolution)
                 } else {
@@ -1294,6 +1352,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.step_active_pair_with_gateway(
             pair,
@@ -1313,87 +1372,97 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         Gateway: RuntimeNetMutationGateway<S>,
     {
-        let (mut outcome, cursor_claim) =
+        let (mut outcome, cursor_claim) = {
+            let mut state = self
+                .runtime
+                .lock()
+                .expect("shared runtime net was poisoned");
+            let revisions = self.revisions();
+            if expected_topology_revision
+                .is_some_and(|expected| expected != revisions.topology_revision())
             {
-                let mut state = self
-                    .runtime
-                    .lock()
-                    .expect("shared runtime net was poisoned");
-                let revisions = self.revisions();
-                if expected_topology_revision
-                    .is_some_and(|expected| expected != revisions.topology_revision())
-                {
-                    return match state.runtime.active.get(&pair) {
-                        Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
-                            pair,
-                            reason: reason.clone(),
-                        }),
-                        _ => ActivePairStep::Disturbed,
-                    };
-                }
-                let pair_state = state.runtime.active.get(&pair).cloned();
-                let mut cursor_claim = None;
-                let (outcome, changed) =
-                    match pair_state {
-                        Some(ActivePairState::Ready) => {
-                            let edges = state.runtime.reduce_pair_edge_transition(pair);
-                            let reduction = gateway
-                                .transition_edges(&mut state.runtime, edges, |runtime| {
-                                    runtime.reduce_pair_with_gateway(pair, gateway)
-                                })
-                                .expect("ready pair must produce one reduction");
-                            if let ReductionKind::RemoteCursor {
-                                cursor,
-                                progress: CursorProgress::Claimed,
-                            } = &reduction.kind
-                            {
-                                cursor_claim =
-                                    Some(state.runtime.cursor_claim(*cursor, gateway).expect(
-                                        "cursor reduction must retain its claimed transition",
-                                    ));
-                            }
-                            (ActivePairStep::Reduction(reduction), true)
-                        }
-                        Some(ActivePairState::Claimed) => {
-                            (ActivePairStep::Contended(self.contention(revisions)), false)
-                        }
-                        Some(ActivePairState::BlockedCursor { cursor, .. }) => {
-                            (ActivePairStep::Cursor(cursor), false)
-                        }
-                        Some(ActivePairState::BlockedCall { wait }) => (
-                            ActivePairStep::BlockedCall(BlockedCall { pair, wait }),
-                            false,
-                        ),
-                        Some(ActivePairState::BlockedCallableCheckpoint { generation, wait }) => {
-                            let call = state
+                return match state.runtime.active.get(&pair) {
+                    Some(ActivePairState::Stuck(reason)) => ActivePairStep::Stuck(StuckPair {
+                        pair,
+                        reason: reason.clone(),
+                    }),
+                    _ => ActivePairStep::Disturbed,
+                };
+            }
+            let mut cursor_claim = None;
+            let (outcome, changed) = match state.runtime.active.get(&pair) {
+                Some(ActivePairState::Ready) => {
+                    let edges = state.runtime.reduce_pair_edge_transition(pair);
+                    let reduction = gateway
+                        .transition_edges(&mut state.runtime, edges, |runtime| {
+                            runtime.reduce_pair_with_gateway(pair, gateway)
+                        })
+                        .expect("ready pair must produce one reduction");
+                    if let ReductionKind::RemoteCursor {
+                        cursor,
+                        progress: CursorProgress::Claimed,
+                    } = &reduction.kind
+                    {
+                        cursor_claim = Some(
+                            state
                                 .runtime
-                                .callable_checkpoint(pair)
-                                .expect("blocked checkpoint state must retain its structural pair");
-                            debug_assert_eq!(call.generation, generation);
-                            (
-                                ActivePairStep::BlockedCallableCheckpoint(
-                                    BlockedCallableCheckpoint { call, wait },
-                                ),
-                                false,
-                            )
-                        }
-                        Some(ActivePairState::BlockedOperatorCall { wait }) => (
-                            ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { pair, wait }),
-                            false,
-                        ),
-                        Some(ActivePairState::Stuck(reason)) => {
-                            (ActivePairStep::Stuck(StuckPair { pair, reason }), false)
-                        }
-                        None => (ActivePairStep::Gone, false),
-                    };
-                if changed {
-                    self.publish_mutation(&mut state.batches);
+                                .cursor_claim(*cursor, gateway)
+                                .expect("cursor reduction must retain its claimed transition"),
+                        );
+                    }
+                    (ActivePairStep::Reduction(reduction), true)
                 }
-                (
-                    outcome,
-                    cursor_claim.map(|claim| CursorClaimGuard::new(self, claim, gateway)),
-                )
+                Some(ActivePairState::Claimed) => {
+                    (ActivePairStep::Contended(self.contention(revisions)), false)
+                }
+                Some(ActivePairState::BlockedCursor { cursor, .. }) => {
+                    (ActivePairStep::Cursor(*cursor), false)
+                }
+                Some(ActivePairState::BlockedCall { wait }) => (
+                    ActivePairStep::BlockedCall(BlockedCall {
+                        pair,
+                        wait: wait.clone(),
+                    }),
+                    false,
+                ),
+                Some(ActivePairState::BlockedCallableCheckpoint { generation, wait }) => {
+                    let call = state
+                        .runtime
+                        .callable_checkpoint(pair)
+                        .expect("blocked checkpoint state must retain its structural pair");
+                    debug_assert_eq!(call.generation, *generation);
+                    (
+                        ActivePairStep::BlockedCallableCheckpoint(BlockedCallableCheckpoint {
+                            call,
+                            wait: wait.clone(),
+                        }),
+                        false,
+                    )
+                }
+                Some(ActivePairState::BlockedOperatorCall { wait }) => (
+                    ActivePairStep::BlockedOperatorCall(BlockedOperatorCall {
+                        pair,
+                        wait: wait.clone(),
+                    }),
+                    false,
+                ),
+                Some(ActivePairState::Stuck(reason)) => (
+                    ActivePairStep::Stuck(StuckPair {
+                        pair,
+                        reason: reason.clone(),
+                    }),
+                    false,
+                ),
+                None => (ActivePairStep::Gone, false),
             };
+            if changed {
+                self.publish_mutation(&mut state.batches);
+            }
+            (
+                outcome,
+                cursor_claim.map(|claim| CursorClaimGuard::new(self, claim, gateway)),
+            )
+        };
 
         if let Some(claim) = cursor_claim {
             let progress = claim.advance_with(inspect_source);
@@ -1426,6 +1495,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     where
         S::Data: Clone,
         S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
     {
         self.step_cursor_with_gateway(
             cursor,
@@ -1456,7 +1526,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             {
                 return CursorStep::Disturbed;
             }
-            match state.runtime.inspect_cursor_step(cursor) {
+            match state.runtime.inspect_cursor_step(cursor, gateway) {
                 CursorStepInspection::Claimable(expected_pair) => {
                     let progress = gateway
                         .transition(&mut state.runtime, |runtime| {
@@ -1486,7 +1556,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             return CursorStep::Progressed(progress);
         }
         let (inspection, revisions) =
-            self.with_revisions(|runtime| runtime.inspect_cursor_step(cursor));
+            self.with_revisions(|runtime| runtime.inspect_cursor_step(cursor, gateway));
         match inspection {
             CursorStepInspection::Claimable(_) => CursorStep::Progressed(progress),
             CursorStepInspection::Dependency(dependency) => CursorStep::Dependency(dependency),
@@ -1608,6 +1678,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 impl<S> SharedRuntimeNet<S>
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     #[cfg(test)]
     fn test_cursor_claim_guard(
@@ -2259,10 +2331,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         )
     }
 
-    pub(crate) fn resolve_cursor_dependency_edge_transition(
+    pub(crate) fn resolve_cursor_dependency_edge_transition_with_gateway(
         &self,
         cursor: NodeId,
         expected: &CursorDependency<S>,
+        gateway: &impl RuntimeNetMutationGateway<S>,
     ) -> RuntimeNetEdgeTransition {
         let leaving = match self.cursor_claim_owner(cursor) {
             Some(CursorClaimOwner::ActivePair(pair))
@@ -2271,7 +2344,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     Some(ActivePairState::BlockedCursor {
                         cursor: blocked,
                         blockage: CursorBlockage::Dependency(actual),
-                    }) if *blocked == cursor && actual == expected
+                    }) if *blocked == cursor && actual.same_with(expected, gateway)
                 ) =>
             {
                 RuntimeNetEdgeSet::active(pair)
@@ -2282,7 +2355,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     Some(PairlessCursorObligation {
                         state: PairlessCursorState::Blocked(actual),
                         ..
-                    }) if actual == expected
+                    }) if actual.same_with(expected, gateway)
                 ) =>
             {
                 RuntimeNetEdgeSet::default().with_obligation(cursor)
@@ -2366,7 +2439,31 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    fn inspect_cursor_step(&self, cursor: NodeId) -> CursorStepInspection<S> {
+    fn cursor_claim_is_stable(&self, cursor: NodeId) -> bool {
+        match self.cursor_claim_owner(cursor) {
+            Some(CursorClaimOwner::ActivePair(pair)) => matches!(
+                self.active.get(&pair),
+                Some(ActivePairState::BlockedCursor {
+                    cursor: blocked,
+                    blockage: CursorBlockage::Stable,
+                }) if *blocked == cursor
+            ),
+            Some(CursorClaimOwner::Obligation) => matches!(
+                self.cursor_obligations.get(&cursor),
+                Some(PairlessCursorObligation {
+                    state: PairlessCursorState::Stable,
+                    ..
+                })
+            ),
+            None => false,
+        }
+    }
+
+    fn inspect_cursor_step(
+        &self,
+        cursor: NodeId,
+        gateway: &impl RuntimeNetMutationGateway<S>,
+    ) -> CursorStepInspection<S> {
         match self.cursor_claim_owner(cursor) {
             Some(CursorClaimOwner::ActivePair(pair)) => match self.active.get(&pair) {
                 Some(ActivePairState::Ready) => CursorStepInspection::Claimable(Some(pair)),
@@ -2374,7 +2471,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 Some(ActivePairState::BlockedCursor {
                     cursor: blocked,
                     blockage: CursorBlockage::Dependency(dependency),
-                }) if *blocked == cursor => CursorStepInspection::Dependency(dependency.clone()),
+                }) if *blocked == cursor => {
+                    CursorStepInspection::Dependency(dependency.duplicate_with(gateway))
+                }
                 Some(ActivePairState::BlockedCursor {
                     cursor: blocked,
                     blockage: CursorBlockage::Stable,
@@ -2391,7 +2490,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     PairlessCursorState::Ready => CursorStepInspection::Claimable(None),
                     PairlessCursorState::Claimed => CursorStepInspection::Claimed,
                     PairlessCursorState::Blocked(dependency) => {
-                        CursorStepInspection::Dependency(dependency.clone())
+                        CursorStepInspection::Dependency(dependency.duplicate_with(gateway))
                     }
                     PairlessCursorState::Stable => CursorStepInspection::Stable,
                 }
@@ -3213,12 +3312,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 Some(RuntimeNode::RemoteCursor { .. }) => {
                     let inserted = self.cursor_claim_owner(node).is_none()
                         && self.ensure_pairless_cursor_obligation(node);
-                    let demand =
-                        if matches!(self.inspect_cursor_step(node), CursorStepInspection::Stable) {
-                            InterfaceDemand::StableCursor(node)
-                        } else {
-                            InterfaceDemand::Cursor(node)
-                        };
+                    let demand = if self.cursor_claim_is_stable(node) {
+                        InterfaceDemand::StableCursor(node)
+                    } else {
+                        InterfaceDemand::Cursor(node)
+                    };
                     return if inserted {
                         RuntimeNetMutation::Changed(demand)
                     } else {
@@ -3303,11 +3401,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    pub(crate) fn resolve_cursor_dependency(
+    pub(crate) fn resolve_cursor_dependency_with_gateway(
         &mut self,
         cursor: NodeId,
         expected: &CursorDependency<S>,
         disposition: CursorDependencyDisposition,
+        gateway: &impl RuntimeNetMutationGateway<S>,
     ) -> CursorDependencyResolution {
         let Some(owner) = self.cursor_claim_owner(cursor) else {
             return CursorDependencyResolution::Gone;
@@ -3318,14 +3417,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 Some(ActivePairState::BlockedCursor {
                     cursor: blocked,
                     blockage: CursorBlockage::Dependency(actual),
-                }) if *blocked == cursor && actual == expected
+                }) if *blocked == cursor && actual.same_with(expected, gateway)
             ),
             CursorClaimOwner::Obligation => matches!(
                 self.cursor_obligations.get(&cursor),
                 Some(PairlessCursorObligation {
                     state: PairlessCursorState::Blocked(actual),
                     ..
-                }) if actual == expected
+                }) if actual.same_with(expected, gateway)
             ),
         };
         if !matches_expected {
