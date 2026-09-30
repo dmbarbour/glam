@@ -3490,7 +3490,9 @@ fn list_concat_resumes_after_its_source_becomes_available() {
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ListConcat),
-        vec![Value::Promised(source.clone())],
+        vec![Value::Promised(
+            source.duplicate_for_test(observer.values()),
+        )],
     )
     .expect("list-concat application should build");
 
@@ -3553,7 +3555,7 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
     let context = test_context();
     let promise = PromisedValue::new(context.values(), "promised list tail");
     let list = context.values().with_runtime_value_access(|access| {
-        append_sequence(&access, Value::Promised(promise.clone()))
+        append_sequence(&access, Value::Promised(promise.duplicate_in(&access)))
             .expect("a promise remains a valid deferred list tail")
     });
 
@@ -3672,8 +3674,12 @@ fn lazy_arguments_share_forced_values() {
 
 #[test]
 fn equality_errors_when_dictionary_comparison_reaches_functions() {
+    let values = crate::core::test_value_factory();
     let function = closed_function_value(1, TestExpr::Local(0));
-    let left = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function.clone()));
+    let left = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("f"),
+        function.duplicate_for_test(&values),
+    ));
     let right = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("f"), function));
     let err = eval_closed_expr(&builtin2_expr(
         Builtin::Equal,
@@ -3688,16 +3694,19 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
 #[test]
 fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
     let function = closed_function_value(2, TestExpr::Local(0));
-    let callable = classify_core_callable(&test_context(), function.clone())
-        .expect("an ordinary function should be callable from an interaction net");
+    let callable = classify_core_callable(
+        &test_context(),
+        function.duplicate_for_test(&crate::core::test_value_factory()),
+    )
+    .expect("an ordinary function should be callable from an interaction net");
 
     match callable {
         CoreCallable::Operator(CoreOperator::Applicable(actual)) => {
             crate::core::test_value_factory()
                 .assert_same_representation_for_test(&actual, &function);
         }
-        CoreCallable::Operator(other) => {
-            panic!("ordinary function lowered to the wrong operator: {other:?}");
+        CoreCallable::Operator(_) => {
+            panic!("ordinary function lowered to the wrong operator");
         }
         CoreCallable::Net(_) => {
             panic!("ordinary function must not expose its internal stage as a raw net");
@@ -3719,8 +3728,8 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
         let error = eval_closed_expr(&builtin2_expr(
             builtin,
-            TestExpr::Value(carrier.clone()),
-            TestExpr::Value(carrier.clone()),
+            TestExpr::Value(carrier.duplicate_for_test(&values)),
+            TestExpr::Value(carrier.duplicate_for_test(&values)),
         ))
         .expect_err_without_debug("comparison must not expose sealed carrier identity");
         assert!(
@@ -3730,13 +3739,13 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     }
 
     assert!(
-        run_pattern_equal(unit_value(), carrier.clone())
+        run_pattern_equal(unit_value(), carrier.duplicate_for_test(&values))
             .expect("a sealed carrier should be an ordinary pattern mismatch")
             .is_empty()
     );
     for builtin in [Builtin::PatternIsList, Builtin::PatternIsDict] {
         assert!(
-            run_pattern_builtin(builtin, carrier.clone())
+            run_pattern_builtin(builtin, carrier.duplicate_for_test(&values))
                 .expect("sealed carriers should mismatch ordinary shape patterns")
                 .is_empty()
         );
@@ -3745,7 +3754,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     let unit_error = eval_closed_expr(&builtin3_expr(
         Builtin::AssertUnit,
         TestExpr::Value(Value::binary_from_text("sealed result")),
-        TestExpr::Value(carrier.clone()),
+        TestExpr::Value(carrier.duplicate_for_test(&values)),
         TestExpr::Value(n(42)),
     ))
     .expect_err_without_debug("a sealed unit carrier must not satisfy a unit assertion");
@@ -3754,7 +3763,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         "sealed result: unit expected, received Sealed"
     );
 
-    let application = apply_value(&test_context(), carrier.clone(), n(0))
+    let application = apply_value(&test_context(), carrier.duplicate_for_test(&values), n(0))
         .expect("application construction should remain lazy");
     let application_error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
@@ -3763,7 +3772,9 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         application_error.to_string(),
         "application requires a function value, received Sealed"
     );
-    let Err(net_call_error) = classify_core_callable(&test_context(), carrier.clone()) else {
+    let Err(net_call_error) =
+        classify_core_callable(&test_context(), carrier.duplicate_for_test(&values))
+    else {
         panic!("an interaction-net call must not unseal metadata");
     };
     assert_eq!(
@@ -3960,7 +3971,10 @@ fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable()
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::Map),
-        vec![callable, Value::Promised(source.clone())],
+        vec![
+            callable,
+            Value::Promised(source.duplicate_for_test(observer.values())),
+        ],
     )
     .expect("map application should build");
 
@@ -4081,11 +4095,12 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
 
 #[test]
 fn compiler_pattern_equality_mismatches_incompatible_values() {
+    let values = crate::core::test_value_factory();
     let atom = key_value(&Key::atom_from_text("tag"));
     for (expected, actual) in [
         (unit_value(), unit_value()),
         (n(42), n(42)),
-        (atom.clone(), atom),
+        (atom.duplicate_for_test(&values), atom),
         (
             Value::binary_from_text("AB"),
             Value::List(List::from_values(vec![n(65), n(66)])),
@@ -4143,7 +4158,9 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         Value::Builtin(Builtin::PatternEqual),
         vec![
             expected,
-            Value::List(List::from_values(vec![Value::Promised(item.clone())])),
+            Value::List(List::from_values(vec![Value::Promised(
+                item.duplicate_for_test(observer.values()),
+            )])),
         ],
     )
     .expect("pattern equality application should build");
@@ -4192,13 +4209,20 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
 
 #[test]
 fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
+    let values = crate::core::test_value_factory();
     let foo = key_value(&Key::atom_from_text("foo"));
-    let expected = Value::List(List::from_values(vec![foo.clone(), n(42)]));
+    let expected = Value::List(List::from_values(vec![
+        foo.duplicate_for_test(&values),
+        n(42),
+    ]));
     crate::core::test_value_factory().assert_same_representation_for_test(
         &run_pattern_builtin2(
             Builtin::PatternPathEqual,
-            expected.clone(),
-            Value::List(List::from_values(vec![foo.clone(), n(42)])),
+            expected.duplicate_for_test(&values),
+            Value::List(List::from_values(vec![
+                foo.duplicate_for_test(&values),
+                n(42),
+            ])),
         )
         .expect("equal computed paths should match"),
         &[unit_value()],
@@ -4209,9 +4233,13 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
         n(42),
     ] {
         assert!(
-            run_pattern_builtin2(Builtin::PatternPathEqual, expected.clone(), actual)
-                .expect("a different or non-keyable subject path should mismatch")
-                .is_empty()
+            run_pattern_builtin2(
+                Builtin::PatternPathEqual,
+                expected.duplicate_for_test(&values),
+                actual,
+            )
+            .expect("a different or non-keyable subject path should mismatch")
+            .is_empty()
         );
     }
     assert_eq!(
@@ -4261,7 +4289,7 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         vec![
             Value::List(List::from_values(vec![expected_item])),
             Value::List(List::from_values(vec![Value::Promised(
-                actual_item.clone(),
+                actual_item.duplicate_for_test(observer.values()),
             )])),
         ],
     )
@@ -4356,15 +4384,18 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     let observed = Arc::clone(&prefix_demands);
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");
-    let promised_leaf = leaf.clone();
+    let values = observer.values().clone();
+    let promised_leaf = leaf.duplicate_for_test(&values);
+    let captured_leaf = promised_leaf.duplicate_for_test(&values);
     let child = Value::semantic_thunk(
         observer.values(),
         "instrumented pattern dictionary prefix",
         move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(
-                Dict::new_sync().insert(bar.clone(), Value::Promised(leaf.clone())),
-            ))
+            Ok(Value::Dict(Dict::new_sync().insert(
+                bar.clone(),
+                Value::Promised(captured_leaf.duplicate_for_test(&values)),
+            )))
         },
     );
     let path = Value::List(List::from_values(vec![
@@ -4428,6 +4459,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
 
 #[test]
 fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
+    let values = crate::core::test_value_factory();
     let key = Key::atom_from_text("key");
     let path = Value::List(List::from_values(vec![key_value(&key)]));
     for value in [
@@ -4436,9 +4468,13 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
         n(1),
     ] {
         assert!(
-            run_pattern_builtin2(Builtin::PatternDictTryTake, path.clone(), value)
-                .expect("missing, undefined, and wrong-kind paths should mismatch")
-                .is_empty()
+            run_pattern_builtin2(
+                Builtin::PatternDictTryTake,
+                path.duplicate_for_test(&values),
+                value,
+            )
+            .expect("missing, undefined, and wrong-kind paths should mismatch")
+            .is_empty()
         );
     }
 
@@ -4507,7 +4543,10 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
     let source = Value::Dict(
         Dict::new_sync()
             .insert(Key::Number(0.into()), first)
-            .insert(Key::Number(1.into()), Value::Promised(second.clone())),
+            .insert(
+                Key::Number(1.into()),
+                Value::Promised(second.duplicate_for_test(observer.values())),
+            ),
     );
     let application = apply_values(
         &observer,
@@ -4562,6 +4601,7 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
 
 #[test]
 fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors() {
+    let values = crate::core::test_value_factory();
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");
     let keep = Key::atom_from_text("keep");
@@ -4573,7 +4613,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     );
     let [parts]: [Value; 1] = run_pattern_builtin2(
         Builtin::PatternDictTryTakeOptional,
-        path.clone(),
+        path.duplicate_for_test(&values),
         Value::Dict(absent.clone()),
     )
     .expect("an optional absent path should succeed")
@@ -4599,7 +4639,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     );
     let [parts]: [Value; 1] = run_pattern_builtin2(
         Builtin::PatternDictTryTakeOptional,
-        path.clone(),
+        path.duplicate_for_test(&values),
         Value::Dict(present),
     )
     .expect("an optional present path should extract normally")
@@ -4615,7 +4655,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     assert!(
         run_pattern_builtin2(
             Builtin::PatternDictTryTakeOptional,
-            path.clone(),
+            path.duplicate_for_test(&values),
             wrong_intermediate,
         )
         .expect("a non-dictionary path prefix should mismatch")
@@ -4762,7 +4802,7 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
         List::from_thunk(
             LazyValue::error(observer.values(), "pattern unsnoc forced its prefix").into(),
         ),
-        List::from_thunk(tail.clone().into()),
+        List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
     ));
     let application = apply_values(
         &observer,
@@ -4837,7 +4877,7 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
     });
     let source = Value::List(List::from_values(vec![
         prefix,
-        Value::Promised(item.clone()),
+        Value::Promised(item.duplicate_for_test(observer.values())),
         n(b'\n' as i64),
         n(b'c' as i64),
     ]));
@@ -4877,7 +4917,7 @@ fn text_lines_resumes_a_promised_list_chunk() {
         .expect("the owner should allocate a promised list tail");
     let source = Value::List(List::concat(
         List::from_bytes(Bytes::from_static(b"a")),
-        List::from_thunk(tail.clone().into()),
+        List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
     ));
     let application = apply_values(&observer, Value::Builtin(Builtin::TextLines), vec![source])
         .expect("text-lines application should build");
@@ -5053,7 +5093,7 @@ fn partial_builtins_share_lazy_arguments() {
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
-            &apply_value(&context, partial.clone(), n(2)).unwrap(),
+            &apply_value(&context, partial.duplicate_for_test(context.values()), n(2)).unwrap(),
         )
         .unwrap(),
         &n(42),
@@ -5090,17 +5130,13 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
     let Value::List(list) = eval_closed_expr(&expression).unwrap() else {
         panic!("net-backed list literal should produce a list");
     };
-    let Some((item, tail)) = list
-        .try_pop_front(&mut |_| -> Result<_, EvaluationHalt> {
-            panic!("embedded lazy value must not become a list hole")
-        })
-        .unwrap()
-    else {
+    let mut items = list_to_value_items(&test_context(), &list)
+        .expect("embedded lazy value must remain observable")
+        .into_iter();
+    let Some(item) = items.next() else {
         panic!("net-backed list literal should contain its argument");
     };
-    let ListItem::Value(item) = item else {
-        panic!("lazy argument should remain an ordinary list value")
-    };
+    assert!(items.next().is_none());
     assert!(matches!(item, Value::Lazy(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     crate::core::test_value_factory().assert_same_representation_for_test(
@@ -5109,7 +5145,6 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
         &n(42),
     );
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
 }
 
 #[test]
@@ -5209,7 +5244,11 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::EffectApply),
-        vec![Value::Promised(function.clone()), n(2), n(40)],
+        vec![
+            Value::Promised(function.duplicate_for_test(observer.values())),
+            n(2),
+            n(40),
+        ],
     )
     .expect("effect application should build");
 
@@ -5254,7 +5293,9 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
             }
             .into(),
         ),
-        List::from_thunk(ListThunk::Promised(tail.clone())),
+        List::from_thunk(ListThunk::Promised(
+            tail.duplicate_for_test(observer.values()),
+        )),
     ));
     let call = apply_values(
         &observer,
@@ -5314,7 +5355,9 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
             Ok(context.with_value_access(|access| access.clone_root(&return_method)))
         });
     let api = Value::Dict(Dict::new_sync().insert((*keys::R).clone(), return_method));
-    let items = Value::List(List::from_thunk(ListThunk::Promised(tail.clone())));
+    let items = Value::List(List::from_thunk(ListThunk::Promised(
+        tail.duplicate_for_test(observer.values()),
+    )));
     let operation = apply_values(
         &observer,
         Value::Builtin(Builtin::EffectMapRun),

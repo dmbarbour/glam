@@ -2524,6 +2524,17 @@ inventory relatch:
            more `src/eval/tests.rs` failures and reduces the all-target
            compiler inventory from 108 to 80 without changing evaluation or
            list traversal behavior.
+         - **D.2h.2ai — builtin and compiler-pattern ownership slice complete
+           2026-09-30.** List concat/chunks, equality and callable
+           classification, sealed metadata observations, map, compiler
+           literal/path/dictionary/list patterns, text lines, partial
+           builtins, net list literals, and effect apply/call/map fixtures now
+           duplicate semantic inputs through their owning context. A reusable
+           dictionary-prefix thunk explicitly owns a distinct promised-leaf
+           edge from the leaf retained for later assignment. This clears 35
+           more `src/eval/tests.rs` failures and reduces the all-target
+           compiler inventory from 80 to 45 without changing builtin or
+           pattern semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
