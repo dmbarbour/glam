@@ -438,7 +438,7 @@ fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
     let _function_root = function.root(context.values());
     let (retained, machine) = retained_application_machine(
         &context,
-        Value::Promised(function.clone()),
+        Value::Promised(function.duplicate_for_test(context.values())),
         Arc::from([number(2), number(3)]),
     );
     let mut route_losses = 0;
@@ -466,7 +466,9 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
     let function = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
-        crate::eval::test_support::TestExpr::Value(Value::Promised(result.clone())),
+        crate::eval::test_support::TestExpr::Value(Value::Promised(
+            result.duplicate_for_test(context.values()),
+        )),
     );
     let lazy = LazyValue::computed_fixpoint(
         context.values(),
@@ -509,9 +511,10 @@ fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
     let lazy = LazyValue::from_access(
         context.values(),
         Arc::from([CoreDataKey::Key(Key::Number(1.into()))]),
-        Arc::from([Value::Dict(
-            Dict::new_sync().insert(Key::Number(1.into()), Value::Promised(result.clone())),
-        )]),
+        Arc::from([Value::Dict(Dict::new_sync().insert(
+            Key::Number(1.into()),
+            Value::Promised(result.duplicate_for_test(context.values())),
+        ))]),
     );
     let retained = lazy.root(context.values());
     let machine = lazy_machine(&context, lazy);
@@ -570,10 +573,13 @@ fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
     let _result_root = result.root(context.values());
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&calls);
-    let captured = result.clone();
+    let captured = result.duplicate_for_test(context.values());
+    let captured_values = context.values().clone();
     let lazy = LazyValue::semantic_thunk(context.values(), "counted test thunk", move |_| {
         counted.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Promised(captured.clone()))
+        Ok(Value::Promised(
+            captured.duplicate_for_test(&captured_values),
+        ))
     });
     let retained = lazy.root(context.values());
     let machine = lazy_machine(&context, lazy);
@@ -596,10 +602,10 @@ fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
 }
 
 fn return_semantic_capture(
-    _context: &crate::evaluation::EvaluatorStepContext<'_>,
+    context: &crate::evaluation::EvaluatorStepContext<'_>,
     captures: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    Ok(captures[0].clone())
+    Ok(context.with_value_access(|access| access.values().duplicate_value(&captures[0])))
 }
 
 #[test]
@@ -610,7 +616,7 @@ fn w6g1f3i_semantic_computation_result_survives_route_loss() {
     let lazy = LazyValue::semantic_computation(
         context.values(),
         "captured test computation",
-        Arc::from([Value::Promised(result.clone())]),
+        Arc::from([Value::Promised(result.duplicate_for_test(context.values()))]),
         return_semantic_capture,
     );
     let retained = lazy.root(context.values());
@@ -1119,7 +1125,9 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
     let mut builder =
         crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
     let [application, argument, result] = builder.bind();
-    let function = builder.data(Value::Promised(promise.clone()));
+    let function = builder.data(Value::Promised(
+        promise.duplicate_for_test(context.values()),
+    ));
     let value = builder.data(context.values().unit());
     builder.wire(application, function);
     builder.wire(argument, value);
@@ -1248,7 +1256,9 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
     let lazy = LazyValue::computed_fixpoint(
         context.values(),
         "retained object fixpoint",
-        FixpointComputation::ObjectInstance(Value::Promised(root_spec.clone())),
+        FixpointComputation::ObjectInstance(Value::Promised(
+            root_spec.duplicate_for_test(context.values()),
+        )),
     );
     let retained = lazy.root(context.values());
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
@@ -1263,12 +1273,12 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
             Dict::new_sync()
                 .insert(
                     (*crate::core::keys::NAME).clone(),
-                    Value::Promised(root_name.clone()),
+                    Value::Promised(root_name.duplicate_for_test(context.values())),
                 )
                 .insert(
                     (*crate::core::keys::DEPS).clone(),
                     Value::List(List::from_thunk(ListThunk::Promised(
-                        dependency_chunk.clone(),
+                        dependency_chunk.duplicate_for_test(context.values()),
                     ))),
                 ),
         ),
@@ -1291,7 +1301,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
         &dependency_chunk,
         Value::List(List::from_values(vec![
             first_dependency,
-            Value::Promised(second_dependency.clone()),
+            Value::Promised(second_dependency.duplicate_for_test(context.values())),
         ])),
     )
     .expect_without_debug("the retained dependency chunk should accept its assignment");
@@ -1358,25 +1368,34 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     let self_function = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
-        crate::eval::test_support::TestExpr::Value(Value::Promised(self_result.clone())),
+        crate::eval::test_support::TestExpr::Value(Value::Promised(
+            self_result.duplicate_for_test(context.values()),
+        )),
     );
-    let _self_function_owner =
-        crate::runtime::RuntimeValueRoot::new(context.values(), self_function.clone());
+    let _self_function_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        self_function.duplicate_for_test(context.values()),
+    );
     let base_function = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
-        crate::eval::test_support::TestExpr::Value(Value::Promised(base_result.clone())),
+        crate::eval::test_support::TestExpr::Value(Value::Promised(
+            base_result.duplicate_for_test(context.values()),
+        )),
     );
-    let _base_function_owner =
-        crate::runtime::RuntimeValueRoot::new(context.values(), base_function.clone());
+    let _base_function_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        base_function.duplicate_for_test(context.values()),
+    );
 
     let observed_defs = Arc::clone(&defs_demands);
+    let definitions_values = context.values().clone();
     let definitions = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "counted object definitions demand",
         move |_| {
             observed_defs.fetch_add(1, Ordering::SeqCst);
-            Ok(base_function.clone())
+            Ok(base_function.duplicate_for_test(&definitions_values))
         },
     ));
     let spec = Value::Dict(
@@ -1448,25 +1467,33 @@ fn list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand() {
     let handler_demands = Arc::new(AtomicUsize::new(0));
 
     let handler = fixed_list_handler(&context, number(42));
-    let _handler_owner = crate::runtime::RuntimeValueRoot::new(context.values(), handler.clone());
+    let _handler_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        handler.duplicate_for_test(context.values()),
+    );
     let observed_handler = Arc::clone(&handler_demands);
+    let handler_values = context.values().clone();
     let counted_handler = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "counted list-effect handler",
         move |_| {
             observed_handler.fetch_add(1, Ordering::SeqCst);
-            Ok(handler.clone())
+            Ok(handler.duplicate_for_test(&handler_values))
         },
     ));
     let effect = list_effect_value(counted_handler);
-    let _effect_owner = crate::runtime::RuntimeValueRoot::new(context.values(), effect.clone());
+    let _effect_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        effect.duplicate_for_test(context.values()),
+    );
     let observed_effect = Arc::clone(&effect_demands);
+    let effect_values = context.values().clone();
     let counted_effect = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "counted list effect",
         move |_| {
             observed_effect.fetch_add(1, Ordering::SeqCst);
-            Ok(effect.clone())
+            Ok(effect.duplicate_for_test(&effect_values))
         },
     ));
     let (retained, machine) = retained_list_effect_machine(
@@ -1508,7 +1535,9 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
         &context,
         "retained list-effect sequence",
         ListEffectComputation::Sequence {
-            results: List::from_thunk(ListThunk::Promised(sequence_chunk.clone())),
+            results: List::from_thunk(ListThunk::Promised(
+                sequence_chunk.duplicate_for_test(context.values()),
+            )),
             continuation: Value::Builtin(Builtin::Add),
         },
     );
@@ -1534,7 +1563,7 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
         &context,
         "retained list-effect cut",
         ListEffectComputation::Cut {
-            operation: Value::Promised(cut_operation.clone()),
+            operation: Value::Promised(cut_operation.duplicate_for_test(context.values())),
         },
     );
     let (cut_machine, cut_dependency) =
@@ -1562,7 +1591,9 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
     let first_chunk = PromisedValue::new(context.values(), "direct-result first chunk");
     let _first_chunk_owner = first_chunk.root(context.values());
     let results = List::concat(
-        List::from_thunk(ListThunk::Promised(first_chunk.clone())),
+        List::from_thunk(ListThunk::Promised(
+            first_chunk.duplicate_for_test(context.values()),
+        )),
         List::from_values(vec![number(2)]),
     );
     let continuation = crate::eval::test_support::closed_function_value_in(
@@ -1595,7 +1626,10 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
         let selected = Value::builtin_call(
             context.values(),
             Builtin::ListAt,
-            vec![number(index as i64), mapped.clone()],
+            vec![
+                number(index as i64),
+                mapped.duplicate_for_test(context.values()),
+            ],
         );
         assert_same_value(
             &context,
@@ -1627,26 +1661,34 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
 
     let handler = fixed_list_handler(&context, number(44));
     let effect = list_effect_value(handler);
-    let _effect_owner = crate::runtime::RuntimeValueRoot::new(context.values(), effect.clone());
+    let _effect_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        effect.duplicate_for_test(context.values()),
+    );
     let observed_operation = Arc::clone(&operation_demands);
+    let operation_values = context.values().clone();
     let operation =
         LazyValue::semantic_thunk(context.values(), "counted list-fix operation", move |_| {
             observed_operation.fetch_add(1, Ordering::SeqCst);
-            Ok(effect.clone())
+            Ok(effect.duplicate_for_test(&operation_values))
         });
     let function = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
         crate::eval::test_support::TestExpr::Value(Value::Lazy(operation)),
     );
-    let _function_owner = crate::runtime::RuntimeValueRoot::new(context.values(), function.clone());
+    let _function_owner = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        function.duplicate_for_test(context.values()),
+    );
     let observed_function = Arc::clone(&function_demands);
+    let function_values = context.values().clone();
     let counted_function = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "counted list-fix function",
         move |_| {
             observed_function.fetch_add(1, Ordering::SeqCst);
-            Ok(function.clone())
+            Ok(function.duplicate_for_test(&function_values))
         },
     ));
     let (retained, machine) = retained_list_effect_machine(
@@ -1732,7 +1774,7 @@ fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
 
     let lifecycle_before_exhaustion = lifecycle;
     assert!(
-        list_front(&context, exhausted.clone()).is_none(),
+        list_front(&context, exhausted.duplicate_for_test(context.values()),).is_none(),
         "the third alternative must publish the empty fixed tail"
     );
     let lifecycle_after_exhaustion = context.values().managed_promise_lifecycle_counts_for_test();
@@ -2326,7 +2368,11 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
     else {
         panic!("memoized construction must remain a net")
     };
-    assert!(first_net.runtime().ptr_eq(second_net.runtime()));
+    assert!(context.values().with_runtime_value_access(|access| {
+        first_net
+            .runtime()
+            .same_net_in(second_net.runtime(), &access)
+    }));
     assert!(route_losses > 0);
     assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
     assert_eq!(continuation_demands.load(Ordering::SeqCst), 1);
@@ -2444,7 +2490,9 @@ fn public_construction_waits_for_first_result_before_ready_right_branch() {
         unreachable!("counted right result must be lazy")
     };
     let results = List::concat(
-        List::from_thunk(ListThunk::Promised(first.clone())),
+        List::from_thunk(ListThunk::Promised(
+            first.duplicate_for_test(context.values()),
+        )),
         List::from_thunk(right.into()),
     );
     let effect = construction_results_effect(&context, results);
@@ -2492,7 +2540,9 @@ fn public_construction_retains_first_result_while_second_promise_blocks() {
     };
     let results = List::concat(
         List::from_thunk(first.into()),
-        List::from_thunk(ListThunk::Promised(second.clone())),
+        List::from_thunk(ListThunk::Promised(
+            second.duplicate_for_test(context.values()),
+        )),
     );
     let effect = construction_results_effect(&context, results);
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);

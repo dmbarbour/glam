@@ -2428,6 +2428,15 @@ inventory relatch:
            27 NC5 compiler failures and reduces the all-target inventory from
            386 to 359. Callable-checkpoint scheduling and topology semantics
            are unchanged.
+         - **D.2h.2y — W4 value/checkpoint ownership slice complete
+           2026-09-30.** Application, fixpoint, static-access, semantic-thunk,
+           object, list-effect, construction, and alternative fixtures now
+           duplicate retained values and promise edges through their isolated
+           context. Re-entrant semantic callbacks duplicate captures on every
+           invocation; runtime-root handoffs and exact memoized-net identity
+           use the owning access. This clears all 32 W4 fixture failures and
+           reduces the all-target compiler inventory from 359 to 327 without
+           changing checkpoint replay or route-loss behavior.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
