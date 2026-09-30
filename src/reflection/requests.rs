@@ -1224,7 +1224,6 @@ fn inspect_dict_items<S: TaskSpecialization>(
     context: &RequestContext<'_, S>,
     dict: &crate::api::EvaluatedValue,
 ) -> Result<RequestResult, TaskHalt> {
-    let values = context.values();
     let items = dict.with_core_access(|value, access| {
         let CoreValue::Dict(dict) = value else {
             return Err(TaskHalt::new("`.dict_items` requires a dictionary"));
@@ -1236,7 +1235,7 @@ fn inspect_dict_items<S: TaskSpecialization>(
                     .map(|(key, value)| {
                         CoreValue::Dict(
                             Dict::new_sync()
-                                .insert((*keys::KEY).clone(), key.to_value_with(values.core()))
+                                .insert((*keys::KEY).clone(), key.to_value_in(access))
                                 .insert((*keys::VALUE).clone(), access.duplicate_value(value)),
                         )
                     })
@@ -1650,37 +1649,37 @@ fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, 
         let value = access.clone_core(value)?;
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::LAUNCHED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::LAUNCHED))
         {
             return Ok(TaggedTaskState::Launched);
         }
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::BLOCKED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::BLOCKED))
         {
             return Ok(TaggedTaskState::Blocked);
         }
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::CANCELED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::CANCELED))
         {
             return Ok(TaggedTaskState::Cancelled);
         }
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::ABANDONED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::ABANDONED))
         {
             return Ok(TaggedTaskState::Abandoned);
         }
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::EXITED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::EXITED))
         {
             return Ok(TaggedTaskState::Exited);
         }
         if access
             .runtime_access()
-            .same_representation(&value, &values.core().key_value(&keys::KILLED))
+            .same_representation(&value, &access.runtime_access().key_value(&keys::KILLED))
         {
             return Ok(TaggedTaskState::Killed);
         }

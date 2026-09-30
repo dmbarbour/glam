@@ -243,9 +243,9 @@ impl Severity {
     pub(crate) fn value(self, access: &RuntimeValueAccess<'_>, values: &CoreValueFactory) -> Value {
         debug_assert!(access.belongs_to(values));
         match self {
-            Self::Info => values.info(),
-            Self::Warning => values.warn(),
-            Self::Error => values.error(),
+            Self::Info => access.info(),
+            Self::Warning => access.warn(),
+            Self::Error => access.error(),
         }
     }
 }

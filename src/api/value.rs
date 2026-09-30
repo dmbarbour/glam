@@ -419,7 +419,7 @@ impl Values {
 
     /// Returns Glam's cached semantic unit value `()`.
     pub fn unit(&self) -> Value {
-        self.with_access(|values| values.wrap(values.core().unit()))
+        self.with_access(|values| values.wrap(values.runtime_access().unit()))
     }
 
     pub fn rational(&self, numerator: i64, denominator: i64) -> Option<Value> {

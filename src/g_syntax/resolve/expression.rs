@@ -112,7 +112,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Tuple(items) => ResolvedExpr::apply(
             ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
             [
-                ResolvedExpr::Embedded(context.values().tuple()),
+                ResolvedExpr::Embedded(access.tuple()),
                 ResolvedExpr::List(
                     items
                         .iter()

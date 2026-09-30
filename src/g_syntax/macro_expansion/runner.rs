@@ -186,7 +186,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
         value
             .with_core(&access, |value| {
                 (
-                    access.same_representation(value, &access.values().unit()),
+                    access.same_representation(value, &access.unit()),
                     access.diagnostic_kind_name(value),
                 )
             })

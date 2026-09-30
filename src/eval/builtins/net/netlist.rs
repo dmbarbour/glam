@@ -58,7 +58,7 @@ pub(super) fn encode_selected_netlist(
 }
 
 pub(super) fn encode_bind(access: &RuntimeValueAccess<'_>) -> Value {
-    access.values().key_value(&BIND_TAG)
+    access.key_value(&BIND_TAG)
 }
 
 pub(super) fn encode_copy(access: &RuntimeValueAccess<'_>, output_count: usize) -> Value {
@@ -95,7 +95,7 @@ fn operation(
     fields: impl IntoIterator<Item = Value>,
 ) -> Value {
     Value::List(List::from_values(
-        std::iter::once(access.values().key_value(tag))
+        std::iter::once(access.key_value(tag))
             .chain(fields)
             .collect(),
     ))

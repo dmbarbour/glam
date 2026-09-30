@@ -419,7 +419,7 @@ fn part_access(
 
 fn pattern_literal_value(access: &RuntimeValueAccess<'_>, literal: &SyntaxPatternLiteral) -> Value {
     match literal {
-        SyntaxPatternLiteral::Unit => access.values().unit(),
+        SyntaxPatternLiteral::Unit => access.unit(),
         SyntaxPatternLiteral::Number(number) => Value::Number(number.clone()),
         SyntaxPatternLiteral::Atom(name) => {
             Value::Atom(Atom::from_key(&Key::binary_from_text(name)))

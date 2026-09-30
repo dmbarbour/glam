@@ -262,7 +262,7 @@ impl CompileContext {
 
     pub(crate) fn unit_value(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
         debug_assert!(access.belongs_to(&self.values));
-        self.values.unit()
+        access.unit()
     }
 
     /// Requests a module import in the current or a relative child namespace.

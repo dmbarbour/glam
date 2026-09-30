@@ -2641,6 +2641,15 @@ inventory relatch:
     and verifies every named access constructor against its canonical atom.
     This slice deliberately leaves the raw factory declarations visible to the
     ledger rather than disguising the pending call-site migration.
+  - **D.2h.3b.1 — production canonical-value access migration complete
+    2026-09-30.** Production factory projections for unit, object-reflection
+    guard, tuple, severity atoms, arbitrary keys, and recursive key values are
+    removed. API, compiler, diagnostic, evaluator, syntax-lowering, and
+    reflection callers now reuse their existing `RuntimeValueAccess` or
+    public scoped access. The production library compiles with no replacement
+    root or nested admission. Temporary `#[cfg(test)]` factory projections
+    keep the fixture corpus compilable while D.2h.3b.2 migrates it by
+    subsystem; they are explicitly not part of the accepted final surface.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.

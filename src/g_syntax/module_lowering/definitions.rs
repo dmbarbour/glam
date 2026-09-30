@@ -453,7 +453,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
             .iter()
             .map(|part| access.duplicate_value(part))
             .collect::<Vec<_>>();
-        path.push(key.to_value_with(access.values()));
+        path.push(key.to_value_in(access));
         match value {
             Value::Dict(nested) if !nested.is_empty() => {
                 update_module_dict_entries_in(access, definitions, path, nested)

@@ -853,7 +853,7 @@ impl RegionalBuilderBuiltinMachine {
             } else {
                 let path = Value::List(List::from_values(
                     keys.iter()
-                        .map(|key| access.values().values().key_value(key))
+                        .map(|key| access.values().key_value(key))
                         .collect(),
                 ));
                 let user_state = access.values().duplicate_value(
@@ -899,7 +899,7 @@ impl RegionalBuilderBuiltinMachine {
                 "interaction-net builder user state must be a dictionary",
             )));
         }
-        self.finish_in(access, access.values().values().unit(), Some(state))
+        self.finish_in(access, access.values().unit(), Some(state))
     }
 
     fn poll_reset_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
@@ -1159,7 +1159,7 @@ impl RegionalBuilderBuiltinMachine {
                 return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
             }
         };
-        self.finish_state_in(access, access.values().values().unit(), state)
+        self.finish_state_in(access, access.values().unit(), state)
     }
 
     fn finish_in(
@@ -1475,12 +1475,12 @@ fn encode_sequence_stack(
             .map(|frame| match frame {
                 BuilderSequenceFrame::Continue(continuation) => {
                     Value::List(List::from_values(vec![
-                        access.values().key_value(&SEQUENCE_TAG),
+                        access.key_value(&SEQUENCE_TAG),
                         continuation,
                     ]))
                 }
                 BuilderSequenceFrame::Cut => {
-                    Value::List(List::from_values(vec![access.values().key_value(&CUT_TAG)]))
+                    Value::List(List::from_values(vec![access.key_value(&CUT_TAG)]))
                 }
             })
             .collect(),
@@ -1587,12 +1587,12 @@ fn encode_reset_stack(access: &RuntimeValueAccess<'_>, resets: Vec<BuilderResetF
             .into_iter()
             .map(|frame| match frame {
                 BuilderResetFrame::Reset { key, sequence } => Value::List(List::from_values(vec![
-                    access.values().key_value(&RESET_TAG),
-                    access.values().key_value(&key),
+                    access.key_value(&RESET_TAG),
+                    access.key_value(&key),
                     sequence,
                 ])),
                 BuilderResetFrame::Resume { sequence } => Value::List(List::from_values(vec![
-                    access.values().key_value(&RESUME_TAG),
+                    access.key_value(&RESUME_TAG),
                     sequence,
                 ])),
             })

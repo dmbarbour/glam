@@ -1120,7 +1120,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     evaluator.project_root(&value, |access, value| {
                         if !access
                             .values()
-                            .same_representation(&value, &self.eval_context.values().unit())
+                            .same_representation(&value, &access.values().unit())
                         {
                             return Err(TaskHalt::new(format!(
                                 "effect task returned {}; expected unit",
@@ -1153,7 +1153,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     evaluator.project_root(&value, |access, value| {
                         if !access
                             .values()
-                            .same_representation(&value, &self.eval_context.values().unit())
+                            .same_representation(&value, &access.values().unit())
                         {
                             return Err(TaskHalt::new(format!(
                                 "scoped effect close must return unit, got {:?}",
@@ -1869,7 +1869,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         evaluator.with_value_access(|access| {
                             let path = Value::List(List::from_values(
                                 path.iter()
-                                    .map(|key| key.to_value_with(self.eval_context.values()))
+                                    .map(|key| key.to_value_in(access.values()))
                                     .collect(),
                             ));
                             let value = access.clone_root(value);
@@ -2658,7 +2658,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             let assertion = Value::builtin_call_in(
                                 access.values(),
                                 Builtin::AssertUnit,
-                                vec![diagnostic_context, value, self.eval_context.values().unit()],
+                                vec![diagnostic_context, value, access.values().unit()],
                             );
                             access.root_value(assertion)
                         })
@@ -3611,7 +3611,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                         (
                             access
                                 .values()
-                                .same_representation(&value, &self.0.eval_context.values().unit()),
+                                .same_representation(&value, &access.values().unit()),
                             value.diagnostic_kind_name(),
                         )
                     })
@@ -5679,7 +5679,7 @@ fn encode_reset_frames(access: &EvaluationValueAccess<'_>, frames: &[ResetFrame]
             .iter()
             .map(|frame| {
                 Value::List(List::from_values(vec![
-                    frame.key.to_value_with(access.values().values()),
+                    frame.key.to_value_in(access.values()),
                     access.clone_root(&frame.continuation),
                     Value::Number(Number::from_usize(frame.scope_depth)),
                     Value::Number(Number::from_usize(frame.order)),

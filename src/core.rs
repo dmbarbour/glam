@@ -612,26 +612,30 @@ impl CoreValueFactory {
             .expect("canonical runtime values initialize before factory publication")
     }
 
+    // D.2h.3b fixture bridge. Production has no factory-level raw-value
+    // projection; the all-target fixture migration removes these helpers
+    // before ledger closure.
+    #[cfg(test)]
     pub(crate) fn unit(&self) -> Value {
         self.with_runtime_value_access(|access| access.unit())
     }
 
+    #[cfg(test)]
     pub(crate) fn object_reflection_guard(&self) -> Value {
         self.with_runtime_value_access(|access| access.object_reflection_guard())
     }
 
-    pub(crate) fn tuple(&self) -> Value {
-        self.with_runtime_value_access(|access| access.tuple())
-    }
-
+    #[cfg(test)]
     pub(crate) fn info(&self) -> Value {
         self.with_runtime_value_access(|access| access.info())
     }
 
+    #[cfg(test)]
     pub(crate) fn warn(&self) -> Value {
         self.with_runtime_value_access(|access| access.warn())
     }
 
+    #[cfg(test)]
     pub(crate) fn error(&self) -> Value {
         self.with_runtime_value_access(|access| access.error())
     }
@@ -641,10 +645,7 @@ impl CoreValueFactory {
         self.with_runtime_value_access(|access| access.initial_metadata())
     }
 
-    fn atom(&self, atom: Atom) -> Value {
-        self.with_runtime_value_access(|access| access.atom(atom))
-    }
-
+    #[cfg(test)]
     pub(crate) fn key_value(&self, key: &Key) -> Value {
         self.with_runtime_value_access(|access| access.key_value(key))
     }
@@ -1286,8 +1287,7 @@ impl Key {
         }
     }
 
-    /// Transitional factory-qualified projection retained only while D.2h.3
-    /// migrates callers to their already-open value-access region.
+    #[cfg(test)]
     pub(crate) fn to_value_with(&self, values: &CoreValueFactory) -> Value {
         values.with_runtime_value_access(|access| self.to_value_in(&access))
     }

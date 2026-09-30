@@ -584,30 +584,29 @@ pub(super) fn runtime_killed_failure(
     values: &CoreValueFactory,
     reason: RuntimeKillReason,
 ) -> RuntimeFailureRoot {
-    let reason = match reason {
-        RuntimeKillReason::Deadlock => values.key_value(&Key::atom_from_text("deadlock")),
-    };
-    let args = Dict::new_sync().insert(Key::atom_from_text("reason"), reason);
-    let detail = Dict::new_sync()
-        .insert(
-            Key::atom_from_text("op"),
-            values.key_value(&Key::atom_from_text("kill")),
-        )
-        .insert(Key::atom_from_text("args"), CoreValue::Dict(args));
-    let message = Dict::new_sync()
-        .insert(
-            (*crate::core::keys::TEXT).clone(),
-            CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
-        )
-        .insert((*crate::core::keys::SEVERITY).clone(), values.error());
-    RuntimeFailureRoot::new(
-        values,
-        Arc::new(EvaluationFailure::emission(CoreValue::Dict(
+    values.with_runtime_value_access(|access| {
+        let reason = match reason {
+            RuntimeKillReason::Deadlock => access.key_value(&Key::atom_from_text("deadlock")),
+        };
+        let args = Dict::new_sync().insert(Key::atom_from_text("reason"), reason);
+        let detail = Dict::new_sync()
+            .insert(
+                Key::atom_from_text("op"),
+                access.key_value(&Key::atom_from_text("kill")),
+            )
+            .insert(Key::atom_from_text("args"), CoreValue::Dict(args));
+        let message = Dict::new_sync()
+            .insert(
+                (*crate::core::keys::TEXT).clone(),
+                CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
+            )
+            .insert((*crate::core::keys::SEVERITY).clone(), access.error());
+        access.root_runtime_failure(Arc::new(EvaluationFailure::emission(CoreValue::Dict(
             Dict::new_sync()
                 .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
                 .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
-        ))),
-    )
+        ))))
+    })
 }
 
 fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {

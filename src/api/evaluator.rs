@@ -110,7 +110,7 @@ impl ReflectionInspector<'_> {
                         .iter()
                         .map(|(key, value)| {
                             (
-                                access.wrap(key.to_value_with(access.core())),
+                                access.wrap(key.to_value_in(access.runtime_access())),
                                 access.wrap(access.runtime_access().duplicate_value(value)),
                             )
                         })
@@ -133,7 +133,7 @@ impl ReflectionInspector<'_> {
                             value.diagnostic_kind_name()
                         )));
                     };
-                    Ok(access.wrap(atom.key().to_value_with(access.core())))
+                    Ok(access.wrap(atom.key().to_value_in(access.runtime_access())))
                 })
                 .ok_or_else(|| Error::new("evaluated value belongs to another value domain"))?
         })

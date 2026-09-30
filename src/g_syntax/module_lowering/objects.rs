@@ -372,7 +372,7 @@ fn object_reflection_guard_resolved(
         path: vec![ResolvedPathPart::Key(name_as_key("name"))],
     };
     ResolvedExpr::List(vec![
-        ResolvedExpr::Embedded(access.values().object_reflection_guard()),
+        ResolvedExpr::Embedded(access.object_reflection_guard()),
         object_name,
     ])
 }
