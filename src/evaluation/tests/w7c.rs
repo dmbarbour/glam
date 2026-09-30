@@ -156,9 +156,9 @@ fn exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn()
     let EvaluationWaitPoll::Complete(value) = context.poll_wait(&wait) else {
         panic!("the retained checkpoint should eventually complete")
     };
-    assert_eq!(
-        value.clone_core_for_test(),
-        Value::Number(Number::from_usize(CHECKPOINT_DEPTH))
+    value.assert_same_representation_for_test(
+        context.values(),
+        &Value::Number(Number::from_usize(CHECKPOINT_DEPTH)),
     );
 }
 

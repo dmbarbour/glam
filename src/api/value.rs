@@ -385,6 +385,21 @@ impl Values {
         self.with_access(|values| values.clone_core(value))
     }
 
+    #[cfg(test)]
+    pub(crate) fn same_representation_for_test(
+        &self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<bool, Error> {
+        self.with_access(|values| {
+            values.with_core(left, |left| {
+                values.with_core(right, |right| {
+                    values.runtime_access().same_representation(left, right)
+                })
+            })?
+        })
+    }
+
     /// Injects host bytes as compact binary data.
     pub fn bytes(&self, bytes: impl Into<Bytes>) -> Value {
         self.with_access(|values| values.wrap(CoreValue::Binary(bytes.into())))

@@ -309,11 +309,11 @@ fn lazy_task_follow_retains_a_fresh_deferred_result_across_polls() {
         ))
     });
 
-    assert_eq!(
-        context
+    context.values().assert_same_representation_for_test(
+        &context
             .evaluate_compatibility_whnf(&outer.clone_core_for_test())
             .expect("the outer lazy should retain its fresh result until the following poll"),
-        Value::Number(42.into())
+        &Value::Number(42.into()),
     );
 }
 
@@ -340,11 +340,11 @@ fn promise_follow_reprojects_its_rooted_assignment_across_polls() {
         .expect("the promise should accept its one assignment");
     drop(assignment);
 
-    assert_eq!(
-        context
+    context.values().assert_same_representation_for_test(
+        &context
             .evaluate_compatibility_whnf(&Value::Promised(promise))
             .expect("the promise root should retain and reproject its immutable assignment"),
-        Value::Number(42.into())
+        &Value::Number(42.into()),
     );
 }
 
@@ -389,10 +389,10 @@ fn client_demand_completes_whnf_into_its_result_cell() {
     assert_eq!(handle.runtime_id(), fixture.runtime.id());
     assert!(handle.poll().is_none());
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 }
 
 #[test]
@@ -515,10 +515,10 @@ fn foreground_client_demand_closes_the_retirement_publication_handoff() {
         .recv_timeout(Duration::from_secs(2))
         .expect("the client demand must finish after result publication")
         .expect("unit demand should not fail");
-    assert!(matches!(
-        result,
-        ClientDemandResult::Complete(value) if value.clone_core_for_test() == expected
-    ));
+    let ClientDemandResult::Complete(value) = result else {
+        panic!("the waited client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
     driver_thread
         .join()
         .expect("client-demand driver must not panic");
@@ -558,10 +558,10 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     ));
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the resumed client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 }
 
 #[test]
@@ -623,11 +623,10 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
         Some(ClientDemandSnapshot::Queued)
     ));
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Number(31.into())
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the lazy producer should complete its client demand")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(31.into()));
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -681,11 +680,10 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
         Some(ClientDemandSnapshot::Queued)
     ));
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Number(37.into())
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the lazy producer should publish its completed result")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(37.into()));
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -745,11 +743,10 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     coordinator.poll_claimed_task(work);
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Number(41.into())
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the completed producer should wake its client demand")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(41.into()));
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -803,11 +800,10 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     coordinator.poll_claimed_task(work);
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Number(43.into())
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the producer should complete after subscription")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(43.into()));
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -965,11 +961,10 @@ fn blocked_client_checkpoint_survives_collection_until_promise_assignment() {
     set_promise(&context, &promise, Value::Number(41.into()))
         .expect("the rooted promise should remain assignable after collection");
     poll_runtime_until(&coordinator, || handle.poll().is_some());
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Number(41.into())
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the runtime pump should complete the client demand")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(41.into()));
 }
 
 #[test]
@@ -997,10 +992,10 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
     set_promise(&context, &promise, expected.clone())
         .expect("abandoning a consumer must not poison its producer");
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        survivor.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = survivor.poll() else {
+        panic!("the surviving demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 }
 
 #[test]
@@ -1049,10 +1044,10 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
         owner_demand.poll().is_some() && observer_demand.poll().is_some()
     });
     for result in [owner_demand.poll(), observer_demand.poll()] {
-        assert!(matches!(
-            result,
-            Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-        ));
+        let Some(ClientDemandResult::Complete(value)) = result else {
+            panic!("both client demands should share the producer result")
+        };
+        value.assert_same_representation_for_test(owner.values(), &expected);
     }
     assert!(
         lazy.cached(owner.values())
@@ -1118,10 +1113,10 @@ fn client_demand_operation_and_result_roots_follow_owner_lifecycle() {
         .collect_managed_for_test()
         .expect("the client result cell should retain its managed result root");
     assert_eq!(result_live.root_entries(), baseline.root_entries() + 1);
-    assert!(matches!(
-        completed.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = completed.poll() else {
+        panic!("the rooted client result should remain complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 
     drop(completed);
     let result_reclaimed = context
@@ -1255,11 +1250,11 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
     let expected = Value::Number(23.into());
     set_promise(&context, &promise, expected.clone())
         .expect("host promise should remain assignable after stable abandonment");
-    assert_eq!(
-        context
+    context.values().assert_same_representation_for_test(
+        &context
             .evaluate_compatibility_whnf(&promised)
             .expect("resolved promise should complete synchronously"),
-        expected
+        &expected,
     );
     assert_eq!(coordinator.client_demand_count(), 0);
 }
@@ -1355,11 +1350,11 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
             other => panic!("released worker must complete its task, got {other:?}"),
         }
     }
-    assert_eq!(
-        producer
+    producer.values().assert_same_representation_for_test(
+        &producer
             .evaluate_compatibility_whnf(&Value::Promised(promise))
             .expect("a fresh client demand should observe the later assignment"),
-        expected
+        &expected,
     );
 }
 
@@ -1390,10 +1385,11 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     set_promise(&context, &promise, expected.clone())
         .expect("external producer should resolve once");
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        waiter.join().expect("client waiter should finish"),
-        ClientDemandResult::Complete(value) if value.clone_core_for_test() == expected
-    ));
+    let ClientDemandResult::Complete(value) = waiter.join().expect("client waiter should finish")
+    else {
+        panic!("the externally completed client demand should return its value")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
     assert_eq!(coordinator.client_demand_count(), 0);
 
     let already_complete = context
@@ -1403,10 +1399,10 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
         ))
         .expect("unit demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        already_complete.wait(),
-        ClientDemandResult::Complete(value) if value.clone_core_for_test() == context.values().unit()
-    ));
+    let ClientDemandResult::Complete(value) = already_complete.wait() else {
+        panic!("the already-complete demand should return its value")
+    };
+    value.assert_same_representation_for_test(context.values(), &context.values().unit());
 }
 
 #[test]
@@ -1468,11 +1464,10 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
         .recv_timeout(Duration::from_secs(2))
         .expect("exact producer completion must wake the foreground")
         .expect("the exact lazy producer should succeed");
-    assert!(matches!(
-        result,
-        ClientDemandResult::Complete(value)
-            if value.clone_core_for_test() == Value::Number(37.into())
-    ));
+    let ClientDemandResult::Complete(value) = result else {
+        panic!("the patient client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &Value::Number(37.into()));
     foreground.join().expect("foreground driver should finish");
     let notifications = coordinator.coordinator_notification_profile();
     assert!(notifications.exact_clients.released >= 1);
@@ -1543,12 +1538,12 @@ fn synchronous_client_demand_waits_for_worker_owned_task_promise() {
         release_sender
             .send(())
             .expect("worker-owned producer should remain live");
-        assert_eq!(
-            result_receiver
+        observer.values().assert_same_representation_for_test(
+            &result_receiver
                 .recv_timeout(Duration::from_secs(2))
                 .expect("producer settlement should wake the foreground")
                 .expect("task-owned promise should resolve"),
-            expected
+            &expected,
         );
         foreground.join().expect("foreground driver should finish");
     }
@@ -1658,11 +1653,13 @@ fn generic_client_demand_resumes_composed_access_and_binary_annotation() {
     assert!(handle.poll().is_none());
     set_promise(&context, &byte, Value::Number(2.into())).expect("binary byte should resolve once");
     while poll_one_runtime_work(&coordinator) {}
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == Value::Binary(bytes::Bytes::from_static(&[1, 2]))
-    ));
+    let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
+        panic!("the binary client demand should complete")
+    };
+    value.assert_same_representation_for_test(
+        context.values(),
+        &Value::Binary(bytes::Bytes::from_static(&[1, 2])),
+    );
 }
 
 #[test]
@@ -1717,7 +1714,10 @@ fn escaped_context_retains_demand_resources_without_retaining_owner_or_coordinat
     drop(executor);
     drop(coordinator);
     assert!(context.coordinator().is_none());
-    assert_eq!(context.values().unit(), crate::core::keys::unit_value());
+    context.values().assert_same_representation_for_test(
+        &context.values().unit(),
+        &crate::core::keys::unit_value(),
+    );
 
     let closed_context = context.clone().for_effect_task();
     let error = PromisedValue::fixpoint(&closed_context, "closed demand promise")
@@ -1930,9 +1930,9 @@ fn evaluation_session_report_root_survives_after_ledger_acknowledgement() {
         .failures
         .get(&task_id)
         .expect("the report should preserve its persistent failure snapshot");
-    assert_eq!(
-        retained.direct_value_roots()[0].clone_core_for_test(),
-        Value::binary_from_text("session-report failure")
+    retained.direct_value_roots()[0].assert_same_representation_for_test(
+        context.values(),
+        &Value::binary_from_text("session-report failure"),
     );
 
     drop(report);
@@ -3321,10 +3321,10 @@ fn terminal_task_wait_root_survives_collection_until_handle_drop() {
         .collect_managed_for_test()
         .expect("the terminal wait should retain its managed result root");
     assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-    assert!(matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == expected
-    ));
+    let EvaluationWaitPoll::Complete(value) = context.poll_reflection_task(&task) else {
+        panic!("the terminal task should retain its result")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 
     drop(task);
     let reclaimed = context
@@ -3454,9 +3454,9 @@ fn wait_completion_projection_requires_scoped_access() {
 
     let poll = EvaluationPollContext::for_context(&context);
     let evaluator = poll.evaluator(&context);
-    assert_eq!(
-        evaluator.project_root(&root, |_, value| value),
-        crate::core::keys::unit_value()
+    context.values().assert_same_representation_for_test(
+        &evaluator.project_root(&root, |_, value| value),
+        &crate::core::keys::unit_value(),
     );
     context
         .values()
@@ -4362,10 +4362,12 @@ fn scheduled_nested_dependency_runs_without_mutator() {
                 .evaluate_compatibility_whnf(&Value::Lazy(nested_for_outer.clone()))
         });
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(outer)),
-        Ok(context.values().unit())
-    );
+    let actual =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(outer))
+            .expect("the outer scheduled dependency should complete");
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &context.values().unit());
     assert!(
         nested_had_no_mutator.load(Ordering::Acquire),
         "cooperative nested pumping must not inherit an outer managed-access region"
@@ -4469,13 +4471,14 @@ fn patient_claimed_task_wait_releases_mutator() {
     release_sender
         .send(())
         .expect("worker release receiver should remain live");
-    assert!(matches!(
-        result_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("patient evaluation should resume"),
-        Ok(ClientDemandResult::Complete(value))
-            if value.clone_core_for_test() == context.values().unit()
-    ));
+    let result = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("patient evaluation should resume")
+        .expect("patient evaluation should not fail");
+    let ClientDemandResult::Complete(value) = result else {
+        panic!("patient evaluation should complete");
+    };
+    value.assert_same_representation_for_test(context.values(), &context.values().unit());
     producer.join().expect("patient producer should not panic");
     evaluation
         .join()
@@ -4568,12 +4571,13 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
 
     coordinator.publish_runtime_observation();
     progress_barrier.wait();
-    assert_eq!(
-        result_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the already-published disturbance should resume the patient evaluator"),
-        Ok(context.values().unit())
-    );
+    let actual = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the already-published disturbance should resume the patient evaluator")
+        .expect("the patient evaluation should complete");
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &context.values().unit());
     evaluation
         .join()
         .expect("patient evaluator should not panic");
@@ -4908,14 +4912,14 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
         observer.poll_wait(&abandoned_wait),
         EvaluationWaitPoll::Abandoned
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &observer,
-            &Value::Lazy(lazy.clone())
-        )
-        .expect("another session should reclaim the lazy"),
-        expected
-    );
+    let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &Value::Lazy(lazy.clone()),
+    )
+    .expect("another session should reclaim the lazy");
+    observer
+        .values()
+        .assert_same_representation_for_test(&actual, &expected);
     assert!(forced.load(Ordering::Acquire));
     assert!(
         lazy.cached(observer.values())
@@ -4976,14 +4980,14 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
     ));
     set_promise(&observer, &promise, Value::Number(53.into()))
         .expect("the shared dependency should accept its assignment");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &observer,
-            &Value::Lazy(lazy.clone())
-        )
-        .expect("a later session should resume the lazy-owned checkpoint"),
-        Value::Number(53.into())
-    );
+    let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &observer,
+        &Value::Lazy(lazy.clone()),
+    )
+    .expect("a later session should resume the lazy-owned checkpoint");
+    observer
+        .values()
+        .assert_same_representation_for_test(&actual, &Value::Number(53.into()));
     assert!(matches!(
         observer.poll_wait(&abandoned_wait),
         EvaluationWaitPoll::Complete(_)
@@ -5100,14 +5104,14 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
         .expect("host promise should resolve once");
     let second = crate::eval::lazy_root_wait(&context, &root).expect("route should re-admit");
     assert_ne!(second.get(), first_id);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &context,
-            &Value::Lazy(lazy.clone())
-        )
-        .unwrap(),
-        Value::Number(53.into())
-    );
+    let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(lazy.clone()),
+    )
+    .unwrap();
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &Value::Number(53.into()));
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
     drop(second);
     drop(root);
@@ -5222,11 +5226,12 @@ fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
 
     set_promise(&context, &promise, Value::Number(73.into()))
         .expect("the source gate should settle once");
-    assert_eq!(
+    let actual =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
-            .unwrap(),
-        Value::Number(73.into())
-    );
+            .unwrap();
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &Value::Number(73.into()));
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
 }
 
@@ -5300,10 +5305,10 @@ fn client_and_background_reflection_share_lazy_progress_after_first_session_clos
         background.pump_wait(task.wait(), 256),
         EvaluationPumpOutcome::TargetReady
     );
-    assert!(matches!(
-        observer.poll_reflection_task(&task),
-        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == Value::Number(79.into())
-    ));
+    let EvaluationWaitPoll::Complete(value) = observer.poll_reflection_task(&task) else {
+        panic!("the background reflection task should complete");
+    };
+    value.assert_same_representation_for_test(observer.values(), &Value::Number(79.into()));
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
 }
 
@@ -5612,20 +5617,20 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
         0,
         "synchronous assignment must remove the producer obligation before returning"
     );
-    assert!(matches!(
-        context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == context.values().unit()
-    ));
+    let EvaluationWaitPoll::Complete(value) = context.poll_wait(&promise_wait) else {
+        panic!("the assigned promise should be complete");
+    };
+    value.assert_same_representation_for_test(context.values(), &context.values().unit());
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Cancelled
     );
-    assert!(matches!(
-        context.poll_wait(&promise_wait),
-        EvaluationWaitPoll::Complete(value) if value.clone_core_for_test() == context.values().unit()
-    ));
+    let EvaluationWaitPoll::Complete(value) = context.poll_wait(&promise_wait) else {
+        panic!("the assigned promise should remain complete after cancellation");
+    };
+    value.assert_same_representation_for_test(context.values(), &context.values().unit());
     assert_eq!(context.task_registry_counts().promises_active, 0);
 }
 
@@ -5669,14 +5674,14 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             format!("successful lazy {index}"),
             |_| Ok(crate::core::keys::unit_value()),
         );
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-                &context,
-                &Value::Lazy(lazy)
-            )
-            .expect("successful lazy should evaluate"),
-            crate::core::keys::unit_value()
-        );
+        let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &context,
+            &Value::Lazy(lazy),
+        )
+        .expect("successful lazy should evaluate");
+        context
+            .values()
+            .assert_same_representation_for_test(&actual, &crate::core::keys::unit_value());
 
         let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
@@ -7580,17 +7585,12 @@ fn runtime_readiness_is_ready_when_no_work_is_retained() {
 
     assert!(first.dispositions().is_empty());
     assert_eq!(first.stamp(), second.stamp());
-    assert_eq!(
+    assert!(
         fixture
             .runtime
             .values()
-            .clone_core(first.reflection().root())
-            .unwrap(),
-        fixture
-            .runtime
-            .values()
-            .clone_core(second.reflection().root())
-            .unwrap()
+            .same_representation_for_test(first.reflection().root(), second.reflection().root())
+            .expect("both readiness snapshots should belong to the fixture runtime")
     );
     assert_eq!(first.runtime_id(), fixture.runtime.id());
 }
@@ -7720,9 +7720,9 @@ fn deadlock_snapshot_root_survives_after_coordinator_record_retirement() {
     let retained = snapshot.unfinished()[0]
         .blocked_failure_root()
         .expect("the deadlock snapshot should preserve the blocked failure root");
-    assert_eq!(
-        retained.direct_value_roots()[0].clone_core_for_test(),
-        Value::binary_from_text("deadlock snapshot root")
+    retained.direct_value_roots()[0].assert_same_representation_for_test(
+        &values,
+        &Value::binary_from_text("deadlock snapshot root"),
     );
 
     drop(snapshot);
@@ -7771,9 +7771,9 @@ fn killed_work_report_root_survives_after_settlement_owners_retire() {
     let retained = report.killed_work()[0]
         .blocked_failure_root()
         .expect("the settled report should preserve the original blocked failure root");
-    assert_eq!(
-        retained.direct_value_roots()[0].clone_core_for_test(),
-        Value::binary_from_text("killed work report root")
+    retained.direct_value_roots()[0].assert_same_representation_for_test(
+        &values,
+        &Value::binary_from_text("killed work report root"),
     );
 
     drop(report);
@@ -7887,14 +7887,16 @@ fn exit_readiness_snapshot_root_survives_after_settlement_report_drop() {
     let snapshot_live = values
         .collect_managed_for_test()
         .expect("the settled readiness snapshot should retain its exit-message root");
+    let expected = fixture.runtime.values().text("snapshot-owned exit");
     assert!(snapshot.dispositions().iter().any(|disposition| {
-        matches!(
-            disposition.kind(),
-            crate::api::RuntimeDispositionKind::ExitError(value)
-                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
-                    value == Value::binary_from_text("snapshot-owned exit")
-                })
-        )
+        let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
+            return false;
+        };
+        fixture
+            .runtime
+            .values()
+            .same_representation_for_test(value, &expected)
+            .unwrap_or(false)
     }));
 
     drop(snapshot);
@@ -7934,14 +7936,16 @@ fn settled_report_root_survives_after_exit_snapshot_and_task_retire() {
     let report_live = values
         .collect_managed_for_test()
         .expect("the settled report should retain its exit-message root");
+    let expected = fixture.runtime.values().text("report-owned exit");
     assert!(report.dispositions().iter().any(|disposition| {
-        matches!(
-            disposition.kind(),
-            crate::api::RuntimeDispositionKind::ExitError(value)
-                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
-                    value == Value::binary_from_text("report-owned exit")
-                })
-        )
+        let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
+            return false;
+        };
+        fixture
+            .runtime
+            .values()
+            .same_representation_for_test(value, &expected)
+            .unwrap_or(false)
     }));
 
     drop(report);
@@ -8221,14 +8225,14 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     ));
     assert!(lazy.cached(context.values()).is_none());
     assert_deferred_task_retired(&context, &lazy);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &context,
-            &Value::Lazy(lazy.clone())
-        )
-        .expect("a later demand should reclaim the lazy source"),
-        expected
-    );
+    let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(lazy.clone()),
+    )
+    .expect("a later demand should reclaim the lazy source");
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &expected);
     assert!(
         lazy.cached(context.values())
             .is_some_and(|result| result.is_ok())
@@ -9597,11 +9601,12 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
         &observer_session,
         observer_session.demand.default_reflection_profile.clone(),
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy)),
-        Ok(context.values().unit()),
-        "a later demand must be able to reclaim the abandoned lazy"
-    );
+    let actual =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy))
+            .expect("a later demand must be able to reclaim the abandoned lazy");
+    observer
+        .values()
+        .assert_same_representation_for_test(&actual, &context.values().unit());
 }
 
 #[test]

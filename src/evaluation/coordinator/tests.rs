@@ -138,7 +138,10 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
             &EvaluationWaitTerminal::Complete(completed.clone()),
             &unresolved,
         );
-        assert_eq!(returned, Ok(crate::core::Value::Number(42.into())));
+        access.assert_same_representation_for_test(
+            &returned,
+            &Ok(crate::core::Value::Number(42.into())),
+        );
 
         let gated = TaskPromiseTerminalMapper::ReflectionGate {
             target: gate_target.clone(),
@@ -148,7 +151,8 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
             &EvaluationWaitTerminal::Complete(completed.clone()),
             &unresolved,
         );
-        assert_eq!(gated, Ok(crate::core::Value::Number(7.into())));
+        access
+            .assert_same_representation_for_test(&gated, &Ok(crate::core::Value::Number(7.into())));
 
         let cases = [
             (
@@ -3900,10 +3904,10 @@ fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
         .expect("independent same-session client work should be claimable concurrently");
     assert_eq!(client_claim.id, client.work());
     coordinator.poll_claimed_client_demand(client_claim);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = client.poll() else {
+        panic!("the independent client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 
     // The unrelated deferred claim remains independently owned until its
     // publisher terminalizes it.
@@ -3973,10 +3977,10 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
         .expect("retired work must not delay client admission");
     assert_eq!(claimed.id, client.work());
     coordinator.poll_claimed_client_demand(claimed);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = client.poll() else {
+        panic!("the admitted client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 }
 
 #[test]
@@ -4010,10 +4014,10 @@ fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
         .claim_client_demand(client.work())
         .expect("the exact foreground driver must retain claim authority");
     coordinator.poll_claimed_client_demand(claimed);
-    assert!(matches!(
-        client.poll(),
-        Some(ClientDemandResult::Complete(value)) if value.clone_core_for_test() == expected
-    ));
+    let Some(ClientDemandResult::Complete(value)) = client.poll() else {
+        panic!("the foreground client demand should complete")
+    };
+    value.assert_same_representation_for_test(context.values(), &expected);
 }
 
 #[test]

@@ -257,6 +257,35 @@ impl RuntimeValueRoot {
             .expect("test root observation requires its live value domain");
         values.with_runtime_value_access(|access| self.clone_core_with(&access))
     }
+
+    /// Compares this retained value without projecting an unrooted shell
+    /// between access regions.
+    #[cfg(test)]
+    pub(crate) fn same_representation_for_test(
+        &self,
+        values: &CoreValueFactory,
+        expected: &Value,
+    ) -> bool {
+        values.with_runtime_value_access(|access| {
+            self.with_core(&access, |actual| {
+                access.same_representation(actual, expected)
+            })
+            .expect("test root and value authority must share one value domain")
+        })
+    }
+
+    #[cfg(test)]
+    #[track_caller]
+    pub(crate) fn assert_same_representation_for_test(
+        &self,
+        values: &CoreValueFactory,
+        expected: &Value,
+    ) {
+        assert!(
+            self.same_representation_for_test(values, expected),
+            "runtime root did not retain the expected semantic representation"
+        );
+    }
 }
 
 impl crate::core::RuntimeValueAccess<'_> {

@@ -2229,6 +2229,19 @@ inventory relatch:
            failure identities retain their narrower identity assertions.
            `src/eval/tests.rs` now contributes no equality errors; this slice
            reduces the all-target inventory from 345 to 285.
+         - **D.2h.2h — evaluation coordinator and lifecycle fixture migration
+           complete 2026-09-30.** Client-demand completion, deferred-work
+           reclamation, task-promise publication, readiness snapshots, exit
+           dispositions, and retained failure roots now compare through their
+           owning runtime value authority. A test-only relation on the public
+           `Values` service observes two public rooted values inside one
+           bounded access region; internal `RuntimeValueRoot` assertions do
+           the same without projecting an unrooted raw value between regions.
+           `src/evaluation/tests.rs`, its coordinator fixtures, and the W7C
+           fixture now contribute no equality errors. This slice reduces the
+           all-target inventory from 285 to 237; the remaining `Clone` and
+           diagnostic-formatting errors stay visible for their distinct
+           migration checkpoints.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
