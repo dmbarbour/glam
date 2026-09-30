@@ -278,8 +278,11 @@ mod tests {
             Dict::new_sync().insert(Key::atom_from_text("nested"), Value::Dict(Dict::new_sync())),
         );
         let tagged = Dict::new_sync()
-            .insert(tag.clone(), payload.clone())
-            .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
+            .insert(tag.clone(), payload.duplicate_for_test(context.values()))
+            .insert(
+                Key::atom_from_text("ignored"),
+                recursively_empty.duplicate_for_test(context.values()),
+            );
 
         context.values().assert_same_representation_for_test(
             &recognize(&context, &tagged, &tag),
@@ -314,7 +317,10 @@ mod tests {
             .insert(tag.clone(), Value::Number(7.into()))
             .insert(
                 ignored,
-                Value::Dict(Dict::new_sync().insert(nested, Value::Promised(promise.clone()))),
+                Value::Dict(Dict::new_sync().insert(
+                    nested,
+                    Value::Promised(promise.duplicate_for_test(context.values())),
+                )),
             );
         let (owner, _) = context
             .values()

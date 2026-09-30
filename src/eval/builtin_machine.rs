@@ -1039,7 +1039,10 @@ mod tests {
         let sum = Value::builtin_call(
             context.values(),
             Builtin::Add,
-            vec![first, Value::Promised(second.clone())],
+            vec![
+                first,
+                Value::Promised(second.duplicate_for_test(context.values())),
+            ],
         );
         let Value::Lazy(sum_lazy) = &sum else {
             unreachable!("a saturated numeric builtin must remain lazy")
@@ -1120,7 +1123,7 @@ mod tests {
             context.values(),
             Builtin::AssertUnit,
             vec![
-                Value::Promised(diagnostic_context.clone()),
+                Value::Promised(diagnostic_context.duplicate_for_test(context.values())),
                 value,
                 Value::Number(99.into()),
             ],
@@ -1217,11 +1220,12 @@ mod tests {
         let result_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&result_demands);
         let front = PromisedValue::new(context.values(), "conditional deferred front");
-        let deferred_front = front.clone();
+        let deferred_front = front.duplicate_for_test(context.values());
+        let deferred_values = context.values().clone();
         let results = Value::semantic_thunk(context.values(), "conditional results", move |_| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::List(crate::core::List::from_thunk(
-                ListThunk::Promised(deferred_front.clone()),
+                ListThunk::Promised(deferred_front.duplicate_for_test(&deferred_values)),
             )))
         });
         let selection = Value::builtin_call(context.values(), Builtin::IfResult, vec![results]);
@@ -1278,7 +1282,10 @@ mod tests {
         let union = Value::builtin_call(
             context.values(),
             Builtin::DictUnion,
-            vec![first, Value::Promised(second.clone())],
+            vec![
+                first,
+                Value::Promised(second.duplicate_for_test(context.values())),
+            ],
         );
         let Value::Lazy(union_lazy) = &union else {
             unreachable!("a saturated dictionary builtin must remain lazy")
@@ -1323,7 +1330,7 @@ mod tests {
         let inspection = Value::builtin_call(
             context.values(),
             Builtin::InspectOrigin,
-            vec![Value::Promised(origin.clone())],
+            vec![Value::Promised(origin.duplicate_for_test(context.values()))],
         );
         let Value::Lazy(inspection_lazy) = &inspection else {
             unreachable!("a saturated origin builtin must remain lazy")
@@ -1378,7 +1385,10 @@ mod tests {
         let comparison = Value::builtin_call(
             context.values(),
             Builtin::Equal,
-            vec![first, Value::Promised(second.clone())],
+            vec![
+                first,
+                Value::Promised(second.duplicate_for_test(context.values())),
+            ],
         );
         let Value::Lazy(comparison_lazy) = &comparison else {
             unreachable!("a saturated comparison builtin must remain lazy")
@@ -1419,7 +1429,9 @@ mod tests {
         let tail = PromisedValue::new(context.values(), "comparison list tail");
         let left = Value::List(crate::core::List::concat(
             crate::core::List::from_values(vec![prefix]),
-            crate::core::List::from_thunk(ListThunk::Promised(tail.clone())),
+            crate::core::List::from_thunk(ListThunk::Promised(
+                tail.duplicate_for_test(context.values()),
+            )),
         ));
         let right = Value::List(crate::core::List::from_values(vec![
             Value::Number(1.into()),
@@ -1477,7 +1489,9 @@ mod tests {
         let tail = PromisedValue::new(context.values(), "list observation front tail");
         let list = Value::List(crate::core::List::concat(
             crate::core::List::from_thunk(prefix.into()),
-            crate::core::List::from_thunk(ListThunk::Promised(tail.clone())),
+            crate::core::List::from_thunk(ListThunk::Promised(
+                tail.duplicate_for_test(context.values()),
+            )),
         ));
         let observation = Value::builtin_call(
             context.values(),
@@ -1538,7 +1552,9 @@ mod tests {
             },
         );
         let list = Value::List(crate::core::List::concat(
-            crate::core::List::from_thunk(ListThunk::Promised(prefix.clone())),
+            crate::core::List::from_thunk(ListThunk::Promised(
+                prefix.duplicate_for_test(context.values()),
+            )),
             crate::core::List::from_thunk(suffix.into()),
         ));
         let observation = Value::builtin_call(
@@ -1595,7 +1611,9 @@ mod tests {
             },
         );
         let list = Value::List(crate::core::List::concat(
-            crate::core::List::from_thunk(ListThunk::Promised(prefix.clone())),
+            crate::core::List::from_thunk(ListThunk::Promised(
+                prefix.duplicate_for_test(context.values()),
+            )),
             crate::core::List::from_thunk(suffix.into()),
         ));
         let pattern =
@@ -1647,7 +1665,7 @@ mod tests {
         let item = PromisedValue::new(context.values(), "text-lines collected item");
         let source = Value::List(crate::core::List::from_values(vec![
             Value::Lazy(prefix),
-            Value::Promised(item.clone()),
+            Value::Promised(item.duplicate_for_test(context.values())),
             Value::Number(Number::from_u8(b'\n')),
         ]));
         let lines = Value::builtin_call(context.values(), Builtin::TextLines, vec![source]);

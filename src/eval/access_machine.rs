@@ -1220,7 +1220,8 @@ mod tests {
                         panic!("strict regional key conversion must not reach a boundary")
                     }
                     RegionalConversionPoll::Failed(failure) => {
-                        panic!("strict regional key conversion failed: {failure:?}")
+                        let _ = failure;
+                        panic!("strict regional key conversion failed")
                     }
                 }
             };
@@ -1285,7 +1286,9 @@ mod tests {
         let input = context.values().construct_runtime_value_root(|_| {
             Value::List(List::concat(
                 List::from_values(vec![Value::Number(1.into())]),
-                List::from_thunk(ListThunk::Promised(chunk.clone())),
+                List::from_thunk(ListThunk::Promised(
+                    chunk.duplicate_for_test(context.values()),
+                )),
             ))
         });
         let registrations = context.values().managed_root_registrations_for_test();
@@ -1370,7 +1373,10 @@ mod tests {
         let access = access_value(
             &context,
             [CoreDataKey::Index],
-            vec![base, Value::Promised(promise.clone())],
+            vec![
+                base,
+                Value::Promised(promise.duplicate_for_test(context.values())),
+            ],
         );
         let Value::Lazy(access_lazy) = &access else {
             unreachable!("computed access fixture must be lazy")
@@ -1405,8 +1411,10 @@ mod tests {
         let base = Value::Dict(
             Dict::new_sync().insert(expected_key, Value::binary_from_text("recursive")),
         );
-        let dynamic =
-            Value::Dict(Dict::new_sync().insert(member, Value::Promised(promise.clone())));
+        let dynamic = Value::Dict(Dict::new_sync().insert(
+            member,
+            Value::Promised(promise.duplicate_for_test(context.values())),
+        ));
         let access = access_value(&context, [CoreDataKey::Index], vec![base, dynamic]);
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
@@ -1432,7 +1440,9 @@ mod tests {
         ));
         let path = Value::List(List::concat(
             List::from_values(vec![Value::Number(1.into())]),
-            List::from_thunk(ListThunk::Promised(promise.clone())),
+            List::from_thunk(ListThunk::Promised(
+                promise.duplicate_for_test(context.values()),
+            )),
         ));
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
 
@@ -1466,12 +1476,17 @@ mod tests {
         });
         let path = Value::List(List::concat(
             List::from_values(vec![prefix]),
-            List::from_thunk(ListThunk::Promised(middle.clone())),
+            List::from_thunk(ListThunk::Promised(
+                middle.duplicate_for_test(context.values()),
+            )),
         ));
         let access = access_value(
             &context,
             [CoreDataKey::PathIndex],
-            vec![Value::Promised(base.clone()), path],
+            vec![
+                Value::Promised(base.duplicate_for_test(context.values())),
+                path,
+            ],
         );
         let Value::Lazy(access_lazy) = &access else {
             unreachable!("computed access fixture must be lazy")
@@ -1506,9 +1521,10 @@ mod tests {
             &base,
             Value::Dict(Dict::new_sync().insert(
                 Key::Number(1.into()),
-                Value::Dict(
-                    Dict::new_sync().insert(Key::Number(2.into()), Value::Promised(result.clone())),
-                ),
+                Value::Dict(Dict::new_sync().insert(
+                    Key::Number(2.into()),
+                    Value::Promised(result.duplicate_for_test(context.values())),
+                )),
             )),
         )
         .expect_without_debug("the selected base promise should accept its assignment");
@@ -1543,7 +1559,10 @@ mod tests {
         let invalid = access_value(
             &context,
             [CoreDataKey::PathIndex],
-            vec![base.clone(), Value::binary_from_text("x")],
+            vec![
+                base.duplicate_for_test(context.values()),
+                Value::binary_from_text("x"),
+            ],
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &invalid)

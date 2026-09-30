@@ -870,17 +870,24 @@ mod tests {
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
             "object self",
-            FixpointComputation::ObjectInstance(Value::Promised(spec.clone())),
+            FixpointComputation::ObjectInstance(Value::Promised(
+                spec.duplicate_for_test(context.values()),
+            )),
         ));
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err_without_debug("object construction must first wait for its spec");
         let spec_value = Value::Dict(
             Dict::new_sync()
-                .insert((*keys::NAME).clone(), Value::Promised(name.clone()))
+                .insert(
+                    (*keys::NAME).clone(),
+                    Value::Promised(name.duplicate_for_test(context.values())),
+                )
                 .insert(
                     (*keys::DEPS).clone(),
-                    Value::List(List::from_thunk(ListThunk::Promised(deps.clone()))),
+                    Value::List(List::from_thunk(ListThunk::Promised(
+                        deps.duplicate_for_test(context.values()),
+                    ))),
                 ),
         );
         crate::core::set_test_promise(context.values(), &spec, spec_value)
@@ -914,7 +921,9 @@ mod tests {
                 .insert((*keys::NAME).clone(), Value::binary_from_text("root"))
                 .insert(
                     (*keys::DEPS).clone(),
-                    Value::List(List::from_values(vec![Value::Promised(dependency.clone())])),
+                    Value::List(List::from_values(vec![Value::Promised(
+                        dependency.duplicate_for_test(context.values()),
+                    )])),
                 ),
         );
         let object = Value::Lazy(LazyValue::computed_fixpoint(
@@ -953,7 +962,9 @@ mod tests {
         let defs = closed_function_value_in(
             context.values(),
             1,
-            TestExpr::Value(Value::Promised(first_result.clone())),
+            TestExpr::Value(Value::Promised(
+                first_result.duplicate_for_test(context.values()),
+            )),
         );
         let spec = Value::Dict(
             Dict::new_sync()
@@ -972,7 +983,9 @@ mod tests {
         let second_stage = closed_function_value_in(
             context.values(),
             1,
-            TestExpr::Value(Value::Promised(second_result.clone())),
+            TestExpr::Value(Value::Promised(
+                second_result.duplicate_for_test(context.values()),
+            )),
         );
         crate::core::set_test_promise(context.values(), &first_result, second_stage)
             .expect_without_debug("the first application should accept its function result");

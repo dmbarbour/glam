@@ -2376,6 +2376,17 @@ inventory relatch:
            fixture family now compiles under the negative carrier traits and
            reduces the all-target compiler inventory from 484 to 457. No
            syntax or lowering semantics changed.
+         - **D.2h.2t — evaluator-adjacent machine ownership slice complete
+           2026-09-30.** Resumable access, builtin, list, object-fixpoint, and
+           tagged-payload fixtures now duplicate promise edges, retained
+           values, and deferred closure captures through their owning isolated
+           evaluation context. A runtime-root construction duplicates its
+           promise while the supplied access is active, and strict conversion
+           failure assertions no longer require semantic-failure `Debug`.
+           These five fixture families now compile under the negative carrier
+           traits and reduce the all-target compiler inventory from 457 to
+           428. Their state-machine protocols and suspension boundaries are
+           unchanged.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
