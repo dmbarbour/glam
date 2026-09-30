@@ -2535,6 +2535,16 @@ inventory relatch:
            more `src/eval/tests.rs` failures and reduces the all-target
            compiler inventory from 80 to 45 without changing builtin or
            pattern semantics.
+         - **D.2h.2aj — dictionary, index, and metadata ownership slice
+           complete 2026-09-30.** Dictionary union/duplicate resolution,
+           list-at and split-end, assert-unit and index context, pure metadata
+           initialization/update, lazy carrier validation, and reflection
+           metadata projection fixtures now duplicate semantic edges through
+           their owning context or active access. Metadata inspection now
+           explicitly admits matching value access. This clears 21 more
+           `src/eval/tests.rs` failures and reduces the all-target compiler
+           inventory from 45 to 24 without changing metadata sealing or
+           reflection-task sharing.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

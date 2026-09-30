@@ -5644,7 +5644,7 @@ fn dictionary_unions_merge_nested_dictionaries_transitively() {
     };
     let greeting = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
-        &Value::Lazy(greeting.clone()),
+        &Value::Lazy(greeting.duplicate_for_test(&crate::core::test_value_factory())),
     )
     .expect("nested dict union should evaluate when demanded");
     let Value::Dict(greeting) = greeting else {
@@ -5709,7 +5709,10 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::DictUnion),
-        vec![Value::Lazy(left), Value::Promised(right.clone())],
+        vec![
+            Value::Lazy(left),
+            Value::Promised(right.duplicate_for_test(observer.values())),
+        ],
     )
     .expect("dictionary union application should build");
 
@@ -5759,7 +5762,7 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
         vec![
             Value::binary_from_text("nested"),
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("left"), n(41))),
-            Value::Promised(right.clone()),
+            Value::Promised(right.duplicate_for_test(observer.values())),
         ],
     )
     .expect("duplicate merge application should build");
@@ -5811,7 +5814,7 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
     );
     let list = Value::List(List::concat(
         List::from_thunk(prefix.into()),
-        List::from_thunk(tail.clone().into()),
+        List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
     ));
     let application = apply_values(&observer, Value::Builtin(Builtin::ListAt), vec![n(1), list])
         .expect("list-at application should build");
@@ -5848,7 +5851,7 @@ fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
     );
     let list = Value::List(List::concat(
         List::from_thunk(lazy_prefix.into()),
-        List::from_thunk(tail.clone().into()),
+        List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
     ));
     let application = apply_values(
         &observer,
@@ -5904,7 +5907,7 @@ fn dictionary_unions_defer_ambiguous_keys_until_observed() {
 
     let err = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
-        &Value::Lazy(ambiguous.clone()),
+        &Value::Lazy(ambiguous.duplicate_for_test(&crate::core::test_value_factory())),
     )
     .expect_err_without_debug("ambiguous key should fail only when demanded");
 
@@ -6175,12 +6178,13 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
 
 #[test]
 fn assert_unit_builtin_uses_its_diagnostic_context() {
+    let values = crate::core::test_value_factory();
     let target = n(42);
     let value = eval_closed_expr(&builtin3_expr(
         Builtin::AssertUnit,
         TestExpr::Value(Value::binary_from_text("test operation result")),
         TestExpr::Value(unit_value()),
-        TestExpr::Value(target.clone()),
+        TestExpr::Value(target.duplicate_for_test(&values)),
     ))
     .expect("unit assertion should return its target");
     crate::core::test_value_factory().assert_same_representation_for_test(&value, &target);
@@ -6268,7 +6272,7 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
                     .insert((*keys::VALUE).clone(), value)
                     .insert(
                         (*keys::CONTEXT).clone(),
-                        Value::Promised(diagnostic_context.clone()),
+                        Value::Promised(diagnostic_context.duplicate_for_test(observer.values())),
                     ),
             ),
         ),
@@ -6482,6 +6486,7 @@ fn annotation_selection_contextualizes_only_nested_evaluation_failures() {
 
 #[test]
 fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
+    let value_factory = crate::core::test_value_factory();
     let values = Value::List(List::from_values(vec![n(42)]));
     let nested = eval_closed_expr(&builtin2_expr(
         Builtin::ListAt,
@@ -6489,7 +6494,7 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
             &crate::core::test_value_factory(),
             "index computation failed",
         )),
-        TestExpr::Value(values.clone()),
+        TestExpr::Value(values.duplicate_for_test(&value_factory)),
     ))
     .expect_err_without_debug("failure while evaluating the index must propagate");
     crate::core::test_value_factory().assert_same_representation_for_test(
@@ -6602,15 +6607,17 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     context
         .values()
         .assert_same_representation_for_test(&first, &second);
-    context.values().assert_same_representation_for_test(
-        &first.associated_metadata(),
-        &Some(Value::Dict(Dict::new_sync())),
-    );
+    let first_metadata = context
+        .values()
+        .with_runtime_value_access(|access| first.associated_metadata(&access));
+    context
+        .values()
+        .assert_same_representation_for_test(&first_metadata, &Some(Value::Dict(Dict::new_sync())));
 
     let seq_result = apply_values(
         &context,
         Value::Builtin(Builtin::Seq),
-        vec![first.clone(), n(42)],
+        vec![first.duplicate_for_test(context.values()), n(42)],
     )
     .expect("initial metadata should already satisfy shallow sequencing");
     context.values().assert_same_representation_for_test(
@@ -6660,6 +6667,7 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
 #[test]
 fn old_metadata_annotation_spellings_are_unrecognized() {
     let context = test_context();
+    let values = crate::core::test_value_factory();
     let old_initial = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("meta")));
     let old_initial = apply_values(
         &context,
@@ -6681,11 +6689,11 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
             "the old update function must remain unused",
         ),
     ));
-    let target = Value::List(List::from_values(vec![carrier.clone()]));
+    let target = Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)]));
     let result = apply_values(
         &context,
         Value::Builtin(Builtin::Anno),
-        vec![old_update, target.clone()],
+        vec![old_update, target.duplicate_for_test(&values)],
     )
     .expect("an unrecognized annotation should preserve its target");
     let result = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result)
@@ -6760,8 +6768,9 @@ fn metadata_reorder_function_in(
 }
 
 fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, EvaluationHalt> {
-    let metadata = carrier
-        .associated_metadata()
+    let metadata = context
+        .values()
+        .with_runtime_value_access(|access| carrier.associated_metadata(&access))
         .expect("metadata update output must remain sealed");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &metadata)
 }
@@ -6777,7 +6786,10 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
     let swapped = run_metadata_update(
         &context,
         metadata_reorder_function_in(context.values(), &[1, 0]),
-        vec![left.clone(), right.clone()],
+        vec![
+            left.duplicate_for_test(context.values()),
+            right.duplicate_for_test(context.values()),
+        ],
     )
     .expect("metadata update should support permutation");
     context.values().assert_same_representation_for_test(
@@ -6854,7 +6866,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
             annotation,
             Value::List(List::from_values(vec![
                 first,
-                Value::Promised(second.clone()),
+                Value::Promised(second.duplicate_for_test(observer.values())),
             ])),
         ],
     )
@@ -6985,12 +6997,13 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         },
     );
     let carrier = Value::metadata_carrier(hidden);
+    let values = context.values().clone();
     let lazy_carrier = Value::semantic_thunk(
         &crate::core::test_value_factory(),
         "lazy metadata carrier",
         move |_| {
             counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(carrier.clone())
+            Ok(carrier.duplicate_for_test(&values))
         },
     );
 
@@ -7136,7 +7149,7 @@ fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
         vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
     )
     .expect("effectful metadata update should construct its output carriers");
-    let copied_first = outputs[0].clone();
+    let copied_first = outputs[0].duplicate_for_test(context.values());
     assert_eq!(
         builds.load(Ordering::SeqCst),
         0,
@@ -7178,8 +7191,9 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
     )
     .expect("effectful metadata update should remain latent");
 
-    let metadata = outputs[0]
-        .associated_metadata()
+    let metadata = context
+        .values()
+        .with_runtime_value_access(|access| outputs[0].associated_metadata(&access))
         .expect("metadata update output must remain sealed");
     let mut demand = ResumableTestValueDemand::new(&context, &metadata);
     let blocked = demand
@@ -7196,11 +7210,11 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
 
 #[test]
 fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
-    let failure = Arc::new(
-        EvaluationFailure::message("metadata reflection task failed")
-            .with_context(evaluation_context_frame("metadata_producer")),
-    );
     let failed_context = annotation_test_context();
+    let failure = Arc::new(failed_context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::message("metadata reflection task failed")
+            .with_context_in(&access, evaluation_context_frame("metadata_producer"))
+    }));
     failed_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Failed(failure),
