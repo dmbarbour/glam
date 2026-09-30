@@ -2486,6 +2486,16 @@ inventory relatch:
            failures and reduces the all-target compiler inventory from 182 to
            166 without changing route retention, cancellation, or atomic
            terminal-publication semantics.
+         - **D.2h.2ae — settlement, output, and spark ownership slice complete
+           2026-09-30.** Deadlock-settlement failures, forced-kill lazy
+           reclamation, task-owned promise settlement, client blockers, and
+           spark/lazy sharing fixtures now duplicate edges through their
+           owning context. One-shot promise construction channels consume
+           their `Option` with `take()` instead of manufacturing a second
+           edge, and failure comparison uses the value-domain representation
+           relation. This clears the final ten `src/evaluation/tests.rs`
+           failures and reduces the all-target compiler inventory from 166 to
+           156 without changing settlement or wake ordering.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

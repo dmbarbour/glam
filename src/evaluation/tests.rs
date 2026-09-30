@@ -7721,7 +7721,9 @@ fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
         Value::Number(41.into()),
     ));
     let frame = crate::diagnostic::evaluation_context_frame("readiness_retention");
-    let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
+    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::emission(emission).with_context_in(&access, frame)
+    }));
     let weak_failure = Arc::downgrade(&failure);
     let task_failure = failure.clone();
     let task = context
@@ -8274,8 +8276,9 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     let context = fixture.context();
     let expected = context.values().unit();
     let lazy = LazyValue::semantic_thunk(context.values(), "reclaim after forced kill", {
-        let expected = expected.clone();
-        move |_| Ok(expected.clone())
+        let values = context.values().clone();
+        let expected = expected.duplicate_for_test(&values);
+        move |_| Ok(expected.duplicate_for_test(&values))
     });
     let wait = context
         .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
@@ -8301,7 +8304,7 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     assert_deferred_task_retired(&context, &lazy);
     let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(context.values())),
     )
     .expect("a later demand should reclaim the lazy source");
     context
@@ -8368,7 +8371,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
     let promise = promise_output
         .lock()
         .expect("promise output was poisoned")
-        .clone()
+        .take()
         .expect("task construction should expose its promise");
     let statuses = Arc::new(RecordedStatuses::default());
     assert!(context.attach_task_status_publisher(&task, RecordedStatuses::publisher(&statuses),));
@@ -8389,7 +8392,10 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
         .assignment(context.values())
         .expect("owned promise should receive a terminal assignment")
         .expect_err_without_debug("owned promise should fail when its producer is killed");
-    assert_eq!(promise_failure, *task_failure.as_failure());
+    context.values().assert_same_representation_for_test(
+        promise_failure.as_ref(),
+        task_failure.as_failure().as_ref(),
+    );
     assert!(matches!(
         statuses
             .0
@@ -8485,7 +8491,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
     let promise = promise_output
         .lock()
         .expect("promise output was poisoned")
-        .clone()
+        .take()
         .expect("task construction should expose its promise");
 
     fixture.runtime.pump_until_stable();
@@ -8530,7 +8536,7 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
-            Value::Promised(promise.clone()),
+            Value::Promised(promise.duplicate_for_test(context.values())),
         ))
         .expect("client demand should admit");
 
@@ -9288,10 +9294,11 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     coordinator.executor_started(1);
     let (promise, _promise_owner, _promise_value) =
         rooted_promise_value(context.values(), "spark-owned deferred wait");
-    let followed = promise.clone();
+    let values = context.values().clone();
+    let followed = promise.duplicate_for_test(&values);
     let (lazy, _lazy_value) =
         rooted_semantic_lazy_value(context.values(), "spark-owned lazy claim", move |_| {
-            Ok(Value::Promised(followed.clone()))
+            Ok(Value::Promised(followed.duplicate_for_test(&values)))
         });
     let promise_root = promise.root(context.values());
     let wait = context
@@ -9626,14 +9633,17 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     let promise = PromisedValue::new(context.values(), "blocked spark assignment");
-    let followed_promise = promise.clone();
+    let values = context.values().clone();
+    let followed_promise = promise.duplicate_for_test(&values);
     let lazy =
         LazyValue::semantic_thunk(context.values(), "reusable spark claim", move |context| {
             context
                 .context()
-                .evaluate_compatibility_whnf(&Value::Promised(followed_promise.clone()))
+                .evaluate_compatibility_whnf(&Value::Promised(
+                    followed_promise.duplicate_for_test(&values),
+                ))
         });
-    context.spark(Value::Lazy(lazy.clone()));
+    context.spark(Value::Lazy(lazy.duplicate_for_test(context.values())));
     wait_for_spark_work_counts(
         &coordinator,
         (0, 0, 1),
