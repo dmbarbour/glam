@@ -2505,6 +2505,15 @@ inventory relatch:
            instead of deriving `Clone` across `Value`. This clears 17
            `src/eval/tests.rs` failures and reduces the all-target compiler
            inventory from 156 to 139 without changing evaluator semantics.
+         - **D.2h.2ag — core lazy/promise/effect ownership slice complete
+           2026-09-30.** Partial function stages, promised and deferred WHNF,
+           structured lazy failures, list-effect sequence/cut/fix recipes,
+           resolver forwarding, promise/lazy cycles, and task fixpoints now
+           duplicate semantic edges under their owning context or active
+           evaluation access. Reusable thunk callbacks duplicate captured
+           outputs per invocation. This clears 31 more `src/eval/tests.rs`
+           failures and reduces the all-target compiler inventory from 139 to
+           108 without changing retry, caching, or cycle semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

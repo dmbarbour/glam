@@ -1451,7 +1451,7 @@ fn curried_function_partial_application_retains_a_shared_stage() {
         panic!("partial application should produce another function stage");
     };
     assert_eq!(first_stage.remaining_arity(), 2);
-    let cloned_stage = partially_applied.clone();
+    let cloned_stage = partially_applied.duplicate_for_test(&crate::core::test_value_factory());
     let Value::Function(cloned_stage) = cloned_stage else {
         unreachable!()
     };
@@ -1580,7 +1580,7 @@ fn same_runtime_contexts() -> (
 fn promised_values_fail_fast_without_poisoning_later_assignment() {
     let context = test_context();
     let promised = PromisedValue::new(&crate::core::test_value_factory(), "test promised value");
-    let value = Value::Promised(promised.clone());
+    let value = Value::Promised(promised.duplicate_for_test(context.values()));
 
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
@@ -1603,7 +1603,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
         .task_owned_promise(Arc::from("deferred computation input"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promised_value = Value::Promised(promise.clone());
+    let promised_value = Value::Promised(promise.duplicate_for_test(observer.values()));
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let lazy = LazyValue::semantic_thunk(
@@ -1616,7 +1616,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
                 .evaluate_compatibility_whnf(&promised_value)
         },
     );
-    let value = Value::Lazy(lazy.clone());
+    let value = Value::Lazy(lazy.duplicate_for_test(observer.values()));
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
         .expect_err_without_debug("the unresolved input promise should block");
@@ -1668,8 +1668,8 @@ fn deferred_computation_caches_one_structured_failure() {
             .insert(detail.clone(), n(7)),
     );
     let frame = evaluation_context_frame("deferred_test");
-    let thunk_emission = emission.clone();
-    let thunk_frame = frame.clone();
+    let thunk_emission = emission.duplicate_for_test(context.values());
+    let thunk_frame = frame.duplicate_for_test(context.values());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let lazy = LazyValue::semantic_thunk(
@@ -1681,12 +1681,12 @@ fn deferred_computation_caches_one_structured_failure() {
                 .context()
                 .values()
                 .with_runtime_value_access(|access| {
-                    EvaluationHalt::from_value(&access, thunk_emission.clone())
-                        .with_context(&access, thunk_frame.clone())
+                    EvaluationHalt::from_value(&access, access.duplicate_value(&thunk_emission))
+                        .with_context(&access, access.duplicate_value(&thunk_frame))
                 }))
         },
     );
-    let value = Value::Lazy(lazy.clone());
+    let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err_without_debug("the deferred computation should fail permanently");
@@ -1732,7 +1732,7 @@ fn deferred_list_effect_work_blocks_and_resumes() {
         &observer,
         Builtin::ListEffect,
         Vec::new(),
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(observer.values())),
     )
     .expect("constructing the lazy list-effect result should not demand its operation");
     let Value::List(results) = handled else {
@@ -1765,7 +1765,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         Value::Builtin(Builtin::ListEffectSeq),
         vec![
             list_return_effect(n(1)),
-            Value::Promised(continuation.clone()),
+            Value::Promised(continuation.duplicate_for_test(session.values())),
         ],
     )
     .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
@@ -1795,7 +1795,9 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     let Value::List(cut) = apply_values(
         &session,
         Value::Builtin(Builtin::ListEffectCut),
-        vec![Value::Promised(cut_operation.clone())],
+        vec![Value::Promised(
+            cut_operation.duplicate_for_test(session.values()),
+        )],
     )
     .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&session, &value))
     .expect("cut construction should remain lazy") else {
@@ -1817,8 +1819,12 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     let (fix_operation, _fix_task, _fix_owner) = session
         .task_owned_promise(Arc::from("list effect fix operation"))
         .unwrap();
-    let fix_function =
-        closed_function_value(1, TestExpr::Value(Value::Promised(fix_operation.clone())));
+    let fix_function = closed_function_value(
+        1,
+        TestExpr::Value(Value::Promised(
+            fix_operation.duplicate_for_test(session.values()),
+        )),
+    );
     let Value::List(fixed) = apply_values(
         &session,
         Value::Builtin(Builtin::ListEffectFix),
@@ -1850,13 +1856,16 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
         .expect("the owner should allocate the fix function promise");
     let demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&demands);
-    let promised_function = function_promise.clone();
+    let values = session.values().clone();
+    let promised_function = function_promise.duplicate_for_test(&values);
     let function = Value::semantic_thunk(
         session.values(),
         "instrumented list effect fix function",
         move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Promised(promised_function.clone()))
+            Ok(Value::Promised(
+                promised_function.duplicate_for_test(&values),
+            ))
         },
     );
 
@@ -1931,7 +1940,7 @@ fn deferred_computation_caches_one_text_failure() {
             Err(EvaluationHalt::new("text deferred failure"))
         },
     );
-    let value = Value::Lazy(lazy.clone());
+    let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
     let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err_without_debug("the deferred computation should fail")
@@ -1956,7 +1965,10 @@ fn deferred_computation_preserves_context_annotation_frames() {
         Key::atom_from_text("deferred"),
         Value::binary_from_text("context annotation"),
     ));
-    let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame.clone()));
+    let annotation = Value::Dict(Dict::new_sync().insert(
+        (*keys::CONTEXT).clone(),
+        frame.duplicate_for_test(context.values()),
+    ));
     let lazy = LazyValue::semantic_thunk(
         &crate::core::test_value_factory(),
         "context-annotated deferred failure",
@@ -1965,7 +1977,7 @@ fn deferred_computation_preserves_context_annotation_frames() {
                 apply_builtin_in(
                     &access,
                     Builtin::Anno,
-                    vec![annotation.clone()],
+                    vec![access.values().duplicate_value(&annotation)],
                     Value::error(
                         &crate::core::test_value_factory(),
                         "annotated deferred failure",
@@ -1991,9 +2003,11 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     let lazy = LazyValue::from_access(
         &crate::core::test_value_factory(),
         Arc::from([]),
-        Arc::from([Value::Promised(promise.clone())]),
+        Arc::from([Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        )]),
     );
-    let value = Value::Lazy(lazy.clone());
+    let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err_without_debug("empty promise should block its lazy");
@@ -2021,7 +2035,9 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     let lazy = LazyValue::from_access(
         context.values(),
         Arc::from([]),
-        Arc::from([Value::Promised(promise.clone())]),
+        Arc::from([Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        )]),
     );
     let value = Value::Lazy(lazy);
 
@@ -2050,7 +2066,9 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
         Value::Lazy(LazyValue::from_access(
             observer.values(),
             Arc::from([]),
-            Arc::from([Value::Promised(promise.clone())]),
+            Arc::from([Value::Promised(
+                promise.duplicate_for_test(observer.values()),
+            )]),
         ))
     };
     let lazy_a = lazy_for(&promise_a);
@@ -2091,12 +2109,17 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
             Ok(n(42))
         });
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
-    set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap_without_debug();
+    set_promise(
+        &context,
+        &promise,
+        Value::Lazy(target.duplicate_for_test(context.values())),
+    )
+    .unwrap_without_debug();
 
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
-            &Value::Promised(promise.clone()),
+            &Value::Promised(promise.duplicate_for_test(context.values())),
         )
         .unwrap(),
         &n(42),
@@ -2140,8 +2163,10 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
             .insert(detail.clone(), n(7)),
     );
     let frame = evaluation_context_frame("promise_test");
-    let failure =
-        Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
+    let failure = Arc::new(session.values().with_runtime_value_access(|access| {
+        EvaluationFailure::emission(access.duplicate_value(&emission))
+            .with_context_in(&access, access.duplicate_value(&frame))
+    }));
 
     fail_promise(&session, &promise, failure.clone())
         .expect_without_debug("new promise should accept one permanent failure");
@@ -2177,12 +2202,16 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
 fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "promise cycle");
-    set_promise(&context, &promise, Value::Promised(promise.clone()))
-        .expect_without_debug("promise should accept its own named assignment");
+    set_promise(
+        &context,
+        &promise,
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    )
+    .expect_without_debug("promise should accept its own named assignment");
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Promised(promise.clone()),
+        &Value::Promised(promise.duplicate_for_test(context.values())),
     )
     .expect_err_without_debug("strict promise recursion should remain blocked");
     assert!(error.blocked_on().is_some());
@@ -2204,13 +2233,20 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     let lazy = LazyValue::from_access(
         &crate::core::test_value_factory(),
         Arc::from([]),
-        Arc::from([Value::Promised(promise.clone())]),
+        Arc::from([Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        )]),
     );
-    set_promise(&context, &promise, Value::Lazy(lazy.clone())).unwrap_without_debug();
+    set_promise(
+        &context,
+        &promise,
+        Value::Lazy(lazy.duplicate_for_test(context.values())),
+    )
+    .unwrap_without_debug();
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Promised(promise.clone()),
+        &Value::Promised(promise.duplicate_for_test(context.values())),
     )
     .expect_err_without_debug("strict mixed recursion should remain blocked");
     assert!(error.blocked_on().is_some());
@@ -2239,7 +2275,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
-    let value = Value::Promised(fixpoint.clone());
+    let value = Value::Promised(fixpoint.duplicate_for_test(session.values()));
 
     let recursive = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&owner, &value)
         .unwrap_err_without_debug();
@@ -2293,7 +2329,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
         .expect("task-owned fixpoint should expose its wait")
         .wait()
         .clone();
-    let value = Value::Promised(fixpoint.clone());
+    let value = Value::Promised(fixpoint.duplicate_for_test(session.values()));
 
     assert!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
