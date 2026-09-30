@@ -36,6 +36,10 @@ where
         .assert_same_representation_for_test(left, right);
 }
 
+fn duplicate_value(context: &EvalContext, value: &Value) -> Value {
+    value.duplicate_for_test(context.values())
+}
+
 fn port(id: u64) -> ConstructionPortId {
     ConstructionPortId::new(id).expect("fixture port IDs are positive")
 }
@@ -190,7 +194,10 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
             "an inactive sequence must remain an explicit empty field"
         );
 
-        let mut missing_sequence = fields.clone();
+        let mut missing_sequence = fields
+            .iter()
+            .map(|value| access.duplicate_value(value))
+            .collect::<Vec<_>>();
         missing_sequence.pop();
         let selected = encode_selected_netlist(
             access,
@@ -428,8 +435,12 @@ fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
     else {
         panic!("construction with a lazy backedge must produce a net")
     };
-    let payload = net.runtime().test_with(values, |runtime| {
-        runtime.interface_data(runtime.exposed()).cloned()
+    let payload = values.with_runtime_value_access(|access| {
+        net.runtime().access(&access).with(|runtime| {
+            runtime
+                .interface_data(runtime.exposed())
+                .map(|value| access.duplicate_value(value))
+        })
     });
     assert!(matches!(payload, Some(Value::Promised(_))));
 
@@ -524,7 +535,11 @@ fn assert_one_net_construction_context(context: &EvalContext, effect: Value) {
     ] {
         let private = crate::diagnostic::evaluation_context_frame(role);
         assert!(
-            !failure.contexts().contains(&private),
+            !failure.contexts().iter().any(|context_frame| {
+                context
+                    .values()
+                    .same_representation_for_test(context_frame, &private)
+            }),
             "private `{role}` frame leaked through construction: {failure}"
         );
     }
@@ -834,9 +849,13 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         );
         (returned, initial)
     });
-    assert_eq!(
-        run_builder_at(&context, returned, initial.clone(), 0),
-        [Value::binary_from_text("returned"), initial.clone()]
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, returned, duplicate_value(&context, &initial), 0),
+        &[
+            Value::binary_from_text("returned"),
+            duplicate_value(&context, &initial),
+        ],
     );
 
     let choice = with_access(&context, |access| {
@@ -870,10 +889,13 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
             vec![mutate_then_fail, right],
         )
     });
-    assert_eq!(
-        run_builder_at(&context, choice, initial.clone(), 0),
-        [Value::binary_from_text("right"), initial.clone()],
-        "a failed left alternative must not leak its branch state"
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, choice, duplicate_value(&context, &initial), 0),
+        &[
+            Value::binary_from_text("right"),
+            duplicate_value(&context, &initial),
+        ],
     );
 
     let cut = with_access(&context, |access| {
@@ -1327,15 +1349,30 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
         (initial, get_all, set_visible, set_all, invalid_set)
     });
 
-    let [whole, unchanged] = run_builder_at(&context, get_all.clone(), initial.clone(), 0);
+    let [whole, unchanged] = run_builder_at(
+        &context,
+        duplicate_value(&context, &get_all),
+        duplicate_value(&context, &initial),
+        0,
+    );
     let Value::Dict(whole) = whole else {
         panic!("whole-state get must return the user dictionary")
     };
     assert!(whole.get(&super::builder::control_key_for_test()).is_some());
     assert_same_representation(&context, &unchanged, &initial);
 
-    let [_unit, nested_state] = run_builder_at(&context, set_visible, initial.clone(), 0);
-    let [nested_whole, _] = run_builder_at(&context, get_all.clone(), nested_state, 0);
+    let [_unit, nested_state] = run_builder_at(
+        &context,
+        set_visible,
+        duplicate_value(&context, &initial),
+        0,
+    );
+    let [nested_whole, _] = run_builder_at(
+        &context,
+        duplicate_value(&context, &get_all),
+        nested_state,
+        0,
+    );
     let Value::Dict(nested_whole) = nested_whole else {
         panic!("nested state update must retain a dictionary")
     };
@@ -1351,8 +1388,13 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
         "a nonempty user path must preserve hidden control state"
     );
 
-    let invalid = builder_result_at(&context, invalid_set, initial.clone(), 0)
-        .expect_err_without_debug("whole-state replacement must remain a dictionary");
+    let invalid = builder_result_at(
+        &context,
+        invalid_set,
+        duplicate_value(&context, &initial),
+        0,
+    )
+    .expect_err_without_debug("whole-state replacement must remain a dictionary");
     assert!(invalid.to_string().contains("must be a dictionary"));
 
     let [_unit, replaced_state] = run_builder_at(&context, set_all, initial, 0);
@@ -1366,17 +1408,19 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
     let outer = crate::core::Key::atom_from_text("outer");
     let inner = crate::core::Key::atom_from_text("inner");
     let source_path = path(context.values(), [outer.clone(), inner.clone()]);
+    let path_values = context.values().clone();
     let lazy_path = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "lazy builder state path",
-        move |_| Ok(source_path.clone()),
+        move |_| Ok(source_path.duplicate_for_test(&path_values)),
     ));
     let inner_dict =
         Value::Dict(Dict::new_sync().insert(inner.clone(), Value::binary_from_text("ready")));
+    let inner_values = context.values().clone();
     let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
         "lazy builder state intermediate",
-        move |_| Ok(inner_dict.clone()),
+        move |_| Ok(inner_dict.duplicate_for_test(&inner_values)),
     ));
     let (state, get, get_missing) = with_access(&context, |access| {
         let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
@@ -1403,7 +1447,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
     });
     assert_same_representation(
         &context,
-        &run_builder_at(&context, get, state.clone(), 0)[0],
+        &run_builder_at(&context, get, duplicate_value(&context, &state), 0)[0],
         &Value::binary_from_text("ready"),
     );
     assert_same_representation(
@@ -1454,7 +1498,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                outer.clone(),
+                access.duplicate_value(&outer),
                 invoke_continuation_with(access, Value::binary_from_text("nested resumed")),
             ],
         );
@@ -1466,7 +1510,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
         let nested = partial_builder(
             access,
             Builtin::InteractionNetBuilderReset,
-            vec![outer.clone(), reset_inner],
+            vec![access.duplicate_value(&outer), reset_inner],
         );
 
         let cut = partial_builder(
@@ -1482,7 +1526,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                outer.clone(),
+                access.duplicate_value(&outer),
                 invoke_continuation_with(access, Value::binary_from_text("after cut")),
             ],
         );
@@ -1494,7 +1538,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
         let cut_then_shift = partial_builder(
             access,
             Builtin::InteractionNetBuilderReset,
-            vec![outer.clone(), cut_then_shift_body],
+            vec![access.duplicate_value(&outer), cut_then_shift_body],
         );
         let missing = partial_builder(
             access,
@@ -1509,12 +1553,17 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
 
     assert_same_representation(
         &context,
-        &run_builder_at(&context, nested, state.clone(), 0)[0],
+        &run_builder_at(&context, nested, duplicate_value(&context, &state), 0)[0],
         &Value::binary_from_text("nested resumed"),
     );
     assert_same_representation(
         &context,
-        &run_builder_at(&context, cut_then_shift, state.clone(), 0)[0],
+        &run_builder_at(
+            &context,
+            cut_then_shift,
+            duplicate_value(&context, &state),
+            0,
+        )[0],
         &Value::binary_from_text("after cut"),
     );
     let error = builder_result_at(&context, missing, state, 0)
@@ -1527,19 +1576,21 @@ fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
     let context = EvalContext::standalone();
     let prompt = Value::binary_from_text("lazy prompt");
     let reset_key = {
-        let prompt = prompt.clone();
+        let prompt = duplicate_value(&context, &prompt);
+        let values = context.values().clone();
         Value::Lazy(LazyValue::semantic_thunk(
             context.values(),
             "lazy reset key",
-            move |_| Ok(prompt.clone()),
+            move |_| Ok(prompt.duplicate_for_test(&values)),
         ))
     };
     let shift_key = {
-        let prompt = prompt.clone();
+        let prompt = duplicate_value(&context, &prompt);
+        let values = context.values().clone();
         Value::Lazy(LazyValue::semantic_thunk(
             context.values(),
             "lazy shift key",
-            move |_| Ok(prompt.clone()),
+            move |_| Ok(prompt.duplicate_for_test(&values)),
         ))
     };
     let (state, capture) = with_access(&context, |access| {
@@ -1602,7 +1653,7 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
         let shift = partial_builder(
             access,
             Builtin::InteractionNetBuilderShift,
-            vec![prompt.clone(), return_continuation(access)],
+            vec![access.duplicate_value(&prompt), return_continuation(access)],
         );
         let capture = partial_builder(
             access,
@@ -1615,18 +1666,23 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
     let [continuation, first_state] = run_builder_at(&context, capture, first_state, 0);
     let resumed = Value::Lazy(LazyValue::from_application(
         context.values(),
-        continuation.clone(),
+        duplicate_value(&context, &continuation),
         Arc::from([Value::binary_from_text("same invocation")]),
     ));
     assert_same_representation(
         &context,
-        &run_builder_at(&context, resumed, first_state.clone(), 0)[0],
+        &run_builder_at(
+            &context,
+            resumed,
+            duplicate_value(&context, &first_state),
+            0,
+        )[0],
         &Value::binary_from_text("same invocation"),
     );
 
     let resumed_again = Value::Lazy(LazyValue::from_application(
         context.values(),
-        continuation.clone(),
+        duplicate_value(&context, &continuation),
         Arc::from([Value::binary_from_text("same invocation again")]),
     ));
     assert_same_representation(
@@ -1665,7 +1721,7 @@ fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 constant_builder_continuation(
                     access,
                     builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderFail)),
@@ -1676,7 +1732,7 @@ fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 invoke_continuation_with(access, Value::binary_from_text("right retained reset")),
             ],
         );
@@ -1719,7 +1775,7 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 invoke_continuation_with(access, Value::binary_from_text("wrong")),
             ],
         );
@@ -1766,7 +1822,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
             access,
             Builtin::InteractionNetBuilderReset,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderGet,
@@ -1803,7 +1859,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 invoke_continuation_with(access, Value::binary_from_text("restored checkpoint")),
             ],
         );
@@ -1908,7 +1964,12 @@ fn hidden_builder_rejects_malformed_control_records() {
                     .expect("initial sequence stack must be strict"),
                 &Vec::<Value>::new(),
             );
-            let missing_sequence = Value::List(List::from_values(fields.clone()));
+            let missing_sequence = Value::List(List::from_values(
+                fields
+                    .iter()
+                    .map(|value| access.duplicate_value(value))
+                    .collect(),
+            ));
             fields.push(Value::Number(2.into()));
             let malformed_sequence = Value::List(List::from_values(fields));
             let returned = partial_builder(
@@ -1937,7 +1998,7 @@ fn hidden_builder_rejects_malformed_control_records() {
             "builder state has the wrong number of fields",
         ),
     ] {
-        let error = builder_result_at(&context, returned.clone(), state, 0)
+        let error = builder_result_at(&context, duplicate_value(&context, &returned), state, 0)
             .expect_err_without_debug(
                 "malformed hidden control state must fail at the evaluator boundary",
             );
@@ -1996,7 +2057,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 invoke_continuation_with(access, Value::binary_from_text("restored")),
             ],
         );
@@ -2004,7 +2065,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
             access,
             Builtin::InteractionNetBuilderReset,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderSeq,
@@ -2017,7 +2078,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
             access,
             Builtin::InteractionNetBuilderShift,
             vec![
-                prompt.clone(),
+                access.duplicate_value(&prompt),
                 invoke_continuation_with(access, Value::binary_from_text("wrong")),
             ],
         );
@@ -2036,17 +2097,22 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
 
     assert_same_representation(
         &context,
-        &run_builder_at(&context, alternatives.clone(), state.clone(), 0)[0],
+        &run_builder_at(
+            &context,
+            duplicate_value(&context, &alternatives),
+            duplicate_value(&context, &state),
+            0,
+        )[0],
         &Value::Number(61.into()),
     );
     assert_same_representation(
         &context,
-        &run_builder_at(&context, alternatives, state.clone(), 1)[0],
+        &run_builder_at(&context, alternatives, duplicate_value(&context, &state), 1)[0],
         &Value::Number(62.into()),
     );
     assert_same_representation(
         &context,
-        &run_builder_at(&context, restored, state.clone(), 0)[0],
+        &run_builder_at(&context, restored, duplicate_value(&context, &state), 0)[0],
         &Value::binary_from_text("restored"),
     );
     let error = builder_result_at(&context, hidden, state, 0)

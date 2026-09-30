@@ -2437,6 +2437,17 @@ inventory relatch:
            use the owning access. This clears all 32 W4 fixture failures and
            reduces the all-target compiler inventory from 359 to 327 without
            changing checkpoint replay or route-loss behavior.
+         - **D.2h.2z — pure net-builder fixture ownership slice complete
+           2026-09-30.** Builder-state, alternative, cut, reset/shift,
+           checkpoint, and fix fixtures now duplicate semantic values through
+           active builder access or the owning context. Outcome arrays and
+           recursive diagnostic frames use the runtime representation
+           observer rather than ambient value equality, and lazy key/prompt
+           callbacks duplicate their captures per invocation. Backedge
+           inspection duplicates payloads while net access is admitted. This
+           clears all 43 pure-builder fixture failures and reduces the
+           all-target compiler inventory from 327 to 284 without changing the
+           builder state machine.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
