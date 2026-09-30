@@ -2277,15 +2277,29 @@ inventory relatch:
            2026-09-30.** Lazy checkpoint handoffs, list-effect state,
            host/reflection continuations, interaction-net builder state,
            captured reset/shift continuations, construction diagnostics, and
-           restored builder outcomes now compare under their existing
-           evaluator or runtime access. Rooted machine completions are
-           observed through `RuntimeValueRoot`; recursive failure contexts use
-           the same value-domain relation while scalar journal lengths and
-           counters remain ordinary Rust assertions. These two fixture files
-           now contribute no equality errors and reduce the all-target
-           inventory from 125 to 74. Their separately inventoried raw-edge
-           duplication and net-identity calls remain visible for the
-           subsequent ownership checkpoints.
+         restored builder outcomes now compare under their existing
+         evaluator or runtime access. Rooted machine completions are
+         observed through `RuntimeValueRoot`; recursive failure contexts use
+         the same value-domain relation while scalar journal lengths and
+         counters remain ordinary Rust assertions. These two fixture files
+         now contribute no equality errors and reduce the all-target
+         inventory from 125 to 74. Their separately inventoried raw-edge
+         duplication and net-identity calls remain visible for the
+         subsequent ownership checkpoints.
+         - **D.2h.2l — reflection-machine fixture equality complete
+           2026-09-30.** Request and reset-stack decoding, direct effect
+           completions, reflection environments, cross-session task
+           observation, structured failure contexts, and owned-promise
+           terminalization now compare semantic payloads through the owning
+           core or public runtime authority. Public effect results remain
+           public rooted values and are compared through the `Values`
+           observer rather than projected into the crate-private raw-value
+           assertion surface. Exact task roots and propagated failure
+           allocations retain pointer-identity assertions. The reflection
+           machine fixture now contributes no equality errors and reduces the
+           all-target inventory from 74 to 35; its distinct raw-value
+           duplication and diagnostic-formatting failures remain visible for
+           the subsequent ownership checkpoints.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

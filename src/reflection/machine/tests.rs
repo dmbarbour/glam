@@ -48,6 +48,17 @@ fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
     Values::from_core_factory(values.clone()).wrap(value)
 }
 
+#[track_caller]
+fn assert_public_core_value(values: &CoreValueFactory, actual: &PublicValue, expected: Value) {
+    let public_values = Values::from_core_factory(values.clone());
+    let expected = public_values.wrap(expected);
+    assert!(
+        public_values
+            .same_representation_for_test(actual, &expected)
+            .expect("reflection test values should share one runtime")
+    );
+}
+
 fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|_| value)
 }
@@ -1138,9 +1149,9 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
     let Value::List(expected) = &expected else {
         panic!("expected value should be a list")
     };
-    assert_eq!(
-        eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
-        eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
+    assembler.core_values().assert_same_representation_for_test(
+        &eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
+        &eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
     );
 }
 
@@ -1582,10 +1593,11 @@ fn request_decode_resumes_the_exact_lazy_payload_without_replay() {
         panic!("fixture should decode a return request")
     };
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(
-            evaluator.project_root(&value, |_, value| value),
-            Value::Number(41.into())
-        );
+        evaluator.project_root(&value, |access, value| {
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &Value::Number(41.into()));
+        });
     });
     assert_eq!(
         evaluations.load(Ordering::Acquire),
@@ -1620,10 +1632,11 @@ fn request_decode_resumes_the_exact_lazy_list_chunk_without_replay() {
         panic!("fixture should decode a return request")
     };
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(
-            evaluator.project_root(&value, |_, value| value),
-            Value::Number(42.into())
-        );
+        evaluator.project_root(&value, |access, value| {
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &Value::Number(42.into()));
+        });
     });
     assert_eq!(
         evaluations.load(Ordering::Acquire),
@@ -1669,10 +1682,11 @@ fn resume_request_decodes_lazy_ids_once_in_source_order() {
     assert_eq!(task.get(), 7);
     assert_eq!(continuation, 8);
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(
-            evaluator.project_root(&value, |_, value| value),
-            Value::Number(99.into())
-        );
+        evaluator.project_root(&value, |access, value| {
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &Value::Number(99.into()));
+        });
     });
     assert_eq!(task_evaluations.load(Ordering::Acquire), 1);
     assert_eq!(continuation_evaluations.load(Ordering::Acquire), 1);
@@ -2013,10 +2027,10 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     let decoded = drive_reset_stack_decoder(&mut decoder, &context)
         .expect("strict reset stack should decode");
     assert_eq!(decoded.serialized.runtime_id(), serialized.runtime_id());
-    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(
-            evaluator.project_root(&decoded.serialized, |_, value| value),
-            evaluator.project_root(&serialized, |_, value| value)
+    context.values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &decoded.serialized.clone_core_with(&access),
+            &serialized.clone_core_with(&access),
         );
     });
     assert_eq!(decoded.frames.len(), 2);
@@ -2027,14 +2041,16 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     assert_eq!(decoded.frames[1].scope_depth, 3);
     assert_eq!(decoded.frames[1].order, 4);
     EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
-        assert_eq!(
-            evaluator.project_root(&decoded.frames[0].continuation, |_, value| value),
-            Value::Number(11.into())
-        );
-        assert_eq!(
-            evaluator.project_root(&decoded.frames[1].continuation, |_, value| value),
-            Value::Number(22.into())
-        );
+        evaluator.project_root(&decoded.frames[0].continuation, |access, value| {
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &Value::Number(11.into()));
+        });
+        evaluator.project_root(&decoded.frames[1].continuation, |access, value| {
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &Value::Number(22.into()));
+        });
     });
 }
 
@@ -2490,10 +2506,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
     let TaskOutcome::Complete(result) = task.run().expect("resumed reset should finish") else {
         panic!("resumed reset should complete")
     };
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::binary_from_text("done")
-    );
+    assert_public_core_value(&values, &result, Value::binary_from_text("done"));
     assert_eq!(task.next_continuation, 2);
     assert_eq!(
         task.next_control_order, 3,
@@ -2636,10 +2649,7 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
     let TaskOutcome::Complete(result) = task.run().expect("installation should resume") else {
         panic!("installation should complete")
     };
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::binary_from_text("resumed")
-    );
+    assert_public_core_value(&values, &result, Value::binary_from_text("resumed"));
     assert_eq!(task.next_control_order, 2);
 }
 
@@ -2695,10 +2705,7 @@ fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
     let TaskOutcome::Complete(result) = task.run().expect("fixpoint should resume") else {
         panic!("fixpoint should complete")
     };
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::binary_from_text("fixed")
-    );
+    assert_public_core_value(&values, &result, Value::binary_from_text("fixed"));
     assert_eq!(task.next_control_order, 2);
 }
 
@@ -2792,10 +2799,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
     let TaskOutcome::Complete(result) = task.run().expect("restart should resume") else {
         panic!("restart should complete")
     };
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::binary_from_text("restarted")
-    );
+    assert_public_core_value(&values, &result, Value::binary_from_text("restarted"));
     assert_eq!(task.next_control_order, 2);
 }
 
@@ -2981,10 +2985,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     let TaskOutcome::Complete(result) = task.run().expect("restore should complete") else {
         panic!("restore should complete")
     };
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::binary_from_text("restored")
-    );
+    assert_public_core_value(&values, &result, Value::binary_from_text("restored"));
 }
 
 #[test]
@@ -5182,7 +5183,7 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
     let EvaluationWaitPoll::Complete(value) = context.poll_reflection_task(&task) else {
         panic!("the result-returning task should complete")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(Number::from(42)));
+    value.assert_same_representation_for_test(context.values(), &Value::Number(Number::from(42)));
 }
 
 #[test]
@@ -5810,23 +5811,26 @@ fn dictionary_items_are_available_to_reflection_in_key_order() {
     };
     let items = eval::list_to_value_items(&assembler.eval_context(), &items).unwrap();
     assert_eq!(items.len(), 2);
-    let keys = items
-        .into_iter()
-        .map(|item| {
-            let Value::Dict(item) = item else {
-                panic!("dict_items entries should be records");
-            };
-            item.get(&*keys::KEY)
-                .cloned()
-                .expect("dict_items entries should include their key")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        vec![
+    let keys = assembler.core_values().with_runtime_value_access(|access| {
+        items
+            .into_iter()
+            .map(|item| {
+                let Value::Dict(item) = item else {
+                    panic!("dict_items entries should be records");
+                };
+                access.duplicate_value(
+                    item.get(&*keys::KEY)
+                        .expect("dict_items entries should include their key"),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assembler.core_values().assert_same_representation_for_test(
+        &keys,
+        &vec![
             Value::Atom(Atom::from_key(&Key::binary_from_text("a"))),
             Value::Atom(Atom::from_key(&Key::binary_from_text("b"))),
-        ]
+        ],
     );
 }
 
@@ -5978,9 +5982,9 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
     let Value::Dict(result) = result.clone_core_for_test() else {
         panic!("eval should return an ok result");
     };
-    assert_eq!(
-        result.get(&*keys::OK),
-        Some(&Value::Number(Number::integer(3)))
+    assembler.core_values().assert_same_representation_for_test(
+        &result.get(&*keys::OK),
+        &Some(&Value::Number(Number::integer(3))),
     );
 
     let (assembler, nested) = compile_effect(".eval { bad:1 / 0 }");
@@ -6233,7 +6237,9 @@ fn suspended_request_failure_preserves_context_without_replay() {
         crate::diagnostic::evaluation_context_frame("log_message"),
         Value::binary_from_text("request argument"),
     ];
-    assert_eq!(error.as_failure().contexts(), expected_contexts);
+    assembler
+        .core_values()
+        .assert_same_representation_for_test(error.as_failure().contexts(), &expected_contexts);
     assert_eq!(probe.application_starts(), 1);
     assert_eq!(probe.parsed_requests(), 1);
     assert_eq!(probe.dispatched_requests(), 1);
@@ -6252,9 +6258,10 @@ fn suspended_request_failure_preserves_context_without_replay() {
             .run()
             .expect_err("uninterrupted message construction should fail");
     let uninterrupted_contexts = uninterrupted_error.into_failure().contexts().to_vec();
-    assert_eq!(
-        uninterrupted_contexts,
-        error.as_failure().contexts(),
+    assert!(
+        assembler
+            .core_values()
+            .same_representation_for_test(&uninterrupted_contexts, error.as_failure().contexts(),),
         "forced suspension must preserve the uninterrupted structured context order"
     );
 }
@@ -6623,13 +6630,13 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
             }
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        items,
-        [
+    context.values().assert_same_representation_for_test(
+        &items,
+        &[
             Value::binary_from_text("A"),
             Value::binary_from_text("B"),
-            Value::binary_from_text("C")
-        ]
+            Value::binary_from_text("C"),
+        ],
     );
 }
 
@@ -6669,12 +6676,12 @@ fn reflection_environment_is_available_as_plain_data() {
     let Value::List(arguments) = arguments.clone_core_for_test() else {
         panic!("process arguments should return a list")
     };
-    assert_eq!(
-        eval::list_to_value_items(&context, &arguments).unwrap(),
-        [
+    context.values().assert_same_representation_for_test(
+        &eval::list_to_value_items(&context, &arguments).unwrap(),
+        &[
             Value::binary_from_text("glam"),
-            Value::binary_from_text("--test")
-        ]
+            Value::binary_from_text("--test"),
+        ],
     );
 
     let (_, child_environment) = compile_effect_with_runtime(
@@ -6688,12 +6695,12 @@ fn reflection_environment_is_available_as_plain_data() {
     let Value::List(arguments) = arguments.clone_core_for_test() else {
         panic!("child reflection task should inherit a list environment")
     };
-    assert_eq!(
-        eval::list_to_value_items(&context, &arguments).unwrap(),
-        [
+    context.values().assert_same_representation_for_test(
+        &eval::list_to_value_items(&context, &arguments).unwrap(),
+        &[
             Value::binary_from_text("glam"),
-            Value::binary_from_text("--test")
-        ]
+            Value::binary_from_text("--test"),
+        ],
     );
 
     let (_, missing) = compile_effect_with_runtime(
@@ -6804,9 +6811,9 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a same-runtime observer should read the pre-pump task status")
     };
-    assert_eq!(
-        launched.clone_core_for_test(),
-        assembler.core_values().key_value(&keys::LAUNCHED)
+    launched.assert_same_representation_for_test(
+        &assembler.core_values(),
+        &assembler.core_values().key_value(&keys::LAUNCHED),
     );
     drop(launched_observer);
 
@@ -6842,32 +6849,35 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         )
         .unwrap_or_else(|error| panic!("task observation {name} should evaluate: {error}"))
     };
-    assert_eq!(
-        field("blocked_status"),
-        assembler.core_values().key_value(&keys::BLOCKED)
+    assembler.core_values().assert_same_representation_for_test(
+        &field("blocked_status"),
+        &assembler.core_values().key_value(&keys::BLOCKED),
     );
     let Value::Dict(complete_status) = field("complete_status") else {
         panic!("complete task status should be tagged data")
     };
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    assembler.core_values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer,
             complete_status
                 .get(&*keys::OK)
                 .expect("complete status should contain ok"),
         )
         .expect("complete status payload should evaluate"),
-        Value::binary_from_text("done")
+        &Value::binary_from_text("done"),
     );
-    assert_eq!(field("complete_value"), Value::binary_from_text("done"));
+    assembler.core_values().assert_same_representation_for_test(
+        &field("complete_value"),
+        &Value::binary_from_text("done"),
+    );
     let Value::Dict(failed_status) = field("failed_status") else {
         panic!("failed task status should be tagged data")
     };
     assert!(failed_status.get(&*keys::ERR).is_some());
     assert!(matches!(field("failed_error"), Value::Dict(_)));
-    assert_eq!(
-        field("canceled_status"),
-        assembler.core_values().key_value(&keys::CANCELED)
+    assembler.core_values().assert_same_representation_for_test(
+        &field("canceled_status"),
+        &assembler.core_values().key_value(&keys::CANCELED),
     );
 
     let EvaluationSessionRun::Deadlocked(after_observation) = owner.run_until_quiescent() else {
@@ -6888,9 +6898,11 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a retained same-runtime handle should remain observable after owner closure")
     };
-    assert_eq!(
-        abandoned.clone_core_for_test(),
-        assembler.core_values().key_value(&keys::ABANDONED),
+    assert!(
+        abandoned.same_representation_for_test(
+            &assembler.core_values(),
+            &assembler.core_values().key_value(&keys::ABANDONED),
+        ),
         "observer-held task handles must not keep their producer demand open"
     );
 }
@@ -6993,9 +7005,9 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("a same-runtime observer should join a completed task")
     };
-    assert_eq!(
-        complete_result.clone_core_for_test(),
-        Value::binary_from_text("complete result")
+    complete_result.assert_same_representation_for_test(
+        &assembler.core_values(),
+        &Value::binary_from_text("complete result"),
     );
 
     let join_failed = join(handle("failed"));
@@ -7056,9 +7068,9 @@ fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     else {
         panic!("the same-runtime join should resume when its child completes")
     };
-    assert_eq!(
-        pending_result.clone_core_for_test(),
-        Value::binary_from_text("pending result")
+    pending_result.assert_same_representation_for_test(
+        &assembler.core_values(),
+        &Value::binary_from_text("pending result"),
     );
 
     let join_abandoned = join(handle("abandoned"));
@@ -7287,9 +7299,9 @@ fn join_propagates_task_error_and_task_error_extracts_it() {
     else {
         panic!("task context payload should be a dictionary")
     };
-    assert_eq!(
-        task_context.get(&Key::atom_from_text("operation")),
-        Some(&Value::Atom(Atom::from_key(&Key::binary_from_text("join"))))
+    assembler.core_values().assert_same_representation_for_test(
+        &task_context.get(&Key::atom_from_text("operation")),
+        &Some(&Value::Atom(Atom::from_key(&Key::binary_from_text("join")))),
     );
     let Some(Value::Number(id)) = task_context.get(&Key::atom_from_text("id")) else {
         panic!("join propagation context should identify the child task")
@@ -7423,9 +7435,9 @@ fn task_errors_preserve_structured_emissions_and_contexts() {
     let Value::List(contexts) = &contexts else {
         panic!("task error contexts should be a list")
     };
-    assert_eq!(
-        eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
-        [Value::binary_from_text("child dispatch")]
+    assembler.core_values().assert_same_representation_for_test(
+        &eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
+        &[Value::binary_from_text("child dispatch")],
     );
 }
 
@@ -7455,9 +7467,9 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
     let evaluation_halt = TaskHalt::from(EvaluationHalt::failure(failure.clone()));
     let evaluation_diagnostic = evaluation_halt.diagnostic(&assembler.values());
     assert_eq!(evaluation_diagnostic.message(), "converted failure");
-    assert_eq!(
-        task_halt_contexts(&assembler, &evaluation_halt),
-        std::slice::from_ref(&frame)
+    assembler.core_values().assert_same_representation_for_test(
+        &task_halt_contexts(&assembler, &evaluation_halt),
+        std::slice::from_ref(&frame),
     );
     assert_eq!(
         value_i64(
@@ -7474,7 +7486,10 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
     let public_halt = TaskHalt::from(public_error);
     let public_diagnostic = public_halt.diagnostic(&assembler.values());
     assert_eq!(public_diagnostic.message(), "converted failure");
-    assert_eq!(task_halt_contexts(&assembler, &public_halt), [frame]);
+    assembler.core_values().assert_same_representation_for_test(
+        &task_halt_contexts(&assembler, &public_halt),
+        &[frame],
+    );
     assert!(evaluation_halt.failure_root().is_none());
     assert_eq!(
         public_halt
@@ -7530,13 +7545,18 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     let expected = assembler
         .core_values()
         .with_runtime_value_access(|access| effect_dispatch_context(&access, "function"));
-    assert_eq!(
-        contexts.first(),
-        Some(&expected),
+    assert!(
+        assembler
+            .core_values()
+            .same_representation_for_test(&contexts.first(), &Some(&expected)),
         "the dispatch boundary should prepend its stage"
     );
     assert!(
-        contexts.contains(&Value::binary_from_text("effect function")),
+        contexts.iter().any(|context| {
+            assembler
+                .core_values()
+                .same_representation_for_test(context, &Value::binary_from_text("effect function"))
+        }),
         "the original effect-function context should survive"
     );
 }
@@ -7563,9 +7583,11 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
         let expected = assembler
             .core_values()
             .with_runtime_value_access(|access| effect_dispatch_context(&access, stage));
-        assert_eq!(
-            task_halt_contexts(&assembler, &halt).first(),
-            Some(&expected),
+        assert!(
+            assembler.core_values().same_representation_for_test(
+                &task_halt_contexts(&assembler, &halt).first(),
+                &Some(&expected),
+            ),
             "the {stage} boundary should prepend its structured dispatch context"
         );
     }
@@ -8460,10 +8482,12 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
         Arc::new(TestHost::with_values(message_assembler.core_values())),
     )
     .unwrap_err();
-    assert_eq!(
-        task_halt_contexts(&message_assembler, &message_error),
-        [crate::diagnostic::evaluation_context_frame("log_message")]
-    );
+    message_assembler
+        .core_values()
+        .assert_same_representation_for_test(
+            &task_halt_contexts(&message_assembler, &message_error),
+            &[crate::diagnostic::evaluation_context_frame("log_message")],
+        );
 
     let (severity_assembler, severity_effect) = compile_effect(
         ".log (anno 'error \"severity construction failed\") { msg:{ text:\"unused\" } }",
@@ -8474,10 +8498,12 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
         Arc::new(TestHost::with_values(severity_assembler.core_values())),
     )
     .unwrap_err();
-    assert_eq!(
-        task_halt_contexts(&severity_assembler, &severity_error),
-        [crate::diagnostic::evaluation_context_frame("log_severity")]
-    );
+    severity_assembler
+        .core_values()
+        .assert_same_representation_for_test(
+            &task_halt_contexts(&severity_assembler, &severity_error),
+            &[crate::diagnostic::evaluation_context_frame("log_severity")],
+        );
 }
 
 #[test]
@@ -8573,22 +8599,25 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
         .expect_err("unresolved owned promise should inherit producer failure")
         .into_permanent_failure();
         assert!(Arc::ptr_eq(&failure, &observed));
-        assert_eq!(observed.emission_value(), Some(&emission));
-        assert_eq!(observed.contexts(), std::slice::from_ref(&frame));
+        owner
+            .values()
+            .assert_same_representation_for_test(&observed.emission_value(), &Some(&emission));
+        owner
+            .values()
+            .assert_same_representation_for_test(observed.contexts(), std::slice::from_ref(&frame));
         let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
             panic!("owned promise wait should publish the producer failure")
         };
         assert!(Arc::ptr_eq(&failure, wait_failure.as_failure()));
     }
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    owner.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &owner,
-            &Value::Promised(resolved)
+            &Value::Promised(resolved),
         )
         .unwrap(),
-        Value::Number(Number::integer(42)),
-        "producer failure must not replace an earlier assignment"
+        &Value::Number(Number::integer(42)),
     );
     assert_eq!(
         owner.poll_wait(&resolved_wait),
